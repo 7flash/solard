@@ -476,11 +476,9 @@ export class SowlBank {
     err: unknown;
   }> {
     const [status] = (
-      await this.sowl
-        .connection()
-        .getSignatureStatuses([signature], {
-          searchTransactionHistory: args.searchTransactionHistory ?? true,
-        })
+      await this.sowl.connection().getSignatureStatuses([signature], {
+        searchTransactionHistory: args.searchTransactionHistory ?? true,
+      })
     ).value;
 
     const confirmationStatus = status?.confirmationStatus ?? null;

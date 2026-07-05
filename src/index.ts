@@ -158,6 +158,7 @@ export {
 } from "./launches/pump/token-launch-cli.js";
 export type {
   Flags,
+  PumpTokenLaunchCliOptions,
   PumpTokenLaunchCliResult,
   PumpTokenMetadataInput,
 } from "./launches/pump/token-launch-cli.js";

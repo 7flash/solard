@@ -13,13 +13,16 @@ import {
   executePumpTokenLaunch,
   installPumpLaunchSenders,
   loadGroupBuyerAllocations,
+  normalizeTraderSubmitMode,
   preparePumpTokenLaunch,
   pumpLaunchEnvironment,
   usesHeliusSenderForLaunch,
   validateHeliusTip,
+  type LaunchReporter,
   type PumpTokenLaunchPlan,
   type PumpTokenLaunchResult,
   type TokenMetadata,
+  type TraderSubmitMode,
 } from "./token-launch.js";
 
 export type Flags = Map<string, string[]>;
@@ -36,6 +39,17 @@ export type PumpTokenMetadataInput = {
   telegram?: string;
   video?: string;
   showName?: boolean;
+};
+
+export type PumpTokenLaunchCliOptions = {
+  /** Safe default: do not start trader spam until the deploy signature is processed. */
+  defaultSubmitMode?: TraderSubmitMode;
+  defaultDeploymentPriorityMicroLamports?: number;
+  defaultBuyerPriorityMicroLamports?: number;
+  defaultSlippageBps?: number;
+  /** Persist the token after any live execution attempt, even if some buyers fail. */
+  persistOnLive?: boolean;
+  report?: LaunchReporter;
 };
 
 export type PumpTokenLaunchCliResult = {
@@ -141,6 +155,10 @@ export function json(value: unknown): string {
     (_key, item) => (typeof item === "bigint" ? item.toString() : item),
     2,
   );
+}
+
+function defaultReport(label: string, value: unknown): void {
+  console.log(`${label}: ${json(value)}`);
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -272,20 +290,16 @@ function summarizeLaunchResult(result: PumpTokenLaunchResult): unknown {
   };
 }
 
-function report(label: string, value: unknown): void {
-  console.log(`${label}: ${json(value)}`);
-}
-
 function requireSkipSimulationForBlindLiveBuys(
   live: boolean,
-  submitMode: string,
+  submitMode: TraderSubmitMode,
   skipSimulation: boolean,
   hasBuyerGroup: boolean,
 ): void {
   if (
     live &&
     hasBuyerGroup &&
-    submitMode === "blind-spam-after-submit" &&
+    normalizeTraderSubmitMode(submitMode) === "blind-spam-after-submit" &&
     !skipSimulation
   ) {
     throw new Error(
@@ -339,12 +353,25 @@ async function resolveMetadataUri(
   return { uri, uploaded };
 }
 
+function resolveSubmitMode(
+  flags: Flags,
+  options: PumpTokenLaunchCliOptions,
+): TraderSubmitMode {
+  return normalizeTraderSubmitMode(
+    first(flags, "submit-mode") ??
+      process.env.SOWL_LAUNCH_SUBMIT_MODE?.trim() ??
+      options.defaultSubmitMode,
+  );
+}
+
 export async function preparePumpTokenLaunchFromFlags(args: {
   sowl: Sowl;
   flags: Flags;
   token: TokenMetadata;
   creator: string;
+  options?: PumpTokenLaunchCliOptions;
 }): Promise<PumpTokenLaunchPlan> {
+  const options = args.options ?? {};
   const group = first(args.flags, "buyer-group");
   const env = pumpLaunchEnvironment();
   const traders = group
@@ -380,17 +407,22 @@ export async function preparePumpTokenLaunchFromFlags(args: {
       "creator-reserve-lamports",
       10_000_000n,
     ),
-    slippageBps: numberFlag(args.flags, "slippage-bps", 1500),
+    slippageBps: numberFlag(
+      args.flags,
+      "slippage-bps",
+      options.defaultSlippageBps ?? 1500,
+    ),
     cuLimit: env.cuLimit,
     priorityMicroLamports: numberFlag(
       args.flags,
       "deployment-priority-micro-lamports",
-      env.priorityMicroLamports,
+      options.defaultDeploymentPriorityMicroLamports ??
+        env.priorityMicroLamports,
     ),
     buyerPriorityMicroLamports: numberFlag(
       args.flags,
       "buyer-priority-micro-lamports",
-      1_500_000,
+      options.defaultBuyerPriorityMicroLamports ?? 1_500_000,
     ),
     senderPolicy: env.policy,
   });
@@ -398,16 +430,19 @@ export async function preparePumpTokenLaunchFromFlags(args: {
 
 export async function runPumpTokenLaunchFromArgs(
   argv: string[],
+  options: PumpTokenLaunchCliOptions = {},
 ): Promise<PumpTokenLaunchCliResult> {
   const { flags } = parseArgs(argv);
+  const report = options.report ?? defaultReport;
   const creator = required(flags, "creator");
   const input = pumpTokenMetadataInput(flags);
   const live = enabled(flags, "live", "LIVE");
   const skipSimulation = enabled(flags, "skip-simulation", "SKIP_SIMULATION");
   const group = first(flags, "buyer-group");
   const env = pumpLaunchEnvironment();
-  const submitMode = env.submitMode;
+  const submitMode = resolveSubmitMode(flags, options);
   const usesHeliusSender = usesHeliusSenderForLaunch(env, Boolean(group));
+  const persistOnLive = options.persistOnLive ?? true;
 
   if (usesHeliusSender) {
     validateHeliusTip({
@@ -431,64 +466,36 @@ export async function runPumpTokenLaunchFromArgs(
 
   let prepared: PumpTokenLaunchPlan | null = null;
   try {
-    const traders = group
-      ? await loadGroupBuyerAllocations({
-          sowl,
-          group,
-          minBps: numberFlag(flags, "buyer-min-bps", 10),
-          maxBps: numberFlag(flags, "buyer-max-bps", 10),
-          reserveLamports: optionalSol(
-            flags,
-            "buyer-reserve-sol",
-            "buyer-reserve-lamports",
-            10_000_000n,
-          ),
-          excludeWallet: creator,
-        })
-      : [];
-
     const token: TokenMetadata = {
       alias: input.alias,
       name: input.name,
       symbol: input.symbol,
       uri,
     };
-
     const deploymentPriorityMicroLamports = numberFlag(
       flags,
       "deployment-priority-micro-lamports",
-      env.priorityMicroLamports,
+      options.defaultDeploymentPriorityMicroLamports ??
+        env.priorityMicroLamports,
     );
     const buyerPriorityMicroLamports = numberFlag(
       flags,
       "buyer-priority-micro-lamports",
-      1_500_000,
+      options.defaultBuyerPriorityMicroLamports ?? 1_500_000,
+    );
+    const slippageBps = numberFlag(
+      flags,
+      "slippage-bps",
+      options.defaultSlippageBps ?? 1500,
     );
 
-    prepared = await preparePumpTokenLaunch({
+    prepared = await preparePumpTokenLaunchFromFlags({
       sowl,
+      flags,
       token,
-      creatorWallet: creator,
-      traders,
-      creatorBuyLamports: optionalSol(
-        flags,
-        "creator-buy-sol",
-        "creator-buy-lamports",
-        0n,
-      ),
-      creatorReserveLamports: optionalSol(
-        flags,
-        "creator-reserve-sol",
-        "creator-reserve-lamports",
-        10_000_000n,
-      ),
-      slippageBps: numberFlag(flags, "slippage-bps", 1500),
-      cuLimit: env.cuLimit,
-      priorityMicroLamports: deploymentPriorityMicroLamports,
-      buyerPriorityMicroLamports,
-      senderPolicy: env.policy,
+      creator,
+      options,
     });
-
     const mint = prepared.deployment.mint.publicKey.toBase58();
 
     report("pump launch plan", {
@@ -536,8 +543,12 @@ export async function runPumpTokenLaunchFromArgs(
         fastBuyers: env.policy.fastTraderSender,
         remainingBuyers: env.policy.rpcTraderSender,
       },
-      submitMode,
-      retry: env.spam,
+      execution: {
+        submitMode,
+        skipSimulation,
+        slippageBps,
+        retry: env.spam,
+      },
       participants: prepared.expectedOutputByWallet,
     });
 
@@ -595,7 +606,7 @@ export async function runPumpTokenLaunchFromArgs(
 
     return output;
   } finally {
-    if (live && prepared) {
+    if (live && persistOnLive && prepared) {
       try {
         sowl.persistPreparedDeployment(prepared.deployment, input.alias);
       } catch {
