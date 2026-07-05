@@ -1,0 +1,43 @@
+{
+  "name": "solwal",
+  "version": "0.0.1",
+  "description": "\ud83e\udd89 Multi-wallet Solana CLI and SDK for memecoin traders and AI agents. Direct venue transactions, shared encrypted local persistence, no Jupiter.",
+  "type": "module",
+  "module": "./src/index.ts",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "bin": {
+    "sowl": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./venues": "./src/venues/venue-plugin.ts",
+    "./claims": "./src/claims/claim-source.ts",
+    "./venues/pump": "./src/venues/pump/index.ts",
+    "./presets/trader": "./src/presets/trader.ts",
+    "./launches": "./src/launches/launch-source.ts",
+    "./launchpads": "./src/launches/launchpad.ts",
+    "./runner": "./src/runner/config.ts"
+  },
+  "scripts": {
+    "sowl": "bun run ./src/cli.ts",
+    "typecheck": "tsc -p ./tsconfig.typecheck.json --noEmit",
+    "build": "bun build ./src/index.ts ./src/cli.ts --outdir ./dist --target bun",
+    "compile": "bun build ./src/cli.ts --compile --outfile ./bin/sowl",
+    "verify:measure-logging": "bun run ./scripts/verify-measure-logging.ts",
+    "verify:pump-create-encoding": "bun run ./scripts/verify-pump-create-encoding.ts"
+  },
+  "dependencies": {
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "bs58": "^6.0.0",
+    "measure-fn": "^3.11.2",
+    "pinata": "^2.5.6",
+    "sqlite-zod-orm": "^3.27.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Runtime
+.DS_Store
+*.log
+bun.lockb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+scripts
+examples
+
+package-lock.json
+bun.lock
