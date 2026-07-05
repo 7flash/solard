@@ -14,9 +14,14 @@ export class VenueRegistry {
     return this;
   }
 
-  list(): readonly TradeVenuePlugin[] { return this.plugins; }
+  list(): readonly TradeVenuePlugin[] {
+    return this.plugins;
+  }
 
-  async inspect(connection: Connection, mint: PublicKey): Promise<Partial<TokenRow> | null> {
+  async inspect(
+    connection: Connection,
+    mint: PublicKey,
+  ): Promise<Partial<TokenRow> | null> {
     for (const plugin of this.plugins) {
       const result = await plugin.inspectToken?.(connection, mint);
       if (result) return result;
@@ -24,7 +29,11 @@ export class VenueRegistry {
     return null;
   }
 
-  async resolve(connection: Connection, token: TokenRow, user: PublicKey): Promise<{ plugin: TradeVenuePlugin; market: VenueMarket }> {
+  async resolve(
+    connection: Connection,
+    token: TokenRow,
+    user: PublicKey,
+  ): Promise<{ plugin: TradeVenuePlugin; market: VenueMarket }> {
     for (const plugin of this.plugins) {
       const market = await plugin.resolveMarket({ connection, token, user });
       if (market) return { plugin, market };

@@ -46,7 +46,9 @@ export class SowlBank {
   private readonly storePath: string;
 
   constructor(private readonly sowl: Sowl) {
-    this.storePath = process.env.SOWL_BANK_STORE_PATH?.trim() || "./data/sowl-bank-deposits.json";
+    this.storePath =
+      process.env.SOWL_BANK_STORE_PATH?.trim() ||
+      "./data/sowl-bank-deposits.json";
   }
 
   generateDepositWallet(args: { userId: string; label?: string }): {
@@ -95,7 +97,10 @@ export class SowlBank {
     };
   }
 
-  async tokenBalance(args: { token: TokenRef; owner: WalletRef | string }): Promise<{
+  async tokenBalance(args: {
+    token: TokenRef;
+    owner: WalletRef | string;
+  }): Promise<{
     owner: string;
     mint: string;
     tokenAccount: string;
@@ -115,7 +120,14 @@ export class SowlBank {
 
     let amountRaw = 0n;
     try {
-      amountRaw = (await getAccount(this.sowl.connection(), tokenAccount, "confirmed", runtime.tokenProgram)).amount;
+      amountRaw = (
+        await getAccount(
+          this.sowl.connection(),
+          tokenAccount,
+          "confirmed",
+          runtime.tokenProgram,
+        )
+      ).amount;
     } catch {
       amountRaw = 0n;
     }
@@ -162,7 +174,9 @@ export class SowlBank {
       ASSOCIATED_TOKEN_PROGRAM_ID,
     );
 
-    const account = await this.sowl.connection().getAccountInfo(tokenAccount, args.commitment ?? "confirmed");
+    const account = await this.sowl
+      .connection()
+      .getAccountInfo(tokenAccount, args.commitment ?? "confirmed");
     if (!account) {
       return {
         deposit: args.deposit,
@@ -174,24 +188,33 @@ export class SowlBank {
       };
     }
 
-    const signatures = await this.sowl.connection().getSignaturesForAddress(
-      tokenAccount,
-      { limit: Math.max(1, Math.min(1000, args.limit ?? 50)) },
-      args.commitment ?? "confirmed",
-    );
+    const signatures = await this.sowl
+      .connection()
+      .getSignaturesForAddress(
+        tokenAccount,
+        { limit: Math.max(1, Math.min(1000, args.limit ?? 50)) },
+        args.commitment ?? "confirmed",
+      );
 
     const deposits = [];
     for (const item of [...signatures].reverse()) {
-      if (args.afterSignature && item.signature === args.afterSignature) continue;
+      if (args.afterSignature && item.signature === args.afterSignature)
+        continue;
       if (item.err) continue;
 
-      const tx = await this.sowl.connection().getParsedTransaction(item.signature, {
-        commitment: args.commitment ?? "confirmed",
-        maxSupportedTransactionVersion: 0,
-      });
+      const tx = await this.sowl
+        .connection()
+        .getParsedTransaction(item.signature, {
+          commitment: args.commitment ?? "confirmed",
+          maxSupportedTransactionVersion: 0,
+        });
       if (!tx || tx.meta?.err) continue;
 
-      const amountRaw = ownerDeltaForMint(tx, runtime.mint.toBase58(), owner.toBase58());
+      const amountRaw = ownerDeltaForMint(
+        tx,
+        runtime.mint.toBase58(),
+        owner.toBase58(),
+      );
       if (amountRaw <= 0n) continue;
 
       deposits.push({
@@ -200,7 +223,10 @@ export class SowlBank {
         slot: item.slot,
         amountRaw,
         amountUi: formatRaw(amountRaw, runtime.decimals),
-        confirmedAt: item.blockTime == null ? null : new Date(item.blockTime * 1000).toISOString(),
+        confirmedAt:
+          item.blockTime == null
+            ? null
+            : new Date(item.blockTime * 1000).toISOString(),
       });
     }
 
@@ -236,9 +262,11 @@ export class SowlBank {
     simulation?: SimulationResult;
     receipt?: SendReceipt;
   }> {
-    if (args.amountRaw <= 0n) throw new Error("sendToken amountRaw must be > 0");
+    if (args.amountRaw <= 0n)
+      throw new Error("sendToken amountRaw must be > 0");
     const runtime = await this.tokenRuntime(args.token);
-    const recipient = typeof args.to === "string" ? new PublicKey(args.to) : args.to;
+    const recipient =
+      typeof args.to === "string" ? new PublicKey(args.to) : args.to;
     const from = this.sowl.signer(args.from);
 
     const tx = this.sowl
@@ -274,7 +302,12 @@ export class SowlBank {
       amountRaw: args.amountRaw,
       amountUi: formatRaw(args.amountRaw, runtime.decimals),
       dryRun: false,
-      status: receipt.status === "confirmed" ? "confirmed" : receipt.status === "failed" ? "failed" : "sent",
+      status:
+        receipt.status === "confirmed"
+          ? "confirmed"
+          : receipt.status === "failed"
+            ? "failed"
+            : "sent",
       signature: receipt.signature,
       receipt,
     };
@@ -318,7 +351,14 @@ export class SowlBank {
 
     let amountRaw = 0n;
     try {
-      amountRaw = (await getAccount(this.sowl.connection(), source, "confirmed", runtime.tokenProgram)).amount;
+      amountRaw = (
+        await getAccount(
+          this.sowl.connection(),
+          source,
+          "confirmed",
+          runtime.tokenProgram,
+        )
+      ).amount;
     } catch {
       amountRaw = 0n;
     }
@@ -375,7 +415,11 @@ export class SowlBank {
       })
       .withSigner(owner)
       .track({ address: transfer.source, kind: "token", mint: runtime.mint })
-      .track({ address: transfer.destination, kind: "token", mint: runtime.mint });
+      .track({
+        address: transfer.destination,
+        kind: "token",
+        mint: runtime.mint,
+      });
 
     if (!args.live) {
       const plan = await builder.build();
@@ -408,13 +452,21 @@ export class SowlBank {
       amountRaw,
       amountUi: formatRaw(amountRaw, runtime.decimals),
       dryRun: false,
-      status: receipt.status === "confirmed" ? "confirmed" : receipt.status === "failed" ? "failed" : "sent",
+      status:
+        receipt.status === "confirmed"
+          ? "confirmed"
+          : receipt.status === "failed"
+            ? "failed"
+            : "sent",
       signature: receipt.signature,
       receipt,
     };
   }
 
-  async checkTransaction(signature: string, args: { searchTransactionHistory?: boolean } = {}): Promise<{
+  async checkTransaction(
+    signature: string,
+    args: { searchTransactionHistory?: boolean } = {},
+  ): Promise<{
     signature: string;
     found: boolean;
     status: "unknown" | "processed" | "confirmed" | "finalized" | "failed";
@@ -423,17 +475,28 @@ export class SowlBank {
     slot: number | null;
     err: unknown;
   }> {
-    const [status] = (await this.sowl.connection().getSignatureStatuses(
-      [signature],
-      { searchTransactionHistory: args.searchTransactionHistory ?? true },
-    )).value;
+    const [status] = (
+      await this.sowl
+        .connection()
+        .getSignatureStatuses([signature], {
+          searchTransactionHistory: args.searchTransactionHistory ?? true,
+        })
+    ).value;
 
     const confirmationStatus = status?.confirmationStatus ?? null;
     const failed = status?.err != null;
     return {
       signature,
       found: Boolean(status),
-      status: !status ? "unknown" : failed ? "failed" : confirmationStatus === "finalized" ? "finalized" : confirmationStatus === "confirmed" ? "confirmed" : "processed",
+      status: !status
+        ? "unknown"
+        : failed
+          ? "failed"
+          : confirmationStatus === "finalized"
+            ? "finalized"
+            : confirmationStatus === "confirmed"
+              ? "confirmed"
+              : "processed",
       confirmationStatus,
       confirmations: status?.confirmations ?? null,
       slot: status?.slot ?? null,
@@ -444,17 +507,34 @@ export class SowlBank {
   private async tokenRuntime(ref: TokenRef): Promise<MintRuntime> {
     const token = this.sowl.resolveToken(ref);
     const mint = new PublicKey(token.mint);
-    const cachedDecimals = typeof token.decimals === "number" ? token.decimals : null;
-    const cachedProgram = typeof token.baseTokenProgram === "string" && token.baseTokenProgram.length > 0
-      ? new PublicKey(token.baseTokenProgram)
-      : null;
+    const cachedDecimals =
+      typeof token.decimals === "number" ? token.decimals : null;
+    const cachedProgram =
+      typeof token.baseTokenProgram === "string" &&
+      token.baseTokenProgram.length > 0
+        ? new PublicKey(token.baseTokenProgram)
+        : null;
 
     if (cachedDecimals != null && cachedProgram) {
-      return { token, mint, decimals: cachedDecimals, tokenProgram: cachedProgram };
+      return {
+        token,
+        mint,
+        decimals: cachedDecimals,
+        tokenProgram: cachedProgram,
+      };
     }
 
-    const mintState = await readMint(this.sowl.connection(), mint, this.sowl.cache);
-    return { token, mint, decimals: mintState.decimals, tokenProgram: mintState.tokenProgram };
+    const mintState = await readMint(
+      this.sowl.connection(),
+      mint,
+      this.sowl.cache,
+    );
+    return {
+      token,
+      mint,
+      decimals: mintState.decimals,
+      tokenProgram: mintState.tokenProgram,
+    };
   }
 
   private resolveOwner(ref: WalletRef | string): PublicKey {
@@ -478,7 +558,9 @@ export class SowlBank {
   private resolveDepositWallet(deposit: string): StoredDepositWallet {
     const found = this.findDeposit(deposit);
     if (!found) {
-      throw new Error(`Unknown deposit wallet: ${deposit}. Use bank.generateDepositWallet() first or import the key through bank store.`);
+      throw new Error(
+        `Unknown deposit wallet: ${deposit}. Use bank.generateDepositWallet() first or import the key through bank store.`,
+      );
     }
     return found;
   }
@@ -486,19 +568,29 @@ export class SowlBank {
   private findDeposit(value: string): StoredDepositWallet | undefined {
     const clean = value.trim();
     return this.readVault().wallets.find(
-      (row) => row.depositId === clean || row.userId === clean || row.address === clean || row.label === clean,
+      (row) =>
+        row.depositId === clean ||
+        row.userId === clean ||
+        row.address === clean ||
+        row.label === clean,
     );
   }
 
   private readVault(): DepositVault {
     if (!existsSync(this.storePath)) return { version: 1, wallets: [] };
-    const parsed = JSON.parse(readFileSync(this.storePath, "utf8")) as DepositVault;
+    const parsed = JSON.parse(
+      readFileSync(this.storePath, "utf8"),
+    ) as DepositVault;
     return { version: 1, wallets: parsed.wallets ?? [] };
   }
 
   private writeVault(vault: DepositVault): void {
     mkdirSync(dirname(this.storePath), { recursive: true });
-    writeFileSync(this.storePath, `${JSON.stringify(vault, null, 2)}\n`, "utf8");
+    writeFileSync(
+      this.storePath,
+      `${JSON.stringify(vault, null, 2)}\n`,
+      "utf8",
+    );
   }
 }
 
@@ -508,7 +600,10 @@ function formatRaw(raw: bigint, decimals: number): string {
   const unit = 10n ** BigInt(decimals);
   const whole = value / unit;
   const frac = value % unit;
-  const fracText = decimals === 0 ? "" : frac.toString().padStart(decimals, "0").replace(/0+$/, "");
+  const fracText =
+    decimals === 0
+      ? ""
+      : frac.toString().padStart(decimals, "0").replace(/0+$/, "");
   return `${negative ? "-" : ""}${whole.toString()}${fracText ? `.${fracText}` : ""}`;
 }
 
@@ -523,13 +618,23 @@ function ownerDeltaForMint(
 }
 
 function ownerBalances(
-  balances: readonly { mint: string; owner?: string; uiTokenAmount: { amount: string } }[] | null | undefined,
+  balances:
+    | readonly {
+        mint: string;
+        owner?: string;
+        uiTokenAmount: { amount: string };
+      }[]
+    | null
+    | undefined,
   mint: string,
 ): Map<string, bigint> {
   const out = new Map<string, bigint>();
   for (const balance of balances ?? []) {
     if (balance.mint !== mint || !balance.owner) continue;
-    out.set(balance.owner, (out.get(balance.owner) ?? 0n) + BigInt(balance.uiTokenAmount.amount));
+    out.set(
+      balance.owner,
+      (out.get(balance.owner) ?? 0n) + BigInt(balance.uiTokenAmount.amount),
+    );
   }
   return out;
 }

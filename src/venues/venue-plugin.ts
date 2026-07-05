@@ -1,9 +1,17 @@
-import type { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
+import type {
+  Connection,
+  PublicKey,
+  TransactionInstruction,
+} from "@solana/web3.js";
 import type { QuoteAsset, RawAmount } from "../core/amounts.js";
 import type { TokenRow } from "../db/schema.js";
 
 export type VenueId = string;
-export type VenueContext = { connection: Connection; token: TokenRow; user: PublicKey };
+export type VenueContext = {
+  connection: Connection;
+  token: TokenRow;
+  user: PublicKey;
+};
 export type VenueMarket = {
   venue: VenueId;
   mint: PublicKey;
@@ -44,13 +52,34 @@ export type BuiltInstructions = {
  */
 export interface TradeVenuePlugin {
   readonly id: VenueId;
-  inspectToken?(connection: Connection, mint: PublicKey): Promise<Partial<TokenRow> | null>;
+  inspectToken?(
+    connection: Connection,
+    mint: PublicKey,
+  ): Promise<Partial<TokenRow> | null>;
   resolveMarket(ctx: VenueContext): Promise<VenueMarket | null>;
-  quoteBuy(ctx: VenueContext, market: VenueMarket, amount: RawAmount, slippageBps: number): Promise<QuoteResult>;
-  quoteSell(ctx: VenueContext, market: VenueMarket, amountRaw: bigint, slippageBps: number): Promise<QuoteResult>;
+  quoteBuy(
+    ctx: VenueContext,
+    market: VenueMarket,
+    amount: RawAmount,
+    slippageBps: number,
+  ): Promise<QuoteResult>;
+  quoteSell(
+    ctx: VenueContext,
+    market: VenueMarket,
+    amountRaw: bigint,
+    slippageBps: number,
+  ): Promise<QuoteResult>;
   price(ctx: VenueContext, market: VenueMarket): Promise<MarketPrice>;
-  buildBuy(ctx: VenueContext, market: VenueMarket, quote: QuoteResult): Promise<BuiltInstructions>;
-  buildSell(ctx: VenueContext, market: VenueMarket, quote: QuoteResult): Promise<BuiltInstructions>;
+  buildBuy(
+    ctx: VenueContext,
+    market: VenueMarket,
+    quote: QuoteResult,
+  ): Promise<BuiltInstructions>;
+  buildSell(
+    ctx: VenueContext,
+    market: VenueMarket,
+    quote: QuoteResult,
+  ): Promise<BuiltInstructions>;
 }
 
 /** @deprecated Import TradeVenuePlugin; retained only for source compatibility. */

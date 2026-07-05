@@ -21,4 +21,10 @@ export function installPump(target: PumpInstallTarget): void {
   target.registerLaunchSource(new PumpLaunchSource());
   target.registerLaunchpad(new PumpTokenLaunchpad());
 }
-export { PumpCurveVenue, PumpSwapVenue, PumpCreatorFeesSource, PumpLaunchSource, PumpTokenLaunchpad };
+export {
+  PumpCurveVenue,
+  PumpSwapVenue,
+  PumpCreatorFeesSource,
+  PumpLaunchSource,
+  PumpTokenLaunchpad,
+};

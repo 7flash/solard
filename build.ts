@@ -1,4 +1,8 @@
-import { type Connection, PublicKey, type TransactionInstruction } from "@solana/web3.js";
+import {
+  type Connection,
+  PublicKey,
+  type TransactionInstruction,
+} from "@solana/web3.js";
 import BN from "bn.js";
 import {
   OnlinePumpAmmSdk,
@@ -7,18 +11,22 @@ import {
   canonicalPumpPoolPda,
   sellBaseInput,
 } from "@pump-fun/pump-swap-sdk";
-import { OnlinePumpSdk, hasCoinCreatorMigratedToSharingConfig } from "@pump-fun/pump-sdk";
 import {
-  SPL_TOKEN_PROGRAM_ID,
-  WRAPPED_SOL_MINT,
-} from "../core/constants.ts";
+  OnlinePumpSdk,
+  hasCoinCreatorMigratedToSharingConfig,
+} from "@pump-fun/pump-sdk";
+import { SPL_TOKEN_PROGRAM_ID, WRAPPED_SOL_MINT } from "../core/constants.ts";
 import {
   cloneCurve,
   quoteBuyExactSolIn,
   quoteSellExactTokenIn,
 } from "../core/curve.ts";
 import { userVolumeAccumulatorPda } from "../core/pda.ts";
-import { fetchCurve, readTokenBalanceRaw, resolveTokenProgram } from "../chain/state.ts";
+import {
+  fetchCurve,
+  readTokenBalanceRaw,
+  resolveTokenProgram,
+} from "../chain/state.ts";
 import { resolveRouting } from "./routing.ts";
 import { ataCreateIx } from "./spl.ts";
 import {
@@ -55,7 +63,10 @@ export async function buildBuyInstructions(args: {
   forceV2?: boolean;
 }): Promise<BuiltInstructions<{ minTokensOut: bigint; tokensOut: bigint }>> {
   const slippageBps = args.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
-  const curve = await fetchCurve({ connection: args.connection, mint: args.mint });
+  const curve = await fetchCurve({
+    connection: args.connection,
+    mint: args.mint,
+  });
 
   // Migrated → trade on the AMM pool.
   if (curve.complete) {
@@ -75,7 +86,11 @@ export async function buildBuyInstructions(args: {
       feeConfig: swapState.feeConfig,
     });
     if (quote.base.lten(0)) throw new Error("AMM buy quote returned zero");
-    const instructions = await PUMP_AMM_SDK.buyInstructions(swapState, quote.base, quote.maxQuote);
+    const instructions = await PUMP_AMM_SDK.buyInstructions(
+      swapState,
+      quote.base,
+      quote.maxQuote,
+    );
     const expected = BigInt(quote.base.toString());
     // The pool can move between quote and execution, so the realised base out
     // can be below `quote.base`. Expose a slippage-discounted floor as the
@@ -100,7 +115,8 @@ export async function buildBuyInstructions(args: {
     totalFeeBps: args.quoteTotalFeeBps ?? DEFAULT_FEE_BPS,
     slippageBps,
   });
-  if (quote.minTokensOut <= 0n) throw new Error("Curve buy quote returned zero");
+  if (quote.minTokensOut <= 0n)
+    throw new Error("Curve buy quote returned zero");
 
   const { ix: baseAta } = ataCreateIx({
     payer: args.user,
@@ -128,7 +144,8 @@ export async function buildBuyInstructions(args: {
         feeRecipient: routing.feeRecipient,
         associatedQuoteFeeRecipient: routing.associatedQuoteFeeRecipient,
         buybackFeeRecipient: routing.buybackFeeRecipient,
-        associatedQuoteBuybackFeeRecipient: routing.associatedQuoteBuybackFeeRecipient,
+        associatedQuoteBuybackFeeRecipient:
+          routing.associatedQuoteBuybackFeeRecipient,
         creatorVault: routing.creatorVault,
         associatedCreatorVault: routing.associatedCreatorVault,
         spendableQuoteIn: args.spendLamports,
@@ -177,10 +194,18 @@ export async function buildSellInstructions(args: {
   trackVolume?: boolean;
 }): Promise<BuiltInstructions<{ tokenAmountIn: bigint; minSolOut: bigint }>> {
   const slippageBps = args.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
-  const curve = await fetchCurve({ connection: args.connection, mint: args.mint });
-  const balance = await readTokenBalanceRaw({ connection: args.connection, owner: args.user, mint: args.mint.toBase58() });
+  const curve = await fetchCurve({
+    connection: args.connection,
+    mint: args.mint,
+  });
+  const balance = await readTokenBalanceRaw({
+    connection: args.connection,
+    owner: args.user,
+    mint: args.mint.toBase58(),
+  });
   const tokenAmountIn = (balance.amountRaw * BigInt(args.tokenBps)) / 10_000n;
-  if (tokenAmountIn <= 0n) throw new Error("Nothing to sell (zero balance or bps)");
+  if (tokenAmountIn <= 0n)
+    throw new Error("Nothing to sell (zero balance or bps)");
 
   if (curve.complete) {
     const sdk = new OnlinePumpAmmSdk(args.connection);
@@ -199,7 +224,11 @@ export async function buildSellInstructions(args: {
       feeConfig: swapState.feeConfig,
     });
     if (quote.minQuote.lten(0)) throw new Error("AMM sell quote returned zero");
-    const instructions = await PUMP_AMM_SDK.sellInstructions(swapState, new BN(tokenAmountIn.toString()), quote.minQuote);
+    const instructions = await PUMP_AMM_SDK.sellInstructions(
+      swapState,
+      new BN(tokenAmountIn.toString()),
+      quote.minQuote,
+    );
     return {
       instructions,
       venue: "amm",
@@ -258,7 +287,8 @@ export async function buildSellInstructions(args: {
         feeRecipient: routing.feeRecipient,
         associatedQuoteFeeRecipient: routing.associatedQuoteFeeRecipient,
         buybackFeeRecipient: routing.buybackFeeRecipient,
-        associatedQuoteBuybackFeeRecipient: routing.associatedQuoteBuybackFeeRecipient,
+        associatedQuoteBuybackFeeRecipient:
+          routing.associatedQuoteBuybackFeeRecipient,
         creatorVault: routing.creatorVault,
         associatedCreatorVault: routing.associatedCreatorVault,
         tokenAmountIn,
@@ -281,7 +311,11 @@ export async function buildSellInstructions(args: {
     );
   }
 
-  return { instructions, venue: "curve", meta: { tokenAmountIn, minSolOut: quote.minSolOut } };
+  return {
+    instructions,
+    venue: "curve",
+    meta: { tokenAmountIn, minSolOut: quote.minSolOut },
+  };
 }
 
 // --- CLAIM (creator fees) ---------------------------------------------------
@@ -292,26 +326,50 @@ export async function buildClaimInstructions(args: {
   /** The wallet that created the token / owns the creator fees. */
   creator: PublicKey;
   minClaimLamports?: bigint;
-}): Promise<BuiltInstructions<{ claimableLamports: bigint; sharing: boolean }>> {
+}): Promise<
+  BuiltInstructions<{ claimableLamports: bigint; sharing: boolean }>
+> {
   const sdk = new OnlinePumpSdk(args.connection);
   const minClaim = args.minClaimLamports ?? 0n;
-  const sharing = hasCoinCreatorMigratedToSharingConfig({ mint: args.mint, creator: args.creator });
+  const sharing = hasCoinCreatorMigratedToSharingConfig({
+    mint: args.mint,
+    creator: args.creator,
+  });
 
   if (sharing) {
     const distributable = await sdk.getMinimumDistributableFee(args.mint);
     const claimable = BigInt(distributable.distributableFees.toString());
     if (!distributable.canDistribute || claimable < minClaim) {
-      return { instructions: [], venue: "curve", meta: { claimableLamports: claimable, sharing } };
+      return {
+        instructions: [],
+        venue: "curve",
+        meta: { claimableLamports: claimable, sharing },
+      };
     }
     const built = await sdk.buildDistributeCreatorFeesInstructions(args.mint);
-    return { instructions: built.instructions, venue: "curve", meta: { claimableLamports: claimable, sharing } };
+    return {
+      instructions: built.instructions,
+      venue: "curve",
+      meta: { claimableLamports: claimable, sharing },
+    };
   }
 
   const balance = await sdk.getCreatorVaultBalanceBothPrograms(args.creator);
   const claimable = BigInt(balance.toString());
   if (claimable < minClaim) {
-    return { instructions: [], venue: "curve", meta: { claimableLamports: claimable, sharing } };
+    return {
+      instructions: [],
+      venue: "curve",
+      meta: { claimableLamports: claimable, sharing },
+    };
   }
-  const instructions = await sdk.collectCoinCreatorFeeInstructions(args.creator, args.creator);
-  return { instructions, venue: "curve", meta: { claimableLamports: claimable, sharing } };
+  const instructions = await sdk.collectCoinCreatorFeeInstructions(
+    args.creator,
+    args.creator,
+  );
+  return {
+    instructions,
+    venue: "curve",
+    meta: { claimableLamports: claimable, sharing },
+  };
 }

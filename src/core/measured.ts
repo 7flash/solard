@@ -14,22 +14,34 @@ type SyncMeasure = {
 };
 type Scope = { measure: AsyncMeasure; measureSync: SyncMeasure };
 
-export async function measured<T, L>(scope: Scope, label: string, operation: () => Promise<T>, logValue: (value: T) => L): Promise<T> {
+export async function measured<T, L>(
+  scope: Scope,
+  label: string,
+  operation: () => Promise<T>,
+  logValue: (value: T) => L,
+): Promise<T> {
   let value: T | undefined;
   await scope.measure.assert(label, async () => {
     value = await operation();
     return logValue(value);
   });
-  if (value === undefined) throw new Error(`Measured operation ${label} produced no result`);
+  if (value === undefined)
+    throw new Error(`Measured operation ${label} produced no result`);
   return value;
 }
 
-export function measuredSync<T, L>(scope: Scope, label: string, operation: () => T, logValue: (value: T) => L): T {
+export function measuredSync<T, L>(
+  scope: Scope,
+  label: string,
+  operation: () => T,
+  logValue: (value: T) => L,
+): T {
   let value: T | undefined;
   scope.measureSync.assert(label, () => {
     value = operation();
     return logValue(value);
   });
-  if (value === undefined) throw new Error(`Measured operation ${label} produced no result`);
+  if (value === undefined)
+    throw new Error(`Measured operation ${label} produced no result`);
   return value;
 }

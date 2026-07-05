@@ -1,7 +1,11 @@
 import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
 import { SOL_ASSET, sameAsset, type RawAmount } from "../../core/amounts.js";
 import type {
-  PendingMarketState, PreparedPendingBuy, PreparedTokenDeployment, PrepareDeploymentArgs, TokenLaunchpadPlugin,
+  PendingMarketState,
+  PreparedPendingBuy,
+  PreparedTokenDeployment,
+  PrepareDeploymentArgs,
+  TokenLaunchpadPlugin,
 } from "../../launches/launchpad.js";
 import type { TokenRow } from "../../db/schema.js";
 import { configuredTotalFeeBps } from "./common.js";
@@ -35,7 +39,10 @@ function tokenForDeployment(deployment: PreparedTokenDeployment): TokenRow {
     pool: null,
     sharingConfig: null,
     venueHint: "pump-curve",
-    metadataJson: JSON.stringify({ pendingDeployment: true, ...(deployment.metadata ?? {}) }),
+    metadataJson: JSON.stringify({
+      pendingDeployment: true,
+      ...(deployment.metadata ?? {}),
+    }),
     refreshedAtMs: null,
     createdAtMs: now,
     updatedAtMs: now,
@@ -47,7 +54,10 @@ function tokenForDeployment(deployment: PreparedTokenDeployment): TokenRow {
 export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
   readonly id = "pump";
 
-  async prepareDeployment(_connection: Connection, args: PrepareDeploymentArgs): Promise<PreparedTokenDeployment> {
+  async prepareDeployment(
+    _connection: Connection,
+    args: PrepareDeploymentArgs,
+  ): Promise<PreparedTokenDeployment> {
     const mint = args.mint ?? Keypair.generate();
     const creator = args.creator ?? args.user;
     const quoteAsset = args.quoteAsset ?? SOL_ASSET;
@@ -63,7 +73,11 @@ export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
       baseTokenProgram: TOKEN_2022_ID.toBase58(),
       bondingCurve: bondingCurvePda(mint.publicKey).toBase58(),
       venueHint: "pump-curve",
-      metadataJson: JSON.stringify({ uri: args.uri, mayhemMode: args.mayhemMode ?? false, cashback: args.cashback ?? false }),
+      metadataJson: JSON.stringify({
+        uri: args.uri,
+        mayhemMode: args.mayhemMode ?? false,
+        cashback: args.cashback ?? false,
+      }),
     };
     return {
       launchpad: this.id,
@@ -72,28 +86,42 @@ export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
       creator,
       quoteAsset,
       token,
-      instructions: [buildCreateV2({
-        mint: mint.publicKey,
-        user: args.user,
-        creator,
-        name: args.name,
-        symbol: args.symbol,
-        uri: args.uri,
-        quote: quoteAsset,
-        mayhemMode: args.mayhemMode,
-        cashback: args.cashback,
-      })],
+      instructions: [
+        buildCreateV2({
+          mint: mint.publicKey,
+          user: args.user,
+          creator,
+          name: args.name,
+          symbol: args.symbol,
+          uri: args.uri,
+          quote: quoteAsset,
+          mayhemMode: args.mayhemMode,
+          cashback: args.cashback,
+        }),
+      ],
       signers: [mint],
-      metadata: { uri: args.uri, mayhemMode: args.mayhemMode ?? false, cashback: args.cashback ?? false },
+      metadata: {
+        uri: args.uri,
+        mayhemMode: args.mayhemMode ?? false,
+        cashback: args.cashback ?? false,
+      },
     };
   }
 
-  async initialPendingMarketState(connection: Connection, deployment: PreparedTokenDeployment): Promise<PumpPendingCurveState> {
+  async initialPendingMarketState(
+    connection: Connection,
+    deployment: PreparedTokenDeployment,
+  ): Promise<PumpPendingCurveState> {
     if (!sameAsset(deployment.quoteAsset, SOL_ASSET)) {
-      throw new Error("Pre-landing Pump buy planning is currently implemented only for SOL-paired create_v2 launches");
+      throw new Error(
+        "Pre-landing Pump buy planning is currently implemented only for SOL-paired create_v2 launches",
+      );
     }
     const initial = await fetchInitialSolCurveState(connection);
-    return { ...initial, totalFeeBps: configuredTotalFeeBps(tokenForDeployment(deployment)) };
+    return {
+      ...initial,
+      totalFeeBps: configuredTotalFeeBps(tokenForDeployment(deployment)),
+    };
   }
 
   async buildPendingBuy(
@@ -105,11 +133,19 @@ export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
     options: { slippageBps?: number } = {},
   ): Promise<PreparedPendingBuy> {
     if (!sameAsset(amount.asset, deployment.quoteAsset)) {
-      throw new Error(`Pending Pump buy asset ${amount.asset.mint.toBase58()} does not match deployment quote ${deployment.quoteAsset.mint.toBase58()}`);
+      throw new Error(
+        `Pending Pump buy asset ${amount.asset.mint.toBase58()} does not match deployment quote ${deployment.quoteAsset.mint.toBase58()}`,
+      );
     }
     const reserves = state as PumpPendingCurveState;
-    if (!reserves || typeof reserves.totalFeeBps !== "number") throw new Error("Invalid Pump pending curve state");
-    const quote = quoteBuyConstantProduct(amount, reserves, options.slippageBps ?? 1500, reserves.totalFeeBps);
+    if (!reserves || typeof reserves.totalFeeBps !== "number")
+      throw new Error("Invalid Pump pending curve state");
+    const quote = quoteBuyConstantProduct(
+      amount,
+      reserves,
+      options.slippageBps ?? 1500,
+      reserves.totalFeeBps,
+    );
     const token = tokenForDeployment(deployment);
     const routing = await resolvePumpRouting(
       connection,
@@ -118,7 +154,8 @@ export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
       deployment.quoteAsset,
       deployment.metadata?.mayhemMode === true,
     );
-    const netQuoteIn = amount.raw * 10_000n / BigInt(10_000 + reserves.totalFeeBps);
+    const netQuoteIn =
+      (amount.raw * 10_000n) / BigInt(10_000 + reserves.totalFeeBps);
     const nextState: PumpPendingCurveState = {
       virtualBase: reserves.virtualBase - quote.expectedOutputRaw,
       virtualQuote: reserves.virtualQuote + netQuoteIn,
@@ -141,7 +178,10 @@ export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
       expectedOutputRaw: quote.expectedOutputRaw,
       minimumOutputRaw: quote.minimumOutputRaw,
       nextState,
-      metadata: { quoteInRaw: quote.inputRaw.toString(), minBaseOutRaw: quote.minimumOutputRaw.toString() },
+      metadata: {
+        quoteInRaw: quote.inputRaw.toString(),
+        minBaseOutRaw: quote.minimumOutputRaw.toString(),
+      },
     };
   }
 }

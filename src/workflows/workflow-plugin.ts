@@ -1,6 +1,9 @@
 import type { Connection, Keypair } from "@solana/web3.js";
 import type { GroupRef, TokenRef, WalletRef } from "../core/refs.js";
-import type { DiscoveredLaunch, WaitForLaunchArgs } from "../launches/launch-source.js";
+import type {
+  DiscoveredLaunch,
+  WaitForLaunchArgs,
+} from "../launches/launch-source.js";
 import type { TokenRow } from "../db/schema.js";
 import type { TransactionBuilder } from "../tx/transaction-builder.js";
 import type { BatchComposer } from "../tx/composer.js";
@@ -12,9 +15,15 @@ export interface WorkflowHost {
   signer(ref: WalletRef): Keypair;
   resolveToken(ref: TokenRef): TokenRow;
   transaction(wallet: WalletRef): TransactionBuilder;
-  route(token: TokenRow, user: Keypair["publicKey"]): Promise<{ plugin: TradeVenuePlugin; market: VenueMarket }>;
+  route(
+    token: TokenRow,
+    user: Keypair["publicKey"],
+  ): Promise<{ plugin: TradeVenuePlugin; market: VenueMarket }>;
   resolveClaim(token: TokenRow, user: Keypair["publicKey"]): Promise<ClaimPlan>;
-  waitForLaunch(sourceId: string, args: WaitForLaunchArgs): Promise<DiscoveredLaunch>;
+  waitForLaunch(
+    sourceId: string,
+    args: WaitForLaunchArgs,
+  ): Promise<DiscoveredLaunch>;
   persistLaunch(launch: DiscoveredLaunch, alias?: string): Promise<TokenRow>;
   groupWallets(group: GroupRef): WalletRef[];
   composeMany(wallets: WalletRef[]): BatchComposer;
@@ -34,10 +43,15 @@ export class WorkflowRegistry {
     this.plugins.set(plugin.id, plugin as WorkflowPlugin<any, any>);
     return this;
   }
-  list(): readonly string[] { return [...this.plugins.keys()]; }
+  list(): readonly string[] {
+    return [...this.plugins.keys()];
+  }
   resolve<Args, Result>(id: string): WorkflowPlugin<Args, Result> {
     const plugin = this.plugins.get(id);
-    if (!plugin) throw new Error(`Unknown workflow: ${id}. Registered: ${this.list().join(", ") || "none"}`);
+    if (!plugin)
+      throw new Error(
+        `Unknown workflow: ${id}. Registered: ${this.list().join(", ") || "none"}`,
+      );
     return plugin as WorkflowPlugin<Args, Result>;
   }
   async run<Args, Result>(id: string, args: Args): Promise<Result> {

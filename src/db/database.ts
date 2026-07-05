@@ -3,9 +3,21 @@ import { dirname, resolve } from "node:path";
 import { Database } from "sqlite-zod-orm";
 import { measure } from "../core/log.js";
 import {
-  AgentSchema, AltSchema, BalanceSchema, PriceSampleSchema, ClaimSchema, ExecutionActionSchema, ExecutionSchema,
-  GroupSchema, GroupWalletSchema, PositionSchema, SettingSchema, TokenSchema, WalletSchema,
-  WatchSchema, type SowlDatabase,
+  AgentSchema,
+  AltSchema,
+  BalanceSchema,
+  PriceSampleSchema,
+  ClaimSchema,
+  ExecutionActionSchema,
+  ExecutionSchema,
+  GroupSchema,
+  GroupWalletSchema,
+  PositionSchema,
+  SettingSchema,
+  TokenSchema,
+  WalletSchema,
+  WatchSchema,
+  type SowlDatabase,
 } from "./schema.js";
 
 const m = measure("db");
@@ -20,49 +32,53 @@ export function openDatabase(input?: string): SowlDatabase {
   const existing = open.get(path);
   if (existing) return existing;
   mkdirSync(dirname(path), { recursive: true });
-  const db = new Database(path, {
-    wallets: WalletSchema,
-    tokens: TokenSchema,
-    executions: ExecutionSchema,
-    executionActions: ExecutionActionSchema,
-    positions: PositionSchema,
-    balances: BalanceSchema,
-    priceSamples: PriceSampleSchema,
-    claims: ClaimSchema,
-    groups: GroupSchema,
-    groupWallets: GroupWalletSchema,
-    agents: AgentSchema,
-    alts: AltSchema,
-    watches: WatchSchema,
-    settings: SettingSchema,
-  }, {
-    timestamps: false,
-    softDeletes: false,
-    debug: process.env.SQLITE_DEBUG === "1",
-    unique: {
-      wallets: [["name"], ["address"]],
-      tokens: [["mint"]],
-      executions: [["signature"]],
-      executionActions: [["executionId", "actionIndex"]],
-      positions: [["walletAddress", "mint"]],
-      groups: [["name"]],
-      groupWallets: [["groupName", "walletAddress"]],
-      agents: [["name"]],
-      alts: [["address"]],
-      watches: [["kind", "address"]],
-      settings: [["key"]],
+  const db = new Database(
+    path,
+    {
+      wallets: WalletSchema,
+      tokens: TokenSchema,
+      executions: ExecutionSchema,
+      executionActions: ExecutionActionSchema,
+      positions: PositionSchema,
+      balances: BalanceSchema,
+      priceSamples: PriceSampleSchema,
+      claims: ClaimSchema,
+      groups: GroupSchema,
+      groupWallets: GroupWalletSchema,
+      agents: AgentSchema,
+      alts: AltSchema,
+      watches: WatchSchema,
+      settings: SettingSchema,
     },
-    indexes: {
-      wallets: ["name", "address", "isActive"],
-      tokens: ["mint", "name", "symbol", "venueHint"],
-      executions: ["status", "walletAddress", "mint", "createdAtMs"],
-      positions: ["walletAddress", "mint"],
-      priceSamples: ["mint", "venue", "capturedAtMs"],
-      claims: ["walletAddress", "mint", "status"],
-      groupWallets: ["groupName", "walletAddress"],
-      watches: ["kind", "address", "isActive"],
+    {
+      timestamps: false,
+      softDeletes: false,
+      debug: process.env.SQLITE_DEBUG === "1",
+      unique: {
+        wallets: [["name"], ["address"]],
+        tokens: [["mint"]],
+        executions: [["signature"]],
+        executionActions: [["executionId", "actionIndex"]],
+        positions: [["walletAddress", "mint"]],
+        groups: [["name"]],
+        groupWallets: [["groupName", "walletAddress"]],
+        agents: [["name"]],
+        alts: [["address"]],
+        watches: [["kind", "address"]],
+        settings: [["key"]],
+      },
+      indexes: {
+        wallets: ["name", "address", "isActive"],
+        tokens: ["mint", "name", "symbol", "venueHint"],
+        executions: ["status", "walletAddress", "mint", "createdAtMs"],
+        positions: ["walletAddress", "mint"],
+        priceSamples: ["mint", "venue", "capturedAtMs"],
+        claims: ["walletAddress", "mint", "status"],
+        groupWallets: ["groupName", "walletAddress"],
+        watches: ["kind", "address", "isActive"],
+      },
     },
-  }) as SowlDatabase;
+  ) as SowlDatabase;
   open.set(path, db);
   m.measureSync(`open ${path}`, () => `ready`);
   return db;

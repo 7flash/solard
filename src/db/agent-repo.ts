@@ -4,13 +4,15 @@ export class AgentRepo {
   constructor(private readonly db: SowlDatabase) {}
 
   resolve(name: string): AgentRow {
-    const row = this.db.agents.select().where({ name }).first() as AgentRow | undefined;
+    const row = this.db.agents.select().where({ name }).first() as
+      AgentRow | undefined;
     if (row) return row;
     return this.configure(name, {});
   }
 
   configure(name: string, config: Record<string, unknown>): AgentRow {
-    const existing = this.db.agents.select().where({ name }).first() as AgentRow | undefined;
+    const existing = this.db.agents.select().where({ name }).first() as
+      AgentRow | undefined;
     const now = Date.now();
     const configJson = JSON.stringify(config);
     if (existing) {
@@ -18,7 +20,13 @@ export class AgentRepo {
       existing.updatedAtMs = now;
       return existing;
     }
-    return this.db.agents.insert({ name, configJson, stateJson: "{}", createdAtMs: now, updatedAtMs: now }) as AgentRow;
+    return this.db.agents.insert({
+      name,
+      configJson,
+      stateJson: "{}",
+      createdAtMs: now,
+      updatedAtMs: now,
+    }) as AgentRow;
   }
 
   list(): AgentRow[] {
@@ -26,8 +34,11 @@ export class AgentRepo {
   }
 
   config(agent: AgentRow): Record<string, unknown> {
-    try { return JSON.parse(agent.configJson) as Record<string, unknown>; }
-    catch { return {}; }
+    try {
+      return JSON.parse(agent.configJson) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
   }
 
   saveState(agent: AgentRow, state: unknown): void {

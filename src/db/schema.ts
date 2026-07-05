@@ -150,7 +150,9 @@ export const SettingSchema = z.object({
 export type WalletRow = z.infer<typeof WalletSchema> & { id: number };
 export type TokenRow = z.infer<typeof TokenSchema> & { id: number };
 export type ExecutionRow = z.infer<typeof ExecutionSchema> & { id: number };
-export type ExecutionActionRow = z.infer<typeof ExecutionActionSchema> & { id: number };
+export type ExecutionActionRow = z.infer<typeof ExecutionActionSchema> & {
+  id: number;
+};
 export type PositionRow = z.infer<typeof PositionSchema> & { id: number };
 export type BalanceRow = z.infer<typeof BalanceSchema> & { id: number };
 export type PriceSampleRow = z.infer<typeof PriceSampleSchema> & { id: number };

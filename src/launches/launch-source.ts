@@ -31,7 +31,10 @@ export type WaitForLaunchArgs = {
 
 export interface LaunchSourcePlugin {
   readonly id: string;
-  waitForLaunch(connection: Connection, args: WaitForLaunchArgs): Promise<DiscoveredLaunch>;
+  waitForLaunch(
+    connection: Connection,
+    args: WaitForLaunchArgs,
+  ): Promise<DiscoveredLaunch>;
 }
 
 /** A registry for token-deployment feeds; separate from execution venues. */
@@ -43,7 +46,9 @@ export class LaunchSourceRegistry {
     return this;
   }
 
-  list(): readonly string[] { return [...this.sources.keys()]; }
+  list(): readonly string[] {
+    return [...this.sources.keys()];
+  }
 
   resolve(id: string): LaunchSourcePlugin {
     const source = this.sources.get(id);
@@ -53,7 +58,11 @@ export class LaunchSourceRegistry {
     return source;
   }
 
-  async wait(connection: Connection, sourceId: string, args: WaitForLaunchArgs): Promise<DiscoveredLaunch> {
+  async wait(
+    connection: Connection,
+    sourceId: string,
+    args: WaitForLaunchArgs,
+  ): Promise<DiscoveredLaunch> {
     return await this.resolve(sourceId).waitForLaunch(connection, args);
   }
 }

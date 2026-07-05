@@ -1,8 +1,16 @@
-import type { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
+import type {
+  Connection,
+  PublicKey,
+  TransactionInstruction,
+} from "@solana/web3.js";
 import type { QuoteAsset } from "../core/amounts.js";
 import type { TokenRow } from "../db/schema.js";
 
-export type ClaimContext = { connection: Connection; token: TokenRow; user: PublicKey };
+export type ClaimContext = {
+  connection: Connection;
+  token: TokenRow;
+  user: PublicKey;
+};
 export type ClaimPlan = {
   source: string;
   quoteAsset: QuoteAsset;
@@ -32,13 +40,21 @@ export class ClaimSourceRegistry {
     return this;
   }
 
-  list(): readonly ClaimSourcePlugin[] { return this.plugins; }
+  list(): readonly ClaimSourcePlugin[] {
+    return this.plugins;
+  }
 
-  async resolve(connection: Connection, token: TokenRow, user: PublicKey): Promise<{ plugin: ClaimSourcePlugin; plan: ClaimPlan }> {
+  async resolve(
+    connection: Connection,
+    token: TokenRow,
+    user: PublicKey,
+  ): Promise<{ plugin: ClaimSourcePlugin; plan: ClaimPlan }> {
     for (const plugin of this.plugins) {
       const plan = await plugin.resolveClaim({ connection, token, user });
       if (plan) return { plugin, plan };
     }
-    throw new Error(`No registered claim source can claim value for token ${token.mint}`);
+    throw new Error(
+      `No registered claim source can claim value for token ${token.mint}`,
+    );
   }
 }

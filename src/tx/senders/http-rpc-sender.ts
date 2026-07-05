@@ -10,7 +10,10 @@ export class HttpRpcSender implements SowlSender {
     private readonly configName = String(id),
   ) {}
 
-  async send({ transaction, options }: Parameters<SowlSender["send"]>[0]): Promise<string> {
+  async send({
+    transaction,
+    options,
+  }: Parameters<SowlSender["send"]>[0]): Promise<string> {
     if (!this.endpoint) throw new MissingConfigError(this.configName);
     const response = await fetch(this.endpoint, {
       method: "POST",
@@ -30,11 +33,21 @@ export class HttpRpcSender implements SowlSender {
       }),
     });
     const raw = await response.text();
-    let data: { result?: string; error?: { code?: number; message?: string; data?: unknown } };
-    try { data = JSON.parse(raw) as typeof data; }
-    catch { throw new Error(`${this.id} sendTransaction failed HTTP ${response.status}: ${raw.slice(0, 500)}`); }
+    let data: {
+      result?: string;
+      error?: { code?: number; message?: string; data?: unknown };
+    };
+    try {
+      data = JSON.parse(raw) as typeof data;
+    } catch {
+      throw new Error(
+        `${this.id} sendTransaction failed HTTP ${response.status}: ${raw.slice(0, 500)}`,
+      );
+    }
     if (!response.ok || data.error || !data.result) {
-      throw new Error(`${this.id} sendTransaction failed HTTP ${response.status}: ${data.error ? JSON.stringify(data.error) : raw.slice(0, 500)}`);
+      throw new Error(
+        `${this.id} sendTransaction failed HTTP ${response.status}: ${data.error ? JSON.stringify(data.error) : raw.slice(0, 500)}`,
+      );
     }
     return data.result;
   }

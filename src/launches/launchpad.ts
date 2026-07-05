@@ -1,4 +1,9 @@
-import type { Connection, Keypair, PublicKey, TransactionInstruction } from "@solana/web3.js";
+import type {
+  Connection,
+  Keypair,
+  PublicKey,
+  TransactionInstruction,
+} from "@solana/web3.js";
 import type { QuoteAsset, RawAmount } from "../core/amounts.js";
 import type { TokenRow } from "../db/schema.js";
 import { UnknownLaunchpadError } from "../core/errors.js";
@@ -50,8 +55,14 @@ export type PreparedPendingBuy = {
  */
 export interface TokenLaunchpadPlugin {
   readonly id: string;
-  prepareDeployment(connection: Connection, args: PrepareDeploymentArgs): Promise<PreparedTokenDeployment>;
-  initialPendingMarketState?(connection: Connection, deployment: PreparedTokenDeployment): Promise<PendingMarketState>;
+  prepareDeployment(
+    connection: Connection,
+    args: PrepareDeploymentArgs,
+  ): Promise<PreparedTokenDeployment>;
+  initialPendingMarketState?(
+    connection: Connection,
+    deployment: PreparedTokenDeployment,
+  ): Promise<PendingMarketState>;
   buildPendingBuy?(
     connection: Connection,
     deployment: PreparedTokenDeployment,
@@ -70,7 +81,9 @@ export class LaunchpadRegistry {
     return this;
   }
 
-  list(): readonly string[] { return [...this.plugins.keys()]; }
+  list(): readonly string[] {
+    return [...this.plugins.keys()];
+  }
 
   resolve(id: string): TokenLaunchpadPlugin {
     const plugin = this.plugins.get(id);

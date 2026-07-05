@@ -10,6 +10,9 @@ export function emit(value: unknown): void {
 }
 
 export function emitError(error: unknown): void {
-  const rendered = error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error);
+  const rendered =
+    error instanceof Error
+      ? (error.stack ?? `${error.name}: ${error.message}`)
+      : String(error);
   ui.measureSync(`[fatal] ${rendered}`);
 }

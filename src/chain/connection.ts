@@ -3,7 +3,10 @@ import { MissingConfigError } from "../core/errors.js";
 
 export class SowlConnection {
   private value?: Connection;
-  constructor(private readonly rpcUrl?: string, private readonly commitment: Commitment = "confirmed") {}
+  constructor(
+    private readonly rpcUrl?: string,
+    private readonly commitment: Commitment = "confirmed",
+  ) {}
   get(): Connection {
     if (this.value) return this.value;
     const url = this.rpcUrl ?? process.env.RPC_ENDPOINT;

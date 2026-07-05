@@ -20,8 +20,10 @@ export class PriceRepo {
   constructor(private readonly db: SowlDatabase) {}
 
   record(input: Omit<PriceSampleRow, "id">): PriceSampleRow {
-    return measuredSync(m, `record ${input.mint.slice(0, 8)} ${input.venue}`, () =>
-      this.db.priceSamples.insert(input) as PriceSampleRow,
+    return measuredSync(
+      m,
+      `record ${input.mint.slice(0, 8)} ${input.venue}`,
+      () => this.db.priceSamples.insert(input) as PriceSampleRow,
       priceSampleLog,
     );
   }
@@ -35,21 +37,30 @@ export class PriceRepo {
       .first() as PriceSampleRow | undefined;
   }
 
-  history(mint: string, args: { sinceMs?: number; limit?: number } = {}): PriceSampleRow[] {
+  history(
+    mint: string,
+    args: { sinceMs?: number; limit?: number } = {},
+  ): PriceSampleRow[] {
     const rows = this.db.priceSamples
       .select()
       .where({ mint })
       .orderBy("capturedAtMs", "desc")
       .limit(args.limit ?? 10_000)
       .all() as PriceSampleRow[];
-    return args.sinceMs == null ? rows : rows.filter((row) => row.capturedAtMs >= args.sinceMs!);
+    return args.sinceMs == null
+      ? rows
+      : rows.filter((row) => row.capturedAtMs >= args.sinceMs!);
   }
 
   average(mint: string, periodMs: number, nowMs = Date.now()): PriceWindow {
     const sinceMs = nowMs - periodMs;
     const rows = this.history(mint, { sinceMs });
-    const values = rows.map((row) => row.priceQuotePerToken).filter((value) => Number.isFinite(value) && value > 0);
-    const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    const values = rows
+      .map((row) => row.priceQuotePerToken)
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const average = values.length
+      ? values.reduce((sum, value) => sum + value, 0) / values.length
+      : null;
     return {
       mint,
       sinceMs,

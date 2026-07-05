@@ -1,4 +1,12 @@
-import type { ExecutionRow, GroupRow, GroupWalletRow, PositionRow, PriceSampleRow, TokenRow, WalletRow } from "../db/schema.js";
+import type {
+  ExecutionRow,
+  GroupRow,
+  GroupWalletRow,
+  PositionRow,
+  PriceSampleRow,
+  TokenRow,
+  WalletRow,
+} from "../db/schema.js";
 import type { SimulationResult, SubmittedPlan } from "../tx/types.js";
 
 export function short(value: string | null | undefined): string | null {
@@ -18,7 +26,12 @@ export function tokenLog(row: TokenRow) {
 }
 
 export function walletLog(row: WalletRow) {
-  return { id: row.id, wallet: `@${row.name}`, address: short(row.address), active: row.isActive === 1 };
+  return {
+    id: row.id,
+    wallet: `@${row.name}`,
+    address: short(row.address),
+    active: row.isActive === 1,
+  };
 }
 
 export function groupLog(row: GroupRow) {
@@ -26,7 +39,12 @@ export function groupLog(row: GroupRow) {
 }
 
 export function groupWalletLog(row: GroupWalletRow) {
-  return { id: row.id, group: row.groupName, wallet: short(row.walletAddress), weightBps: row.weightBps };
+  return {
+    id: row.id,
+    group: row.groupName,
+    wallet: short(row.walletAddress),
+    weightBps: row.weightBps,
+  };
 }
 
 export function executionLog(row: ExecutionRow) {
@@ -44,7 +62,12 @@ export function executionLog(row: ExecutionRow) {
 }
 
 export function positionLog(row: PositionRow) {
-  return { id: row.id, wallet: short(row.walletAddress), mint: short(row.mint), amountRaw: row.tokenAmountRaw };
+  return {
+    id: row.id,
+    wallet: short(row.walletAddress),
+    mint: short(row.mint),
+    amountRaw: row.tokenAmountRaw,
+  };
 }
 
 export function priceSampleLog(row: PriceSampleRow) {
