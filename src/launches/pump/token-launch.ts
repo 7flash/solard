@@ -58,6 +58,12 @@ export type SpamSubmitOptions = {
   recompileIntervalMs?: number;
   /** How long to wait for the create tx / market accounts to become visible in gated modes. Use 0 for no deadline. */
   readinessTimeoutMs?: number;
+  /** Global send budget across all launch buyer loops. Use 0 for unlimited; recommended <= provider sendTransaction limit. */
+  senderTps?: number;
+  /** Backoff after a provider 429/rate-limit response. */
+  rateLimitBackoffMs?: number;
+  /** Random extra delay used to avoid all buyers retrying on the same millisecond. */
+  jitterMs?: number;
 };
 
 export type BuyerLane = {
@@ -94,6 +100,7 @@ export type SpamBuyerReceipt = {
   preReadyFailures: number;
   buildErrors: number;
   broadcastErrors: number;
+  rateLimitErrors: number;
   resends: number;
   signatures: string[];
 };
@@ -110,6 +117,8 @@ export type PumpTokenLaunchPlan = {
   launchDraft: TransactionDraft;
   launchPlan: PlannedTransaction;
   slippageBps: number;
+  cuLimit: number;
+  buyerPriorityMicroLamports: number;
   deploymentSender: SenderId;
   traderPlans: PlannedTransaction[];
   traderLanes: BuyerLane[];
@@ -255,6 +264,9 @@ export function pumpLaunchEnvironment(): PumpLaunchEnvironment {
       maxFailedAttempts: intEnv("SOWL_LAUNCH_MAX_FAILED_ATTEMPTS", 0),
       recompileIntervalMs: intEnv("SOWL_LAUNCH_RECOMPILE_INTERVAL_MS", 750),
       readinessTimeoutMs: intEnv("SOWL_LAUNCH_READINESS_TIMEOUT_MS", 0),
+      senderTps: intEnv("SOWL_LAUNCH_SENDER_TPS", 40),
+      rateLimitBackoffMs: intEnv("SOWL_LAUNCH_RATE_LIMIT_BACKOFF_MS", 350),
+      jitterMs: intEnv("SOWL_LAUNCH_RETRY_JITTER_MS", 80),
     },
     policy: {
       deploymentSender,
@@ -676,19 +688,17 @@ export async function preparePumpTokenLaunch(args: {
     initialBuyer: creator,
   });
 
-  const traderLanes = args.traders.map((_trader, index) =>
-    index < args.senderPolicy.fastTraderCount
-      ? {
-          sender: args.senderPolicy.fastTraderSender,
-          tip: args.senderPolicy.fastTip,
-          lane: "trader-fast" as const,
-        }
-      : {
-          sender: args.senderPolicy.rpcTraderSender,
-          tip: {},
-          lane: "trader-rpc" as const,
-        },
-  );
+  const tipForSender = (sender: SenderId): TipConfig =>
+    String(sender) === "helius-fast" ? args.senderPolicy.fastTip : {};
+  const traderLanes = args.traders.map((_trader, index) => {
+    const sender =
+      index < args.senderPolicy.fastTraderCount
+        ? args.senderPolicy.fastTraderSender
+        : args.senderPolicy.rpcTraderSender;
+    return index < args.senderPolicy.fastTraderCount
+      ? { sender, tip: tipForSender(sender), lane: "trader-fast" as const }
+      : { sender, tip: tipForSender(sender), lane: "trader-rpc" as const };
+  });
 
   const pendingBuys = await prepareWorstCaseBuys({
     sowl: args.sowl,
@@ -723,6 +733,8 @@ export async function preparePumpTokenLaunch(args: {
     launchDraft: launch.draft,
     launchPlan: launch.plan,
     slippageBps: args.slippageBps,
+    cuLimit: args.cuLimit,
+    buyerPriorityMicroLamports: args.buyerPriorityMicroLamports,
     deploymentSender: args.senderPolicy.deploymentSender,
     traderPlans,
     traderLanes,
@@ -784,6 +796,72 @@ function beforeDeadline(startedAt: number, timeoutMs: number): boolean {
   return !hasDeadline(timeoutMs) || Date.now() - startedAt < timeoutMs;
 }
 
+function jitter(maxMs: number | undefined): number {
+  const limit = maxMs ?? 0;
+  return limit > 0 ? Math.floor(Math.random() * (limit + 1)) : 0;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error
+    ? `${error.name}: ${error.message}`
+    : String(error);
+}
+
+function isRateLimitError(error: unknown): boolean {
+  return /\b429\b|rate.?limit|too many requests/i.test(errorText(error));
+}
+
+function isTransientSenderError(error: unknown): boolean {
+  return (
+    isRateLimitError(error) ||
+    /\b5\d\d\b|timeout|timed out|fetch failed|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket/i.test(
+      errorText(error),
+    )
+  );
+}
+
+class SenderRateLimiter {
+  private nextAvailableAt = 0;
+  private backoffUntil = 0;
+
+  constructor(
+    private readonly options: SpamSubmitOptions,
+    private readonly reporter?: LaunchReporter,
+  ) {}
+
+  async wait(sender: SenderId): Promise<void> {
+    const tps = this.options.senderTps ?? 0;
+    if (tps <= 0) return;
+
+    const now = Date.now();
+    const spacingMs = Math.max(1, Math.ceil(1000 / tps));
+    const waitUntil = Math.max(this.nextAvailableAt, this.backoffUntil, now);
+    const delayMs = Math.max(0, waitUntil - now);
+    this.nextAvailableAt = waitUntil + spacingMs;
+
+    if (delayMs > 0) {
+      this.reporter?.("pump sender throttle", {
+        sender: String(sender),
+        delayMs,
+        senderTps: tps,
+      });
+      await sleep(delayMs);
+    }
+  }
+
+  async backoff(sender: SenderId, error: unknown): Promise<void> {
+    const baseMs = this.options.rateLimitBackoffMs ?? 350;
+    const delayMs = baseMs + jitter(this.options.jitterMs);
+    this.backoffUntil = Math.max(this.backoffUntil, Date.now() + delayMs);
+    this.reporter?.("pump sender backoff", {
+      sender: String(sender),
+      delayMs,
+      error: errorText(error),
+    });
+    await sleep(delayMs);
+  }
+}
+
 function deploymentReadinessAddresses(
   deployment: PreparedTokenDeployment,
 ): Array<{ label: string; address: PublicKey }> {
@@ -810,10 +888,8 @@ function deploymentReadinessAddresses(
 }
 
 function isTransientMarketReadinessError(error: unknown): boolean {
-  const text =
-    error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return /not found|account.*missing|mint account|bonding curve|curve.*not|market.*not|failed to get account/i.test(
-    text,
+    errorText(error),
   );
 }
 
@@ -922,6 +998,7 @@ async function spamDependentBuy(args: {
   options: SpamSubmitOptions & { launchSignature?: string };
   /** Builds a normal post-launch buy with a fresh quote. Used as soon as the market is visible. */
   buildReadyPlan?: () => Promise<PlannedTransaction>;
+  sendLimiter?: SenderRateLimiter;
   reporter?: LaunchReporter;
 }): Promise<SpamBuyerReceipt> {
   const startedAt = Date.now();
@@ -931,6 +1008,7 @@ async function spamDependentBuy(args: {
   let preReadyFailures = 0;
   let buildErrors = 0;
   let broadcastErrors = 0;
+  let rateLimitErrors = 0;
   let resends = 0;
   let active: SubmittedPlan | null = null;
   let activeSince = 0;
@@ -991,6 +1069,7 @@ async function spamDependentBuy(args: {
       }
 
       try {
+        await args.sendLimiter?.wait(args.lane.sender);
         active = await args.sowl.broadcastPlan(
           freshPlan,
           args.lane.sender,
@@ -998,9 +1077,35 @@ async function spamDependentBuy(args: {
           { skipSimulation: true, skipPreflight: true },
         );
       } catch (error) {
+        broadcastErrors += 1;
+        if (isRateLimitError(error)) {
+          rateLimitErrors += 1;
+          args.reporter?.("pump buyer rate-limit retry", {
+            lane: args.lane.lane,
+            sender: String(args.lane.sender),
+            wallet: args.participant.address,
+            launchReady,
+            rateLimitErrors,
+            broadcastErrors,
+            error: errorText(error),
+          });
+          await args.sendLimiter?.backoff(args.lane.sender, error);
+          continue;
+        }
+        if (isTransientSenderError(error)) {
+          args.reporter?.("pump buyer transient-send retry", {
+            lane: args.lane.lane,
+            sender: String(args.lane.sender),
+            wallet: args.participant.address,
+            launchReady,
+            broadcastErrors,
+            error: errorText(error),
+          });
+          await sleep(args.options.intervalMs + jitter(args.options.jitterMs));
+          continue;
+        }
         if (launchReady) failedAttempts += 1;
         else preReadyFailures += 1;
-        broadcastErrors += 1;
         args.reporter?.("pump buyer broadcast retry", {
           lane: args.lane.lane,
           sender: String(args.lane.sender),
@@ -1009,9 +1114,9 @@ async function spamDependentBuy(args: {
           failedAttempts,
           preReadyFailures,
           broadcastErrors,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorText(error),
         });
-        await sleep(args.options.intervalMs);
+        await sleep(args.options.intervalMs + jitter(args.options.jitterMs));
         continue;
       }
 
@@ -1039,6 +1144,7 @@ async function spamDependentBuy(args: {
           preReadyFailures,
           buildErrors,
           broadcastErrors,
+          rateLimitErrors,
           resends,
           signatures,
         };
@@ -1077,21 +1183,52 @@ async function spamDependentBuy(args: {
         continue;
       }
 
-      const signature = await args.sowl.senders.resolve(args.lane.sender).send({
-        connection: args.sowl.connection(),
-        transaction: active.plan.transaction,
-        options: { skipPreflight: true, skipSimulation: true },
-      });
+      try {
+        await args.sendLimiter?.wait(args.lane.sender);
+        const signature = await args.sowl.senders
+          .resolve(args.lane.sender)
+          .send({
+            connection: args.sowl.connection(),
+            transaction: active.plan.transaction,
+            options: { skipPreflight: true, skipSimulation: true },
+          });
 
-      if (signature !== active.signature) {
-        throw new Error(
-          `${String(args.lane.sender)} resend changed signature for ${args.participant.address}`,
-        );
+        if (signature !== active.signature) {
+          throw new Error(
+            `${String(args.lane.sender)} resend changed signature for ${args.participant.address}`,
+          );
+        }
+        resends += 1;
+      } catch (error) {
+        if (isRateLimitError(error)) {
+          rateLimitErrors += 1;
+          args.reporter?.("pump buyer resend rate-limited", {
+            lane: args.lane.lane,
+            sender: String(args.lane.sender),
+            wallet: args.participant.address,
+            signature: active.signature,
+            rateLimitErrors,
+            error: errorText(error),
+          });
+          await args.sendLimiter?.backoff(args.lane.sender, error);
+          continue;
+        }
+        if (isTransientSenderError(error)) {
+          args.reporter?.("pump buyer resend transient-error", {
+            lane: args.lane.lane,
+            sender: String(args.lane.sender),
+            wallet: args.participant.address,
+            signature: active.signature,
+            error: errorText(error),
+          });
+          await sleep(args.options.intervalMs + jitter(args.options.jitterMs));
+          continue;
+        }
+        throw error;
       }
-      resends += 1;
     }
 
-    await sleep(args.options.intervalMs);
+    await sleep(args.options.intervalMs + jitter(args.options.jitterMs));
   }
 
   if (active) {
@@ -1106,6 +1243,7 @@ async function spamDependentBuy(args: {
         preReadyFailures,
         buildErrors,
         broadcastErrors,
+        rateLimitErrors,
         resends,
         signatures,
       };
@@ -1114,6 +1252,69 @@ async function spamDependentBuy(args: {
 
   throw new Error(
     `trader ${args.participant.address} did not confirm within ${args.options.timeoutMs}ms; signatures=${signatures.join(",")}`,
+  );
+}
+
+async function broadcastLaunchWithRetry(args: {
+  sowl: Sowl;
+  plan: PlannedTransaction;
+  sender: SenderId;
+  kind: string;
+  skipSimulation: boolean;
+  spam: SpamSubmitOptions;
+  sendLimiter: SenderRateLimiter;
+  reporter?: LaunchReporter;
+}): Promise<SubmittedPlan> {
+  const startedAt = Date.now();
+  let attempts = 0;
+  let rateLimitErrors = 0;
+  let transientErrors = 0;
+
+  while (beforeDeadline(startedAt, args.spam.timeoutMs)) {
+    attempts += 1;
+    try {
+      await args.sendLimiter.wait(args.sender);
+      const submitted = await args.sowl.broadcastPlan(
+        args.plan,
+        args.sender,
+        `${args.kind}:attempt:${attempts}`,
+        { skipSimulation: args.skipSimulation, skipPreflight: true },
+      );
+      args.reporter?.("pump launch submit", {
+        sender: String(args.sender),
+        attempts,
+        signature: submitted.signature,
+      });
+      return submitted;
+    } catch (error) {
+      if (isRateLimitError(error)) {
+        rateLimitErrors += 1;
+        args.reporter?.("pump launch rate-limit retry", {
+          sender: String(args.sender),
+          attempts,
+          rateLimitErrors,
+          error: errorText(error),
+        });
+        await args.sendLimiter.backoff(args.sender, error);
+        continue;
+      }
+      if (isTransientSenderError(error)) {
+        transientErrors += 1;
+        args.reporter?.("pump launch transient-send retry", {
+          sender: String(args.sender),
+          attempts,
+          transientErrors,
+          error: errorText(error),
+        });
+        await sleep(args.spam.intervalMs + jitter(args.spam.jitterMs));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error(
+    `Launch transaction could not be submitted within ${args.spam.timeoutMs}ms`,
   );
 }
 
@@ -1142,12 +1343,17 @@ export async function executePumpTokenLaunch(args: {
     };
   }
 
-  const launch = await args.sowl.broadcastPlan(
-    args.prepared.launchPlan,
-    args.prepared.deploymentSender,
-    `${args.kind}:create-and-creator-buy`,
-    { skipSimulation: args.skipSimulation, skipPreflight: true },
-  );
+  const sendLimiter = new SenderRateLimiter(args.spam, args.reporter);
+  const launch = await broadcastLaunchWithRetry({
+    sowl: args.sowl,
+    plan: args.prepared.launchPlan,
+    sender: args.prepared.deploymentSender,
+    kind: `${args.kind}:create-and-creator-buy`,
+    skipSimulation: args.skipSimulation,
+    spam: args.spam,
+    sendLimiter,
+    reporter: args.reporter,
+  });
 
   if (submitMode === "after-deploy-confirmed") {
     const launchReceipt = await args.sowl.confirmSubmitted(launch);
@@ -1204,13 +1410,23 @@ export async function executePumpTokenLaunch(args: {
         options: { ...args.spam, launchSignature: launch.signature },
         buildReadyPlan: async () => {
           ensureTokenPersisted();
-          return await args.sowl
+          const builder = args.sowl
             .tx(participant.walletRef)
+            .priorityFee({
+              cuLimit: args.prepared.cuLimit,
+              microLamports: args.prepared.buyerPriorityMicroLamports,
+            })
             .buy(mintRef, rawAmount(participant.spendLamports, SOL_ASSET), {
               slippageBps: args.prepared.slippageBps,
-            })
-            .build();
+            });
+          addTip(
+            builder as unknown as ReturnType<Sowl["transaction"]>,
+            args.sowl.signer(participant.walletRef).publicKey,
+            args.prepared.traderLanes[index]!.tip,
+          );
+          return await builder.build();
         },
+        sendLimiter,
         reporter: args.reporter,
       });
     }),

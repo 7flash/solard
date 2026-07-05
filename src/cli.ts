@@ -126,6 +126,7 @@ Wallets and tokens
 
 Metadata and launching
   solwal launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--alias <name>] [--buyer-group <group>] [--live] [--skip-simulation]
+                    [--submit-mode after-deploy-processed|spam-after-market-ready|fast-spam] [--sender-tps 40] [--helius-tip-sol 0.01]
   sowl metadata upload --image <local_path> --name <name> --symbol <symbol> --description <text> [--provider pump-frontend|pinata]
                        [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
   sowl deploy pump --wallet <wallet> --name <name> --symbol <symbol> (--uri <metadata_uri> | --image <local_path> --description <text>) [--alias <name>] [--live]

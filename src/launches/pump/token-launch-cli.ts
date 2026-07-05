@@ -19,6 +19,7 @@ import {
   usesHeliusSenderForLaunch,
   validateHeliusTip,
   type LaunchReporter,
+  type PumpLaunchEnvironment,
   type PumpTokenLaunchPlan,
   type PumpTokenLaunchResult,
   type TokenMetadata,
@@ -244,6 +245,86 @@ function optionalSol(
   return human == null ? fallback : sol(human).raw;
 }
 
+function optionalSolOverride(
+  flags: Flags,
+  solKey: string,
+  rawKey: string,
+): bigint | undefined {
+  const raw = first(flags, rawKey);
+  if (raw != null) return bigintFlag(flags, rawKey, 0n);
+  const human = first(flags, solKey);
+  return human == null ? undefined : sol(human).raw;
+}
+
+function senderFlag(flags: Flags, key: string, fallback: string): string {
+  const value = first(flags, key);
+  if (!value) return fallback;
+  if (value !== "helius-fast" && value !== "helius-rpc") {
+    throw new Error(
+      `Invalid --${key}: ${value}. Expected helius-fast or helius-rpc.`,
+    );
+  }
+  return value;
+}
+
+export function pumpLaunchEnvironmentFromFlags(
+  flags: Flags,
+  base = pumpLaunchEnvironment(),
+): PumpLaunchEnvironment {
+  const deploymentSender = senderFlag(
+    flags,
+    "deployment-sender",
+    String(base.policy.deploymentSender),
+  );
+  const fastTraderSender = senderFlag(
+    flags,
+    "fast-trader-sender",
+    String(base.policy.fastTraderSender),
+  );
+  const rpcTraderSender = senderFlag(
+    flags,
+    "rpc-trader-sender",
+    String(base.policy.rpcTraderSender),
+  );
+  const evolutionSender = senderFlag(
+    flags,
+    "evolution-sender",
+    String(base.policy.evolutionSender),
+  );
+  const fastTraderCount = numberFlag(
+    flags,
+    "fast-trader-count",
+    base.policy.fastTraderCount,
+  );
+  const senderUrl = first(flags, "helius-sender-url") ?? base.senderUrl;
+  const tipAccount =
+    first(flags, "helius-tip-account") ??
+    first(flags, "fast-tip-account") ??
+    base.policy.fastTip.account;
+  const tipLamports =
+    optionalSolOverride(flags, "helius-tip-sol", "helius-tip-lamports") ??
+    optionalSolOverride(flags, "fast-tip-sol", "fast-tip-lamports") ??
+    base.policy.fastTip.lamports;
+
+  return {
+    ...base,
+    rpcUrl: first(flags, "rpc-url") ?? base.rpcUrl,
+    senderUrl,
+    policy: {
+      ...base.policy,
+      deploymentSender,
+      evolutionSender,
+      fastTraderSender,
+      rpcTraderSender,
+      fastTraderCount,
+      fastTip:
+        tipAccount || tipLamports != null
+          ? { account: tipAccount, lamports: tipLamports }
+          : {},
+    },
+  };
+}
+
 function simulationSummary(
   simulation: SimulationResult,
 ): Record<string, unknown> {
@@ -387,6 +468,13 @@ function spamOptionsFromFlags(
       "readiness-timeout-ms",
       fallback.readinessTimeoutMs ?? fallback.timeoutMs,
     ),
+    senderTps: numberFlag(flags, "sender-tps", fallback.senderTps ?? 40),
+    rateLimitBackoffMs: numberFlag(
+      flags,
+      "rate-limit-backoff-ms",
+      fallback.rateLimitBackoffMs ?? 350,
+    ),
+    jitterMs: numberFlag(flags, "retry-jitter-ms", fallback.jitterMs ?? 80),
   };
 }
 
@@ -395,11 +483,12 @@ export async function preparePumpTokenLaunchFromFlags(args: {
   flags: Flags;
   token: TokenMetadata;
   creator: string;
+  env?: PumpLaunchEnvironment;
   options?: PumpTokenLaunchCliOptions;
 }): Promise<PumpTokenLaunchPlan> {
   const options = args.options ?? {};
   const group = first(args.flags, "buyer-group");
-  const env = pumpLaunchEnvironment();
+  const env = args.env ?? pumpLaunchEnvironmentFromFlags(args.flags);
   const traders = group
     ? await loadGroupBuyerAllocations({
         sowl: args.sowl,
@@ -465,11 +554,17 @@ export async function runPumpTokenLaunchFromArgs(
   const live = enabled(flags, "live", "LIVE");
   const skipSimulation = enabled(flags, "skip-simulation", "SKIP_SIMULATION");
   const group = first(flags, "buyer-group");
-  const env = pumpLaunchEnvironment();
+  const env = pumpLaunchEnvironmentFromFlags(flags);
   const spam = spamOptionsFromFlags(flags, env.spam);
   const submitMode = resolveSubmitMode(flags, options);
   const usesHeliusSender = usesHeliusSenderForLaunch(env, Boolean(group));
   const persistOnLive = options.persistOnLive ?? true;
+
+  if (usesHeliusSender && !env.senderUrl) {
+    throw new Error(
+      "Helius fast sender is selected; provide --helius-sender-url or HELIUS_SENDER_URL.",
+    );
+  }
 
   if (usesHeliusSender) {
     validateHeliusTip({
@@ -521,6 +616,7 @@ export async function runPumpTokenLaunchFromArgs(
       flags,
       token,
       creator,
+      env,
       options,
     });
     const mint = prepared.deployment.mint.publicKey.toBase58();
@@ -563,6 +659,8 @@ export async function runPumpTokenLaunchFromArgs(
         usesHeliusSender,
         priorityMicroLamports: deploymentPriorityMicroLamports,
         buyerPriorityMicroLamports,
+        heliusTipLamports: env.policy.fastTip.lamports ?? null,
+        senderTps: spam.senderTps ?? null,
       },
       routes: {
         createAndCreatorBuy: env.policy.deploymentSender,
@@ -599,6 +697,8 @@ export async function runPumpTokenLaunchFromArgs(
         usesHeliusSender,
         priorityMicroLamports: deploymentPriorityMicroLamports,
         buyerPriorityMicroLamports,
+        heliusTipLamports: env.policy.fastTip.lamports ?? null,
+        senderTps: spam.senderTps ?? null,
         createAndCreatorBuy: env.policy.deploymentSender,
         fastBuyerCount: env.policy.fastTraderCount,
         fastBuyers: env.policy.fastTraderSender,

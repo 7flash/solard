@@ -152,6 +152,7 @@ export {
   numberFlag,
   parseArgs,
   preparePumpTokenLaunchFromFlags,
+  pumpLaunchEnvironmentFromFlags,
   pumpTokenMetadataInput,
   required,
   runPumpTokenLaunchFromArgs,
