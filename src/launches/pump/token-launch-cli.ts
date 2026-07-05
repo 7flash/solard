@@ -359,9 +359,35 @@ function resolveSubmitMode(
 ): TraderSubmitMode {
   return normalizeTraderSubmitMode(
     first(flags, "submit-mode") ??
+      process.env.SOLWAL_LAUNCH_SUBMIT_MODE?.trim() ??
       process.env.SOWL_LAUNCH_SUBMIT_MODE?.trim() ??
       options.defaultSubmitMode,
   );
+}
+
+function spamOptionsFromFlags(
+  flags: Flags,
+  fallback: ReturnType<typeof pumpLaunchEnvironment>["spam"],
+): ReturnType<typeof pumpLaunchEnvironment>["spam"] {
+  return {
+    intervalMs: numberFlag(flags, "retry-interval-ms", fallback.intervalMs),
+    timeoutMs: numberFlag(flags, "retry-timeout-ms", fallback.timeoutMs),
+    maxFailedAttempts: numberFlag(
+      flags,
+      "max-failed-attempts",
+      fallback.maxFailedAttempts,
+    ),
+    recompileIntervalMs: numberFlag(
+      flags,
+      "retry-recompile-interval-ms",
+      fallback.recompileIntervalMs ?? 750,
+    ),
+    readinessTimeoutMs: numberFlag(
+      flags,
+      "readiness-timeout-ms",
+      fallback.readinessTimeoutMs ?? fallback.timeoutMs,
+    ),
+  };
 }
 
 export async function preparePumpTokenLaunchFromFlags(args: {
@@ -440,6 +466,7 @@ export async function runPumpTokenLaunchFromArgs(
   const skipSimulation = enabled(flags, "skip-simulation", "SKIP_SIMULATION");
   const group = first(flags, "buyer-group");
   const env = pumpLaunchEnvironment();
+  const spam = spamOptionsFromFlags(flags, env.spam);
   const submitMode = resolveSubmitMode(flags, options);
   const usesHeliusSender = usesHeliusSenderForLaunch(env, Boolean(group));
   const persistOnLive = options.persistOnLive ?? true;
@@ -547,7 +574,7 @@ export async function runPumpTokenLaunchFromArgs(
         submitMode,
         skipSimulation,
         slippageBps,
-        retry: env.spam,
+        retry: spam,
       },
       participants: prepared.expectedOutputByWallet,
     });
@@ -558,8 +585,8 @@ export async function runPumpTokenLaunchFromArgs(
       live,
       traderSubmitMode: submitMode,
       skipSimulation,
-      spam: env.spam,
-      kind: `script:launch-pump-token:${input.alias}`,
+      spam,
+      kind: `cli:launch:pump:${input.alias}`,
       reporter: report,
     });
 

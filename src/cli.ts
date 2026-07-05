@@ -125,6 +125,7 @@ Wallets and tokens
   sowl tokens
 
 Metadata and launching
+  solwal launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--alias <name>] [--buyer-group <group>] [--live] [--skip-simulation]
   sowl metadata upload --image <local_path> --name <name> --symbol <symbol> --description <text> [--provider pump-frontend|pinata]
                        [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
   sowl deploy pump --wallet <wallet> --name <name> --symbol <symbol> (--uri <metadata_uri> | --image <local_path> --description <text>) [--alias <name>] [--live]
@@ -207,6 +208,22 @@ async function main() {
     if (!script)
       throw new Error("Usage: sowl run <name-or-path> [script flags...]");
     process.exitCode = await runScript(script, scriptArgs);
+    return;
+  }
+  if (
+    command === "launch" &&
+    (values[0] === "pump" || values[0] === "pump-token")
+  ) {
+    const { runPumpTokenLaunchFromArgs } =
+      await import("./launches/pump/token-launch-cli.js");
+    await runPumpTokenLaunchFromArgs(rest.slice(1), {
+      defaultSubmitMode: "after-deploy-processed",
+      defaultDeploymentPriorityMicroLamports: 500_000,
+      defaultBuyerPriorityMicroLamports: 1_500_000,
+      defaultSlippageBps: 1_500,
+      persistOnLive: true,
+      report: (label, value) => emit(`${label}: ${json(value)}\n`),
+    });
     return;
   }
   if (command === "jito" && values[0] === "tip-accounts") {

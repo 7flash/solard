@@ -40,16 +40,23 @@ export type TraderSubmitMode =
   | "after-deploy-processed"
   | "spam-after-market-ready"
   | "blind-spam-after-submit"
+  /** Human-friendly alias for blind-spam-after-submit. */
+  | "fast-spam"
   /** Backwards-compatible alias for blind-spam-after-submit. */
   | "spam-after-deploy-submit";
 
 export type TipConfig = { account?: string; lamports?: bigint };
 
 export type SpamSubmitOptions = {
+  /** Delay between send/resend loops. Keep small for fast launches. */
   intervalMs: number;
+  /** Overall per-buyer deadline. Use 0 for no deadline; the loop then stops only on success or terminal launch failure. */
   timeoutMs: number;
+  /** Post-readiness failed landed transactions before giving up. Use 0 for unlimited. */
   maxFailedAttempts: number;
-  /** How long to wait for the create tx to become processed before buys start in gated modes. */
+  /** Recompile with a fresh blockhash and fresh quote at this cadence while a signature is still pending. */
+  recompileIntervalMs?: number;
+  /** How long to wait for the create tx / market accounts to become visible in gated modes. Use 0 for no deadline. */
   readinessTimeoutMs?: number;
 };
 
@@ -85,6 +92,7 @@ export type SpamBuyerReceipt = {
   receipt: SendReceipt;
   failedAttempts: number;
   preReadyFailures: number;
+  buildErrors: number;
   broadcastErrors: number;
   resends: number;
   signatures: string[];
@@ -101,6 +109,7 @@ export type PumpTokenLaunchPlan = {
   traders: BuyerAllocation[];
   launchDraft: TransactionDraft;
   launchPlan: PlannedTransaction;
+  slippageBps: number;
   deploymentSender: SenderId;
   traderPlans: PlannedTransaction[];
   traderLanes: BuyerLane[];
@@ -134,8 +143,12 @@ type LaunchReadiness = "pending" | "processed" | "confirmed" | "failed";
 type LaunchSenderName = "helius-fast" | "helius-rpc";
 
 function envString(name: string): string | undefined {
-  const value = process.env[name]?.trim();
-  return value || undefined;
+  const primary = process.env[name]?.trim();
+  if (primary) return primary;
+  const solwalAlias = name.startsWith("SOWL_")
+    ? process.env[`SOLWAL_${name.slice("SOWL_".length)}`]?.trim()
+    : undefined;
+  return solwalAlias || undefined;
 }
 
 function requireEnv(name: string): string {
@@ -190,7 +203,8 @@ export function normalizeTraderSubmitMode(
   value: string | undefined,
 ): TraderSubmitMode {
   if (!value) return "after-deploy-processed";
-  if (value === "spam-after-deploy-submit") return "blind-spam-after-submit";
+  if (value === "spam-after-deploy-submit" || value === "fast-spam")
+    return "blind-spam-after-submit";
   if (
     value === "after-deploy-confirmed" ||
     value === "after-deploy-processed" ||
@@ -200,7 +214,7 @@ export function normalizeTraderSubmitMode(
     return value;
   }
   throw new Error(
-    `Invalid SOWL_LAUNCH_SUBMIT_MODE: ${value}. Expected after-deploy-confirmed, after-deploy-processed, spam-after-market-ready or blind-spam-after-submit.`,
+    `Invalid SOWL_LAUNCH_SUBMIT_MODE: ${value}. Expected after-deploy-confirmed, after-deploy-processed, spam-after-market-ready, blind-spam-after-submit or fast-spam.`,
   );
 }
 
@@ -236,10 +250,11 @@ export function pumpLaunchEnvironment(): PumpLaunchEnvironment {
     priorityMicroLamports: intEnv("HELIUS_PRIORITY_MICRO_LAMPORTS", 500_000),
     submitMode: normalizeTraderSubmitMode(envString("SOWL_LAUNCH_SUBMIT_MODE")),
     spam: {
-      intervalMs: intEnv("SOWL_LAUNCH_RETRY_INTERVAL_MS", 150),
-      timeoutMs: intEnv("SOWL_LAUNCH_RETRY_TIMEOUT_MS", 30_000),
-      maxFailedAttempts: intEnv("SOWL_LAUNCH_MAX_FAILED_ATTEMPTS", 20),
-      readinessTimeoutMs: intEnv("SOWL_LAUNCH_READINESS_TIMEOUT_MS", 15_000),
+      intervalMs: intEnv("SOWL_LAUNCH_RETRY_INTERVAL_MS", 75),
+      timeoutMs: intEnv("SOWL_LAUNCH_RETRY_TIMEOUT_MS", 120_000),
+      maxFailedAttempts: intEnv("SOWL_LAUNCH_MAX_FAILED_ATTEMPTS", 0),
+      recompileIntervalMs: intEnv("SOWL_LAUNCH_RECOMPILE_INTERVAL_MS", 750),
+      readinessTimeoutMs: intEnv("SOWL_LAUNCH_READINESS_TIMEOUT_MS", 0),
     },
     policy: {
       deploymentSender,
@@ -707,6 +722,7 @@ export async function preparePumpTokenLaunch(args: {
     traders: args.traders,
     launchDraft: launch.draft,
     launchPlan: launch.plan,
+    slippageBps: args.slippageBps,
     deploymentSender: args.senderPolicy.deploymentSender,
     traderPlans,
     traderLanes,
@@ -760,6 +776,47 @@ export async function signatureReadiness(
   return "pending";
 }
 
+function hasDeadline(timeoutMs: number): boolean {
+  return timeoutMs > 0;
+}
+
+function beforeDeadline(startedAt: number, timeoutMs: number): boolean {
+  return !hasDeadline(timeoutMs) || Date.now() - startedAt < timeoutMs;
+}
+
+function deploymentReadinessAddresses(
+  deployment: PreparedTokenDeployment,
+): Array<{ label: string; address: PublicKey }> {
+  const addresses: Array<{ label: string; address: PublicKey }> = [
+    { label: "mint", address: deployment.mint.publicKey },
+  ];
+
+  const bondingCurve =
+    typeof deployment.token.bondingCurve === "string"
+      ? deployment.token.bondingCurve
+      : null;
+  if (bondingCurve) {
+    try {
+      addresses.push({
+        label: "bondingCurve",
+        address: new PublicKey(bondingCurve),
+      });
+    } catch {
+      // Ignore malformed optional metadata; the mint readiness check still protects the critical path.
+    }
+  }
+
+  return addresses;
+}
+
+function isTransientMarketReadinessError(error: unknown): boolean {
+  const text =
+    error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return /not found|account.*missing|mint account|bonding curve|curve.*not|market.*not|failed to get account/i.test(
+    text,
+  );
+}
+
 export async function waitForSignatureAtLeastProcessed(args: {
   connection: Connection;
   signature: string;
@@ -769,7 +826,7 @@ export async function waitForSignatureAtLeastProcessed(args: {
   const startedAt = Date.now();
   const intervalMs = args.intervalMs ?? 50;
 
-  while (Date.now() - startedAt < args.timeoutMs) {
+  while (beforeDeadline(startedAt, args.timeoutMs)) {
     const state = await signatureReadiness(args.connection, args.signature);
     if (state === "failed")
       throw new Error(`Launch transaction failed: ${args.signature}`);
@@ -792,7 +849,7 @@ export async function waitForAccountExists(args: {
   const startedAt = Date.now();
   const intervalMs = args.intervalMs ?? 50;
 
-  while (Date.now() - startedAt < args.timeoutMs) {
+  while (beforeDeadline(startedAt, args.timeoutMs)) {
     const account = await args.connection.getAccountInfo(
       args.address,
       "processed",
@@ -830,16 +887,19 @@ async function waitForLaunchReady(args: {
   });
 
   if (mode === "spam-after-market-ready") {
-    await waitForAccountExists({
-      connection: args.sowl.connection(),
-      address: args.prepared.deployment.mint.publicKey,
-      timeoutMs,
-      intervalMs: Math.min(args.spam.intervalMs, 100),
-    });
-    args.reporter?.("pump market readiness", {
-      mint: args.prepared.deployment.mint.publicKey.toBase58(),
-      account: "mint",
-    });
+    for (const item of deploymentReadinessAddresses(args.prepared.deployment)) {
+      await waitForAccountExists({
+        connection: args.sowl.connection(),
+        address: item.address,
+        timeoutMs,
+        intervalMs: Math.min(args.spam.intervalMs, 100),
+      });
+      args.reporter?.("pump market readiness", {
+        mint: args.prepared.deployment.mint.publicKey.toBase58(),
+        account: item.label,
+        address: item.address.toBase58(),
+      });
+    }
   }
 }
 
@@ -860,18 +920,23 @@ async function spamDependentBuy(args: {
   lane: BuyerLane;
   kind: string;
   options: SpamSubmitOptions & { launchSignature?: string };
+  /** Builds a normal post-launch buy with a fresh quote. Used as soon as the market is visible. */
+  buildReadyPlan?: () => Promise<PlannedTransaction>;
   reporter?: LaunchReporter;
 }): Promise<SpamBuyerReceipt> {
   const startedAt = Date.now();
   const signatures: string[] = [];
+  const recompileIntervalMs = args.options.recompileIntervalMs ?? 750;
   let failedAttempts = 0;
   let preReadyFailures = 0;
+  let buildErrors = 0;
   let broadcastErrors = 0;
   let resends = 0;
   let active: SubmittedPlan | null = null;
+  let activeSince = 0;
   let launchReady = !args.options.launchSignature;
 
-  while (Date.now() - startedAt < args.options.timeoutMs) {
+  while (beforeDeadline(startedAt, args.options.timeoutMs)) {
     if (!launchReady && args.options.launchSignature) {
       const launchState = await signatureReadiness(
         args.sowl.connection(),
@@ -886,17 +951,44 @@ async function spamDependentBuy(args: {
     }
 
     if (!active) {
-      if (launchReady && failedAttempts >= args.options.maxFailedAttempts) {
+      if (
+        launchReady &&
+        args.options.maxFailedAttempts > 0 &&
+        failedAttempts >= args.options.maxFailedAttempts
+      ) {
         throw new Error(
           `trader ${args.participant.address} exhausted ${failedAttempts} post-readiness failed attempts`,
         );
       }
 
-      const freshPlan = await args.sowl.compile(
-        args.sowl.signer(args.participant.walletRef),
-        args.template.draft,
-        { useAlts: false },
-      );
+      let freshPlan: PlannedTransaction;
+      try {
+        freshPlan =
+          launchReady && args.buildReadyPlan
+            ? await args.buildReadyPlan()
+            : await args.sowl.compile(
+                args.sowl.signer(args.participant.walletRef),
+                args.template.draft,
+                { useAlts: false },
+              );
+      } catch (error) {
+        buildErrors += 1;
+        if (!launchReady || isTransientMarketReadinessError(error))
+          preReadyFailures += 1;
+        else failedAttempts += 1;
+        args.reporter?.("pump buyer build retry", {
+          lane: args.lane.lane,
+          sender: String(args.lane.sender),
+          wallet: args.participant.address,
+          launchReady,
+          failedAttempts,
+          preReadyFailures,
+          buildErrors,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await sleep(args.options.intervalMs);
+        continue;
+      }
 
       try {
         active = await args.sowl.broadcastPlan(
@@ -916,12 +1008,14 @@ async function spamDependentBuy(args: {
           launchReady,
           failedAttempts,
           preReadyFailures,
+          broadcastErrors,
           error: error instanceof Error ? error.message : String(error),
         });
         await sleep(args.options.intervalMs);
         continue;
       }
 
+      activeSince = Date.now();
       signatures.push(active.signature);
       args.reporter?.("pump buyer attempt", {
         lane: args.lane.lane,
@@ -943,6 +1037,7 @@ async function spamDependentBuy(args: {
           receipt,
           failedAttempts,
           preReadyFailures,
+          buildErrors,
           broadcastErrors,
           resends,
           signatures,
@@ -963,6 +1058,21 @@ async function spamDependentBuy(args: {
           preReadyFailures,
         });
 
+        active = null;
+        continue;
+      }
+
+      if (
+        recompileIntervalMs > 0 &&
+        Date.now() - activeSince >= recompileIntervalMs
+      ) {
+        args.reporter?.("pump buyer recompile", {
+          lane: args.lane.lane,
+          sender: String(args.lane.sender),
+          wallet: args.participant.address,
+          oldSignature: active.signature,
+          ageMs: Date.now() - activeSince,
+        });
         active = null;
         continue;
       }
@@ -994,6 +1104,7 @@ async function spamDependentBuy(args: {
         receipt,
         failedAttempts,
         preReadyFailures,
+        buildErrors,
         broadcastErrors,
         resends,
         signatures,
@@ -1069,18 +1180,40 @@ export async function executePumpTokenLaunch(args: {
     reporter: args.reporter,
   });
 
+  const mintRef = args.prepared.deployment.mint.publicKey.toBase58();
+  let tokenPersisted = false;
+  const ensureTokenPersisted = () => {
+    if (!tokenPersisted) {
+      args.sowl.persistPreparedDeployment(
+        args.prepared.deployment,
+        args.prepared.token.alias,
+      );
+      tokenPersisted = true;
+    }
+  };
+
   const settled = await Promise.allSettled(
-    args.prepared.traderPlans.map((plan, index) =>
-      spamDependentBuy({
+    args.prepared.traderPlans.map((plan, index) => {
+      const participant = args.prepared.traders[index]!;
+      return spamDependentBuy({
         sowl: args.sowl,
         template: plan,
-        participant: args.prepared.traders[index]!,
+        participant,
         lane: args.prepared.traderLanes[index]!,
         kind: `${args.kind}:trader:${index + 1}`,
         options: { ...args.spam, launchSignature: launch.signature },
+        buildReadyPlan: async () => {
+          ensureTokenPersisted();
+          return await args.sowl
+            .tx(participant.walletRef)
+            .buy(mintRef, rawAmount(participant.spendLamports, SOL_ASSET), {
+              slippageBps: args.prepared.slippageBps,
+            })
+            .build();
+        },
         reporter: args.reporter,
-      }),
-    ),
+      });
+    }),
   );
 
   const launchReceipt = await args.sowl.confirmSubmitted(launch);
