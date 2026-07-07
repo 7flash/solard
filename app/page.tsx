@@ -1,21 +1,38 @@
 export default function HomePage() {
   return (
-    <div
-      style={{
-        maxWidth: "640px",
-        margin: "80px auto",
-        padding: "0 24px",
-        fontFamily: "Inter, system-ui, sans-serif",
-      }}
-    >
-      <h1 style={{ fontSize: "2.5rem", fontWeight: 700, marginBottom: "16px" }}>
-        🦊 My App
-      </h1>
-      <p style={{ color: "#71717a", fontSize: "1.1rem", lineHeight: 1.6 }}>
-        Your TradJS app is running. Edit <code>app/page.tsx</code> to get
-        started.
-      </p>
-      <div id="app-root" style={{ marginTop: "32px" }} />
-    </div>
+    <main className="shell">
+      <header className="hero">
+        <div>
+          <p className="eyebrow">Solwal local trading console</p>
+          <h1>Wallets, groups, launches, trades.</h1>
+          <p className="muted">
+            Run this only on a trusted local machine. Browser actions can sign
+            transactions through your encrypted local Solwal wallet store.
+          </p>
+        </div>
+        <div className="status-card">
+          <span id="connection-status" className="pill">
+            loading
+          </span>
+          <span id="last-refresh" className="muted small">
+            —
+          </span>
+        </div>
+      </header>
+
+      <nav className="tabs" id="tabs">
+        <button data-tab="overview" className="active">
+          Overview
+        </button>
+        <button data-tab="wallets">Wallets & groups</button>
+        <button data-tab="launch">Launch pump</button>
+        <button data-tab="trade">Trade</button>
+        <button data-tab="jobs">Jobs</button>
+      </nav>
+
+      <section id="app-root" className="panel">
+        Loading console…
+      </section>
+    </main>
   );
 }

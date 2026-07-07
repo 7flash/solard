@@ -1,18 +1,13 @@
-export default function RootLayout({ children }: { children: any }) {
+export default function RootLayout({ children }: { children: unknown }) {
   return (
     <html lang="en">
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>My App</title>
-        <link
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-          rel="stylesheet"
-        />
+        <title>Solwal Console</title>
+        <link rel="stylesheet" href="/globals.css" />
       </head>
-      <body>
-        <main id="melina-page-content">{children}</main>
-      </body>
+      <body>{children}</body>
     </html>
   );
 }
