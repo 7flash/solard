@@ -486,12 +486,19 @@ function launchBuilder(args: {
   initialBuy?: PreparedPendingBuy | null;
   initialBuyer?: BuyerAllocation | null;
 }) {
-  const builder = args.sowl
-    .transaction(args.creatorWallet)
-    .priorityFee({
+  const builder = args.sowl.transaction(args.creatorWallet);
+
+  // The create transaction should be cheap by default. It only gets compute
+  // budget instructions when the caller explicitly asks for a CU limit or
+  // priority price. Buyer transactions have their own high-priority path.
+  if (args.cuLimit > 0 || args.priorityMicroLamports > 0) {
+    builder.priorityFee({
       cuLimit: args.cuLimit,
       microLamports: args.priorityMicroLamports,
-    })
+    });
+  }
+
+  builder
     .addMany(args.deployment.instructions, {
       kind: args.kind,
       mint: args.deployment.mint.publicKey,
@@ -524,12 +531,18 @@ async function compileLaunch(
   args: Parameters<typeof launchBuilder>[0],
 ): Promise<{ draft: TransactionDraft; plan: PlannedTransaction }> {
   const draft = launchBuilder(args).snapshot();
+  const hasHeliusTip = Boolean(
+    args.senderTip.account &&
+    args.senderTip.lamports != null &&
+    args.senderTip.lamports > 0n,
+  );
   try {
     return {
       draft,
       plan: await args.sowl.compile(
         args.sowl.signer(args.creatorWallet),
         draft,
+        hasHeliusTip ? { useAlts: false } : undefined,
       ),
     };
   } catch (error) {
@@ -537,9 +550,10 @@ async function compileLaunch(
       error instanceof Error &&
       /too large|overrun|packet/i.test(error.message)
     ) {
-      throw new Error(
-        `Create + creator initial buy does not fit without a registered launch ALT. Run: sowl run prepare-pump-launch-alt --creator <wallet> --name <name> --symbol <symbol> --alias <alias> --creator-buy-sol <amount> --create --live. Original error: ${error.message}`,
-      );
+      const altAdvice = hasHeliusTip
+        ? "Create + Helius Sender tip does not fit while keeping the tip account static. Use a non-Helius deployment sender for this launch transaction."
+        : "Create + creator initial buy does not fit without a registered launch ALT. Run: sowl run prepare-pump-launch-alt --creator <wallet> --name <name> --symbol <symbol> --alias <alias> --creator-buy-sol <amount> --create --live.";
+      throw new Error(`${altAdvice} Original error: ${error.message}`);
     }
     throw error;
   }
@@ -677,13 +691,18 @@ export async function preparePumpTokenLaunch(args: {
     state = initialBuy.nextState;
   }
 
+  const launchSenderTip: TipConfig =
+    String(args.senderPolicy.deploymentSender) === "helius-fast"
+      ? args.senderPolicy.fastTip
+      : {};
+
   const launch = await compileLaunch({
     ...args,
     deployment,
     kind: "launch-pump-token",
     alias: args.token.alias,
     symbol: args.token.symbol,
-    senderTip: args.senderPolicy.fastTip,
+    senderTip: launchSenderTip,
     initialBuy,
     initialBuyer: creator,
   });

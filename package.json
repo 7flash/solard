@@ -1,5 +1,5 @@
 {
-  "name": "solwal",
+  "name": "soler",
   "version": "0.0.1",
   "description": "\ud83e\udd89 Multi-wallet Solana CLI and SDK for memecoin traders and AI agents. Direct venue transactions, shared encrypted local persistence, no Jupiter.",
   "type": "module",

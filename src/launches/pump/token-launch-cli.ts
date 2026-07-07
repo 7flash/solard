@@ -109,6 +109,14 @@ export function first(
   return flags.get(key)?.at(-1) ?? (env ? process.env[env] : undefined);
 }
 
+function envFirst(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
 export function required(flags: Flags, key: string, env?: string): string {
   const value = first(flags, key, env);
   if (!value || value === "true") {
@@ -256,6 +264,23 @@ function optionalSolOverride(
   return human == null ? undefined : sol(human).raw;
 }
 
+function optionalSolEnv(
+  solEnvNames: string[],
+  rawEnvNames: string[],
+): bigint | undefined {
+  const raw = envFirst(...rawEnvNames);
+  if (raw != null) {
+    try {
+      return BigInt(raw);
+    } catch {
+      throw new Error(`Invalid ${rawEnvNames.join("/")}: ${raw}`);
+    }
+  }
+
+  const human = envFirst(...solEnvNames);
+  return human == null ? undefined : sol(human).raw;
+}
+
 function senderFlag(flags: Flags, key: string, fallback: string): string {
   const value = first(flags, key);
   if (!value) return fallback;
@@ -276,39 +301,77 @@ export function pumpLaunchEnvironmentFromFlags(
     "deployment-sender",
     String(base.policy.deploymentSender),
   );
-  const fastTraderSender = senderFlag(
-    flags,
-    "fast-trader-sender",
-    String(base.policy.fastTraderSender),
-  );
-  const rpcTraderSender = senderFlag(
-    flags,
-    "rpc-trader-sender",
-    String(base.policy.rpcTraderSender),
-  );
+  const buyerSender = first(flags, "buyer-sender");
+  if (
+    buyerSender &&
+    buyerSender !== "helius-fast" &&
+    buyerSender !== "helius-rpc"
+  ) {
+    throw new Error(
+      `Invalid --buyer-sender: ${buyerSender}. Expected helius-fast or helius-rpc.`,
+    );
+  }
+
+  const fastTraderSender =
+    buyerSender ??
+    senderFlag(
+      flags,
+      "fast-trader-sender",
+      String(base.policy.fastTraderSender),
+    );
+  const rpcTraderSender =
+    buyerSender ??
+    senderFlag(flags, "rpc-trader-sender", String(base.policy.rpcTraderSender));
   const evolutionSender = senderFlag(
     flags,
     "evolution-sender",
     String(base.policy.evolutionSender),
   );
-  const fastTraderCount = numberFlag(
-    flags,
-    "fast-trader-count",
-    base.policy.fastTraderCount,
-  );
-  const senderUrl = first(flags, "helius-sender-url") ?? base.senderUrl;
+  const fastTraderCount = flags.has("fast-trader-count")
+    ? numberFlag(flags, "fast-trader-count", base.policy.fastTraderCount)
+    : buyerSender === "helius-fast"
+      ? Number.MAX_SAFE_INTEGER
+      : buyerSender === "helius-rpc"
+        ? 0
+        : base.policy.fastTraderCount;
+
+  const senderUrl =
+    first(flags, "helius-sender-url") ??
+    first(flags, "sender-url") ??
+    envFirst(
+      "HELIUS_SENDER_URL",
+      "SOLWAL_HELIUS_SENDER_URL",
+      "SOWL_HELIUS_SENDER_URL",
+    ) ??
+    base.senderUrl;
   const tipAccount =
     first(flags, "helius-tip-account") ??
     first(flags, "fast-tip-account") ??
+    envFirst(
+      "HELIUS_TIP_ACCOUNT",
+      "SOLWAL_HELIUS_TIP_ACCOUNT",
+      "SOWL_HELIUS_TIP_ACCOUNT",
+    ) ??
     base.policy.fastTip.account;
   const tipLamports =
     optionalSolOverride(flags, "helius-tip-sol", "helius-tip-lamports") ??
     optionalSolOverride(flags, "fast-tip-sol", "fast-tip-lamports") ??
+    optionalSolEnv(
+      ["HELIUS_TIP_SOL", "SOLWAL_HELIUS_TIP_SOL", "SOWL_HELIUS_TIP_SOL"],
+      [
+        "HELIUS_TIP_LAMPORTS",
+        "SOLWAL_HELIUS_TIP_LAMPORTS",
+        "SOWL_HELIUS_TIP_LAMPORTS",
+      ],
+    ) ??
     base.policy.fastTip.lamports;
 
   return {
     ...base,
-    rpcUrl: first(flags, "rpc-url") ?? base.rpcUrl,
+    rpcUrl:
+      first(flags, "rpc-url") ??
+      envFirst("HELIUS_RPC_URL", "RPC_ENDPOINT") ??
+      base.rpcUrl,
     senderUrl,
     policy: {
       ...base.policy,
@@ -400,14 +463,13 @@ async function resolveMetadataUri(
   let uploaded: Awaited<ReturnType<typeof uploadPumpMetadata>> | null = null;
 
   if (!uri && input.imagePath) {
-    if (!input.description)
-      throw new Error(`Token ${input.alias} has imagePath but no description.`);
     uploaded = await uploadPumpMetadata(
       {
         imagePath: input.imagePath,
         name: input.name,
         symbol: input.symbol,
-        description: input.description,
+        description:
+          input.description?.trim() || `${input.name} (${input.symbol})`,
         website: input.website,
         twitter: input.twitter,
         telegram: input.telegram,
@@ -427,7 +489,7 @@ async function resolveMetadataUri(
 
   if (!uri) {
     throw new Error(
-      "Provide --uri <metadata-uri> or --metadata <json> / --image <path> with a description.",
+      "Provide --uri <metadata-uri> or --metadata <json> / --image <path>.",
     );
   }
 
@@ -505,6 +567,12 @@ export async function preparePumpTokenLaunchFromFlags(args: {
       })
     : [];
 
+  const defaultDeploymentPriorityMicroLamports =
+    options.defaultDeploymentPriorityMicroLamports ??
+    (String(env.policy.deploymentSender) === "helius-fast"
+      ? env.priorityMicroLamports
+      : 0);
+
   return await preparePumpTokenLaunch({
     sowl: args.sowl,
     token: args.token,
@@ -531,8 +599,7 @@ export async function preparePumpTokenLaunchFromFlags(args: {
     priorityMicroLamports: numberFlag(
       args.flags,
       "deployment-priority-micro-lamports",
-      options.defaultDeploymentPriorityMicroLamports ??
-        env.priorityMicroLamports,
+      defaultDeploymentPriorityMicroLamports,
     ),
     buyerPriorityMicroLamports: numberFlag(
       args.flags,
@@ -594,11 +661,15 @@ export async function runPumpTokenLaunchFromArgs(
       symbol: input.symbol,
       uri,
     };
+    const defaultDeploymentPriorityMicroLamports =
+      options.defaultDeploymentPriorityMicroLamports ??
+      (String(env.policy.deploymentSender) === "helius-fast"
+        ? env.priorityMicroLamports
+        : 0);
     const deploymentPriorityMicroLamports = numberFlag(
       flags,
       "deployment-priority-micro-lamports",
-      options.defaultDeploymentPriorityMicroLamports ??
-        env.priorityMicroLamports,
+      defaultDeploymentPriorityMicroLamports,
     );
     const buyerPriorityMicroLamports = numberFlag(
       flags,
