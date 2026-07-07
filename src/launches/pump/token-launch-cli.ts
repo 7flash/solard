@@ -12,12 +12,14 @@ import type { SendReceipt, SimulationResult } from "../../tx/types.js";
 import {
   executePumpTokenLaunch,
   installPumpLaunchSenders,
+  loadExplicitBuyerAllocations,
   loadGroupBuyerAllocations,
   normalizeTraderSubmitMode,
   preparePumpTokenLaunch,
   pumpLaunchEnvironment,
   usesHeliusSenderForLaunch,
   validateHeliusTip,
+  type ExplicitBuyerPlanRow,
   type LaunchReporter,
   type PumpLaunchEnvironment,
   type PumpTokenLaunchPlan,
@@ -58,6 +60,7 @@ export type PumpTokenLaunchCliResult = {
   live: boolean;
   creator: string;
   buyerGroup: string | null;
+  buyPlan?: string | null;
   transport: Record<string, unknown>;
   token: PumpTokenMetadataInput & {
     uri: string;
@@ -525,6 +528,16 @@ function spamOptionsFromFlags(
       "retry-recompile-interval-ms",
       fallback.recompileIntervalMs ?? 750,
     ),
+    freshQuoteDelayMs: numberFlag(
+      flags,
+      "fresh-quote-delay-ms",
+      fallback.freshQuoteDelayMs ?? 2_500,
+    ),
+    blockhashRefreshIntervalMs: numberFlag(
+      flags,
+      "blockhash-refresh-interval-ms",
+      fallback.blockhashRefreshIntervalMs ?? 500,
+    ),
     readinessTimeoutMs: numberFlag(
       flags,
       "readiness-timeout-ms",
@@ -540,6 +553,124 @@ function spamOptionsFromFlags(
   };
 }
 
+type RawBuyPlanRow = Record<string, unknown>;
+
+function stringValue(row: RawBuyPlanRow, key: string): string | undefined {
+  const value = row[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberValue(row: RawBuyPlanRow, key: string): number | undefined {
+  const value = row[key];
+  if (value == null || value === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed))
+    throw new Error(`Invalid buy plan ${key}: ${String(value)}`);
+  return parsed;
+}
+
+function bigintValue(row: RawBuyPlanRow, key: string): bigint | undefined {
+  const value = row[key];
+  if (value == null || value === "") return undefined;
+  try {
+    return BigInt(String(value));
+  } catch {
+    throw new Error(`Invalid buy plan ${key}: ${String(value)}`);
+  }
+}
+
+function solValue(
+  row: RawBuyPlanRow,
+  solKey: string,
+  lamportsKey: string,
+): bigint | undefined {
+  const lamports = bigintValue(row, lamportsKey);
+  if (lamports != null) return lamports;
+  const human = stringValue(row, solKey);
+  return human == null ? undefined : sol(human).raw;
+}
+
+function parseBuyPlanRows(flags: Flags): ExplicitBuyerPlanRow[] | null {
+  const inline = first(flags, "buy-plan-json");
+  const path = first(flags, "buy-plan");
+  if (!inline && !path) return null;
+
+  const parsed = JSON.parse(
+    inline ?? readFileSync(resolve(path!), "utf8"),
+  ) as unknown;
+  const rows = Array.isArray(parsed)
+    ? parsed
+    : (parsed as { buys?: unknown }).buys;
+  if (!Array.isArray(rows))
+    throw new Error(
+      "Buy plan must be a JSON array or an object with a buys array",
+    );
+
+  return rows.map((raw, index): ExplicitBuyerPlanRow => {
+    if (!raw || typeof raw !== "object")
+      throw new Error(`Buy plan row ${index + 1} must be an object`);
+    const row = raw as RawBuyPlanRow;
+    const wallet =
+      stringValue(row, "wallet") ??
+      stringValue(row, "walletRef") ??
+      stringValue(row, "address");
+    if (!wallet) throw new Error(`Buy plan row ${index + 1} is missing wallet`);
+
+    const amountMode =
+      stringValue(row, "amountMode") ?? stringValue(row, "mode") ?? "range-bps";
+    let amount: ExplicitBuyerPlanRow["amount"];
+    if (amountMode === "exact-sol" || amountMode === "exact") {
+      const exactSol =
+        stringValue(row, "exactSol") ??
+        stringValue(row, "sol") ??
+        stringValue(row, "amountSol");
+      if (!exactSol)
+        throw new Error(
+          `Buy plan row ${index + 1} exact-sol mode requires exactSol`,
+        );
+      amount = { kind: "exact-sol", sol: exactSol };
+    } else if (amountMode === "exact-lamports" || amountMode === "lamports") {
+      const lamports =
+        bigintValue(row, "exactLamports") ??
+        bigintValue(row, "lamports") ??
+        bigintValue(row, "amountLamports");
+      if (lamports == null)
+        throw new Error(
+          `Buy plan row ${index + 1} exact-lamports mode requires exactLamports`,
+        );
+      amount = { kind: "exact-lamports", lamports };
+    } else {
+      amount = {
+        kind: "balance-bps",
+        minBps:
+          numberValue(row, "minBps") ?? numberValue(row, "buyerMinBps") ?? 5000,
+        maxBps:
+          numberValue(row, "maxBps") ?? numberValue(row, "buyerMaxBps") ?? 8000,
+        reserveLamports:
+          solValue(row, "reserveSol", "reserveLamports") ?? 20_000_000n,
+      };
+    }
+
+    const tipLamports = solValue(row, "tipSol", "tipLamports");
+    return {
+      wallet,
+      amount,
+      execution: {
+        label: stringValue(row, "label"),
+        sender: stringValue(row, "sender") as never,
+        strategy: stringValue(row, "strategy") as never,
+        tipLamports,
+        priorityMicroLamports: numberValue(row, "priorityMicroLamports"),
+        slippageBps: numberValue(row, "slippageBps"),
+        retryIntervalMs: numberValue(row, "retryIntervalMs"),
+        recompileIntervalMs: numberValue(row, "recompileIntervalMs"),
+        freshQuoteDelayMs: numberValue(row, "freshQuoteDelayMs"),
+        maxFailedAttempts: numberValue(row, "maxFailedAttempts"),
+      },
+    };
+  });
+}
+
 export async function preparePumpTokenLaunchFromFlags(args: {
   sowl: Sowl;
   flags: Flags;
@@ -551,27 +682,28 @@ export async function preparePumpTokenLaunchFromFlags(args: {
   const options = args.options ?? {};
   const group = first(args.flags, "buyer-group");
   const env = args.env ?? pumpLaunchEnvironmentFromFlags(args.flags);
-  const traders = group
-    ? await loadGroupBuyerAllocations({
+  const explicitBuyPlan = parseBuyPlanRows(args.flags);
+  const traders = explicitBuyPlan
+    ? await loadExplicitBuyerAllocations({
         sowl: args.sowl,
-        group,
-        minBps: numberFlag(args.flags, "buyer-min-bps", 10),
-        maxBps: numberFlag(args.flags, "buyer-max-bps", 10),
-        reserveLamports: optionalSol(
-          args.flags,
-          "buyer-reserve-sol",
-          "buyer-reserve-lamports",
-          10_000_000n,
-        ),
+        rows: explicitBuyPlan,
         excludeWallet: args.creator,
       })
-    : [];
-
-  const defaultDeploymentPriorityMicroLamports =
-    options.defaultDeploymentPriorityMicroLamports ??
-    (String(env.policy.deploymentSender) === "helius-fast"
-      ? env.priorityMicroLamports
-      : 0);
+    : group
+      ? await loadGroupBuyerAllocations({
+          sowl: args.sowl,
+          group,
+          minBps: numberFlag(args.flags, "buyer-min-bps", 10),
+          maxBps: numberFlag(args.flags, "buyer-max-bps", 10),
+          reserveLamports: optionalSol(
+            args.flags,
+            "buyer-reserve-sol",
+            "buyer-reserve-lamports",
+            10_000_000n,
+          ),
+          excludeWallet: args.creator,
+        })
+      : [];
 
   return await preparePumpTokenLaunch({
     sowl: args.sowl,
@@ -599,7 +731,8 @@ export async function preparePumpTokenLaunchFromFlags(args: {
     priorityMicroLamports: numberFlag(
       args.flags,
       "deployment-priority-micro-lamports",
-      defaultDeploymentPriorityMicroLamports,
+      options.defaultDeploymentPriorityMicroLamports ??
+        env.priorityMicroLamports,
     ),
     buyerPriorityMicroLamports: numberFlag(
       args.flags,
@@ -661,15 +794,11 @@ export async function runPumpTokenLaunchFromArgs(
       symbol: input.symbol,
       uri,
     };
-    const defaultDeploymentPriorityMicroLamports =
-      options.defaultDeploymentPriorityMicroLamports ??
-      (String(env.policy.deploymentSender) === "helius-fast"
-        ? env.priorityMicroLamports
-        : 0);
     const deploymentPriorityMicroLamports = numberFlag(
       flags,
       "deployment-priority-micro-lamports",
-      defaultDeploymentPriorityMicroLamports,
+      options.defaultDeploymentPriorityMicroLamports ??
+        env.priorityMicroLamports,
     );
     const buyerPriorityMicroLamports = numberFlag(
       flags,
@@ -726,6 +855,9 @@ export async function runPumpTokenLaunchFromArgs(
         0n,
       ),
       buyerGroup: group ?? null,
+      buyPlan:
+        first(flags, "buy-plan") ??
+        (first(flags, "buy-plan-json") ? "inline-json" : null),
       transport: {
         usesHeliusSender,
         priorityMicroLamports: deploymentPriorityMicroLamports,
@@ -764,6 +896,9 @@ export async function runPumpTokenLaunchFromArgs(
       live,
       creator,
       buyerGroup: group ?? null,
+      buyPlan:
+        first(flags, "buy-plan") ??
+        (first(flags, "buy-plan-json") ? "inline-json" : null),
       transport: {
         usesHeliusSender,
         priorityMicroLamports: deploymentPriorityMicroLamports,

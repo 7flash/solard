@@ -33,6 +33,7 @@ export type BuyerAllocation = {
   reserveLamports: bigint;
   selectedBps: number | null;
   spendLamports: bigint;
+  execution?: BuyerExecutionOverride;
 };
 
 export type TraderSubmitMode =
@@ -47,6 +48,35 @@ export type TraderSubmitMode =
 
 export type TipConfig = { account?: string; lamports?: bigint };
 
+export type BuyerLaunchStrategy =
+  | "fast-spam"
+  | "spam-after-market-ready"
+  | "after-deploy-processed"
+  | "after-deploy-confirmed";
+
+export type BuyerExecutionOverride = {
+  /** Optional UI label for the row. */
+  label?: string;
+  /** Per-wallet sender. Defaults to the policy-derived buyer lane. */
+  sender?: SenderId;
+  /** Per-wallet launch strategy. Defaults to the global submit mode. */
+  strategy?: BuyerLaunchStrategy;
+  /** Per-wallet Helius tip. Only applied when sender is helius-fast. */
+  tipLamports?: bigint;
+  /** Per-wallet compute-unit price. Defaults to buyerPriorityMicroLamports. */
+  priorityMicroLamports?: number;
+  /** Per-wallet slippage. Defaults to launch slippageBps. */
+  slippageBps?: number;
+  /** Per-wallet retry interval. */
+  retryIntervalMs?: number;
+  /** Per-wallet recompile cadence. */
+  recompileIntervalMs?: number;
+  /** Per-wallet fresh quote delay. Use -1 to never fetch fresh quotes. */
+  freshQuoteDelayMs?: number;
+  /** Per-wallet maximum failed attempts. 0 means unlimited. */
+  maxFailedAttempts?: number;
+};
+
 export type SpamSubmitOptions = {
   /** Delay between send/resend loops. Keep small for fast launches. */
   intervalMs: number;
@@ -54,8 +84,15 @@ export type SpamSubmitOptions = {
   timeoutMs: number;
   /** Post-readiness failed landed transactions before giving up. Use 0 for unlimited. */
   maxFailedAttempts: number;
-  /** Recompile with a fresh blockhash and fresh quote at this cadence while a signature is still pending. */
+  /** Recompile/resign a buyer transaction with a fresh blockhash at this cadence while a signature is still pending. */
   recompileIntervalMs?: number;
+  /**
+   * Hybrid retry setting: keep using the precomputed pending-buy template for this long after launch readiness.
+   * Use 0 to switch to live quote immediately after readiness; use -1 to never fetch live quotes and only refresh blockhashes.
+   */
+  freshQuoteDelayMs?: number;
+  /** Keep Sowl's cached blockhash warm in parallel so buyer recompiles usually do not wait on getLatestBlockhash. Use 0 to disable. */
+  blockhashRefreshIntervalMs?: number;
   /** How long to wait for the create tx / market accounts to become visible in gated modes. Use 0 for no deadline. */
   readinessTimeoutMs?: number;
   /** Global send budget across all launch buyer loops. Use 0 for unlimited; recommended <= provider sendTransaction limit. */
@@ -263,6 +300,11 @@ export function pumpLaunchEnvironment(): PumpLaunchEnvironment {
       timeoutMs: intEnv("SOWL_LAUNCH_RETRY_TIMEOUT_MS", 120_000),
       maxFailedAttempts: intEnv("SOWL_LAUNCH_MAX_FAILED_ATTEMPTS", 0),
       recompileIntervalMs: intEnv("SOWL_LAUNCH_RECOMPILE_INTERVAL_MS", 750),
+      freshQuoteDelayMs: intEnv("SOWL_LAUNCH_FRESH_QUOTE_DELAY_MS", 2_500),
+      blockhashRefreshIntervalMs: intEnv(
+        "SOWL_LAUNCH_BLOCKHASH_REFRESH_INTERVAL_MS",
+        500,
+      ),
       readinessTimeoutMs: intEnv("SOWL_LAUNCH_READINESS_TIMEOUT_MS", 0),
       senderTps: intEnv("SOWL_LAUNCH_SENDER_TPS", 40),
       rateLimitBackoffMs: intEnv("SOWL_LAUNCH_RATE_LIMIT_BACKOFF_MS", 350),
@@ -390,6 +432,106 @@ function addTip(
       meta: { lamports: tip.lamports.toString(), sender: "helius-fast" },
     },
   );
+}
+
+export type ExplicitBuyerAmount =
+  | { kind: "exact-lamports"; lamports: bigint }
+  | { kind: "exact-sol"; sol: string }
+  | {
+      kind: "balance-bps";
+      minBps: number;
+      maxBps: number;
+      reserveLamports: bigint;
+    };
+
+export type ExplicitBuyerPlanRow = {
+  wallet: WalletRef;
+  amount: ExplicitBuyerAmount;
+  execution?: BuyerExecutionOverride;
+};
+
+function solStringToLamports(value: string): bigint {
+  const clean = value.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(clean))
+    throw new Error(`Invalid SOL amount: ${value}`);
+  const [whole, frac = ""] = clean.split(".");
+  if (frac.length > 9)
+    throw new Error(`Invalid SOL amount ${value}: max 9 decimals`);
+  return (
+    BigInt(whole || "0") * 1_000_000_000n + BigInt(frac.padEnd(9, "0") || "0")
+  );
+}
+
+export async function loadExplicitBuyerAllocations(args: {
+  sowl: Sowl;
+  rows: ExplicitBuyerPlanRow[];
+  excludeWallet?: WalletRef;
+}): Promise<BuyerAllocation[]> {
+  const excluded = args.excludeWallet
+    ? args.sowl.resolveWallet(args.excludeWallet).address.toBase58()
+    : null;
+  const allocations: BuyerAllocation[] = [];
+  const seen = new Set<string>();
+
+  for (const [index, row] of args.rows.entries()) {
+    const wallet = args.sowl.resolveWallet(row.wallet);
+    const address = wallet.address.toBase58();
+    if (address === excluded) continue;
+    if (seen.has(address))
+      throw new Error(`Duplicate buyer wallet in buy plan: ${address}`);
+    seen.add(address);
+
+    const balanceLamports = BigInt(
+      await args.sowl.connection().getBalance(wallet.address, "confirmed"),
+    );
+    let reserveLamports = 0n;
+    let selectedBps: number | null = null;
+    let spendLamports: bigint;
+
+    if (row.amount.kind === "exact-lamports") {
+      spendLamports = row.amount.lamports;
+    } else if (row.amount.kind === "exact-sol") {
+      spendLamports = solStringToLamports(row.amount.sol);
+    } else {
+      reserveLamports = row.amount.reserveLamports;
+      validateBps(row.amount.minBps, row.amount.maxBps);
+      if (balanceLamports <= reserveLamports) {
+        throw new Error(
+          `Buy plan row ${index + 1} wallet ${address} balance ${balanceLamports} does not exceed reserve ${reserveLamports}`,
+        );
+      }
+      selectedBps = randomBps(row.amount.minBps, row.amount.maxBps);
+      spendLamports =
+        ((balanceLamports - reserveLamports) * BigInt(selectedBps)) / 10_000n;
+    }
+
+    if (spendLamports <= 0n)
+      throw new Error(
+        `Buy plan row ${index + 1} wallet ${address} produced zero buy amount`,
+      );
+    if (balanceLamports <= spendLamports + reserveLamports) {
+      throw new Error(
+        `Buy plan row ${index + 1} wallet ${address} has insufficient SOL: balance=${balanceLamports} spend=${spendLamports} reserve=${reserveLamports}`,
+      );
+    }
+
+    allocations.push({
+      role: "trader",
+      walletRef: row.wallet,
+      address,
+      balanceLamports,
+      reserveLamports,
+      selectedBps,
+      spendLamports,
+      execution: row.execution,
+    });
+  }
+
+  if (allocations.length === 0)
+    throw new Error(
+      "Buy plan has no eligible buyer wallets after excluding the creator",
+    );
+  return allocations;
 }
 
 export async function loadGroupBuyerAllocations(args: {
@@ -707,16 +849,28 @@ export async function preparePumpTokenLaunch(args: {
     initialBuyer: creator,
   });
 
-  const tipForSender = (sender: SenderId): TipConfig =>
-    String(sender) === "helius-fast" ? args.senderPolicy.fastTip : {};
-  const traderLanes = args.traders.map((_trader, index) => {
-    const sender =
+  const tipForSender = (
+    sender: SenderId,
+    trader?: BuyerAllocation,
+  ): TipConfig => {
+    if (String(sender) !== "helius-fast") return {};
+    const explicitTip = trader?.execution?.tipLamports;
+    return explicitTip != null
+      ? { ...args.senderPolicy.fastTip, lamports: explicitTip }
+      : args.senderPolicy.fastTip;
+  };
+  const traderLanes = args.traders.map((trader, index) => {
+    const policySender =
       index < args.senderPolicy.fastTraderCount
         ? args.senderPolicy.fastTraderSender
         : args.senderPolicy.rpcTraderSender;
-    return index < args.senderPolicy.fastTraderCount
-      ? { sender, tip: tipForSender(sender), lane: "trader-fast" as const }
-      : { sender, tip: tipForSender(sender), lane: "trader-rpc" as const };
+    const sender = trader.execution?.sender ?? policySender;
+    const lane =
+      String(sender) === "helius-fast" ||
+      index < args.senderPolicy.fastTraderCount
+        ? ("trader-fast" as const)
+        : ("trader-rpc" as const);
+    return { sender, tip: tipForSender(sender, trader), lane };
   });
 
   const pendingBuys = await prepareWorstCaseBuys({
@@ -739,7 +893,9 @@ export async function preparePumpTokenLaunch(args: {
         kind: "buy-pump-token-group",
         senderTip: lane.tip,
         lane,
-        priorityMicroLamports: args.buyerPriorityMicroLamports,
+        priorityMicroLamports:
+          args.traders[index]!.execution?.priorityMicroLamports ??
+          args.buyerPriorityMicroLamports,
       }),
     );
   }
@@ -830,7 +986,14 @@ function isRateLimitError(error: unknown): boolean {
   return /\b429\b|rate.?limit|too many requests/i.test(errorText(error));
 }
 
+function isStructuralSenderError(error: unknown): boolean {
+  return /invalid request|invalid params|must send a tip|transaction must send a tip|tip of at least|insufficient funds|blockhash not found|signature verification failed/i.test(
+    errorText(error),
+  );
+}
+
 function isTransientSenderError(error: unknown): boolean {
+  if (isStructuralSenderError(error)) return false;
   return (
     isRateLimitError(error) ||
     /\b5\d\d\b|timeout|timed out|fetch failed|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket/i.test(
@@ -879,6 +1042,42 @@ class SenderRateLimiter {
     });
     await sleep(delayMs);
   }
+}
+
+function startBlockhashWarmer(
+  sowl: Sowl,
+  intervalMs: number | undefined,
+  reporter?: LaunchReporter,
+): () => void {
+  const ms = intervalMs ?? 0;
+  if (ms <= 0) return () => {};
+
+  const cache = (
+    sowl as unknown as {
+      blockhash?: {
+        invalidate: () => void;
+        get: (connection: Connection) => Promise<unknown>;
+      };
+    }
+  ).blockhash;
+  if (!cache) return () => {};
+
+  let stopped = false;
+  const run = async () => {
+    while (!stopped) {
+      try {
+        cache.invalidate();
+        await cache.get(sowl.connection());
+      } catch (error) {
+        reporter?.("pump blockhash warm error", { error: errorText(error) });
+      }
+      await sleep(ms);
+    }
+  };
+  void run();
+  return () => {
+    stopped = true;
+  };
 }
 
 function deploymentReadinessAddresses(
@@ -1008,6 +1207,82 @@ async function signatureState(
   return "pending";
 }
 
+function strategyToSubmitMode(
+  strategy: BuyerLaunchStrategy | TraderSubmitMode | undefined,
+  fallback: TraderSubmitMode,
+): TraderSubmitMode {
+  return normalizeTraderSubmitMode(strategy ?? fallback);
+}
+
+async function waitForBuyerStartMode(args: {
+  sowl: Sowl;
+  prepared: PumpTokenLaunchPlan;
+  launchSignature: string;
+  mode: TraderSubmitMode;
+  spam: SpamSubmitOptions;
+  reporter?: LaunchReporter;
+  wallet: string;
+}): Promise<boolean> {
+  const mode = normalizeTraderSubmitMode(args.mode);
+  if (mode === "blind-spam-after-submit") return false;
+  const timeoutMs = args.spam.readinessTimeoutMs ?? args.spam.timeoutMs;
+  const processed = await waitForSignatureAtLeastProcessed({
+    connection: args.sowl.connection(),
+    signature: args.launchSignature,
+    timeoutMs,
+    intervalMs: Math.min(args.spam.intervalMs, 100),
+  });
+  args.reporter?.("pump buyer start gate", {
+    wallet: args.wallet,
+    mode,
+    signatureState: processed,
+  });
+
+  if (mode === "after-deploy-confirmed") {
+    const startedAt = Date.now();
+    while (beforeDeadline(startedAt, timeoutMs)) {
+      const state = await signatureReadiness(
+        args.sowl.connection(),
+        args.launchSignature,
+      );
+      if (state === "failed")
+        throw new Error(
+          `Launch failed before buyer ${args.wallet}: ${args.launchSignature}`,
+        );
+      if (state === "confirmed") break;
+      await sleep(Math.min(args.spam.intervalMs, 100));
+    }
+    if (
+      (await signatureReadiness(
+        args.sowl.connection(),
+        args.launchSignature,
+      )) !== "confirmed"
+    ) {
+      throw new Error(
+        `Launch was not confirmed before buyer ${args.wallet}: ${args.launchSignature}`,
+      );
+    }
+  }
+
+  if (mode === "spam-after-market-ready") {
+    for (const item of deploymentReadinessAddresses(args.prepared.deployment)) {
+      await waitForAccountExists({
+        connection: args.sowl.connection(),
+        address: item.address,
+        timeoutMs,
+        intervalMs: Math.min(args.spam.intervalMs, 100),
+      });
+      args.reporter?.("pump buyer market gate", {
+        wallet: args.wallet,
+        account: item.label,
+        address: item.address.toBase58(),
+      });
+    }
+  }
+
+  return true;
+}
+
 async function spamDependentBuy(args: {
   sowl: Sowl;
   template: PlannedTransaction;
@@ -1015,6 +1290,8 @@ async function spamDependentBuy(args: {
   lane: BuyerLane;
   kind: string;
   options: SpamSubmitOptions & { launchSignature?: string };
+  startMode?: TraderSubmitMode;
+  prepared?: PumpTokenLaunchPlan;
   /** Builds a normal post-launch buy with a fresh quote. Used as soon as the market is visible. */
   buildReadyPlan?: () => Promise<PlannedTransaction>;
   sendLimiter?: SenderRateLimiter;
@@ -1032,6 +1309,31 @@ async function spamDependentBuy(args: {
   let active: SubmittedPlan | null = null;
   let activeSince = 0;
   let launchReady = !args.options.launchSignature;
+  let launchReadyAt: number | null = launchReady ? Date.now() : null;
+
+  if (args.startMode && args.prepared && args.options.launchSignature) {
+    const gatedReady = await waitForBuyerStartMode({
+      sowl: args.sowl,
+      prepared: args.prepared,
+      launchSignature: args.options.launchSignature,
+      mode: args.startMode,
+      spam: args.options,
+      reporter: args.reporter,
+      wallet: args.participant.address,
+    });
+    if (gatedReady) {
+      launchReady = true;
+      launchReadyAt = Date.now();
+    }
+  }
+
+  const shouldUseFreshQuote = () => {
+    if (!launchReady || !args.buildReadyPlan) return false;
+    const delayMs = args.options.freshQuoteDelayMs ?? 2_500;
+    if (delayMs < 0) return false;
+    if (delayMs === 0) return true;
+    return launchReadyAt != null && Date.now() - launchReadyAt >= delayMs;
+  };
 
   while (beforeDeadline(startedAt, args.options.timeoutMs)) {
     if (!launchReady && args.options.launchSignature) {
@@ -1044,7 +1346,10 @@ async function spamDependentBuy(args: {
           `Launch failed before trader buy could land: ${args.options.launchSignature}`,
         );
       }
-      launchReady = launchState === "processed" || launchState === "confirmed";
+      const nextLaunchReady =
+        launchState === "processed" || launchState === "confirmed";
+      if (nextLaunchReady && !launchReady) launchReadyAt = Date.now();
+      launchReady = nextLaunchReady;
     }
 
     if (!active) {
@@ -1059,32 +1364,69 @@ async function spamDependentBuy(args: {
       }
 
       let freshPlan: PlannedTransaction;
+      let planSource:
+        "pending-template" | "fresh-ready-quote" | "pending-template-fallback" =
+        "pending-template";
       try {
-        freshPlan =
-          launchReady && args.buildReadyPlan
-            ? await args.buildReadyPlan()
-            : await args.sowl.compile(
-                args.sowl.signer(args.participant.walletRef),
-                args.template.draft,
-                { useAlts: false },
-              );
+        if (shouldUseFreshQuote()) {
+          planSource = "fresh-ready-quote";
+          freshPlan = await args.buildReadyPlan!();
+        } else {
+          freshPlan = await args.sowl.compile(
+            args.sowl.signer(args.participant.walletRef),
+            args.template.draft,
+            { useAlts: false },
+          );
+        }
       } catch (error) {
-        buildErrors += 1;
-        if (!launchReady || isTransientMarketReadinessError(error))
-          preReadyFailures += 1;
-        else failedAttempts += 1;
-        args.reporter?.("pump buyer build retry", {
-          lane: args.lane.lane,
-          sender: String(args.lane.sender),
-          wallet: args.participant.address,
-          launchReady,
-          failedAttempts,
-          preReadyFailures,
-          buildErrors,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        await sleep(args.options.intervalMs);
-        continue;
+        if (
+          planSource === "fresh-ready-quote" &&
+          isTransientMarketReadinessError(error)
+        ) {
+          try {
+            planSource = "pending-template-fallback";
+            freshPlan = await args.sowl.compile(
+              args.sowl.signer(args.participant.walletRef),
+              args.template.draft,
+              { useAlts: false },
+            );
+          } catch (fallbackError) {
+            buildErrors += 1;
+            failedAttempts += launchReady ? 1 : 0;
+            preReadyFailures += launchReady ? 0 : 1;
+            args.reporter?.("pump buyer build retry", {
+              lane: args.lane.lane,
+              sender: String(args.lane.sender),
+              wallet: args.participant.address,
+              launchReady,
+              failedAttempts,
+              preReadyFailures,
+              buildErrors,
+              planSource,
+              error: errorText(fallbackError),
+            });
+            await sleep(args.options.intervalMs);
+            continue;
+          }
+        } else {
+          buildErrors += 1;
+          if (!launchReady || isTransientMarketReadinessError(error))
+            preReadyFailures += 1;
+          else failedAttempts += 1;
+          args.reporter?.("pump buyer build retry", {
+            lane: args.lane.lane,
+            sender: String(args.lane.sender),
+            wallet: args.participant.address,
+            launchReady,
+            failedAttempts,
+            preReadyFailures,
+            buildErrors,
+            planSource,
+            error: errorText(error),
+          });
+          await sleep(args.options.intervalMs);
+          continue;
+        }
       }
 
       try {
@@ -1146,6 +1488,7 @@ async function spamDependentBuy(args: {
         sender: String(args.lane.sender),
         wallet: args.participant.address,
         launchReady,
+        planSource,
         failedAttempts,
         preReadyFailures,
         signature: active.signature,
@@ -1363,115 +1706,170 @@ export async function executePumpTokenLaunch(args: {
   }
 
   const sendLimiter = new SenderRateLimiter(args.spam, args.reporter);
-  const launch = await broadcastLaunchWithRetry({
-    sowl: args.sowl,
-    plan: args.prepared.launchPlan,
-    sender: args.prepared.deploymentSender,
-    kind: `${args.kind}:create-and-creator-buy`,
-    skipSimulation: args.skipSimulation,
-    spam: args.spam,
-    sendLimiter,
-    reporter: args.reporter,
-  });
+  const stopBlockhashWarmer = startBlockhashWarmer(
+    args.sowl,
+    args.spam.blockhashRefreshIntervalMs ?? 500,
+    args.reporter,
+  );
+  try {
+    const launch = await broadcastLaunchWithRetry({
+      sowl: args.sowl,
+      plan: args.prepared.launchPlan,
+      sender: args.prepared.deploymentSender,
+      kind: `${args.kind}:create-and-creator-buy`,
+      skipSimulation: args.skipSimulation,
+      spam: args.spam,
+      sendLimiter,
+      reporter: args.reporter,
+    });
 
-  if (submitMode === "after-deploy-confirmed") {
-    const launchReceipt = await args.sowl.confirmSubmitted(launch);
-    if (launchReceipt.status !== "confirmed") {
-      throw new Error(
-        `Token create + creator initial buy did not confirm: ${launchReceipt.status}`,
+    if (submitMode === "after-deploy-confirmed") {
+      const launchReceipt = await args.sowl.confirmSubmitted(launch);
+      if (launchReceipt.status !== "confirmed") {
+        throw new Error(
+          `Token create + creator initial buy did not confirm: ${launchReceipt.status}`,
+        );
+      }
+
+      const traderReceipts = await Promise.all(
+        args.prepared.traderPlans.map((plan, index) =>
+          args.sowl.sendPlan(
+            plan,
+            args.prepared.traderLanes[index]!.sender,
+            `${args.kind}:trader:${index + 1}`,
+            { skipSimulation: false, skipPreflight: true },
+          ),
+        ),
       );
+
+      return { mode: submitMode, launchReceipt, traderReceipts };
     }
 
-    const traderReceipts = await Promise.all(
-      args.prepared.traderPlans.map((plan, index) =>
-        args.sowl.sendPlan(
-          plan,
-          args.prepared.traderLanes[index]!.sender,
-          `${args.kind}:trader:${index + 1}`,
-          { skipSimulation: false, skipPreflight: true },
-        ),
-      ),
+    const hasPerBuyerStrategy = args.prepared.traders.some(
+      (trader) => trader.execution?.strategy,
+    );
+    if (!hasPerBuyerStrategy) {
+      await waitForLaunchReady({
+        sowl: args.sowl,
+        prepared: args.prepared,
+        launchSignature: launch.signature,
+        mode: submitMode,
+        spam: args.spam,
+        reporter: args.reporter,
+      });
+    }
+
+    const mintRef = args.prepared.deployment.mint.publicKey.toBase58();
+    let tokenPersisted = false;
+    const ensureTokenPersisted = () => {
+      if (!tokenPersisted) {
+        args.sowl.persistPreparedDeployment(
+          args.prepared.deployment,
+          args.prepared.token.alias,
+        );
+        tokenPersisted = true;
+      }
+    };
+
+    const settled = await Promise.allSettled(
+      args.prepared.traderPlans.map((plan, index) => {
+        const participant = args.prepared.traders[index]!;
+        return spamDependentBuy({
+          sowl: args.sowl,
+          template: plan,
+          participant,
+          lane: args.prepared.traderLanes[index]!,
+          kind: `${args.kind}:trader:${index + 1}`,
+          options: {
+            ...args.spam,
+            launchSignature: launch.signature,
+            intervalMs:
+              participant.execution?.retryIntervalMs ?? args.spam.intervalMs,
+            recompileIntervalMs:
+              participant.execution?.recompileIntervalMs ??
+              args.spam.recompileIntervalMs,
+            freshQuoteDelayMs:
+              participant.execution?.freshQuoteDelayMs ??
+              args.spam.freshQuoteDelayMs,
+            maxFailedAttempts:
+              participant.execution?.maxFailedAttempts ??
+              args.spam.maxFailedAttempts,
+          },
+          startMode: strategyToSubmitMode(
+            participant.execution?.strategy,
+            submitMode,
+          ),
+          prepared: args.prepared,
+          buildReadyPlan: async () => {
+            ensureTokenPersisted();
+            const builder = args.sowl
+              .tx(participant.walletRef)
+              .priorityFee({
+                cuLimit: args.prepared.cuLimit,
+                microLamports:
+                  participant.execution?.priorityMicroLamports ??
+                  args.prepared.buyerPriorityMicroLamports,
+              })
+              .buy(mintRef, rawAmount(participant.spendLamports, SOL_ASSET), {
+                slippageBps:
+                  participant.execution?.slippageBps ??
+                  args.prepared.slippageBps,
+              });
+
+            // Helius Sender validates that the transaction contains a static SOL
+            // transfer to one of its tip accounts. Do not use builder.build() here:
+            // the default compiler may use ALTs, which can make the tip account
+            // invisible to Sender's preflight validator. The pre-launch template
+            // path already compiles with useAlts:false; the post-readiness fresh
+            // quote path must do the same.
+            addTip(
+              builder as unknown as ReturnType<Sowl["transaction"]>,
+              args.sowl.signer(participant.walletRef).publicKey,
+              String(args.prepared.traderLanes[index]!.sender) ===
+                "helius-fast" && participant.execution?.tipLamports != null
+                ? {
+                    ...args.prepared.traderLanes[index]!.tip,
+                    lamports: participant.execution.tipLamports,
+                  }
+                : args.prepared.traderLanes[index]!.tip,
+            );
+            const draft = await builder.materializedDraft();
+            return await args.sowl.compile(
+              args.sowl.signer(participant.walletRef),
+              draft,
+              { useAlts: false },
+            );
+          },
+          sendLimiter,
+          reporter: args.reporter,
+        });
+      }),
+    );
+
+    const launchReceipt = await args.sowl.confirmSubmitted(launch);
+    const traderReceipts: TraderReceiptOutcome[] = settled.map((item, index) =>
+      item.status === "fulfilled"
+        ? {
+            ok: true,
+            index,
+            address: args.prepared.traders[index]!.address,
+            result: item.value,
+          }
+        : {
+            ok: false,
+            index,
+            address: args.prepared.traders[index]!.address,
+            error:
+              item.reason instanceof Error
+                ? item.reason.message
+                : String(item.reason),
+          },
     );
 
     return { mode: submitMode, launchReceipt, traderReceipts };
+  } finally {
+    stopBlockhashWarmer();
   }
-
-  await waitForLaunchReady({
-    sowl: args.sowl,
-    prepared: args.prepared,
-    launchSignature: launch.signature,
-    mode: submitMode,
-    spam: args.spam,
-    reporter: args.reporter,
-  });
-
-  const mintRef = args.prepared.deployment.mint.publicKey.toBase58();
-  let tokenPersisted = false;
-  const ensureTokenPersisted = () => {
-    if (!tokenPersisted) {
-      args.sowl.persistPreparedDeployment(
-        args.prepared.deployment,
-        args.prepared.token.alias,
-      );
-      tokenPersisted = true;
-    }
-  };
-
-  const settled = await Promise.allSettled(
-    args.prepared.traderPlans.map((plan, index) => {
-      const participant = args.prepared.traders[index]!;
-      return spamDependentBuy({
-        sowl: args.sowl,
-        template: plan,
-        participant,
-        lane: args.prepared.traderLanes[index]!,
-        kind: `${args.kind}:trader:${index + 1}`,
-        options: { ...args.spam, launchSignature: launch.signature },
-        buildReadyPlan: async () => {
-          ensureTokenPersisted();
-          const builder = args.sowl
-            .tx(participant.walletRef)
-            .priorityFee({
-              cuLimit: args.prepared.cuLimit,
-              microLamports: args.prepared.buyerPriorityMicroLamports,
-            })
-            .buy(mintRef, rawAmount(participant.spendLamports, SOL_ASSET), {
-              slippageBps: args.prepared.slippageBps,
-            });
-          addTip(
-            builder as unknown as ReturnType<Sowl["transaction"]>,
-            args.sowl.signer(participant.walletRef).publicKey,
-            args.prepared.traderLanes[index]!.tip,
-          );
-          return await builder.build();
-        },
-        sendLimiter,
-        reporter: args.reporter,
-      });
-    }),
-  );
-
-  const launchReceipt = await args.sowl.confirmSubmitted(launch);
-  const traderReceipts: TraderReceiptOutcome[] = settled.map((item, index) =>
-    item.status === "fulfilled"
-      ? {
-          ok: true,
-          index,
-          address: args.prepared.traders[index]!.address,
-          result: item.value,
-        }
-      : {
-          ok: false,
-          index,
-          address: args.prepared.traders[index]!.address,
-          error:
-            item.reason instanceof Error
-              ? item.reason.message
-              : String(item.reason),
-        },
-  );
-
-  return { mode: submitMode, launchReceipt, traderReceipts };
 }
 
 function sleep(ms: number): Promise<void> {

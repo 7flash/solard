@@ -39,3 +39,10 @@ th { color: #9fb0d5; font-weight: 700; }
 pre { background: rgba(0,0,0,.24); border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 12px; max-height: 380px; overflow: auto; }
 .notice { padding: 12px 14px; border-radius: 14px; background: rgba(131, 162, 255, .12); border: 1px solid rgba(131, 162, 255, .2); color: #dbe5ff; margin-bottom: 14px; }
 @media (max-width: 920px) { .span-3, .span-4, .span-5, .span-6, .span-7, .span-8 { grid-column: span 12; } .hero { display: grid; } .form-grid { grid-template-columns: 1fr; } }
+
+.wide-table { overflow-x: auto; }
+.wide-table table { min-width: 1180px; }
+.wide-table td { vertical-align: top; }
+.wide-table input, .wide-table select { min-width: 110px; margin: 2px 0; }
+.mini-grid { display: grid; grid-template-columns: repeat(3, minmax(72px, 1fr)); gap: 6px; }
+.between { justify-content: space-between; align-items: center; }

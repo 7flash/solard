@@ -9,6 +9,31 @@ type Overview = {
   balances: AnyRow[];
 };
 
+type BuyPlanRow = {
+  id: string;
+  wallet: string;
+  label: string;
+  amountMode: "range-bps" | "exact-sol" | "exact-lamports";
+  minBps: string;
+  maxBps: string;
+  reserveSol: string;
+  exactSol: string;
+  exactLamports: string;
+  sender: "helius-fast" | "helius-rpc";
+  strategy:
+    | "fast-spam"
+    | "spam-after-market-ready"
+    | "after-deploy-processed"
+    | "after-deploy-confirmed";
+  tipSol: string;
+  priorityMicroLamports: string;
+  slippageBps: string;
+  retryIntervalMs: string;
+  recompileIntervalMs: string;
+  freshQuoteDelayMs: string;
+  maxFailedAttempts: string;
+};
+
 type State = {
   tab: "overview" | "wallets" | "launch" | "trade" | "jobs";
   overview: Overview | null;
@@ -18,6 +43,7 @@ type State = {
   busy: boolean;
   error: string | null;
   token: string;
+  buyPlanRows: BuyPlanRow[];
 };
 
 const state: State = {
@@ -29,6 +55,7 @@ const state: State = {
   busy: false,
   error: null,
   token: localStorage.getItem("solwal:web-token") ?? "",
+  buyPlanRows: [],
 };
 
 function authHeaders(): HeadersInit {
@@ -330,6 +357,356 @@ function WalletsView() {
   );
 }
 
+function newBuyPlanRow(seed: Partial<BuyPlanRow> = {}): BuyPlanRow {
+  return {
+    id: String(Date.now()) + ":" + Math.random().toString(36).slice(2),
+    wallet: "",
+    label: "",
+    amountMode: "range-bps",
+    minBps: "5000",
+    maxBps: "8000",
+    reserveSol: "0.02",
+    exactSol: "",
+    exactLamports: "",
+    sender: "helius-fast",
+    strategy: "fast-spam",
+    tipSol: "0.001",
+    priorityMicroLamports: "1500000",
+    slippageBps: "9999",
+    retryIntervalMs: "75",
+    recompileIntervalMs: "750",
+    freshQuoteDelayMs: "-1",
+    maxFailedAttempts: "0",
+    ...seed,
+  };
+}
+
+function updateBuyPlanRow(id: string, patch: Partial<BuyPlanRow>): void {
+  state.buyPlanRows = state.buyPlanRows.map((row) =>
+    row.id === id ? { ...row, ...patch } : row,
+  );
+  update();
+}
+
+function removeBuyPlanRow(id: string): void {
+  state.buyPlanRows = state.buyPlanRows.filter((row) => row.id !== id);
+  update();
+}
+
+function walletLabel(wallet: AnyRow): string {
+  return wallet.name
+    ? `${wallet.name} — ${short(wallet.address, 4, 4)}`
+    : wallet.address;
+}
+
+function populateBuyPlanFromGroup(groupName: string): void {
+  const group = state.overview?.groups.find(
+    (item: AnyRow) => item.name === groupName,
+  );
+  const members = group?.wallets ?? [];
+  state.buyPlanRows = members.map((member: AnyRow, index: number) =>
+    newBuyPlanRow({
+      wallet:
+        member.walletAddress ?? member.address ?? String(member.wallet ?? ""),
+      label: `buyer-${index + 1}`,
+    }),
+  );
+  update();
+}
+
+function buyPlanPayload(): AnyRow[] {
+  return state.buyPlanRows
+    .filter((row) => row.wallet.trim())
+    .map((row) => ({
+      wallet: row.wallet.trim(),
+      label: row.label.trim() || undefined,
+      amountMode: row.amountMode,
+      minBps: row.amountMode === "range-bps" ? row.minBps : undefined,
+      maxBps: row.amountMode === "range-bps" ? row.maxBps : undefined,
+      reserveSol: row.amountMode === "range-bps" ? row.reserveSol : undefined,
+      exactSol: row.amountMode === "exact-sol" ? row.exactSol : undefined,
+      exactLamports:
+        row.amountMode === "exact-lamports" ? row.exactLamports : undefined,
+      sender: row.sender,
+      strategy: row.strategy,
+      tipSol: row.sender === "helius-fast" ? row.tipSol : undefined,
+      priorityMicroLamports: row.priorityMicroLamports,
+      slippageBps: row.slippageBps,
+      retryIntervalMs: row.retryIntervalMs,
+      recompileIntervalMs: row.recompileIntervalMs,
+      freshQuoteDelayMs: row.freshQuoteDelayMs,
+      maxFailedAttempts: row.maxFailedAttempts,
+    }));
+}
+
+function BuyPlanTable() {
+  const wallets = state.overview?.wallets ?? [];
+  return (
+    <div className="card span-12">
+      <div className="row between">
+        <div>
+          <h3>Follower buy plan</h3>
+          <p className="muted">
+            Optional. When rows are present, these rows override the
+            buyer-group/global buyer settings. Each wallet runs in parallel with
+            its own sender, strategy, fees and retry rhythm.
+          </p>
+        </div>
+        <div className="row">
+          <select id="buy-plan-group-select">
+            <option value="">load group…</option>
+            {(state.overview?.groups ?? []).map((group: AnyRow) => (
+              <option value={group.name}>{group.name}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => {
+              const select = document.getElementById(
+                "buy-plan-group-select",
+              ) as HTMLSelectElement | null;
+              if (select?.value) populateBuyPlanFromGroup(select.value);
+            }}
+          >
+            Load group
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              state.buyPlanRows = [...state.buyPlanRows, newBuyPlanRow()];
+              update();
+            }}
+          >
+            Add row
+          </button>
+        </div>
+      </div>
+      <div className="wide-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Wallet</th>
+              <th>Amount</th>
+              <th>Execution</th>
+              <th>Fees</th>
+              <th>Retry</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {state.buyPlanRows.map((row) => (
+              <tr>
+                <td>
+                  <input
+                    placeholder="label"
+                    value={row.label}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        label: event.currentTarget.value,
+                      })
+                    }
+                  />
+                  <select
+                    value={row.wallet}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        wallet: event.currentTarget.value,
+                      })
+                    }
+                  >
+                    <option value="">select wallet…</option>
+                    {wallets.map((wallet: AnyRow) => (
+                      <option value={wallet.address}>
+                        {walletLabel(wallet)}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  <select
+                    value={row.amountMode}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        amountMode: event.currentTarget.value,
+                      })
+                    }
+                  >
+                    <option value="range-bps">balance % range</option>
+                    <option value="exact-sol">exact SOL</option>
+                    <option value="exact-lamports">exact lamports</option>
+                  </select>
+                  {row.amountMode === "range-bps" ? (
+                    <div className="mini-grid">
+                      <input
+                        title="min bps"
+                        value={row.minBps}
+                        onInput={(event: any) =>
+                          updateBuyPlanRow(row.id, {
+                            minBps: event.currentTarget.value,
+                          })
+                        }
+                      />
+                      <input
+                        title="max bps"
+                        value={row.maxBps}
+                        onInput={(event: any) =>
+                          updateBuyPlanRow(row.id, {
+                            maxBps: event.currentTarget.value,
+                          })
+                        }
+                      />
+                      <input
+                        title="reserve SOL"
+                        value={row.reserveSol}
+                        onInput={(event: any) =>
+                          updateBuyPlanRow(row.id, {
+                            reserveSol: event.currentTarget.value,
+                          })
+                        }
+                      />
+                    </div>
+                  ) : null}
+                  {row.amountMode === "exact-sol" ? (
+                    <input
+                      placeholder="exact SOL"
+                      value={row.exactSol}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          exactSol: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  ) : null}
+                  {row.amountMode === "exact-lamports" ? (
+                    <input
+                      placeholder="exact lamports"
+                      value={row.exactLamports}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          exactLamports: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  ) : null}
+                </td>
+                <td>
+                  <select
+                    value={row.sender}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        sender: event.currentTarget.value,
+                      })
+                    }
+                  >
+                    <option value="helius-fast">helius-fast</option>
+                    <option value="helius-rpc">helius-rpc</option>
+                  </select>
+                  <select
+                    value={row.strategy}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        strategy: event.currentTarget.value,
+                      })
+                    }
+                  >
+                    <option value="fast-spam">fast-spam</option>
+                    <option value="spam-after-market-ready">
+                      market-ready spam
+                    </option>
+                    <option value="after-deploy-processed">
+                      after processed
+                    </option>
+                    <option value="after-deploy-confirmed">
+                      after confirmed
+                    </option>
+                  </select>
+                </td>
+                <td>
+                  <input
+                    title="tip SOL"
+                    value={row.tipSol}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        tipSol: event.currentTarget.value,
+                      })
+                    }
+                  />
+                  <input
+                    title="priority micro lamports"
+                    value={row.priorityMicroLamports}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        priorityMicroLamports: event.currentTarget.value,
+                      })
+                    }
+                  />
+                  <input
+                    title="slippage bps"
+                    value={row.slippageBps}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        slippageBps: event.currentTarget.value,
+                      })
+                    }
+                  />
+                </td>
+                <td>
+                  <input
+                    title="retry ms"
+                    value={row.retryIntervalMs}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        retryIntervalMs: event.currentTarget.value,
+                      })
+                    }
+                  />
+                  <input
+                    title="recompile ms"
+                    value={row.recompileIntervalMs}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        recompileIntervalMs: event.currentTarget.value,
+                      })
+                    }
+                  />
+                  <input
+                    title="fresh quote delay"
+                    value={row.freshQuoteDelayMs}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        freshQuoteDelayMs: event.currentTarget.value,
+                      })
+                    }
+                  />
+                  <input
+                    title="max failed"
+                    value={row.maxFailedAttempts}
+                    onInput={(event: any) =>
+                      updateBuyPlanRow(row.id, {
+                        maxFailedAttempts: event.currentTarget.value,
+                      })
+                    }
+                  />
+                </td>
+                <td>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => removeBuyPlanRow(row.id)}
+                  >
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function LaunchView() {
   return (
     <form
@@ -348,6 +725,8 @@ function LaunchView() {
           )?.checked
             ? "true"
             : "false";
+        const explicitBuyPlan = buyPlanPayload();
+        if (explicitBuyPlan.length > 0) body.buyPlan = explicitBuyPlan;
         void runAction(async () => {
           const started = await api<{ id: string }>("/api/launch/pump", {
             method: "POST",
@@ -407,7 +786,7 @@ function LaunchView() {
             <input name="creator" required />
           </label>
           <label>
-            Buyer group
+            Buyer group fallback
             <input name="buyerGroup" placeholder="mind-buyers" />
           </label>
           <label>
@@ -428,8 +807,9 @@ function LaunchView() {
           </label>
         </div>
       </div>
+      <BuyPlanTable />
       <div className="card span-12">
-        <h3>Execution</h3>
+        <h3>Global defaults</h3>
         <div className="form-grid">
           <label>
             Deployment sender

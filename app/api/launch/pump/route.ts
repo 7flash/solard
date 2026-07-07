@@ -25,6 +25,9 @@ export async function POST(request: Request): Promise<Response> {
 
     pushArg(argv, "creator", requireString(body, "creator"));
     pushArg(argv, "buyer-group", optionalString(body, "buyerGroup"));
+    if (Array.isArray(body.buyPlan) && body.buyPlan.length > 0) {
+      pushArg(argv, "buy-plan-json", JSON.stringify(body.buyPlan));
+    }
     pushArg(argv, "metadata", optionalString(body, "metadataPath"));
     pushArg(argv, "alias", optionalString(body, "alias"));
     pushArg(argv, "name", optionalString(body, "name"));
