@@ -101,6 +101,55 @@ function num(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function intEnv(name: string, fallback: number): number {
+  const value = process.env[name]?.trim();
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+let metadataBackoffUntil = 0;
+let metadataBusy = false;
+const metadataQueue: Array<{ mint: string; uri: string }> = [];
+const metadataQueued = new Set<string>();
+
+function enqueueMetadataEnrichment(mint: string, uri: string): void {
+  if (process.env.SOLWAL_PUMP_METADATA_ENRICH === "0") return;
+  if (metadataQueued.has(mint)) return;
+  const maxQueue = Math.max(1, intEnv("SOLWAL_PUMP_METADATA_QUEUE_MAX", 150));
+  if (metadataQueue.length >= maxQueue) {
+    const removed = metadataQueue.shift();
+    if (removed) metadataQueued.delete(removed.mint);
+  }
+  metadataQueue.push({ mint, uri });
+  metadataQueued.add(mint);
+  void drainMetadataQueue();
+}
+
+async function drainMetadataQueue(): Promise<void> {
+  if (metadataBusy) return;
+  metadataBusy = true;
+  try {
+    while (metadataQueue.length > 0) {
+      const waitMs = Math.max(0, metadataBackoffUntil - Date.now());
+      if (waitMs > 0)
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      const item = metadataQueue.shift();
+      if (!item) break;
+      metadataQueued.delete(item.mint);
+      await enrichTokenMetadata(item.mint, item.uri);
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          Math.max(50, intEnv("SOLWAL_PUMP_METADATA_INTERVAL_MS", 750)),
+        ),
+      );
+    }
+  } finally {
+    metadataBusy = false;
+  }
+}
+
 function bool(value: unknown): boolean | null {
   if (typeof value === "boolean") return value;
   if (typeof value === "string") {
@@ -387,6 +436,15 @@ async function enrichTokenMetadata(mint: string, uri: string): Promise<void> {
     const response = await fetch(ipfsGateway(uri), {
       signal: controller.signal,
     });
+    if (response.status === 429) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const retryMs =
+        Number.isFinite(retryAfter) && retryAfter >= 0
+          ? retryAfter * 1000
+          : intEnv("SOLWAL_PUMP_METADATA_429_BACKOFF_MS", 10_000);
+      metadataBackoffUntil = Date.now() + Math.max(1_000, retryMs);
+      return;
+    }
     if (!response.ok) return;
     const metadata = (await response.json()) as Record<string, unknown>;
     const vault = readVault();
@@ -466,7 +524,7 @@ export function normalizePumpNewToken(
   addMintToGroup(vault, SESSION_GROUP_ID, SESSION_GROUP_NAME, mint);
   writeVault(vault);
   writeTokenToDb(token, token.samples[token.samples.length - 1]);
-  if (token.uri && !token.image) void enrichTokenMetadata(mint, token.uri);
+  if (token.uri && !token.image) enqueueMetadataEnrichment(mint, token.uri);
   return summarize(token, now);
 }
 
@@ -659,7 +717,7 @@ export function addTokenToWatchGroup(args: {
   ].slice(0, MAX_NEW_TOKENS);
   writeVault(vault);
   writeTokenToDb(token, token.samples[token.samples.length - 1]);
-  if (token.uri && !token.image) void enrichTokenMetadata(mint, token.uri);
+  if (token.uri && !token.image) enqueueMetadataEnrichment(mint, token.uri);
   return listPumpLiveState().watchGroups.find((item) => item.id === group!.id)!;
 }
 

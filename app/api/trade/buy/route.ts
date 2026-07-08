@@ -109,6 +109,16 @@ export async function POST(request: Request): Promise<Response> {
         symbol: typeof tokenMeta.symbol === "string" ? tokenMeta.symbol : null,
         creator:
           typeof tokenMeta.creator === "string" ? tokenMeta.creator : null,
+        description:
+          typeof tokenMeta.description === "string"
+            ? tokenMeta.description
+            : null,
+        website:
+          typeof tokenMeta.website === "string" ? tokenMeta.website : null,
+        twitter:
+          typeof tokenMeta.twitter === "string" ? tokenMeta.twitter : null,
+        telegram:
+          typeof tokenMeta.telegram === "string" ? tokenMeta.telegram : null,
         uri: typeof tokenMeta.uri === "string" ? tokenMeta.uri : null,
         image: typeof tokenMeta.image === "string" ? tokenMeta.image : null,
         signature:

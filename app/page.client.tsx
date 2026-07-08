@@ -43,6 +43,10 @@ type PumpFeedRow = {
   symbol?: string | null;
   uri?: string | null;
   creator?: string | null;
+  description?: string | null;
+  website?: string | null;
+  twitter?: string | null;
+  telegram?: string | null;
   signature?: string | null;
   initialBuy?: number | null;
   solAmount?: number | null;
@@ -77,6 +81,10 @@ type TokenWatchToken = {
   name?: string | null;
   symbol?: string | null;
   creator?: string | null;
+  description?: string | null;
+  website?: string | null;
+  twitter?: string | null;
+  telegram?: string | null;
   uri?: string | null;
   image?: string | null;
   signature?: string | null;
@@ -105,6 +113,14 @@ type TokenWatchGroup = {
   createdAtMs: number;
   updatedAtMs: number;
   tokens: TokenWatchToken[];
+};
+
+type Toast = {
+  id: string;
+  type: "info" | "warn" | "error" | "ok";
+  message: string;
+  details?: string | null;
+  createdAtMs: number;
 };
 
 type State = {
@@ -153,6 +169,7 @@ type State = {
     | "newest";
   hideMayhem: boolean;
   hideUsdc: boolean;
+  toasts: Toast[];
   pumpFeedAbort: AbortController | null;
   watchGroups: TokenWatchGroup[];
   selectedWatchGroupId: string | null;
@@ -201,6 +218,7 @@ const state: State = {
     "mcap-desc",
   hideMayhem: localStorage.getItem("solwal:pump-hide-mayhem") === "1",
   hideUsdc: localStorage.getItem("solwal:pump-hide-usdc") === "1",
+  toasts: [],
   pumpFeedAbort: null,
   watchGroups: [],
   selectedWatchGroupId: null,
@@ -232,6 +250,48 @@ function authHeaders(): HeadersInit {
   return state.token ? { "x-solwal-web-token": state.token } : {};
 }
 
+function notify(
+  type: Toast["type"],
+  message: string,
+  details?: string | null,
+): void {
+  const cleanMessage = String(message || "notice").slice(0, 420);
+  const cleanDetails = details ? String(details).slice(0, 1800) : null;
+  const duplicate = state.toasts.find(
+    (toast) =>
+      toast.message === cleanMessage && Date.now() - toast.createdAtMs < 5_000,
+  );
+  if (duplicate) return;
+  state.toasts = [
+    {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      type,
+      message: cleanMessage,
+      details: cleanDetails,
+      createdAtMs: Date.now(),
+    },
+    ...state.toasts,
+  ].slice(0, 8);
+  update();
+}
+
+function dismissToast(id: string): void {
+  state.toasts = state.toasts.filter((toast) => toast.id !== id);
+  update();
+}
+
+function classifyNotice(message: string): Toast["type"] {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("429") ||
+    lower.includes("too many requests") ||
+    lower.includes("rate limit")
+  )
+    return "warn";
+  if (lower.includes("error") || lower.includes("failed")) return "error";
+  return "info";
+}
+
 async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(url, {
     ...options,
@@ -242,8 +302,15 @@ async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
     },
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false)
-    throw new Error(payload.error ?? `HTTP ${response.status}`);
+  if (!response.ok || payload.ok === false) {
+    const message = payload.error ?? `HTTP ${response.status}`;
+    notify(
+      classifyNotice(String(message)),
+      String(message),
+      JSON.stringify(payload, null, 2),
+    );
+    throw new Error(message);
+  }
   return payload.value as T;
 }
 
@@ -286,25 +353,103 @@ function tokenImage(row: {
     : image;
 }
 
+function deepText(value: unknown, depth = 0): string {
+  if (value == null || depth > 3) return "";
+  if (["string", "number", "boolean"].includes(typeof value))
+    return String(value);
+  if (Array.isArray(value))
+    return value.map((item) => deepText(item, depth + 1)).join(" ");
+  if (typeof value === "object")
+    return Object.entries(value as AnyRow)
+      .map(([key, item]) => `${key} ${deepText(item, depth + 1)}`)
+      .join(" ");
+  return "";
+}
+
+function rowSearchText(row: AnyRow): string {
+  return [
+    row.name,
+    row.symbol,
+    row.description,
+    row.creator,
+    row.quoteAsset,
+    row.quoteMint,
+    row.website,
+    row.twitter,
+    row.telegram,
+    deepText(row.raw),
+  ]
+    .map((value) => String(value ?? ""))
+    .join(" ")
+    .toLowerCase();
+}
+
+function normalizeUrl(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw === "null" || raw === "undefined") return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^t\.me\//i.test(raw)) return `https://${raw}`;
+  if (/^(x\.com|twitter\.com)\//i.test(raw)) return `https://${raw}`;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(raw)) return `https://${raw}`;
+  return null;
+}
+
+function socialLinks(row: AnyRow): Array<{ label: string; url: string }> {
+  const raw = row.raw ?? {};
+  const entries = [
+    ["WEB", row.website ?? raw.website ?? raw.site ?? raw.external_url],
+    ["X", row.twitter ?? raw.twitter ?? raw.x ?? raw.twitterUrl],
+    ["TG", row.telegram ?? raw.telegram ?? raw.telegramUrl],
+  ] as const;
+  const seen = new Set<string>();
+  return entries.flatMap(([label, value]) => {
+    const url = normalizeUrl(value);
+    if (!url || seen.has(url)) return [];
+    seen.add(url);
+    return [{ label, url }];
+  });
+}
+
+function SocialLinks(row: AnyRow) {
+  const links = socialLinks(row);
+  if (!links.length) return null;
+  return (
+    <span className="social-links">
+      {links.map((link) => (
+        <span className="social-hover" title={link.url}>
+          <a href={link.url} target="_blank" rel="noreferrer">
+            {link.label}
+          </a>
+          <span className="social-frame">
+            <iframe
+              src={link.url}
+              loading="lazy"
+              sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
+            />
+          </span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function isMayhemToken(row: {
   isMayhemMode?: boolean | null;
   raw?: AnyRow;
+  name?: string | null;
+  symbol?: string | null;
+  description?: string | null;
 }): boolean {
   if (row.isMayhemMode === true) return true;
+  const text = rowSearchText(row as AnyRow);
+  if (/(^|[^a-z])mayhem([^a-z]|$)/i.test(text)) return true;
   const raw = row.raw ?? {};
-  return [
-    "isMayhemMode",
-    "mayhemMode",
-    "mayhem",
-    "isMayhem",
-    "mode",
-    "launchMode",
-    "curveType",
-  ].some(
-    (key) =>
-      String(raw[key] ?? "")
-        .toLowerCase()
-        .includes("mayhem") || raw[key] === true,
+  return Object.entries(raw).some(
+    ([key, value]) =>
+      key.toLowerCase().includes("mayhem") &&
+      (value === true ||
+        String(value).toLowerCase().includes("mayhem") ||
+        String(value) === "1"),
   );
 }
 
@@ -313,17 +458,7 @@ function isUsdcToken(row: {
   quoteMint?: string | null;
   raw?: AnyRow;
 }): boolean {
-  const text = [
-    row.quoteAsset,
-    row.quoteMint,
-    row.raw?.quoteAsset,
-    row.raw?.quoteSymbol,
-    row.raw?.quoteMint,
-    row.raw?.quoteTokenMint,
-    row.raw?.quoteCurrency,
-  ]
-    .map((value) => String(value ?? "").toLowerCase())
-    .join(" ");
+  const text = rowSearchText(row as AnyRow);
   return (
     text.includes("usdc") ||
     text.includes("epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v")
@@ -335,6 +470,9 @@ function passesBadgeFilters(row: {
   quoteAsset?: string | null;
   quoteMint?: string | null;
   raw?: AnyRow;
+  name?: string | null;
+  symbol?: string | null;
+  description?: string | null;
 }): boolean {
   if (state.hideMayhem && isMayhemToken(row)) return false;
   if (state.hideUsdc && isUsdcToken(row)) return false;
@@ -596,6 +734,10 @@ async function addWatchedToken(
     name?: string | null;
     symbol?: string | null;
     creator?: string | null;
+    description?: string | null;
+    website?: string | null;
+    twitter?: string | null;
+    telegram?: string | null;
     uri?: string | null;
     image?: string | null;
     signature?: string | null;
@@ -640,6 +782,10 @@ async function starPumpFeedRow(
     name: row.name ?? null,
     symbol: row.symbol ?? null,
     creator: row.creator ?? null,
+    description: row.description ?? null,
+    website: row.website ?? null,
+    twitter: row.twitter ?? null,
+    telegram: row.telegram ?? null,
     uri: row.uri ?? null,
     image: row.image ?? null,
     signature: row.signature ?? null,
@@ -671,6 +817,10 @@ async function quickBuyPumpFeedRow(row: PumpFeedRow): Promise<void> {
         name: row.name ?? null,
         symbol: row.symbol ?? null,
         creator: row.creator ?? null,
+        description: row.description ?? null,
+        website: row.website ?? null,
+        twitter: row.twitter ?? null,
+        telegram: row.telegram ?? null,
         uri: row.uri ?? null,
         image: row.image ?? null,
         signature: row.signature ?? null,
@@ -690,7 +840,6 @@ async function quickBuyPumpFeedRow(row: PumpFeedRow): Promise<void> {
       skipPreflight: "true",
     }),
   });
-  await refreshPumpLive();
 }
 
 let pumpFeedUpdateScheduled = false;
@@ -753,13 +902,15 @@ function handleSseBlock(block: string): void {
       state.pumpFeedStatus = (payload.status ??
         event) as State["pumpFeedStatus"];
       state.pumpFeedError = null;
-      if (state.pumpFeedStatus === "connected")
-        void refreshPumpLive()
-          .then(() => update())
-          .catch(() => undefined);
       schedulePumpFeedUpdate();
     } else if (event === "warning") {
-      state.pumpFeedError = payload.error ?? "Pump feed warning";
+      const message = payload.error ?? payload.message ?? "Pump feed warning";
+      state.pumpFeedError = String(message);
+      notify(
+        classifyNotice(String(message)),
+        String(message),
+        JSON.stringify(payload, null, 2),
+      );
       schedulePumpFeedUpdate();
     }
   } catch {
@@ -805,6 +956,7 @@ async function startPumpFeed(): Promise<void> {
       state.pumpFeedStatus = "error";
       state.pumpFeedError =
         error instanceof Error ? error.message : String(error);
+      notify(classifyNotice(state.pumpFeedError), state.pumpFeedError);
     }
   } finally {
     if (state.pumpFeedAbort === abort) state.pumpFeedAbort = null;
@@ -2020,8 +2172,6 @@ function TerminalView() {
                 <th>Creator</th>
                 <th>Initial buy</th>
                 <th>MCap SOL</th>
-                <th>SMA 1m</th>
-                <th>SMA 5m</th>
                 <th>Δ MCap</th>
                 <th>Δ %</th>
                 <th>Last trade</th>
@@ -2058,6 +2208,7 @@ function TerminalView() {
                     <div className="muted small">
                       {row.name ?? row.eventType ?? "new token"}
                     </div>
+                    <SocialLinks {...row} />
                   </td>
                   <td className="code">
                     {row.mint ? (
@@ -2075,8 +2226,6 @@ function TerminalView() {
                   <td className="code">{short(row.creator)}</td>
                   <td>{formatSol(row.initialBuy ?? row.solAmount)}</td>
                   <td>{formatSol(latestMcap(row))}</td>
-                  <td>{formatSol(row.sma1m)}</td>
-                  <td>{formatSol(row.sma5m)}</td>
                   <td
                     className={
                       mcapChange(row) != null && mcapChange(row)! > 0
@@ -2331,6 +2480,7 @@ function WatchlistsView() {
                     <div className="muted small">
                       {token.name ?? "watched token"}
                     </div>
+                    <SocialLinks {...token} />
                   </td>
                   <td className="code">
                     <a
@@ -2855,6 +3005,27 @@ function JobsView() {
   );
 }
 
+function ToastStack() {
+  return (
+    <div className="toast-stack">
+      {state.toasts.map((toast) => (
+        <div className={`toast ${toast.type}`}>
+          <button
+            type="button"
+            className="toast-close"
+            onClick={() => dismissToast(toast.id)}
+          >
+            ×
+          </button>
+          <div className="toast-title">{toast.type.toUpperCase()}</div>
+          <div className="toast-message">{toast.message}</div>
+          {toast.details ? <pre>{toast.details}</pre> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function App() {
   return (
     <>
@@ -2893,6 +3064,7 @@ function App() {
       ) : (
         <JobsView />
       )}
+      <ToastStack />
     </>
   );
 }

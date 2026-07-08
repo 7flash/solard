@@ -71,13 +71,52 @@ function heliusWsUrl(): string {
   );
 }
 
+class RpcRateLimitError extends Error {
+  constructor(
+    message: string,
+    readonly retryAfterMs: number,
+  ) {
+    super(message);
+  }
+}
+
+function intEnv(name: string, fallback: number): number {
+  const value = process.env[name]?.trim();
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+function retryAfterMs(response: Response, fallbackMs: number): number {
+  const header = response.headers.get("retry-after");
+  if (!header) return fallbackMs;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0)
+    return Math.max(250, Math.floor(seconds * 1000));
+  const at = Date.parse(header);
+  return Number.isFinite(at) ? Math.max(250, at - Date.now()) : fallbackMs;
+}
+
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
   const response = await fetch(rpcHttpUrl(), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
   });
-  const payload = (await response.json()) as { result?: T; error?: unknown };
+  const text = await response.text();
+  let payload: { result?: T; error?: unknown } = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { error: text };
+  }
+  if (response.status === 429) {
+    const waitMs = retryAfterMs(
+      response,
+      intEnv("SOLWAL_HELIUS_429_BACKOFF_MS", 10_000),
+    );
+    throw new RpcRateLimitError(`RPC ${method} rate limited`, waitMs);
+  }
   if (!response.ok || payload.error)
     throw new Error(
       `RPC ${method} failed: ${JSON.stringify(payload.error ?? response.status)}`,
@@ -306,12 +345,122 @@ function runHeliusStream(args: {
   close: () => void;
 }): () => void {
   const wsUrl = heliusWsUrl();
+  const maxQueue = Math.max(1, intEnv("SOLWAL_HELIUS_ENRICH_QUEUE_MAX", 300));
+  const enrichPerSecond = Math.max(
+    0.1,
+    intEnv("SOLWAL_HELIUS_ENRICH_PER_SECOND", 2),
+  );
+  const seenLimit = Math.max(
+    maxQueue * 4,
+    intEnv("SOLWAL_HELIUS_SEEN_LIMIT", 5_000),
+  );
+  const queue: string[] = [];
+  const queued = new Set<string>();
+  const seen: string[] = [];
+  const seenSet = new Set<string>();
   let ws: WebSocket | null = null;
-  const seen = new Set<string>();
+  let closed = false;
+  let processing = false;
+  let rateLimitedUntil = 0;
+  let dropped = 0;
+  let queueTimer: ReturnType<typeof setTimeout> | null = null;
+  let statsTimer: ReturnType<typeof setInterval> | null = null;
+
+  const markSeen = (signature: string): boolean => {
+    if (seenSet.has(signature)) return false;
+    seenSet.add(signature);
+    seen.push(signature);
+    while (seen.length > seenLimit) {
+      const removed = seen.shift();
+      if (removed) seenSet.delete(removed);
+    }
+    return true;
+  };
+
+  const schedule = (delayMs = Math.ceil(1000 / enrichPerSecond)) => {
+    if (closed || queueTimer) return;
+    queueTimer = setTimeout(
+      () => {
+        queueTimer = null;
+        void pumpQueue();
+      },
+      Math.max(25, delayMs),
+    );
+  };
+
+  const enqueue = (signature: string): void => {
+    if (!markSeen(signature)) return;
+    if (queued.has(signature)) return;
+    if (queue.length >= maxQueue) {
+      dropped += 1;
+      const removed = queue.shift();
+      if (removed) queued.delete(removed);
+    }
+    queue.push(signature);
+    queued.add(signature);
+    schedule(0);
+  };
+
+  const pumpQueue = async (): Promise<void> => {
+    if (closed || processing) return;
+    const now = Date.now();
+    if (now < rateLimitedUntil) {
+      schedule(rateLimitedUntil - now);
+      return;
+    }
+    const signature = queue.shift();
+    if (!signature) return;
+    queued.delete(signature);
+    processing = true;
+    try {
+      const token = await normalizeHeliusSignature(signature);
+      if (token) args.send("token", token);
+      else
+        args.send("warning", {
+          source: "helius",
+          signature,
+          error: "create log seen but transaction parser did not extract token",
+          at: new Date().toISOString(),
+        });
+    } catch (error) {
+      if (error instanceof RpcRateLimitError) {
+        rateLimitedUntil = Date.now() + error.retryAfterMs;
+        queue.unshift(signature);
+        queued.add(signature);
+        args.send("warning", {
+          source: "helius",
+          kind: "rate-limit",
+          error: error.message,
+          retryAfterMs: error.retryAfterMs,
+          queued: queue.length,
+          dropped,
+          at: new Date().toISOString(),
+        });
+      } else {
+        args.send("warning", {
+          source: "helius",
+          signature,
+          error: error instanceof Error ? error.message : String(error),
+          at: new Date().toISOString(),
+        });
+      }
+    } finally {
+      processing = false;
+      if (queue.length > 0)
+        schedule(
+          Date.now() < rateLimitedUntil
+            ? rateLimitedUntil - Date.now()
+            : Math.ceil(1000 / enrichPerSecond),
+        );
+    }
+  };
+
   args.send("status", {
     status: "connecting",
     source: "helius",
     wsUrl: wsUrl.replace(/api-key=[^&]+/, "api-key=***"),
+    enrichPerSecond,
+    maxQueue,
     at: new Date().toISOString(),
   });
   ws = new WebSocket(wsUrl);
@@ -319,6 +468,8 @@ function runHeliusStream(args: {
     args.send("status", {
       status: "connected",
       source: "helius",
+      enrichPerSecond,
+      maxQueue,
       at: new Date().toISOString(),
     });
     ws?.send(
@@ -331,47 +482,43 @@ function runHeliusStream(args: {
     );
   });
   ws.addEventListener("message", (message) => {
-    void (async () => {
-      try {
-        const text =
-          typeof message.data === "string"
-            ? message.data
-            : String(message.data);
-        const parsed = JSON.parse(text) as Raw;
-        const value = ((
-          (parsed.params as Raw | undefined)?.result as Raw | undefined
-        )?.value ?? {}) as Raw;
-        const signature = clean(value.signature);
-        const logs = Array.isArray(value.logs) ? value.logs.map(String) : [];
-        if (!signature || seen.has(signature)) return;
-        if (
-          !logs.some(
-            (line) =>
-              /Instruction:\s*Create/i.test(line) ||
-              /CreateV2|create_v2/i.test(line),
-          )
+    try {
+      const text =
+        typeof message.data === "string" ? message.data : String(message.data);
+      const parsed = JSON.parse(text) as Raw;
+      const value = ((
+        (parsed.params as Raw | undefined)?.result as Raw | undefined
+      )?.value ?? {}) as Raw;
+      const signature = clean(value.signature);
+      const logs = Array.isArray(value.logs) ? value.logs.map(String) : [];
+      if (!signature) return;
+      if (
+        !logs.some(
+          (line) =>
+            /Instruction:\s*Create/i.test(line) ||
+            /CreateV2|create_v2/i.test(line),
         )
-          return;
-        seen.add(signature);
-        const token = await normalizeHeliusSignature(signature);
-        if (token) args.send("token", token);
-        else
-          args.send("warning", {
-            source: "helius",
-            signature,
-            error:
-              "create log seen but transaction parser did not extract token",
-            at: new Date().toISOString(),
-          });
-      } catch (error) {
-        args.send("warning", {
-          source: "helius",
-          error: error instanceof Error ? error.message : String(error),
-          at: new Date().toISOString(),
-        });
-      }
-    })();
+      )
+        return;
+      enqueue(signature);
+    } catch (error) {
+      args.send("warning", {
+        source: "helius",
+        error: error instanceof Error ? error.message : String(error),
+        at: new Date().toISOString(),
+      });
+    }
   });
+  statsTimer = setInterval(() => {
+    args.send("status", {
+      status: "helius-enrichment",
+      source: "helius",
+      queued: queue.length,
+      dropped,
+      rateLimitedMs: Math.max(0, rateLimitedUntil - Date.now()),
+      at: new Date().toISOString(),
+    });
+  }, 5_000);
   ws.addEventListener("error", () =>
     args.send("status", {
       status: "error",
@@ -390,6 +537,9 @@ function runHeliusStream(args: {
     args.close();
   });
   return () => {
+    closed = true;
+    if (queueTimer) clearTimeout(queueTimer);
+    if (statsTimer) clearInterval(statsTimer);
     try {
       ws?.close();
     } catch {}

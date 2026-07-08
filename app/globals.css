@@ -657,3 +657,112 @@ button.primary.compact {
   .terminal-controls { justify-content: flex-start; }
   .mini-field { min-width: 46%; }
 }
+
+/* Live errors / toasts */
+.toast-stack {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 9999;
+  display: grid;
+  gap: 8px;
+  width: min(520px, calc(100vw - 28px));
+  pointer-events: none;
+}
+.toast {
+  position: relative;
+  pointer-events: auto;
+  border: 2px solid var(--line-strong, #334155);
+  background: #050608;
+  color: var(--text, #e5e7eb);
+  padding: 10px 34px 10px 10px;
+  box-shadow: none;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.toast.warn { border-color: var(--warn, #f59e0b); }
+.toast.error { border-color: var(--bad, #ef4444); }
+.toast.ok { border-color: var(--green, #22c55e); }
+.toast-title {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 1000;
+  letter-spacing: .12em;
+  color: var(--muted, #94a3b8);
+  margin-bottom: 5px;
+}
+.toast-message {
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 900;
+  word-break: break-word;
+}
+.toast pre {
+  margin: 8px 0 0;
+  max-height: 160px;
+  overflow: auto;
+  border-top: 1px solid var(--line, #1f2937);
+  padding-top: 8px;
+  white-space: pre-wrap;
+  font-size: 10px;
+  color: var(--muted, #94a3b8);
+}
+.toast-close {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  width: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 1px solid var(--line, #1f2937);
+  background: transparent;
+  color: var(--muted, #94a3b8);
+}
+
+/* Social link hover previews */
+.social-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.social-hover {
+  position: relative;
+  display: inline-flex;
+}
+.social-hover > a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--line, #1f2937);
+  color: var(--green, #22c55e);
+  background: #020304;
+  font-size: 10px;
+  font-weight: 1000;
+  letter-spacing: .06em;
+  text-decoration: none;
+}
+.social-frame {
+  display: none;
+  position: fixed;
+  z-index: 9998;
+  left: 50%;
+  top: 70px;
+  width: min(720px, 72vw);
+  height: min(520px, 72vh);
+  transform: translateX(-50%);
+  border: 2px solid var(--line-strong, #334155);
+  background: #020304;
+  padding: 6px;
+}
+.social-frame iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+.social-hover:hover .social-frame { display: block; }
+@media (max-width: 900px) {
+  .social-frame { width: calc(100vw - 24px); height: 60vh; top: 80px; }
+}
