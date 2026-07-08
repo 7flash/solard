@@ -46,3 +46,12 @@ pre { background: rgba(0,0,0,.24); border: 1px solid rgba(255,255,255,.08); bord
 .wide-table input, .wide-table select { min-width: 110px; margin: 2px 0; }
 .mini-grid { display: grid; grid-template-columns: repeat(3, minmax(72px, 1fr)); gap: 6px; }
 .between { justify-content: space-between; align-items: center; }
+
+.terminal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; flex-wrap: wrap; }
+.terminal-table { overflow: auto; max-height: 620px; margin-top: 12px; border-radius: 14px; border: 1px solid rgba(255,255,255,.08); }
+.terminal-table table { min-width: 980px; }
+.terminal-table tbody tr { background: rgba(30, 255, 154, .018); }
+.terminal-table tbody tr:hover { background: rgba(131, 162, 255, .08); }
+.token-title { font-weight: 900; letter-spacing: .02em; color: #dff7ff; }
+a { color: #95b5ff; text-decoration: none; }
+a:hover { text-decoration: underline; }

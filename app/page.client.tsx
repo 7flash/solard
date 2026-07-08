@@ -34,8 +34,24 @@ type BuyPlanRow = {
   maxFailedAttempts: string;
 };
 
+type PumpFeedRow = {
+  seq?: number;
+  receivedAt?: string;
+  eventType?: string;
+  mint?: string | null;
+  name?: string | null;
+  symbol?: string | null;
+  uri?: string | null;
+  creator?: string | null;
+  signature?: string | null;
+  initialBuy?: number | null;
+  solAmount?: number | null;
+  marketCapSol?: number | null;
+  raw?: AnyRow;
+};
+
 type State = {
-  tab: "overview" | "wallets" | "launch" | "trade" | "jobs";
+  tab: "overview" | "wallets" | "terminal" | "launch" | "trade" | "jobs";
   overview: Overview | null;
   jobs: AnyRow[];
   selectedJobId: string | null;
@@ -44,6 +60,11 @@ type State = {
   error: string | null;
   token: string;
   buyPlanRows: BuyPlanRow[];
+  pumpFeed: PumpFeedRow[];
+  pumpFeedStatus: "idle" | "connecting" | "connected" | "error" | "closed";
+  pumpFeedError: string | null;
+  pumpFeedFilter: string;
+  pumpFeedAbort: AbortController | null;
 };
 
 const state: State = {
@@ -56,6 +77,11 @@ const state: State = {
   error: null,
   token: localStorage.getItem("solwal:web-token") ?? "",
   buyPlanRows: [],
+  pumpFeed: [],
+  pumpFeedStatus: "idle",
+  pumpFeedError: null,
+  pumpFeedFilter: "",
+  pumpFeedAbort: null,
 };
 
 function authHeaders(): HeadersInit {
@@ -92,6 +118,112 @@ function solFromLamports(value: any): string {
     .padStart(9, "0")
     .replace(/0+$/, "");
   return `${whole}${frac ? `.${frac}` : ""}`;
+}
+
+function formatSol(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return value >= 0.001
+    ? value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")
+    : value.toExponential(2);
+}
+
+function tokenUrl(mint: string | null | undefined): string {
+  return mint ? `https://pump.fun/coin/${mint}` : "#";
+}
+
+let pumpFeedUpdateScheduled = false;
+function schedulePumpFeedUpdate(): void {
+  if (pumpFeedUpdateScheduled) return;
+  pumpFeedUpdateScheduled = true;
+  setTimeout(() => {
+    pumpFeedUpdateScheduled = false;
+    update();
+  }, 120);
+}
+
+function appendPumpFeed(row: PumpFeedRow): void {
+  state.pumpFeed = [row, ...state.pumpFeed].slice(0, 350);
+  schedulePumpFeedUpdate();
+}
+
+function handleSseBlock(block: string): void {
+  const lines = block.split("\n");
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:"))
+      dataLines.push(line.slice(5).trimStart());
+  }
+  if (dataLines.length === 0) return;
+  const text = dataLines.join("\n");
+  try {
+    const payload = JSON.parse(text);
+    if (event === "token") appendPumpFeed(payload as PumpFeedRow);
+    else if (event === "status") {
+      state.pumpFeedStatus = (payload.status ??
+        event) as State["pumpFeedStatus"];
+      state.pumpFeedError = null;
+      schedulePumpFeedUpdate();
+    } else if (event === "warning") {
+      state.pumpFeedError = payload.error ?? "Pump feed warning";
+      schedulePumpFeedUpdate();
+    }
+  } catch {
+    state.pumpFeedError = text;
+    schedulePumpFeedUpdate();
+  }
+}
+
+async function startPumpFeed(): Promise<void> {
+  state.pumpFeedAbort?.abort();
+  const abort = new AbortController();
+  state.pumpFeedAbort = abort;
+  state.pumpFeedStatus = "connecting";
+  state.pumpFeedError = null;
+  update();
+  try {
+    const response = await fetch("/api/pump-feed", {
+      headers: authHeaders(),
+      signal: abort.signal,
+    });
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error ?? `Pump feed HTTP ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (!abort.signal.aborted) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let split = buffer.indexOf("\n\n");
+      while (split >= 0) {
+        const block = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        handleSseBlock(block);
+        split = buffer.indexOf("\n\n");
+      }
+    }
+    if (!abort.signal.aborted) state.pumpFeedStatus = "closed";
+  } catch (error) {
+    if (!abort.signal.aborted) {
+      state.pumpFeedStatus = "error";
+      state.pumpFeedError =
+        error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    if (state.pumpFeedAbort === abort) state.pumpFeedAbort = null;
+    update();
+  }
+}
+
+function stopPumpFeed(): void {
+  state.pumpFeedAbort?.abort();
+  state.pumpFeedAbort = null;
+  state.pumpFeedStatus = "closed";
+  update();
 }
 
 function formData(form: HTMLFormElement): AnyRow {
@@ -707,6 +839,140 @@ function BuyPlanTable() {
   );
 }
 
+function TerminalView() {
+  const filter = state.pumpFeedFilter.trim().toLowerCase();
+  const rows = filter
+    ? state.pumpFeed.filter((row) =>
+        [row.name, row.symbol, row.mint, row.creator].some((value) =>
+          String(value ?? "")
+            .toLowerCase()
+            .includes(filter),
+        ),
+      )
+    : state.pumpFeed;
+  return (
+    <div className="grid">
+      <div className="card span-12 terminal-head">
+        <div>
+          <h2>Pump.fun new-token terminal</h2>
+          <p className="muted">
+            Live feed from PumpPortal WebSocket subscribeNewToken. Use it for
+            watch-only discovery; trading still requires an explicit
+            launch/trade action.
+          </p>
+        </div>
+        <div className="row">
+          <span
+            className={`pill ${state.pumpFeedStatus === "connected" ? "ok" : state.pumpFeedStatus === "error" ? "bad" : ""}`}
+          >
+            {state.pumpFeedStatus}
+          </span>
+          <button type="button" onClick={() => void startPumpFeed()}>
+            {state.pumpFeedStatus === "connected" ? "Reconnect" : "Connect"}
+          </button>
+          <button type="button" className="secondary" onClick={stopPumpFeed}>
+            Stop
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => {
+              state.pumpFeed = [];
+              update();
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      <div className="card span-12">
+        <div className="row between">
+          <div className="row">
+            <label>
+              Filter
+              <input
+                value={state.pumpFeedFilter}
+                placeholder="symbol, name, mint, creator"
+                onInput={(event: any) => {
+                  state.pumpFeedFilter = event.currentTarget.value;
+                  update();
+                }}
+              />
+            </label>
+            <span className="pill">
+              {rows.length} shown / {state.pumpFeed.length} cached
+            </span>
+          </div>
+          {state.pumpFeedError ? (
+            <span className="pill bad">{state.pumpFeedError}</span>
+          ) : null}
+        </div>
+        <div className="terminal-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Token</th>
+                <th>Mint</th>
+                <th>Creator</th>
+                <th>Initial buy</th>
+                <th>MCap SOL</th>
+                <th>Sig</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr>
+                  <td className="code">
+                    {row.receivedAt
+                      ? new Date(row.receivedAt).toLocaleTimeString()
+                      : "—"}
+                  </td>
+                  <td>
+                    <div className="token-title">
+                      {row.symbol ? `$${row.symbol}` : "—"}
+                    </div>
+                    <div className="muted small">
+                      {row.name ?? row.eventType ?? "new token"}
+                    </div>
+                  </td>
+                  <td className="code">
+                    {row.mint ? (
+                      <a
+                        href={tokenUrl(row.mint)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {short(row.mint)}
+                      </a>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="code">{short(row.creator)}</td>
+                  <td>{formatSol(row.initialBuy ?? row.solAmount)}</td>
+                  <td>{formatSol(row.marketCapSol)}</td>
+                  <td className="code">{short(row.signature)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="card span-12">
+        <h3>Latest raw event</h3>
+        {state.pumpFeed[0] ? (
+          <pre>{JSON.stringify(state.pumpFeed[0], null, 2)}</pre>
+        ) : (
+          <p className="muted">
+            Connect to the feed to see new Pump.fun launches.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LaunchView() {
   return (
     <form
@@ -1054,6 +1320,8 @@ function App() {
         <OverviewView />
       ) : state.tab === "wallets" ? (
         <WalletsView />
+      ) : state.tab === "terminal" ? (
+        <TerminalView />
       ) : state.tab === "launch" ? (
         <LaunchView />
       ) : state.tab === "trade" ? (
@@ -1095,5 +1363,8 @@ export default function mount() {
         .catch(() => undefined);
   }, 1500);
   update();
-  return () => clearInterval(interval);
+  return () => {
+    clearInterval(interval);
+    state.pumpFeedAbort?.abort();
+  };
 }

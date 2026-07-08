@@ -25,6 +25,7 @@ export default function HomePage() {
           Overview
         </button>
         <button data-tab="wallets">Wallets & groups</button>
+        <button data-tab="terminal">Pump terminal</button>
         <button data-tab="launch">Launch pump</button>
         <button data-tab="trade">Trade</button>
         <button data-tab="jobs">Jobs</button>
