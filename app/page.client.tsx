@@ -43,10 +43,6 @@ type PumpFeedRow = {
   symbol?: string | null;
   uri?: string | null;
   creator?: string | null;
-  description?: string | null;
-  website?: string | null;
-  twitter?: string | null;
-  telegram?: string | null;
   signature?: string | null;
   initialBuy?: number | null;
   solAmount?: number | null;
@@ -81,10 +77,6 @@ type TokenWatchToken = {
   name?: string | null;
   symbol?: string | null;
   creator?: string | null;
-  description?: string | null;
-  website?: string | null;
-  twitter?: string | null;
-  telegram?: string | null;
   uri?: string | null;
   image?: string | null;
   signature?: string | null;
@@ -115,14 +107,6 @@ type TokenWatchGroup = {
   tokens: TokenWatchToken[];
 };
 
-type Toast = {
-  id: string;
-  type: "info" | "warn" | "error" | "ok";
-  message: string;
-  details?: string | null;
-  createdAtMs: number;
-};
-
 type State = {
   tab:
     | "overview"
@@ -133,6 +117,7 @@ type State = {
     | "trade"
     | "jobs";
   overview: Overview | null;
+  rpcStatus: AnyRow | null;
   jobs: AnyRow[];
   selectedJobId: string | null;
   selectedJob: AnyRow | null;
@@ -169,7 +154,6 @@ type State = {
     | "newest";
   hideMayhem: boolean;
   hideUsdc: boolean;
-  toasts: Toast[];
   pumpFeedAbort: AbortController | null;
   watchGroups: TokenWatchGroup[];
   selectedWatchGroupId: string | null;
@@ -179,6 +163,7 @@ type State = {
 const state: State = {
   tab: "overview",
   overview: null,
+  rpcStatus: null,
   jobs: [],
   selectedJobId: null,
   selectedJob: null,
@@ -218,7 +203,6 @@ const state: State = {
     "mcap-desc",
   hideMayhem: localStorage.getItem("solwal:pump-hide-mayhem") === "1",
   hideUsdc: localStorage.getItem("solwal:pump-hide-usdc") === "1",
-  toasts: [],
   pumpFeedAbort: null,
   watchGroups: [],
   selectedWatchGroupId: null,
@@ -250,48 +234,6 @@ function authHeaders(): HeadersInit {
   return state.token ? { "x-solwal-web-token": state.token } : {};
 }
 
-function notify(
-  type: Toast["type"],
-  message: string,
-  details?: string | null,
-): void {
-  const cleanMessage = String(message || "notice").slice(0, 420);
-  const cleanDetails = details ? String(details).slice(0, 1800) : null;
-  const duplicate = state.toasts.find(
-    (toast) =>
-      toast.message === cleanMessage && Date.now() - toast.createdAtMs < 5_000,
-  );
-  if (duplicate) return;
-  state.toasts = [
-    {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      type,
-      message: cleanMessage,
-      details: cleanDetails,
-      createdAtMs: Date.now(),
-    },
-    ...state.toasts,
-  ].slice(0, 8);
-  update();
-}
-
-function dismissToast(id: string): void {
-  state.toasts = state.toasts.filter((toast) => toast.id !== id);
-  update();
-}
-
-function classifyNotice(message: string): Toast["type"] {
-  const lower = message.toLowerCase();
-  if (
-    lower.includes("429") ||
-    lower.includes("too many requests") ||
-    lower.includes("rate limit")
-  )
-    return "warn";
-  if (lower.includes("error") || lower.includes("failed")) return "error";
-  return "info";
-}
-
 async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(url, {
     ...options,
@@ -302,15 +244,8 @@ async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
     },
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false) {
-    const message = payload.error ?? `HTTP ${response.status}`;
-    notify(
-      classifyNotice(String(message)),
-      String(message),
-      JSON.stringify(payload, null, 2),
-    );
-    throw new Error(message);
-  }
+  if (!response.ok || payload.ok === false)
+    throw new Error(payload.error ?? `HTTP ${response.status}`);
   return payload.value as T;
 }
 
@@ -353,103 +288,25 @@ function tokenImage(row: {
     : image;
 }
 
-function deepText(value: unknown, depth = 0): string {
-  if (value == null || depth > 3) return "";
-  if (["string", "number", "boolean"].includes(typeof value))
-    return String(value);
-  if (Array.isArray(value))
-    return value.map((item) => deepText(item, depth + 1)).join(" ");
-  if (typeof value === "object")
-    return Object.entries(value as AnyRow)
-      .map(([key, item]) => `${key} ${deepText(item, depth + 1)}`)
-      .join(" ");
-  return "";
-}
-
-function rowSearchText(row: AnyRow): string {
-  return [
-    row.name,
-    row.symbol,
-    row.description,
-    row.creator,
-    row.quoteAsset,
-    row.quoteMint,
-    row.website,
-    row.twitter,
-    row.telegram,
-    deepText(row.raw),
-  ]
-    .map((value) => String(value ?? ""))
-    .join(" ")
-    .toLowerCase();
-}
-
-function normalizeUrl(value: unknown): string | null {
-  const raw = String(value ?? "").trim();
-  if (!raw || raw === "null" || raw === "undefined") return null;
-  if (/^https?:\/\//i.test(raw)) return raw;
-  if (/^t\.me\//i.test(raw)) return `https://${raw}`;
-  if (/^(x\.com|twitter\.com)\//i.test(raw)) return `https://${raw}`;
-  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(raw)) return `https://${raw}`;
-  return null;
-}
-
-function socialLinks(row: AnyRow): Array<{ label: string; url: string }> {
-  const raw = row.raw ?? {};
-  const entries = [
-    ["WEB", row.website ?? raw.website ?? raw.site ?? raw.external_url],
-    ["X", row.twitter ?? raw.twitter ?? raw.x ?? raw.twitterUrl],
-    ["TG", row.telegram ?? raw.telegram ?? raw.telegramUrl],
-  ] as const;
-  const seen = new Set<string>();
-  return entries.flatMap(([label, value]) => {
-    const url = normalizeUrl(value);
-    if (!url || seen.has(url)) return [];
-    seen.add(url);
-    return [{ label, url }];
-  });
-}
-
-function SocialLinks(row: AnyRow) {
-  const links = socialLinks(row);
-  if (!links.length) return null;
-  return (
-    <span className="social-links">
-      {links.map((link) => (
-        <span className="social-hover" title={link.url}>
-          <a href={link.url} target="_blank" rel="noreferrer">
-            {link.label}
-          </a>
-          <span className="social-frame">
-            <iframe
-              src={link.url}
-              loading="lazy"
-              sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
-            />
-          </span>
-        </span>
-      ))}
-    </span>
-  );
-}
-
 function isMayhemToken(row: {
   isMayhemMode?: boolean | null;
   raw?: AnyRow;
-  name?: string | null;
-  symbol?: string | null;
-  description?: string | null;
 }): boolean {
   if (row.isMayhemMode === true) return true;
-  const text = rowSearchText(row as AnyRow);
-  if (/(^|[^a-z])mayhem([^a-z]|$)/i.test(text)) return true;
   const raw = row.raw ?? {};
-  return Object.entries(raw).some(
-    ([key, value]) =>
-      key.toLowerCase().includes("mayhem") &&
-      (value === true ||
-        String(value).toLowerCase().includes("mayhem") ||
-        String(value) === "1"),
+  return [
+    "isMayhemMode",
+    "mayhemMode",
+    "mayhem",
+    "isMayhem",
+    "mode",
+    "launchMode",
+    "curveType",
+  ].some(
+    (key) =>
+      String(raw[key] ?? "")
+        .toLowerCase()
+        .includes("mayhem") || raw[key] === true,
   );
 }
 
@@ -458,7 +315,17 @@ function isUsdcToken(row: {
   quoteMint?: string | null;
   raw?: AnyRow;
 }): boolean {
-  const text = rowSearchText(row as AnyRow);
+  const text = [
+    row.quoteAsset,
+    row.quoteMint,
+    row.raw?.quoteAsset,
+    row.raw?.quoteSymbol,
+    row.raw?.quoteMint,
+    row.raw?.quoteTokenMint,
+    row.raw?.quoteCurrency,
+  ]
+    .map((value) => String(value ?? "").toLowerCase())
+    .join(" ");
   return (
     text.includes("usdc") ||
     text.includes("epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v")
@@ -470,9 +337,6 @@ function passesBadgeFilters(row: {
   quoteAsset?: string | null;
   quoteMint?: string | null;
   raw?: AnyRow;
-  name?: string | null;
-  symbol?: string | null;
-  description?: string | null;
 }): boolean {
   if (state.hideMayhem && isMayhemToken(row)) return false;
   if (state.hideUsdc && isUsdcToken(row)) return false;
@@ -734,17 +598,10 @@ async function addWatchedToken(
     name?: string | null;
     symbol?: string | null;
     creator?: string | null;
-    description?: string | null;
-    website?: string | null;
-    twitter?: string | null;
-    telegram?: string | null;
     uri?: string | null;
     image?: string | null;
     signature?: string | null;
     marketCapSol?: number | null;
-    isMayhemMode?: boolean | null;
-    quoteAsset?: string | null;
-    quoteMint?: string | null;
     source?: string;
   },
 ): Promise<void> {
@@ -782,10 +639,6 @@ async function starPumpFeedRow(
     name: row.name ?? null,
     symbol: row.symbol ?? null,
     creator: row.creator ?? null,
-    description: row.description ?? null,
-    website: row.website ?? null,
-    twitter: row.twitter ?? null,
-    telegram: row.telegram ?? null,
     uri: row.uri ?? null,
     image: row.image ?? null,
     signature: row.signature ?? null,
@@ -812,23 +665,6 @@ async function quickBuyPumpFeedRow(row: PumpFeedRow): Promise<void> {
     body: JSON.stringify({
       wallet: state.terminalDefaultWallet.trim(),
       token: row.mint,
-      tokenMeta: {
-        mint: row.mint,
-        name: row.name ?? null,
-        symbol: row.symbol ?? null,
-        creator: row.creator ?? null,
-        description: row.description ?? null,
-        website: row.website ?? null,
-        twitter: row.twitter ?? null,
-        telegram: row.telegram ?? null,
-        uri: row.uri ?? null,
-        image: row.image ?? null,
-        signature: row.signature ?? null,
-        marketCapSol: row.marketCapSol ?? row.lastMarketCapSol ?? null,
-        isMayhemMode: row.isMayhemMode ?? null,
-        quoteAsset: row.quoteAsset ?? null,
-        quoteMint: row.quoteMint ?? null,
-      },
       amountSol: state.terminalDefaultBuySol.trim(),
       slippageBps: state.terminalDefaultSlippageBps.trim() || "9999",
       sender: state.terminalDefaultSender,
@@ -904,13 +740,7 @@ function handleSseBlock(block: string): void {
       state.pumpFeedError = null;
       schedulePumpFeedUpdate();
     } else if (event === "warning") {
-      const message = payload.error ?? payload.message ?? "Pump feed warning";
-      state.pumpFeedError = String(message);
-      notify(
-        classifyNotice(String(message)),
-        String(message),
-        JSON.stringify(payload, null, 2),
-      );
+      state.pumpFeedError = payload.error ?? "Pump feed warning";
       schedulePumpFeedUpdate();
     }
   } catch {
@@ -956,7 +786,6 @@ async function startPumpFeed(): Promise<void> {
       state.pumpFeedStatus = "error";
       state.pumpFeedError =
         error instanceof Error ? error.message : String(error);
-      notify(classifyNotice(state.pumpFeedError), state.pumpFeedError);
     }
   } finally {
     if (state.pumpFeedAbort === abort) state.pumpFeedAbort = null;
@@ -975,12 +804,29 @@ function formData(form: HTMLFormElement): AnyRow {
   return Object.fromEntries(new FormData(form).entries());
 }
 
-async function refreshOverview(): Promise<void> {
-  state.overview = await api<Overview>("/api/overview");
+async function refreshStatus(): Promise<void> {
+  state.rpcStatus = await api<AnyRow>("/api/status");
   const status = document.getElementById("connection-status");
   if (status) {
-    status.textContent = "connected";
-    status.className = "pill ok";
+    status.textContent = state.rpcStatus?.ok ? "connected" : "rpc error";
+    status.className = state.rpcStatus?.ok ? "pill ok" : "pill bad";
+  }
+  const last = document.getElementById("last-refresh");
+  if (last) last.textContent = new Date().toLocaleTimeString();
+}
+
+async function refreshOverview(): Promise<void> {
+  const [overview, rpcStatus] = await Promise.all([
+    api<Overview>("/api/overview"),
+    api<AnyRow>("/api/status").catch(() => null),
+  ]);
+  state.overview = overview;
+  if (rpcStatus) state.rpcStatus = rpcStatus;
+  const status = document.getElementById("connection-status");
+  if (status) {
+    status.textContent =
+      state.rpcStatus?.ok === false ? "rpc error" : "connected";
+    status.className = state.rpcStatus?.ok === false ? "pill bad" : "pill ok";
   }
   const last = document.getElementById("last-refresh");
   if (last) last.textContent = new Date().toLocaleTimeString();
@@ -1134,6 +980,81 @@ function LaunchRunSummary({ job }: { job: AnyRow | null }) {
   );
 }
 
+function ConnectionStrip() {
+  const status = state.rpcStatus;
+  const wallets = state.overview?.wallets ?? [];
+  return (
+    <div className="connection-strip">
+      <div className="conn-cell">
+        <span className={`dot ${status?.ok ? "good" : "bad"}`} />
+        <div>
+          <div className="label">RPC</div>
+          <div className="code">{status?.rpc?.url ?? "not checked"}</div>
+        </div>
+      </div>
+      <div className="conn-cell compact">
+        <div className="label">SOURCE</div>
+        <div>{status?.rpc?.source ?? "—"}</div>
+      </div>
+      <div className="conn-cell compact">
+        <div className="label">API KEY</div>
+        <div>{status?.rpc?.hasApiKey ? "yes" : "no / unknown"}</div>
+      </div>
+      <div className="conn-cell compact">
+        <div className="label">PING</div>
+        <div>{status?.latencyMs != null ? `${status.latencyMs}ms` : "—"}</div>
+      </div>
+      <div className="conn-cell compact">
+        <div className="label">SLOT</div>
+        <div>{status?.slot ?? "—"}</div>
+      </div>
+      <label className="conn-select">
+        <span>Current wallet</span>
+        <select
+          value={state.terminalDefaultWallet}
+          onInput={(event: any) => {
+            state.terminalDefaultWallet = event.currentTarget.value;
+            localStorage.setItem(
+              "solwal:terminal-default-wallet",
+              state.terminalDefaultWallet,
+            );
+            update();
+          }}
+        >
+          <option value="">select wallet…</option>
+          {wallets.map((wallet: AnyRow) => (
+            <option value={wallet.address}>
+              {wallet.name
+                ? `${wallet.name} · ${short(wallet.address)}`
+                : wallet.address}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="conn-amount">
+        <span>Default buy SOL</span>
+        <input
+          value={state.terminalDefaultBuySol}
+          onInput={(event: any) => {
+            state.terminalDefaultBuySol = event.currentTarget.value;
+            localStorage.setItem(
+              "solwal:terminal-default-buy-sol",
+              state.terminalDefaultBuySol,
+            );
+          }}
+        />
+      </label>
+      <button
+        type="button"
+        className="secondary compact"
+        onClick={() => void runAction(refreshStatus)}
+      >
+        Ping
+      </button>
+    </div>
+  );
+}
+
 function Stats() {
   const data = state.overview;
   const visibleExecutions = (data?.executions ?? []).filter(
@@ -1240,29 +1161,24 @@ function OverviewView() {
                   <td>{row.wallet?.name ?? "—"}</td>
                   <td className="code">{short(row.wallet?.address)}</td>
                   <td>
-                    {row.error ? (
-                      <span className="pill bad">
-                        {String(row.error).slice(0, 80)}
-                      </span>
-                    ) : (
-                      <>
-                        <div className="balance-main">
-                          {solFromLamports(row.solLamports)} SOL
-                        </div>
-                        <div className="holdings">
-                          {(row.visibleTokenBalances ?? [])
-                            .slice(0, 8)
-                            .map((token: AnyRow) => (
-                              <span className="holding">
-                                {token.symbol
-                                  ? `$${token.symbol}`
-                                  : short(token.mint, 3, 3)}{" "}
-                                {token.amountUi ?? token.amountRaw}
-                              </span>
-                            ))}
-                        </div>
-                      </>
-                    )}
+                    <div className="balance-main">
+                      {solFromLamports(row.solLamports)} SOL
+                    </div>
+                    <div className="holdings">
+                      {(row.visibleTokenBalances ?? [])
+                        .slice(0, 8)
+                        .map((token: AnyRow) => (
+                          <span className="holding">
+                            {token.symbol
+                              ? `$${token.symbol}`
+                              : short(token.mint, 3, 3)}{" "}
+                            {token.amountUi ?? token.amountRaw}
+                          </span>
+                        ))}
+                    </div>
+                    {row.balanceWarning ? (
+                      <div className="muted tiny">partial balance data</div>
+                    ) : null}
                   </td>
                 </tr>
               ))}
@@ -2208,7 +2124,6 @@ function TerminalView() {
                     <div className="muted small">
                       {row.name ?? row.eventType ?? "new token"}
                     </div>
-                    <SocialLinks {...row} />
                   </td>
                   <td className="code">
                     {row.mint ? (
@@ -2480,7 +2395,6 @@ function WatchlistsView() {
                     <div className="muted small">
                       {token.name ?? "watched token"}
                     </div>
-                    <SocialLinks {...token} />
                   </td>
                   <td className="code">
                     <a
@@ -3005,27 +2919,6 @@ function JobsView() {
   );
 }
 
-function ToastStack() {
-  return (
-    <div className="toast-stack">
-      {state.toasts.map((toast) => (
-        <div className={`toast ${toast.type}`}>
-          <button
-            type="button"
-            className="toast-close"
-            onClick={() => dismissToast(toast.id)}
-          >
-            ×
-          </button>
-          <div className="toast-title">{toast.type.toUpperCase()}</div>
-          <div className="toast-message">{toast.message}</div>
-          {toast.details ? <pre>{toast.details}</pre> : null}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function App() {
   return (
     <>
@@ -3049,6 +2942,7 @@ function App() {
         {state.busy ? <span className="pill">working…</span> : null}
         {state.error ? <span className="pill bad">{state.error}</span> : null}
       </div>
+      <ConnectionStrip />
       {state.tab === "overview" ? (
         <OverviewView />
       ) : state.tab === "wallets" ? (
@@ -3064,7 +2958,6 @@ function App() {
       ) : (
         <JobsView />
       )}
-      <ToastStack />
     </>
   );
 }
@@ -3083,6 +2976,7 @@ export default function mount() {
   state.tab = pageFromPath();
   void runAction(async () => {
     await refreshOverview();
+    await refreshStatus();
     await refreshJobs();
     await refreshPumpLive();
   });
@@ -3096,6 +2990,9 @@ export default function mount() {
       void refreshPumpLive()
         .then(update)
         .catch(() => undefined);
+    void refreshStatus()
+      .then(update)
+      .catch(() => undefined);
   }, 1500);
   update();
   return () => {

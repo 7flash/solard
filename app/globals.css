@@ -766,3 +766,42 @@ button.primary.compact {
 @media (max-width: 900px) {
   .social-frame { width: calc(100vw - 24px); height: 60vh; top: 80px; }
 }
+
+.connection-strip {
+  display: grid;
+  grid-template-columns: minmax(280px, 2fr) repeat(4, minmax(90px, 0.6fr)) minmax(240px, 1fr) 150px auto;
+  gap: 8px;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  background: #05080b;
+  padding: 10px;
+  margin: 0 0 14px;
+}
+.conn-cell, .conn-select, .conn-amount {
+  border: 1px solid #263142;
+  background: #080d12;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  overflow: hidden;
+}
+.conn-cell.compact { display: block; }
+.conn-cell .label, .conn-select span, .conn-amount span {
+  display: block;
+  color: var(--green);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-bottom: 3px;
+}
+.conn-cell .code { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dot { width: 10px; height: 10px; display: inline-block; border: 1px solid currentColor; }
+.dot.good { color: var(--green); background: rgba(0,255,160,.25); }
+.dot.bad { color: var(--red); background: rgba(255,58,94,.25); }
+.conn-select, .conn-amount { flex-direction: column; align-items: stretch; justify-content: center; }
+.conn-select select, .conn-amount input { width: 100%; min-height: 28px; }
+@media (max-width: 1200px) {
+  .connection-strip { grid-template-columns: 1fr 1fr; }
+}
