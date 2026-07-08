@@ -1,348 +1,42 @@
 import { render } from "tradjs/client";
 import { createClientMeasureScope, summarizeForClient } from "./measure";
+import { authHeaders, unwrapApiPayload } from "./api-client";
+import { installKeyboardShortcuts } from "./keyboard";
+import {
+  activePageFromLocation,
+  state,
+  type AnyRow,
+  type BuyPlanRow,
+  type Overview,
+  type Portfolio,
+  type PumpFeedRow,
+  type State,
+  type TelegramSignalsState,
+  type Toast,
+  type TokenHolder,
+  type TokenWatchGroup,
+  type TokenWatchSample,
+  type TokenWatchToken,
+} from "./state";
 
-export type AnyRow = Record<string, any>;
-export type Overview = {
-  wallets: AnyRow[];
-  tokens: AnyRow[];
-  groups: AnyRow[];
-  executions: AnyRow[];
-  balances: AnyRow[];
-};
-
-export type Portfolio = {
-  wallets: AnyRow[];
-  totals: {
-    wallets: number;
-    tokenAccounts: number;
-    holdings: number;
-    solLamports: string | null;
-  };
-  rows: AnyRow[];
-  loadedAtMs: number;
-};
-
-export type BuyPlanRow = {
-  id: string;
-  wallet: string;
-  label: string;
-  amountMode: "range-bps" | "exact-sol" | "exact-lamports";
-  minBps: string;
-  maxBps: string;
-  reserveSol: string;
-  exactSol: string;
-  exactLamports: string;
-  sender: "helius-fast" | "helius-rpc";
-  strategy:
-    | "fast-spam"
-    | "spam-after-market-ready"
-    | "after-deploy-processed"
-    | "after-deploy-confirmed";
-  tipSol: string;
-  priorityMicroLamports: string;
-  slippageBps: string;
-  retryIntervalMs: string;
-  recompileIntervalMs: string;
-  freshQuoteDelayMs: string;
-  maxFailedAttempts: string;
-};
-
-export type PumpFeedRow = {
-  seq?: number;
-  receivedAt?: string;
-  createdAtMs?: number;
-  updatedAtMs?: number;
-  eventType?: string;
-  mint?: string | null;
-  name?: string | null;
-  symbol?: string | null;
-  uri?: string | null;
-  creator?: string | null;
-  signature?: string | null;
-  initialBuy?: number | null;
-  solAmount?: number | null;
-  marketCapSol?: number | null;
-  priceSolPerToken?: number | null;
-  image?: string | null;
-  website?: string | null;
-  twitter?: string | null;
-  telegram?: string | null;
-  description?: string | null;
-  samples?: TokenWatchSample[];
-  initialMarketCapSol?: number | null;
-  lastMarketCapSol?: number | null;
-  marketCapChangeSol?: number | null;
-  marketCapChangePct?: number | null;
-  sma1m?: number | null;
-  sma5m?: number | null;
-  sma15m?: number | null;
-  sma60m?: number | null;
-  lastTradeAtMs?: number | null;
-  isMayhemMode?: boolean | null;
-  quoteAsset?: string | null;
-  quoteMint?: string | null;
-  trades?: AnyRow[];
-  raw?: AnyRow;
-};
-
-export type TokenHolder = {
-  tokenAccount: string;
-  owner: string | null;
-  amount: string | null;
-  uiAmount: string | null;
-  decimals: number | null;
-  pctSupply?: number | null;
-  label?: string | null;
-  lastDeltaUi?: number | null;
-  lastSignature?: string | null;
-  source?: string | null;
-};
-
-export type Toast = {
-  id: string;
-  kind: "info" | "warn" | "error" | "success";
-  title: string;
-  message?: string | null;
-  createdAtMs: number;
-  expiresAtMs: number;
-};
-
-export type TokenWatchSample = {
-  capturedAtMs: number;
-  marketCapSol: number | null;
-  source?: string | null;
-};
-
-export type TokenWatchToken = {
-  mint: string;
-  name?: string | null;
-  symbol?: string | null;
-  creator?: string | null;
-  uri?: string | null;
-  image?: string | null;
-  signature?: string | null;
-  addedAtMs: number;
-  updatedAtMs: number;
-  samples: TokenWatchSample[];
-  priceSolPerToken?: number | null;
-  lastTradeAtMs?: number | null;
-  initialMarketCapSol?: number | null;
-  marketCapChangeSol?: number | null;
-  marketCapChangePct?: number | null;
-  isMayhemMode?: boolean | null;
-  quoteAsset?: string | null;
-  quoteMint?: string | null;
-  trades?: AnyRow[];
-  lastMarketCapSol: number | null;
-  sma1m: number | null;
-  sma5m: number | null;
-  sma15m: number | null;
-  sma60m: number | null;
-};
-
-export type TokenWatchGroup = {
-  id: string;
-  name: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  tokens: TokenWatchToken[];
-};
-
-export type TelegramSignalSource = {
-  id: string;
-  kind: "telegram" | "manual";
-  name: string;
-  chatRef?: string | null;
-  isActive: boolean;
-  createdAtMs: number;
-  updatedAtMs: number;
-};
-
-export type TelegramSignal = {
-  id: string;
-  sourceId: string | null;
-  sourceName: string | null;
-  receivedAtMs: number;
-  direction: "buy" | "sell" | "watch" | "unknown";
-  confidence: number;
-  text: string;
-  mints: string[];
-  symbols: string[];
-  urls: string[];
-  amountSol: string | null;
-  status: "new" | "watched" | "ignored" | "traded";
-  notes?: string | null;
-};
-
-export type TelegramSignalsState = {
-  version: 1;
-  sources: TelegramSignalSource[];
-  signals: TelegramSignal[];
-};
-
-export type State = {
-  tab:
-    | "overview"
-    | "wallets"
-    | "portfolio"
-    | "terminal"
-    | "watchlists"
-    | "signals"
-    | "launch"
-    | "trade"
-    | "jobs";
-  overview: Overview | null;
-  portfolio: Portfolio | null;
-  portfolioSearch: string;
-  portfolioHideZero: boolean;
-  rpcStatus: AnyRow | null;
-  jobs: AnyRow[];
-  selectedJobId: string | null;
-  selectedJob: AnyRow | null;
-  busy: boolean;
-  error: string | null;
-  token: string;
-  buyPlanRows: BuyPlanRow[];
-  pumpFeed: PumpFeedRow[];
-  pumpFeedStatus: "idle" | "connecting" | "connected" | "error" | "closed";
-  pumpFeedError: string | null;
-  pumpFeedFilter: string;
-  pumpFeedSort:
-    | "newest"
-    | "mcap-desc"
-    | "mcap-asc"
-    | "mcap-change-desc"
-    | "mcap-change-pct-desc"
-    | "sma1m-desc"
-    | "sma5m-desc"
-    | "sma15m-desc"
-    | "trades-desc";
-  pumpFeedSource: "helius" | "pumpportal";
-  terminalDefaultWallet: string;
-  terminalDefaultBuySol: string;
-  terminalDefaultSender: "helius-fast" | "helius-rpc" | "rpc";
-  terminalDefaultSlippageBps: string;
-  terminalDefaultTipSol: string;
-  terminalDefaultPriorityMicroLamports: string;
-  terminalQuickLive: boolean;
-  watchSort:
-    | "mcap-desc"
-    | "mcap-asc"
-    | "mcap-change-desc"
-    | "mcap-change-pct-desc"
-    | "sma1m-desc"
-    | "trades-desc"
-    | "newest";
-  hideMayhem: boolean;
-  hideUsdc: boolean;
-  pumpFeedAbort: AbortController | null;
-  watchGroups: TokenWatchGroup[];
-  selectedWatchGroupId: string | null;
-  watchGroupName: string;
-  signals: TelegramSignalsState | null;
-  signalSourceName: string;
-  signalSourceChatRef: string;
-  signalSourceId: string;
-  signalText: string;
-  walletSearch: string;
-  groupSearch: string;
-  mountId: number;
-  previousTab: State["tab"] | null;
-  measureScope: string;
-  terminalInspectorKey: string | null;
-  terminalInspectorFixed: boolean;
-  terminalPinnedMints: string[];
-  terminalSessionStartedAtMs: number | null;
-  tokenHolders: Record<string, TokenHolder[]>;
-  tokenHolderErrors: Record<string, string>;
-  tokenHoldersCheckedAt: Record<string, number>;
-  tokenHoldersLoadingMint: string | null;
-  toasts: Toast[];
-};
-
-export const state: State = {
-  tab: "overview",
-  overview: null,
-  portfolio: null,
-  portfolioSearch: localStorage.getItem("solard:portfolio-search") ?? "",
-  portfolioHideZero: localStorage.getItem("solard:portfolio-hide-zero") !== "0",
-  rpcStatus: null,
-  jobs: [],
-  selectedJobId: null,
-  selectedJob: null,
-  busy: false,
-  error: null,
-  token: localStorage.getItem("solwal:web-token") ?? "",
-  buyPlanRows: [],
-  pumpFeed: [],
-  pumpFeedStatus: "idle",
-  pumpFeedError: null,
-  pumpFeedFilter: "",
-  pumpFeedSort:
-    (localStorage.getItem("solwal:pump-feed-sort") as State["pumpFeedSort"]) ||
-    "newest",
-  pumpFeedSource:
-    (localStorage.getItem(
-      "solwal:pump-feed-source",
-    ) as State["pumpFeedSource"]) || "helius",
-  terminalDefaultWallet:
-    localStorage.getItem("solwal:terminal-default-wallet") ?? "",
-  terminalDefaultBuySol:
-    localStorage.getItem("solwal:terminal-default-buy-sol") ?? "0.05",
-  terminalDefaultSender:
-    (localStorage.getItem(
-      "solwal:terminal-default-sender",
-    ) as State["terminalDefaultSender"]) || "helius-fast",
-  terminalDefaultSlippageBps:
-    localStorage.getItem("solwal:terminal-default-slippage-bps") ?? "9999",
-  terminalDefaultTipSol:
-    localStorage.getItem("solwal:terminal-default-tip-sol") ?? "0.001",
-  terminalDefaultPriorityMicroLamports:
-    localStorage.getItem("solwal:terminal-default-priority-micro-lamports") ??
-    "1500000",
-  terminalQuickLive: localStorage.getItem("solwal:terminal-quick-live") === "1",
-  watchSort:
-    (localStorage.getItem("solwal:watch-sort") as State["watchSort"]) ||
-    "mcap-desc",
-  hideMayhem: localStorage.getItem("solwal:pump-hide-mayhem") === "1",
-  hideUsdc: localStorage.getItem("solwal:pump-hide-usdc") === "1",
-  pumpFeedAbort: null,
-  watchGroups: [],
-  selectedWatchGroupId: null,
-  watchGroupName: "main",
-  signals: null,
-  signalSourceName: "Telegram alpha",
-  signalSourceChatRef: "",
-  signalSourceId: "",
-  signalText: "",
-  walletSearch: localStorage.getItem("solard:wallet-search") ?? "",
-  groupSearch: localStorage.getItem("solard:group-search") ?? "",
-  mountId: 0,
-  previousTab: null,
-  measureScope: "solard:web:boot",
-  terminalInspectorKey:
-    localStorage.getItem("solard:terminal-inspector-key") || null,
-  terminalInspectorFixed:
-    localStorage.getItem("solard:terminal-inspector-fixed") === "1",
-  terminalPinnedMints: (() => {
-    try {
-      const parsed = JSON.parse(
-        localStorage.getItem("solard:terminal-pinned-mints") || "[]",
-      );
-      return Array.isArray(parsed)
-        ? parsed.filter((item) => typeof item === "string")
-        : [];
-    } catch {
-      return [];
-    }
-  })(),
-  terminalSessionStartedAtMs: null,
-  tokenHolders: {},
-  tokenHolderErrors: {},
-  tokenHoldersCheckedAt: {},
-  tokenHoldersLoadingMint: null,
-  toasts: [],
-};
+export { activePageFromLocation, state } from "./state";
+export { authHeaders } from "./api-client";
+export type {
+  AnyRow,
+  BuyPlanRow,
+  Overview,
+  Portfolio,
+  PumpFeedRow,
+  State,
+  TelegramSignal,
+  TelegramSignalSource,
+  TelegramSignalsState,
+  Toast,
+  TokenHolder,
+  TokenWatchGroup,
+  TokenWatchSample,
+  TokenWatchToken,
+} from "./state";
 
 const runtimeMeasure = createClientMeasureScope("solard:web");
 const toastDedupedAt: Record<string, number> = {};
@@ -441,16 +135,7 @@ export function dismissToast(id: string): void {
 }
 
 export function pageFromPath(): State["tab"] {
-  const path = window.location.pathname.replace(/\/+$/, "");
-  if (path.endsWith("/wallets")) return "wallets";
-  if (path.endsWith("/portfolio")) return "portfolio";
-  if (path.endsWith("/terminal")) return "terminal";
-  if (path.endsWith("/watchlists")) return "watchlists";
-  if (path.endsWith("/signals")) return "signals";
-  if (path.endsWith("/launch")) return "launch";
-  if (path.endsWith("/trade")) return "trade";
-  if (path.endsWith("/activity")) return "jobs";
-  return "overview";
+  return activePageFromLocation();
 }
 
 export function pageHref(page: State["tab"]): string {
@@ -461,22 +146,6 @@ export function pageHref(page: State["tab"]): string {
 
 export function navigatePage(page: State["tab"]): void {
   window.location.href = pageHref(page);
-}
-
-export function authHeaders(): HeadersInit {
-  return state.token ? { "x-solwal-web-token": state.token } : {};
-}
-
-function unwrapApiPayload<T>(payload: any, status: number): T {
-  if (payload && typeof payload === "object") {
-    if (payload.ok === false)
-      throw new Error(payload.error ?? payload.message ?? `HTTP ${status}`);
-    if (Object.prototype.hasOwnProperty.call(payload, "value"))
-      return payload.value as T;
-    if (Object.prototype.hasOwnProperty.call(payload, "data"))
-      return payload.data as T;
-  }
-  return payload as T;
 }
 
 export async function api<T>(
@@ -1003,7 +672,7 @@ function shouldHydrateTerminalRow(row: PumpFeedRow): boolean {
   if (!started) return false;
   // A live SSE event may hit the DB before this client receives the event block.
   // Hydrate only very recent rows so the terminal does not turn into a stale DB dump.
-  return rowTimeMs(row) >= started - 15_000;
+  return rowTimeMs(row) >= started - 60_000;
 }
 
 function currentSessionRows(
@@ -1019,10 +688,12 @@ function currentSessionRows(
 
 export async function refreshPumpLive(): Promise<void> {
   const terminal = state.tab === "terminal";
-  const suffix =
-    terminal && state.terminalSessionStartedAtMs
-      ? `?terminal=1&sinceMs=${encodeURIComponent(String(state.terminalSessionStartedAtMs))}`
-      : "";
+  const pinnedParam = state.terminalPinnedMints.length
+    ? `&pinnedMints=${encodeURIComponent(state.terminalPinnedMints.join(","))}`
+    : "";
+  const suffix = terminal
+    ? `?terminal=1&sinceMs=${encodeURIComponent(String(state.terminalSessionStartedAtMs ?? Date.now()))}${pinnedParam}`
+    : "";
   const live = await api<{
     newTokens: PumpFeedRow[];
     watchGroups: TokenWatchGroup[];
@@ -1404,35 +1075,52 @@ export function handleSseBlock(block: string): void {
   }
 }
 
-export async function startPumpFeed(): Promise<void> {
-  state.pumpFeedAbort?.abort();
+export async function startPumpFeed(
+  options: { reset?: boolean; retry?: number } = {},
+): Promise<void> {
+  if (!options.retry) {
+    state.pumpFeedAbort?.abort();
+    if (pumpFeedReconnectTimer) clearTimeout(pumpFeedReconnectTimer);
+    pumpFeedReconnectTimer = null;
+  }
+
   const abort = new AbortController();
+  const retry = options.retry ?? 0;
   state.pumpFeedAbort = abort;
-  state.pumpFeedStatus = "connecting";
+  state.pumpFeedStatus = retry > 0 ? "reconnecting" : "connecting";
   state.pumpFeedError = null;
-  state.terminalSessionStartedAtMs = Date.now();
-  // Keep explicitly pinned rows, but clear stale cached DB rows so Terminal
-  // behaves like a real-time feed instead of a historical dump.
-  state.pumpFeed = state.pumpFeed.filter(
-    (row) => row.mint && state.terminalPinnedMints.includes(row.mint),
-  );
-  followLatestInTerminalInspector();
+  state.terminalSessionStartedAtMs ??= Date.now();
+
+  if (options.reset !== false) {
+    // Keep explicitly pinned rows, but clear stale cached DB rows so Terminal
+    // behaves like a real-time feed instead of a historical dump.
+    state.pumpFeed = state.pumpFeed.filter(
+      (row) => row.mint && state.terminalPinnedMints.includes(row.mint),
+    );
+    followLatestInTerminalInspector();
+  }
+
   update();
   try {
+    const reset = options.reset === false ? "0" : "1";
     const response = await fetch(
-      `/api/pump-live?stream=1&reset=1&source=${encodeURIComponent(state.pumpFeedSource)}`,
+      `/api/pump-live?stream=1&reset=${reset}&source=${encodeURIComponent(state.pumpFeedSource)}`,
       { headers: authHeaders(), signal: abort.signal },
     );
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error ?? `Pump feed HTTP ${response.status}`);
     }
+    state.pumpFeedStatus = "connected";
+    state.pumpFeedError = null;
+    update();
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     while (!abort.signal.aborted) {
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done) throw new Error("Pump feed stream closed");
       buffer += decoder.decode(value, { stream: true });
       let split = buffer.indexOf("\n\n");
       while (split >= 0) {
@@ -1445,22 +1133,34 @@ export async function startPumpFeed(): Promise<void> {
     if (!abort.signal.aborted) state.pumpFeedStatus = "closed";
   } catch (error) {
     if (!abort.signal.aborted) {
-      state.pumpFeedStatus = "error";
-      state.pumpFeedError = null;
+      const message = error instanceof Error ? error.message : String(error);
+      state.pumpFeedError = message;
+      state.pumpFeedStatus = "reconnecting";
+      const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(retry, 5));
       pushToast(
-        "error",
-        "Pump feed disconnected",
-        error instanceof Error ? error.message : String(error),
-        8000,
+        "warn",
+        retry > 0 ? "Pump feed reconnecting" : "Pump feed disconnected",
+        `${message} · retrying in ${Math.round(delayMs / 1000)}s`,
+        6000,
       );
+      pumpFeedReconnectTimer = setTimeout(() => {
+        if (state.tab === "terminal" && state.pumpFeedStatus === "reconnecting")
+          void startPumpFeed({ reset: false, retry: retry + 1 });
+      }, delayMs);
     }
   } finally {
-    if (state.pumpFeedAbort === abort) state.pumpFeedAbort = null;
+    if (
+      state.pumpFeedAbort === abort &&
+      state.pumpFeedStatus !== "reconnecting"
+    )
+      state.pumpFeedAbort = null;
     update();
   }
 }
 
 export function stopPumpFeed(): void {
+  if (pumpFeedReconnectTimer) clearTimeout(pumpFeedReconnectTimer);
+  pumpFeedReconnectTimer = null;
   state.pumpFeedAbort?.abort();
   state.pumpFeedAbort = null;
   state.pumpFeedStatus = "closed";
@@ -1913,6 +1613,8 @@ function resetPageScopedState(
     });
   }
   if (previous === "terminal" && next !== "terminal") {
+    if (pumpFeedReconnectTimer) clearTimeout(pumpFeedReconnectTimer);
+    pumpFeedReconnectTimer = null;
     state.pumpFeedAbort?.abort();
     state.pumpFeedAbort = null;
     state.pumpFeedStatus = "closed";
@@ -1932,6 +1634,8 @@ let currentPageView: ConsolePage = () => (
 );
 let currentCleanup: (() => void) | null = null;
 let unloadCleanup: (() => void) | null = null;
+let pumpFeedReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let updateQueued = false;
 
 function ToastHost() {
   const now = Date.now();
@@ -1957,6 +1661,21 @@ function ToastHost() {
 
 function ConsoleRuntime() {
   const Page = currentPageView;
+  let pageNode: any = null;
+  try {
+    pageNode = <Page />;
+  } catch (error) {
+    state.error =
+      error instanceof Error
+        ? error.message
+        : `Render failed: ${String(error)}`;
+    pageNode = (
+      <div className="card">
+        <h3>Render failed</h3>
+        <p className="muted">{state.error}</p>
+      </div>
+    );
+  }
   return (
     <>
       {state.error ? (
@@ -1964,20 +1683,40 @@ function ConsoleRuntime() {
           <span className="pill bad">{state.error}</span>
         </div>
       ) : null}
-      <Page />
+      {pageNode}
       <ToastHost />
     </>
   );
 }
 
-export function update() {
-  const root = document.getElementById("app-root");
-  if (root) render(<ConsoleRuntime />, root);
+function applyActiveNav(): void {
   document
     .querySelectorAll<HTMLAnchorElement>("#main-nav a")
-    .forEach((link) =>
-      link.classList.toggle("active", link.dataset.page === state.tab),
-    );
+    .forEach((link) => {
+      const active = link.dataset.page === state.tab;
+      link.classList.toggle("active", active);
+      if (active) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
+}
+
+function renderRuntime(): void {
+  const root = document.getElementById("app-root");
+  if (root) render(<ConsoleRuntime />, root);
+  applyActiveNav();
+}
+
+export function update() {
+  if (updateQueued) return;
+  updateQueued = true;
+  const schedule =
+    typeof queueMicrotask === "function"
+      ? queueMicrotask
+      : (fn: () => void) => window.requestAnimationFrame(fn);
+  schedule(() => {
+    updateQueued = false;
+    renderRuntime();
+  });
 }
 
 export function mountPage(page: State["tab"], view: ConsolePage) {
@@ -2071,10 +1810,30 @@ export function mountPage(page: State["tab"], view: ConsolePage) {
     }).catch(() => undefined);
   }, 10_000);
 
+  const removeKeyboardShortcuts = installKeyboardShortcuts({
+    getTab: () => state.tab,
+    getSelectedTerminalRow: () =>
+      state.pumpFeed.find(
+        (row) => pumpRowKey(row) === state.terminalInspectorKey,
+      ) ??
+      state.pumpFeed[0] ??
+      null,
+    onRefresh: () => {
+      void refreshCurrentPage().then(update);
+    },
+    onPin: (row) => toggleTerminalPinned(row),
+    onBuy: (row) => {
+      void quickBuyPumpFeedRow(row);
+    },
+  });
+
   const cleanup = () =>
     measureClientSync("unmount", () => {
       clearInterval(dataInterval);
       clearInterval(statusInterval);
+      removeKeyboardShortcuts();
+      if (pumpFeedReconnectTimer) clearTimeout(pumpFeedReconnectTimer);
+      pumpFeedReconnectTimer = null;
       state.pumpFeedAbort?.abort();
       state.pumpFeedAbort = null;
       return { page, mountId: state.mountId };

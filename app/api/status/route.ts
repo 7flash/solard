@@ -4,6 +4,10 @@ import {
   rpcHasApiKey,
 } from "../../../src/chain/helius-history.js";
 import { withSowl } from "../../../src/web/http.js";
+import {
+  loadSolardRuntimeConfig,
+  publicSolardConfig,
+} from "../../../src/solard/config.js";
 
 export function GET(request: Request): Promise<Response> {
   return withSowl(request, async (sowl) => {
@@ -70,6 +74,7 @@ export function GET(request: Request): Promise<Response> {
           process.env.SOWL_HELIUS_TIP_ACCOUNT?.trim() ||
           null,
       },
+      config: publicSolardConfig(loadSolardRuntimeConfig()),
     };
   });
 }

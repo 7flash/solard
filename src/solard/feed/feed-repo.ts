@@ -26,6 +26,54 @@ export type ObservedHolder = {
   lastUpdatedMs: number;
 };
 
+export type PumpTerminalFeedRow = {
+  mint: string;
+  name?: string | null;
+  symbol?: string | null;
+  image?: string | null;
+  uri?: string | null;
+  website?: string | null;
+  twitter?: string | null;
+  telegram?: string | null;
+  creator?: string | null;
+  signature?: string | null;
+  bondingCurveKey?: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  receivedAt?: string | null;
+  lastTradeAtMs?: number | null;
+  marketCapSol?: number | null;
+  lastMarketCapSol?: number | null;
+  initialMarketCapSol?: number | null;
+  marketCapChangeSol?: number | null;
+  marketCapChangePct?: number | null;
+  priceSolPerToken?: number | null;
+  samples: Array<{
+    capturedAtMs: number;
+    marketCapSol: number | null;
+    priceSolPerToken?: number | null;
+    source?: string | null;
+  }>;
+  trades: Array<{
+    capturedAtMs: number;
+    marketCapSol: number | null;
+    priceSolPerToken?: number | null;
+    solAmount?: number | null;
+    tokenAmount?: number | null;
+    txType?: string | null;
+    signature?: string | null;
+    source?: string | null;
+  }>;
+  sma1m: number | null;
+  sma5m: number | null;
+  sma15m: number | null;
+  source?: string | null;
+  eventType?: string | null;
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
+  raw?: Record<string, unknown> | null;
+};
+
 const SOLANA_PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const INTERVALS_SECONDS = [60, 300, 900];
 
@@ -67,6 +115,38 @@ function tokenValue(observation: PumpFeedObservation, key: string): unknown {
 }
 function likelyPubkey(value: string | null | undefined): value is string {
   return !!value && SOLANA_PUBKEY_RE.test(value);
+}
+
+function safeParseJson(
+  value: string | null | undefined,
+): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function latestPumpAggregateRows(mint: string): PumpPriceAggregateRow[] {
+  return db()
+    .pumpPriceAggregates.select()
+    .where({ mint })
+    .orderBy("bucketStartMs", "desc")
+    .limit(24)
+    .all() as PumpPriceAggregateRow[];
+}
+
+function latestPumpSwaps(mint: string, limit = 50): PumpSwapRow[] {
+  return db()
+    .pumpSwaps.select()
+    .where({ mint })
+    .orderBy("createdAtMs", "desc")
+    .limit(Math.max(1, Math.min(200, limit)))
+    .all() as PumpSwapRow[];
 }
 
 export function latestPumpAggregates(mint: string): {
@@ -317,6 +397,181 @@ export function recordPumpFeedObservation(
   if (observation.eventType === "trade")
     recordSwap(observation, tokenRow.mint, now);
   recordObservedHolder(observation, tokenRow.mint, now);
+}
+
+function terminalRowFromToken(
+  row: PumpTokenEventRow,
+  now = Date.now(),
+): PumpTerminalFeedRow {
+  const aggregateRows = latestPumpAggregateRows(row.mint);
+  const aggregateFor = (
+    intervalSeconds: number,
+  ): PumpPriceAggregateRow | undefined =>
+    aggregateRows.find((item) => item.intervalSeconds === intervalSeconds);
+  const swaps = latestPumpSwaps(row.mint, 25);
+  const raw = safeParseJson(row.rawJson);
+  const samples = aggregateRows
+    .map((agg) => ({
+      capturedAtMs: agg.updatedAtMs || agg.bucketStartMs,
+      marketCapSol: agg.lastMarketCapSol ?? agg.smaMarketCapSol ?? null,
+      priceSolPerToken: row.priceSolPerToken ?? null,
+      source: `sma-${agg.intervalSeconds}s`,
+    }))
+    .filter(
+      (sample, index, arr) =>
+        index ===
+        arr.findIndex(
+          (other) =>
+            Math.abs(other.capturedAtMs - sample.capturedAtMs) < 1000 &&
+            other.marketCapSol === sample.marketCapSol,
+        ),
+    )
+    .slice(0, 100);
+  if (
+    row.marketCapSol != null &&
+    !samples.some(
+      (sample) => Math.abs(sample.capturedAtMs - row.updatedAtMs) < 1000,
+    )
+  ) {
+    samples.unshift({
+      capturedAtMs: row.updatedAtMs || now,
+      marketCapSol: row.marketCapSol,
+      priceSolPerToken: row.priceSolPerToken ?? null,
+      source: row.source,
+    });
+  }
+  const trades = swaps.map((swap) => ({
+    capturedAtMs: swap.createdAtMs,
+    marketCapSol: swap.marketCapSol ?? null,
+    priceSolPerToken: swap.priceSolPerToken ?? null,
+    solAmount: swap.solAmount ?? null,
+    tokenAmount: swap.tokenAmountUi ?? null,
+    txType: swap.side ?? null,
+    signature: swap.signature,
+    source: swap.source,
+  }));
+  const current =
+    row.marketCapSol ??
+    samples.find((sample) => sample.marketCapSol != null)?.marketCapSol ??
+    null;
+  const initial =
+    row.initialMarketCapSol ??
+    [...samples].reverse().find((sample) => sample.marketCapSol != null)
+      ?.marketCapSol ??
+    current ??
+    null;
+  const change = current != null && initial != null ? current - initial : null;
+  const changePct =
+    change != null && initial != null && initial > 0
+      ? (change / initial) * 100
+      : null;
+  return {
+    mint: row.mint,
+    name: row.name,
+    symbol: row.symbol,
+    image: row.image,
+    uri: row.uri,
+    website: row.website,
+    twitter: row.twitter,
+    telegram: row.telegram,
+    creator: row.creator,
+    signature: row.signature,
+    bondingCurveKey: row.bondingCurve,
+    createdAtMs: row.createdAtMs,
+    updatedAtMs: row.updatedAtMs,
+    receivedAt: row.updatedAtMs
+      ? new Date(row.updatedAtMs).toISOString()
+      : null,
+    lastTradeAtMs: row.lastTradeAtMs,
+    marketCapSol: current,
+    lastMarketCapSol: current,
+    initialMarketCapSol: initial,
+    marketCapChangeSol: change,
+    marketCapChangePct: changePct,
+    priceSolPerToken: row.priceSolPerToken,
+    samples,
+    trades,
+    sma1m: aggregateFor(60)?.smaMarketCapSol ?? null,
+    sma5m: aggregateFor(300)?.smaMarketCapSol ?? null,
+    sma15m: aggregateFor(900)?.smaMarketCapSol ?? null,
+    source: row.source,
+    eventType: row.eventType,
+    quoteAsset: "SOL",
+    quoteMint: "So11111111111111111111111111111111111111112",
+    raw,
+  };
+}
+
+export function listPumpTerminalFeedRows(
+  args: { sinceMs?: number; pinnedMints?: string[]; limit?: number } = {},
+): PumpTerminalFeedRow[] {
+  const now = Date.now();
+  const limit = Math.max(1, Math.min(500, Math.floor(args.limit ?? 250)));
+  const sinceMs = Number(args.sinceMs ?? 0);
+  const cutoff =
+    Number.isFinite(sinceMs) && sinceMs > 0
+      ? sinceMs - 60_000
+      : now - 10 * 60_000;
+  const pinned = new Set(
+    (args.pinnedMints ?? []).filter((mint) => likelyPubkey(mint)),
+  );
+  const rows = db()
+    .pumpTokenEvents.select()
+    .orderBy("updatedAtMs", "desc")
+    .limit(limit * 4)
+    .all() as PumpTokenEventRow[];
+  const filtered = rows.filter(
+    (row) =>
+      pinned.has(row.mint) ||
+      row.updatedAtMs >= cutoff ||
+      (row.lastTradeAtMs != null && row.lastTradeAtMs >= cutoff),
+  );
+  return filtered
+    .slice(0, limit)
+    .map((row) => terminalRowFromToken(row, now))
+    .sort((a, b) => {
+      const pinDelta = Number(pinned.has(b.mint)) - Number(pinned.has(a.mint));
+      if (pinDelta) return pinDelta;
+      return (b.updatedAtMs ?? 0) - (a.updatedAtMs ?? 0);
+    });
+}
+
+export function getPumpFeedDbStats(): {
+  tokens: number;
+  swaps: number;
+  holders: number;
+  aggregates: number;
+  latestUpdatedAtMs: number | null;
+} {
+  // Bounded counts keep the status path cheap. This is operational telemetry,
+  // not an accounting endpoint.
+  const tokens = db()
+    .pumpTokenEvents.select()
+    .orderBy("updatedAtMs", "desc")
+    .limit(10_000)
+    .all() as PumpTokenEventRow[];
+  const swaps = db()
+    .pumpSwaps.select()
+    .orderBy("createdAtMs", "desc")
+    .limit(10_000)
+    .all() as PumpSwapRow[];
+  const holders = db()
+    .pumpHoldersCurrent.select()
+    .orderBy("lastUpdatedMs", "desc")
+    .limit(10_000)
+    .all() as PumpHolderCurrentRow[];
+  const aggregates = db()
+    .pumpPriceAggregates.select()
+    .orderBy("updatedAtMs", "desc")
+    .limit(10_000)
+    .all() as PumpPriceAggregateRow[];
+  return {
+    tokens: tokens.length,
+    swaps: swaps.length,
+    holders: holders.length,
+    aggregates: aggregates.length,
+    latestUpdatedAtMs: tokens[0]?.updatedAtMs ?? null,
+  };
 }
 
 export function listObservedPumpHolders(

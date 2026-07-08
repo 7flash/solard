@@ -1,18 +1,9 @@
-type ConsolePage =
-  | "overview"
-  | "terminal"
-  | "watchlists"
-  | "signals"
-  | "launch"
-  | "wallets"
-  | "portfolio"
-  | "trade"
-  | "jobs";
+import { PageHost, type ConsolePage } from "./page-host";
 
 /**
- * Backwards-compatible shim only.
- * The real app frame belongs in app/layout.tsx. Do not render a nested shell here.
- * Older route files that still import ConsoleShell will now mount only the page host.
+ * Deprecated compatibility shim.
+ * New routes should import PageHost directly so app/layout.tsx is the only
+ * server-side shell and the client runtime owns page headers.
  */
 export function ConsoleShell(args: {
   page: ConsolePage;
@@ -20,9 +11,5 @@ export function ConsoleShell(args: {
   description?: string;
   eyebrow?: string;
 }) {
-  return (
-    <section id="app-root" data-page={args.page} className="client-root">
-      Loading {args.heading ?? args.page}…
-    </section>
-  );
+  return <PageHost page={args.page} />;
 }

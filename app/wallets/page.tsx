@@ -1,11 +1,5 @@
-import { ConsoleShell } from "../console-shell";
+import { PageHost } from "../page-host";
 
 export default function Page() {
-  return (
-    <ConsoleShell
-      page="wallets"
-      heading="Wallets"
-      description="Encrypted local wallets, groups, balances, imports, and wallet-group membership."
-    />
-  );
+  return <PageHost page="wallets" />;
 }

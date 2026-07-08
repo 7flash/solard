@@ -9,6 +9,7 @@ import {
   assertWebAuth,
 } from "../../../../src/web/http.js";
 import { startPumpLaunchJob } from "../../../../src/web/launch-jobs.js";
+import { assertLiveTradeAllowed } from "../../../../src/web/live-safety.js";
 
 function pushArg(argv: string[], key: string, value: unknown): void {
   if (value == null || value === "") return;
@@ -113,7 +114,11 @@ export async function POST(request: Request): Promise<Response> {
     pushArg(argv, "slippage-bps", numberValue(body, "slippageBps", 9999));
     pushArg(argv, "out", optionalString(body, "out"));
 
-    if (boolValue(body, "live", false)) pushArg(argv, "live", true);
+    const live = boolValue(body, "live", false);
+    if (live) {
+      assertLiveTradeAllowed("pump launch");
+      pushArg(argv, "live", true);
+    }
     if (boolValue(body, "skipSimulation", true))
       pushArg(argv, "skip-simulation", true);
 

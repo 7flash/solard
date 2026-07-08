@@ -6,16 +6,22 @@ import {
   requireString,
   withSowl,
 } from "../../../../src/web/http.js";
+import {
+  assertLiveTradeAllowed,
+  installWebTradeSenders,
+} from "../../../../src/web/live-safety.js";
 
 export async function POST(request: Request): Promise<Response> {
   const body = await readJson(request);
   return withSowl(request, async (sowl) => {
+    installWebTradeSenders(sowl);
     const token = requireString(body, "token");
     const wallet = requireString(body, "wallet");
     const bps = numberValue(body, "bps", 10000);
     const slippageBps = numberValue(body, "slippageBps", 1500);
     const via = optionalString(body, "sender") ?? "rpc";
     const live = boolValue(body, "live", false);
+    if (live) assertLiveTradeAllowed("web sell");
 
     if (!live) {
       const plan = await sowl

@@ -18,7 +18,11 @@ import {
   recordPumpTrade,
   removeTokenFromWatchGroup,
 } from "./pump-live-store.js";
-import { recordPumpFeedObservation } from "../../solard/feed/feed-repo.js";
+import {
+  getPumpFeedDbStats,
+  listPumpTerminalFeedRows,
+  recordPumpFeedObservation,
+} from "../../solard/feed/feed-repo.js";
 import {
   PUMP_PROGRAM_ID,
   findPumpCreateInTransaction,
@@ -1231,14 +1235,30 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
       const terminal = url.searchParams.get("terminal") === "1";
       const measured = await measureSolard(
         "solard:api:GET:/api/pump-live",
-        "list-state",
+        terminal ? "terminal-db-snapshot" : "list-state",
         () => {
           const state = listPumpLiveState() as unknown as {
             newTokens: Raw[];
             watchGroups: Raw[];
             watchedMints: string[];
           };
-          return terminal ? filterPumpLiveForTerminal(state, sinceMs) : state;
+          if (!terminal) return state;
+          const pinnedMints = String(url.searchParams.get("pinnedMints") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean);
+          return {
+            ...filterPumpLiveForTerminal(state, sinceMs),
+            // Terminal gets its live rows from the feed-worker tables, not the old
+            // token/priceSample cache. This is what keeps stale parser rows from
+            // poisoning MCAP/SMA/holder state.
+            newTokens: listPumpTerminalFeedRows({
+              sinceMs,
+              pinnedMints,
+              limit: 300,
+            }) as unknown as Raw[],
+            db: getPumpFeedDbStats(),
+          };
         },
         summarizeForMeasure,
       );
@@ -1252,6 +1272,7 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
             startedAtMs: pumpWorkerStartedAtMs || null,
             listeners: pumpWorkerListeners.size,
             lastError: pumpWorkerLastError,
+            db: getPumpFeedDbStats(),
           },
         },
         meta: {

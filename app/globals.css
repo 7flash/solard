@@ -14,6 +14,17 @@
   --red: #ff4d6d;
   --violet: #c084fc;
   --black: #000;
+  --border: var(--line-strong);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --warn: var(--yellow);
+  --bad: var(--red);
+  --accent: var(--green);
+  --fg: var(--text);
+  --pink: #ff7ab6;
+  --sidebar-width: 248px;
+  --table-min-width: 1180px;
+  --terminal-table-min-width: 1280px;
+  --inspector-max-height: min(72vh, 760px);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   background: var(--bg);
   color: var(--text);
@@ -509,7 +520,7 @@ tbody tr:hover { background: #10151d; }
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   min-height: 100vh;
 }
 .side-nav {
@@ -817,7 +828,7 @@ textarea { width: 100%; min-height: 120px; resize: vertical; }
 
 /* Stability cleanup: make console pages fit the viewport and avoid home-page overflow. */
 html, body { width: 100%; overflow-x: hidden; }
-.page-shell { grid-template-columns: 248px minmax(0, 1fr); width: 100%; overflow-x: hidden; }
+.page-shell { grid-template-columns: var(--sidebar-width) minmax(0, 1fr); width: 100%; overflow-x: hidden; }
 .main-console { min-width: 0; max-width: 100%; overflow-x: hidden; }
 .main-console > .panel, #app-root { min-width: 0; max-width: 100%; overflow-x: hidden; }
 .card, .panel, .metric-card, .home-top, .activity-hero { min-width: 0; }
@@ -1849,4 +1860,76 @@ input[type="checkbox"] {
 @media (max-width: 520px) {
   .page-shell { grid-template-columns: 1fr !important; }
   .side-nav { width: 100%; min-width: 0; height: auto !important; position: static !important; border-right: 0 !important; border-bottom: 2px solid var(--line-strong) !important; }
+}
+
+/* Repair pass: stable client-root mounting and compact terminal defaults. */
+.client-root,
+#app-root {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.page-shell > .main-console > .client-root {
+  display: block;
+}
+
+.nav-list a.active,
+.nav-list a[aria-current="page"] {
+  background: var(--text);
+  color: var(--black);
+}
+
+.terminal-page-only {
+  container-type: inline-size;
+}
+
+.terminal-table table,
+.watch-grid-table table,
+.wide-table table {
+  table-layout: fixed;
+}
+
+.terminal-table table { min-width: var(--terminal-table-min-width); }
+.wide-table table { min-width: var(--table-min-width); }
+
+.terminal-table td,
+.terminal-table th,
+.watch-grid-table td,
+.watch-grid-table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.token-inspector,
+.inspector,
+.run-detail {
+  max-height: var(--inspector-max-height);
+  overflow: auto;
+}
+
+.toast-host,
+.toast-stack {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 9999;
+  display: grid;
+  gap: 8px;
+  width: min(520px, calc(100vw - 28px));
+}
+
+.toast-host .toast {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  white-space: normal;
+}
+
+.global-error-strip {
+  margin-bottom: 12px;
+}
+
+@media (max-width: 900px) {
+  :root { --sidebar-width: 100%; --table-min-width: 920px; --terminal-table-min-width: 980px; }
 }

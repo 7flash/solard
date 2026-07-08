@@ -1,5 +1,5 @@
-import { PublicKey, SystemProgram } from "@solana/web3.js";
-import { sol, HeliusSender, HttpRpcSender } from "../../../../src/index.js";
+import { SystemProgram } from "@solana/web3.js";
+import { sol } from "../../../../src/index.js";
 import {
   boolValue,
   numberValue,
@@ -9,34 +9,12 @@ import {
   withSowl,
 } from "../../../../src/web/http.js";
 import { addTokenToTradedGroup } from "../../../../src/web/token-watch-store.js";
-
-function installWebTradeSenders(sowl: any): void {
-  const rpcUrl =
-    process.env.HELIUS_RPC_URL?.trim() || process.env.RPC_ENDPOINT?.trim();
-  const senderUrl = process.env.HELIUS_SENDER_URL?.trim();
-  if (senderUrl)
-    sowl.registerSender(new HeliusSender(senderUrl, "helius-fast"));
-  if (rpcUrl)
-    sowl.registerSender(
-      new HttpRpcSender("helius-rpc", rpcUrl, "HELIUS_RPC_URL/RPC_ENDPOINT"),
-    );
-}
-
-function parseSolLamports(value: string | undefined, fallback: string): bigint {
-  return sol(value && value.trim() ? value : fallback).raw;
-}
-
-function heliusTipAccount(): PublicKey {
-  const value =
-    process.env.HELIUS_TIP_ACCOUNT?.trim() ||
-    process.env.SOLWAL_HELIUS_TIP_ACCOUNT?.trim() ||
-    process.env.SOWL_HELIUS_TIP_ACCOUNT?.trim();
-  if (!value)
-    throw new Error(
-      "HELIUS_TIP_ACCOUNT is required for helius-fast quick buys",
-    );
-  return new PublicKey(value);
-}
+import {
+  assertLiveTradeAllowed,
+  heliusTipAccount,
+  installWebTradeSenders,
+  parseSolLamports,
+} from "../../../../src/web/live-safety.js";
 
 export async function POST(request: Request): Promise<Response> {
   const body = await readJson(request);
@@ -52,6 +30,7 @@ export async function POST(request: Request): Promise<Response> {
     const slippageBps = numberValue(body, "slippageBps", 1500);
     const via = optionalString(body, "sender") ?? "rpc";
     const live = boolValue(body, "live", false);
+    if (live) assertLiveTradeAllowed("web quick buy");
     const skipSimulation = boolValue(body, "skipSimulation", false);
     const skipPreflight = boolValue(body, "skipPreflight", true);
     const priorityMicroLamports = numberValue(
