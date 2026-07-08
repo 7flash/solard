@@ -7,6 +7,7 @@ import {
   loadSolardPortfolio,
   type SolardPortfolioOptions,
 } from "./portfolio-service.js";
+import { loadTokenHolders } from "./token-holder-service.js";
 import {
   listTelegramSignals,
   upsertTelegramSignalSource,
@@ -21,7 +22,7 @@ import {
   createTokenWatchGroup,
   listPumpLiveState,
   removeTokenFromWatchGroup,
-} from "../web/pump-live-store.js";
+} from "../pump/services/pump-live-store.js";
 
 export type SolardAppServices = {
   sowl: Sowl;
@@ -34,6 +35,11 @@ export type SolardAppServices = {
     load(
       options?: SolardPortfolioOptions,
     ): ReturnType<typeof loadSolardPortfolio>;
+  };
+  tokenHolders: {
+    load(
+      input: Parameters<typeof loadTokenHolders>[1],
+    ): ReturnType<typeof loadTokenHolders>;
   };
   pumpLive: {
     list(): ReturnType<typeof listPumpLiveState>;
@@ -80,6 +86,9 @@ export function createSolardAppServices(
     },
     portfolio: {
       load: (options) => loadSolardPortfolio(sowl, options),
+    },
+    tokenHolders: {
+      load: (input) => loadTokenHolders(sowl, input),
     },
     pumpLive: {
       list: () => listPumpLiveState(),

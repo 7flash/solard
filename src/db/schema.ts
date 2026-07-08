@@ -147,6 +147,20 @@ export const SettingSchema = z.object({
   updatedAtMs: z.number(),
 });
 
+export const TokenWatchGroupSchema = z.object({
+  groupId: z.string(),
+  name: z.string(),
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
+export const TokenWatchGroupTokenSchema = z.object({
+  groupId: z.string(),
+  mint: z.string(),
+  addedAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
 export type WalletRow = z.infer<typeof WalletSchema> & { id: number };
 export type TokenRow = z.infer<typeof TokenSchema> & { id: number };
 export type ExecutionRow = z.infer<typeof ExecutionSchema> & { id: number };
@@ -162,6 +176,12 @@ export type GroupWalletRow = z.infer<typeof GroupWalletSchema> & { id: number };
 export type AgentRow = z.infer<typeof AgentSchema> & { id: number };
 export type AltRow = z.infer<typeof AltSchema> & { id: number };
 export type WatchRow = z.infer<typeof WatchSchema> & { id: number };
+export type TokenWatchGroupRow = z.infer<typeof TokenWatchGroupSchema> & {
+  id: number;
+};
+export type TokenWatchGroupTokenRow = z.infer<
+  typeof TokenWatchGroupTokenSchema
+> & { id: number };
 
 export type SowlDatabase = Database<{
   wallets: typeof WalletSchema;
@@ -178,4 +198,6 @@ export type SowlDatabase = Database<{
   alts: typeof AltSchema;
   watches: typeof WatchSchema;
   settings: typeof SettingSchema;
+  tokenWatchGroups: typeof TokenWatchGroupSchema;
+  tokenWatchGroupTokens: typeof TokenWatchGroupTokenSchema;
 }>;

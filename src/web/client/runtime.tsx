@@ -1,10 +1,5 @@
 import { render } from "tradjs/client";
-import {
-  createClientMeasureScope,
-  clientMeasureStore,
-  summarizeForClient,
-  type ClientMeasureEvent,
-} from "./measure";
+import { createClientMeasureScope, summarizeForClient } from "./measure";
 
 export type AnyRow = Record<string, any>;
 export type Overview = {
@@ -55,6 +50,8 @@ export type BuyPlanRow = {
 export type PumpFeedRow = {
   seq?: number;
   receivedAt?: string;
+  createdAtMs?: number;
+  updatedAtMs?: number;
   eventType?: string;
   mint?: string | null;
   name?: string | null;
@@ -67,6 +64,10 @@ export type PumpFeedRow = {
   marketCapSol?: number | null;
   priceSolPerToken?: number | null;
   image?: string | null;
+  website?: string | null;
+  twitter?: string | null;
+  telegram?: string | null;
+  description?: string | null;
   samples?: TokenWatchSample[];
   initialMarketCapSol?: number | null;
   lastMarketCapSol?: number | null;
@@ -82,6 +83,14 @@ export type PumpFeedRow = {
   quoteMint?: string | null;
   trades?: AnyRow[];
   raw?: AnyRow;
+};
+
+export type TokenHolder = {
+  tokenAccount: string;
+  owner: string | null;
+  amount: string | null;
+  uiAmount: string | null;
+  decimals: number | null;
 };
 
 export type TokenWatchSample = {
@@ -190,6 +199,9 @@ export type State = {
     | "mcap-asc"
     | "mcap-change-desc"
     | "mcap-change-pct-desc"
+    | "sma1m-desc"
+    | "sma5m-desc"
+    | "sma15m-desc"
     | "trades-desc";
   pumpFeedSource: "helius" | "pumpportal";
   terminalDefaultWallet: string;
@@ -223,8 +235,11 @@ export type State = {
   mountId: number;
   previousTab: State["tab"] | null;
   measureScope: string;
-  measureEvents: ClientMeasureEvent[];
-  measureOpen: boolean;
+  terminalInspectorKey: string | null;
+  terminalInspectorFixed: boolean;
+  terminalPinnedMints: string[];
+  tokenHolders: Record<string, TokenHolder[]>;
+  tokenHoldersLoadingMint: string | null;
 };
 
 export const state: State = {
@@ -287,30 +302,38 @@ export const state: State = {
   mountId: 0,
   previousTab: null,
   measureScope: "solard:web:boot",
-  measureEvents: clientMeasureStore.snapshot(),
-  measureOpen: localStorage.getItem("solard:measure-open") === "1",
+  terminalInspectorKey:
+    localStorage.getItem("solard:terminal-inspector-key") || null,
+  terminalInspectorFixed:
+    localStorage.getItem("solard:terminal-inspector-fixed") === "1",
+  terminalPinnedMints: (() => {
+    try {
+      const parsed = JSON.parse(
+        localStorage.getItem("solard:terminal-pinned-mints") || "[]",
+      );
+      return Array.isArray(parsed)
+        ? parsed.filter((item) => typeof item === "string")
+        : [];
+    } catch {
+      return [];
+    }
+  })(),
+  tokenHolders: {},
+  tokenHoldersLoadingMint: null,
 };
 
 const runtimeMeasure = createClientMeasureScope("solard:web");
-
-function syncMeasureEvents(): void {
-  state.measureEvents = clientMeasureStore.snapshot();
-}
 
 export async function measureClient<T>(
   label: string,
   fn: () => Promise<T> | T,
   summarize: (value: T) => unknown = summarizeForClient,
 ): Promise<T> {
-  try {
-    return await runtimeMeasure.measure(
-      `${state.measureScope}:${label}`,
-      fn,
-      summarize,
-    );
-  } finally {
-    syncMeasureEvents();
-  }
+  return await runtimeMeasure.measure(
+    `${state.measureScope}:${label}`,
+    fn,
+    summarize,
+  );
 }
 
 export function measureClientSync<T>(
@@ -318,20 +341,15 @@ export function measureClientSync<T>(
   fn: () => T,
   summarize: (value: T) => unknown = summarizeForClient,
 ): T {
-  try {
-    return runtimeMeasure.measureSync(
-      `${state.measureScope}:${label}`,
-      fn,
-      summarize,
-    );
-  } finally {
-    syncMeasureEvents();
-  }
+  return runtimeMeasure.measureSync(
+    `${state.measureScope}:${label}`,
+    fn,
+    summarize,
+  );
 }
 
 function measureEvent(label: string, summary?: unknown): void {
   runtimeMeasure.event(`${state.measureScope}:${label}`, summary);
-  syncMeasureEvents();
 }
 
 export function pageFromPath(): State["tab"] {
@@ -539,6 +557,94 @@ export function passesBadgeFilters(row: {
   return true;
 }
 
+export function pumpRowKey(row: {
+  mint?: string | null;
+  signature?: string | null;
+  seq?: number;
+}): string {
+  return row.mint || row.signature || String(row.seq ?? "");
+}
+
+export function isTerminalPinned(row: { mint?: string | null }): boolean {
+  return !!row.mint && state.terminalPinnedMints.includes(row.mint);
+}
+
+export function toggleTerminalPinned(row: { mint?: string | null }): void {
+  if (!row.mint) return;
+  const pinned = new Set(state.terminalPinnedMints);
+  if (pinned.has(row.mint)) pinned.delete(row.mint);
+  else pinned.add(row.mint);
+  state.terminalPinnedMints = [...pinned];
+  localStorage.setItem(
+    "solard:terminal-pinned-mints",
+    JSON.stringify(state.terminalPinnedMints),
+  );
+  update();
+}
+
+export function fixTerminalInspector(row: {
+  mint?: string | null;
+  signature?: string | null;
+  seq?: number;
+}): void {
+  const key = pumpRowKey(row);
+  if (!key) return;
+  state.terminalInspectorKey = key;
+  state.terminalInspectorFixed = true;
+  localStorage.setItem("solard:terminal-inspector-key", key);
+  localStorage.setItem("solard:terminal-inspector-fixed", "1");
+  update();
+}
+
+export function followLatestInTerminalInspector(): void {
+  state.terminalInspectorKey = null;
+  state.terminalInspectorFixed = false;
+  localStorage.removeItem("solard:terminal-inspector-key");
+  localStorage.removeItem("solard:terminal-inspector-fixed");
+  update();
+}
+
+export function tokenSocialLinks(row: {
+  raw?: AnyRow;
+  uri?: string | null;
+  website?: string | null;
+  twitter?: string | null;
+  telegram?: string | null;
+}): Array<{ kind: string; href: string }> {
+  const raw = row.raw ?? {};
+  const entries: Array<[string, unknown]> = [
+    [
+      "web",
+      row.website ??
+        raw.website ??
+        raw.site ??
+        raw.external_url ??
+        raw.externalUrl,
+    ],
+    [
+      "x",
+      row.twitter ?? raw.twitterUrl ?? raw.twitter_url ?? raw.x ?? raw.xUrl,
+    ],
+    ["tg", row.telegram ?? raw.telegramUrl ?? raw.telegram_url ?? raw.tg],
+    ["uri", row.uri],
+  ];
+  const seen = new Set<string>();
+  const out: Array<{ kind: string; href: string }> = [];
+  for (const [kind, value] of entries) {
+    const href = typeof value === "string" && value.trim() ? value.trim() : "";
+    if (!href || seen.has(href)) continue;
+    if (!/^https?:\/\//i.test(href) && !href.startsWith("ipfs://")) continue;
+    seen.add(href);
+    out.push({
+      kind,
+      href: href.startsWith("ipfs://")
+        ? `https://ipfs.io/ipfs/${href.slice(7)}`
+        : href,
+    });
+  }
+  return out;
+}
+
 export function TokenBadges(row: {
   isMayhemMode?: boolean | null;
   quoteAsset?: string | null;
@@ -688,6 +794,18 @@ export function sortFeedRows(rows: PumpFeedRow[]): PumpFeedRow[] {
         (a, b) =>
           (mcapChangePct(b) ?? -Infinity) - (mcapChangePct(a) ?? -Infinity),
       );
+    case "sma1m-desc":
+      return copy.sort(
+        (a, b) => (b.sma1m ?? -Infinity) - (a.sma1m ?? -Infinity),
+      );
+    case "sma5m-desc":
+      return copy.sort(
+        (a, b) => (b.sma5m ?? -Infinity) - (a.sma5m ?? -Infinity),
+      );
+    case "sma15m-desc":
+      return copy.sort(
+        (a, b) => (b.sma15m ?? -Infinity) - (a.sma15m ?? -Infinity),
+      );
     case "trades-desc":
       return copy.sort((a, b) => byTrades(b) - byTrades(a));
     default:
@@ -799,6 +917,24 @@ export async function refreshPumpLive(): Promise<void> {
     state.selectedWatchGroupId = state.watchGroups[0].id;
 }
 
+export async function refreshTokenHolders(
+  mint: string | null | undefined,
+): Promise<void> {
+  const normalized = String(mint ?? "").trim();
+  if (!normalized) return;
+  if (state.tokenHolders[normalized]?.length) return;
+  state.tokenHoldersLoadingMint = normalized;
+  try {
+    const result = await api<{ mint: string; holders: TokenHolder[] }>(
+      `/api/token-holders?mint=${encodeURIComponent(normalized)}&limit=12`,
+    );
+    state.tokenHolders[result.mint] = result.holders ?? [];
+  } finally {
+    if (state.tokenHoldersLoadingMint === normalized)
+      state.tokenHoldersLoadingMint = null;
+  }
+}
+
 export async function createWatchGroup(name: string): Promise<void> {
   const created = await api<TokenWatchGroup>("/api/watch-groups", {
     method: "POST",
@@ -819,7 +955,10 @@ export async function addWatchedToken(
     image?: string | null;
     signature?: string | null;
     marketCapSol?: number | null;
-    source?: string;
+    isMayhemMode?: boolean | null;
+    quoteAsset?: string | null;
+    quoteMint?: string | null;
+    source?: string | null;
   },
 ): Promise<void> {
   await api<TokenWatchGroup>("/api/watch-groups", {
@@ -1472,76 +1611,6 @@ function resetPageScopedState(
   }
 }
 
-function MeasurePanel() {
-  const events = (state.measureEvents ?? []).slice(-18).reverse();
-  const latestError = events.find((event) => event.status === "error");
-  return (
-    <div className="measure-panel">
-      <div className="measure-head">
-        <div>
-          <span className={`dot ${latestError ? "bad" : "good"}`} />
-          <b>measure</b>
-          <span className="muted small">
-            {state.measureScope} · mount #{state.mountId}
-          </span>
-        </div>
-        <button
-          type="button"
-          className="secondary compact"
-          onClick={() => {
-            state.measureOpen = !state.measureOpen;
-            localStorage.setItem(
-              "solard:measure-open",
-              state.measureOpen ? "1" : "0",
-            );
-            update();
-          }}
-        >
-          {state.measureOpen ? "hide" : "show"}
-        </button>
-      </div>
-      {state.measureOpen ? (
-        <div className="measure-rows">
-          {events.length ? (
-            events.map((event) => (
-              <details
-                className={`measure-row ${event.status}`}
-                open={event.status === "error"}
-              >
-                <summary>
-                  <span className="code">#{event.id}</span>
-                  <span
-                    className={`pill ${event.status === "error" ? "bad" : event.status === "ok" ? "ok" : ""}`}
-                  >
-                    {event.status}
-                  </span>
-                  <span className="measure-label">{event.label}</span>
-                  <span className="muted small">
-                    {event.tookMs != null
-                      ? `${event.tookMs}ms`
-                      : new Date(event.atMs).toLocaleTimeString()}
-                  </span>
-                </summary>
-                <pre>
-                  {JSON.stringify(
-                    event.error
-                      ? { error: event.error }
-                      : (event.summary ?? {}),
-                    null,
-                    2,
-                  )}
-                </pre>
-              </details>
-            ))
-          ) : (
-            <p className="muted small">No measurements yet.</p>
-          )}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 export type ConsolePage = () => any;
 let currentPageView: ConsolePage = () => (
   <p className="muted">No page mounted.</p>
@@ -1553,30 +1622,11 @@ function ConsoleRuntime() {
   const Page = currentPageView;
   return (
     <>
-      <div className="notice row global-console-controls">
-        <label style="max-width: 360px">
-          Web token, optional
-          <input
-            value={state.token}
-            onInput={(event: any) => {
-              state.token = event.currentTarget.value;
-              localStorage.setItem("solwal:web-token", state.token);
-            }}
-          />
-        </label>
-        <button
-          className="secondary"
-          onClick={() =>
-            void runAction(refreshCurrentPage, { refreshAfter: false })
-          }
-        >
-          Refresh page
-        </button>
-        {state.busy ? <span className="pill">working…</span> : null}
-        {state.error ? <span className="pill bad">{state.error}</span> : null}
-      </div>
-      <ConnectionStrip />
-      <MeasurePanel />
+      {state.error ? (
+        <div className="global-error-strip">
+          <span className="pill bad">{state.error}</span>
+        </div>
+      ) : null}
       <Page />
     </>
   );

@@ -16,6 +16,8 @@ import {
   SettingSchema,
   TokenSchema,
   WalletSchema,
+  TokenWatchGroupSchema,
+  TokenWatchGroupTokenSchema,
   WatchSchema,
   type SowlDatabase,
 } from "./schema.js";
@@ -49,6 +51,8 @@ export function openDatabase(input?: string): SowlDatabase {
       alts: AltSchema,
       watches: WatchSchema,
       settings: SettingSchema,
+      tokenWatchGroups: TokenWatchGroupSchema,
+      tokenWatchGroupTokens: TokenWatchGroupTokenSchema,
     },
     {
       timestamps: false,
@@ -66,6 +70,8 @@ export function openDatabase(input?: string): SowlDatabase {
         alts: [["address"]],
         watches: [["kind", "address"]],
         settings: [["key"]],
+        tokenWatchGroups: [["groupId"], ["name"]],
+        tokenWatchGroupTokens: [["groupId", "mint"]],
       },
       indexes: {
         wallets: ["name", "address", "isActive"],
@@ -76,6 +82,8 @@ export function openDatabase(input?: string): SowlDatabase {
         claims: ["walletAddress", "mint", "status"],
         groupWallets: ["groupName", "walletAddress"],
         watches: ["kind", "address", "isActive"],
+        tokenWatchGroups: ["groupId", "name"],
+        tokenWatchGroupTokens: ["groupId", "mint", "updatedAtMs"],
       },
     },
   ) as SowlDatabase;

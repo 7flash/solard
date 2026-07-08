@@ -1,22 +1,19 @@
-export type ClientMeasureEvent = {
-  id: number;
-  parentId: number | null;
-  scope: string;
-  label: string;
-  status: "start" | "ok" | "error" | "event";
-  atMs: number;
-  tookMs?: number;
-  summary?: unknown;
-  error?: string;
-};
+import { createMeasure } from "measure-fn";
 
-const MAX_EVENTS = 240;
 const SENSITIVE_KEY =
   /secret|private|mnemonic|seed|keypair|password|authorization|cookie|token/i;
 
-function now(): number {
-  return Date.now();
-}
+type RawMeasureScope = {
+  measure?:
+    | { assert?: <T>(label: string, fn: () => Promise<T>) => Promise<T> }
+    | ((
+        label: string,
+        fn: () => Promise<unknown>,
+      ) => Promise<unknown> | unknown);
+  measureSync?:
+    | { assert?: <T>(label: string, fn: () => T) => T }
+    | ((label: string, fn?: () => unknown) => unknown);
+};
 
 export function summarizeForClient(value: unknown, depth = 0): unknown {
   if (value == null) return value;
@@ -61,148 +58,84 @@ export function summarizeForClient(value: unknown, depth = 0): unknown {
   return String(value);
 }
 
-function eventKey(event: ClientMeasureEvent): string {
-  return `${event.id}:${event.status}:${event.label}`;
-}
-
-class ClientMeasureStore {
-  private seq = 0;
-  private stack: number[] = [];
-  events: ClientMeasureEvent[] = [];
-
-  snapshot(): ClientMeasureEvent[] {
-    return [...this.events];
-  }
-
-  push(
-    event: Omit<ClientMeasureEvent, "id" | "parentId" | "atMs"> & {
-      parentId?: number | null;
-      atMs?: number;
-    },
-  ): ClientMeasureEvent {
-    const item: ClientMeasureEvent = {
-      id: ++this.seq,
-      parentId:
-        event.parentId === undefined
-          ? (this.stack[this.stack.length - 1] ?? null)
-          : event.parentId,
-      atMs: event.atMs ?? now(),
-      ...event,
-    };
-    this.events = [
-      ...this.events.filter(
-        (existing) => eventKey(existing) !== eventKey(item),
-      ),
-      item,
-    ].slice(-MAX_EVENTS);
-    return item;
-  }
-
-  async measure<T>(
-    scope: string,
-    label: string,
-    fn: () => Promise<T> | T,
-    summarize: (value: T) => unknown = summarizeForClient,
-  ): Promise<T> {
-    const start = this.push({ scope, label, status: "start" });
-    this.stack.push(start.id);
-    const started = now();
-    try {
-      const value = await fn();
-      this.push({
-        scope,
-        label,
-        status: "ok",
-        parentId: start.parentId,
-        tookMs: now() - started,
-        summary: summarize(value),
-      });
-      return value;
-    } catch (error) {
-      this.push({
-        scope,
-        label,
-        status: "error",
-        parentId: start.parentId,
-        tookMs: now() - started,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    } finally {
-      const index = this.stack.lastIndexOf(start.id);
-      if (index >= 0) this.stack.splice(index, 1);
-    }
-  }
-
-  sync<T>(
-    scope: string,
-    label: string,
-    fn: () => T,
-    summarize: (value: T) => unknown = summarizeForClient,
-  ): T {
-    const start = this.push({ scope, label, status: "start" });
-    this.stack.push(start.id);
-    const started = now();
-    try {
-      const value = fn();
-      this.push({
-        scope,
-        label,
-        status: "ok",
-        parentId: start.parentId,
-        tookMs: now() - started,
-        summary: summarize(value),
-      });
-      return value;
-    } catch (error) {
-      this.push({
-        scope,
-        label,
-        status: "error",
-        parentId: start.parentId,
-        tookMs: now() - started,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    } finally {
-      const index = this.stack.lastIndexOf(start.id);
-      if (index >= 0) this.stack.splice(index, 1);
-    }
-  }
-
-  event(scope: string, label: string, summary?: unknown): void {
-    this.push({
-      scope,
-      label,
-      status: "event",
-      summary: summarizeForClient(summary),
-    });
+function safeMeasure(scope: string): RawMeasureScope | null {
+  try {
+    return createMeasure(scope, { maxResultLength: 1200 }) as RawMeasureScope;
+  } catch {
+    return null;
   }
 }
 
-export const clientMeasureStore = new ClientMeasureStore();
+async function runMeasured<T>(
+  scope: RawMeasureScope | null,
+  label: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const measure = scope?.measure;
+  if (
+    measure &&
+    typeof measure === "object" &&
+    typeof measure.assert === "function"
+  )
+    return await measure.assert(label, fn);
+  if (typeof measure === "function")
+    return await (measure(label, fn) as Promise<T> | T);
+  return await fn();
+}
 
-export function createClientMeasureScope(scope: string) {
+function runMeasuredSync<T>(
+  scope: RawMeasureScope | null,
+  label: string,
+  fn: () => T,
+): T {
+  const measureSync = scope?.measureSync;
+  if (
+    measureSync &&
+    typeof measureSync === "object" &&
+    typeof measureSync.assert === "function"
+  )
+    return measureSync.assert(label, fn);
+  if (typeof measureSync === "function") return measureSync(label, fn) as T;
+  return fn();
+}
+
+export function createClientMeasureScope(scopeName: string) {
+  const scope = safeMeasure(scopeName);
   return {
     event(label: string, summary?: unknown) {
-      clientMeasureStore.event(scope, label, summary);
+      runMeasuredSync(scope, label, () => summarizeForClient(summary));
     },
-    measure<T>(
+    async measure<T>(
       label: string,
-      fn: () => Promise<T> | T,
-      summarize?: (value: T) => unknown,
-    ) {
-      return clientMeasureStore.measure(scope, label, fn, summarize);
+      operation: () => Promise<T> | T,
+      summarize: (value: T) => unknown = summarizeForClient,
+    ): Promise<T> {
+      let value!: T;
+      let hasValue = false;
+      await runMeasured(scope, label, async () => {
+        value = await operation();
+        hasValue = true;
+        return summarize(value);
+      });
+      if (!hasValue)
+        throw new Error(`Measured operation produced no value: ${label}`);
+      return value;
     },
     measureSync<T>(
       label: string,
-      fn: () => T,
-      summarize?: (value: T) => unknown,
-    ) {
-      return clientMeasureStore.sync(scope, label, fn, summarize);
-    },
-    snapshot() {
-      return clientMeasureStore.snapshot();
+      operation: () => T,
+      summarize: (value: T) => unknown = summarizeForClient,
+    ): T {
+      let value!: T;
+      let hasValue = false;
+      runMeasuredSync(scope, label, () => {
+        value = operation();
+        hasValue = true;
+        return summarize(value);
+      });
+      if (!hasValue)
+        throw new Error(`Measured operation produced no value: ${label}`);
+      return value;
     },
   };
 }
