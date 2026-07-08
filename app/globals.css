@@ -1055,3 +1055,17 @@ html, body { width: 100%; overflow-x: hidden; }
   .clean-table.wallet-table { min-width: 760px; }
   .wallet-balance-scroll { max-height: 70vh; }
 }
+
+/* Portfolio page */
+.portfolio-page { display: grid; gap: 16px; }
+.portfolio-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.portfolio-controls label { min-width: 220px; }
+.portfolio-controls .check { min-width: auto; flex-direction: row; align-items: center; gap: 8px; }
+.portfolio-table-panel { overflow: hidden; }
+.portfolio-table { min-width: 980px; }
+.portfolio-table td, .portfolio-table th { vertical-align: top; }
+.right-actions { justify-content: flex-end; }
+@media (max-width: 900px) {
+  .portfolio-table-panel { overflow-x: auto; }
+  .portfolio-controls label { min-width: 100%; }
+}

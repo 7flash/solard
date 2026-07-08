@@ -9,6 +9,18 @@ type Overview = {
   balances: AnyRow[];
 };
 
+type Portfolio = {
+  wallets: AnyRow[];
+  totals: {
+    wallets: number;
+    tokenAccounts: number;
+    holdings: number;
+    solLamports: string | null;
+  };
+  rows: AnyRow[];
+  loadedAtMs: number;
+};
+
 type BuyPlanRow = {
   id: string;
   wallet: string;
@@ -143,6 +155,7 @@ type State = {
   tab:
     | "overview"
     | "wallets"
+    | "portfolio"
     | "terminal"
     | "watchlists"
     | "signals"
@@ -150,6 +163,9 @@ type State = {
     | "trade"
     | "jobs";
   overview: Overview | null;
+  portfolio: Portfolio | null;
+  portfolioSearch: string;
+  portfolioHideZero: boolean;
   rpcStatus: AnyRow | null;
   jobs: AnyRow[];
   selectedJobId: string | null;
@@ -203,6 +219,9 @@ type State = {
 const state: State = {
   tab: "overview",
   overview: null,
+  portfolio: null,
+  portfolioSearch: localStorage.getItem("solard:portfolio-search") ?? "",
+  portfolioHideZero: localStorage.getItem("solard:portfolio-hide-zero") !== "0",
   rpcStatus: null,
   jobs: [],
   selectedJobId: null,
@@ -259,6 +278,7 @@ const state: State = {
 function pageFromPath(): State["tab"] {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path.endsWith("/wallets")) return "wallets";
+  if (path.endsWith("/portfolio")) return "portfolio";
   if (path.endsWith("/terminal")) return "terminal";
   if (path.endsWith("/watchlists")) return "watchlists";
   if (path.endsWith("/signals")) return "signals";
@@ -617,6 +637,10 @@ async function refreshWatchGroups(): Promise<void> {
   ) {
     state.selectedWatchGroupId = state.watchGroups[0]?.id ?? null;
   }
+}
+
+async function refreshPortfolio(): Promise<void> {
+  state.portfolio = await api<Portfolio>("/api/portfolio");
 }
 
 async function refreshSignals(): Promise<void> {
@@ -1250,6 +1274,13 @@ function OverviewView() {
           <button
             type="button"
             className="secondary"
+            onClick={() => navigatePage("portfolio")}
+          >
+            Open portfolio
+          </button>
+          <button
+            type="button"
+            className="secondary"
             onClick={() =>
               void runAction(async () => {
                 await refreshOverview();
@@ -1394,6 +1425,185 @@ function walletBalanceForAddress(address: string | undefined): AnyRow | null {
       (row: AnyRow) =>
         String(row.wallet?.address ?? "").toLowerCase() === target,
     ) ?? null
+  );
+}
+
+function PortfolioView() {
+  const data = state.portfolio;
+  const query = state.portfolioSearch.trim().toLowerCase();
+  const rows = (data?.rows ?? []).filter((row: AnyRow) => {
+    if (state.portfolioHideZero && String(row.amountRaw ?? "0") === "0")
+      return false;
+    if (!query) return true;
+    const haystack = [
+      row.wallet?.name,
+      row.wallet?.address,
+      row.mint,
+      row.symbol,
+      row.name,
+      row.tokenAccount,
+      ...(row.wallet?.groups ?? []),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(query);
+  });
+  const grouped = new Map<string, AnyRow[]>();
+  for (const row of rows) {
+    const key = row.wallet?.address ?? "unknown";
+    const list = grouped.get(key) ?? [];
+    list.push(row);
+    grouped.set(key, list);
+  }
+  return (
+    <div className="portfolio-page">
+      <section className="console-panel hero-panel">
+        <div>
+          <div className="section-kicker">Portfolio</div>
+          <h2>Holdings, separated from Home</h2>
+          <p className="muted">
+            Home stays instant from SQLite. Portfolio can spend RPC time
+            refreshing SOL and non-zero token accounts across wallets.
+          </p>
+        </div>
+        <div className="row right-actions">
+          <button
+            type="button"
+            onClick={() => void runAction(refreshPortfolio)}
+          >
+            Refresh portfolio
+          </button>
+        </div>
+      </section>
+
+      <div className="home-metrics">
+        <div className="metric-card">
+          <div className="muted small">Wallets scanned</div>
+          <div className="stat">{data?.totals?.wallets ?? "—"}</div>
+        </div>
+        <div className="metric-card">
+          <div className="muted small">Non-zero holdings</div>
+          <div className="stat">{data?.totals?.holdings ?? "—"}</div>
+        </div>
+        <div className="metric-card">
+          <div className="muted small">Token accounts</div>
+          <div className="stat">{data?.totals?.tokenAccounts ?? "—"}</div>
+        </div>
+        <div className="metric-card">
+          <div className="muted small">SOL total</div>
+          <div className="stat">
+            {solFromLamports(data?.totals?.solLamports)}
+          </div>
+        </div>
+      </div>
+
+      <section className="console-panel portfolio-controls">
+        <label>
+          Search
+          <input
+            value={state.portfolioSearch}
+            placeholder="wallet, group, mint, symbol"
+            onInput={(event: any) => {
+              state.portfolioSearch = event.currentTarget.value;
+              localStorage.setItem(
+                "solard:portfolio-search",
+                state.portfolioSearch,
+              );
+              update();
+            }}
+          />
+        </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={state.portfolioHideZero}
+            onChange={(event: any) => {
+              state.portfolioHideZero = event.currentTarget.checked;
+              localStorage.setItem(
+                "solard:portfolio-hide-zero",
+                state.portfolioHideZero ? "1" : "0",
+              );
+              update();
+            }}
+          />{" "}
+          Hide zero accounts
+        </label>
+        <span className="muted small">
+          Loaded{" "}
+          {data?.loadedAtMs
+            ? new Date(data.loadedAtMs).toLocaleTimeString()
+            : "not yet"}
+        </span>
+      </section>
+
+      <section className="console-panel portfolio-table-panel">
+        <table className="clean-table portfolio-table">
+          <thead>
+            <tr>
+              <th>Wallet</th>
+              <th>Groups</th>
+              <th>Asset</th>
+              <th>Amount</th>
+              <th>Mint</th>
+              <th>Token account</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row: AnyRow) => (
+              <tr>
+                <td>
+                  <b>{row.wallet?.name ?? "—"}</b>
+                  <div className="code tiny">
+                    {short(row.wallet?.address, 8, 8)}
+                  </div>
+                </td>
+                <td>
+                  <div className="groups-inline">
+                    {(row.wallet?.groups ?? []).length ? (
+                      row.wallet.groups.map((name: string) => (
+                        <span className="group-chip">{name}</span>
+                      ))
+                    ) : (
+                      <span className="muted tiny">none</span>
+                    )}
+                  </div>
+                </td>
+                <td>
+                  {row.symbol ? (
+                    <b>${row.symbol}</b>
+                  ) : row.name ? (
+                    <b>{row.name}</b>
+                  ) : (
+                    <b>{row.kind === "sol" ? "SOL" : short(row.mint, 4, 4)}</b>
+                  )}
+                  <div className="muted tiny">{row.kind ?? "token"}</div>
+                </td>
+                <td className="strong-cell">
+                  {row.amountUi ?? row.amountRaw ?? "—"}
+                </td>
+                <td className="code">
+                  {row.mint ? (
+                    <a href={tokenUrl(row.mint)} target="_blank">
+                      {short(row.mint, 8, 8)}
+                    </a>
+                  ) : (
+                    "native"
+                  )}
+                </td>
+                <td className="code">
+                  {row.tokenAccount ? short(row.tokenAccount, 8, 8) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length ? (
+          <p className="muted">
+            No holdings loaded yet. Refresh portfolio after RPC is configured.
+          </p>
+        ) : null}
+      </section>
+    </div>
   );
 }
 
@@ -3652,6 +3862,8 @@ function App() {
         <OverviewView />
       ) : state.tab === "wallets" ? (
         <WalletsView />
+      ) : state.tab === "portfolio" ? (
+        <PortfolioView />
       ) : state.tab === "terminal" ? (
         <TerminalView />
       ) : state.tab === "watchlists" ? (
@@ -3687,6 +3899,8 @@ export default function mount() {
     await refreshJobs().catch(() => undefined);
     if (state.tab === "terminal" || state.tab === "watchlists")
       await refreshPumpLive().catch(() => undefined);
+    if (state.tab === "portfolio")
+      await refreshPortfolio().catch(() => undefined);
     if (state.tab === "signals") await refreshSignals().catch(() => undefined);
   });
   if (state.tab === "terminal") void startPumpFeed();
@@ -3701,6 +3915,10 @@ export default function mount() {
         .catch(() => undefined);
     if (state.tab === "signals")
       void refreshSignals()
+        .then(update)
+        .catch(() => undefined);
+    if (state.tab === "portfolio")
+      void refreshPortfolio()
         .then(update)
         .catch(() => undefined);
     void refreshStatus()
