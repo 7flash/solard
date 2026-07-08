@@ -3,11 +3,11 @@ export default function HomePage() {
     <main className="shell">
       <header className="hero">
         <div>
-          <p className="eyebrow">Solwal local trading console</p>
-          <h1>Trade terminal, watchlists, launches.</h1>
+          <p className="eyebrow">SOLWAL // LOCAL COMMAND CONSOLE</p>
+          <h1>Terminal. Wallets. Launches.</h1>
           <p className="muted">
-            A local admin console for Pump streams, wallet groups, launch plans,
-            trades, and live run activity.
+            Flat local admin console for Pump streams, watchlists, wallet
+            groups, launch plans, trades, and run activity.
           </p>
         </div>
         <div className="status-card">

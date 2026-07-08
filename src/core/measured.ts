@@ -1,18 +1,33 @@
 /**
  * Compatibility adapter for measure-fn runtimes.
  *
- * Newer measure-fn versions accept `{ result: mapper }`, but older linked Bun
- * installs print the raw returned value. These helpers always return a compact
- * summary from the measured callback while retaining the real application value
- * outside the callback. Logs therefore stay safe and compact on either runtime.
+ * Some linked Bun/measure-fn builds expose `scope.measure(label, fn)` and
+ * `scope.measureSync(label, fn)` directly, while other builds expose
+ * `scope.measure.assert(label, fn)` / `scope.measureSync.assert(label, fn)`.
+ *
+ * These helpers support both shapes. They keep logs compact by returning the
+ * mapped log value from the measured callback, while returning the real
+ * application value to callers.
  */
-type AsyncMeasure = {
-  assert<T>(label: string, fn: () => Promise<T>): Promise<T>;
+type MaybeAsyncMeasureFn = (<T>(
+  label: string,
+  fn: () => Promise<T>,
+) => Promise<T>) & {
+  assert?: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
 };
-type SyncMeasure = {
-  assert<T>(label: string, fn: () => T): T;
+
+type MaybeSyncMeasureFn = (<T>(label: string, fn: () => T) => T) & {
+  assert?: <T>(label: string, fn: () => T) => T;
 };
-type Scope = { measure: AsyncMeasure; measureSync: SyncMeasure };
+
+type Scope = {
+  measure?: MaybeAsyncMeasureFn;
+  measureSync?: MaybeSyncMeasureFn;
+};
+
+function hasValue<T>(value: T | undefined): value is T {
+  return value !== undefined;
+}
 
 export async function measured<T, L>(
   scope: Scope,
@@ -21,11 +36,22 @@ export async function measured<T, L>(
   logValue: (value: T) => L,
 ): Promise<T> {
   let value: T | undefined;
-  await scope.measure.assert(label, async () => {
+
+  const run = async (): Promise<L> => {
     value = await operation();
     return logValue(value);
-  });
-  if (value === undefined)
+  };
+
+  const measure = scope.measure;
+  if (measure?.assert) {
+    await measure.assert(label, run);
+  } else if (typeof measure === "function") {
+    await measure(label, run);
+  } else {
+    await run();
+  }
+
+  if (!hasValue(value))
     throw new Error(`Measured operation ${label} produced no result`);
   return value;
 }
@@ -37,11 +63,22 @@ export function measuredSync<T, L>(
   logValue: (value: T) => L,
 ): T {
   let value: T | undefined;
-  scope.measureSync.assert(label, () => {
+
+  const run = (): L => {
     value = operation();
     return logValue(value);
-  });
-  if (value === undefined)
+  };
+
+  const measureSync = scope.measureSync;
+  if (measureSync?.assert) {
+    measureSync.assert(label, run);
+  } else if (typeof measureSync === "function") {
+    measureSync(label, run);
+  } else {
+    run();
+  }
+
+  if (!hasValue(value))
     throw new Error(`Measured operation ${label} produced no result`);
   return value;
 }
