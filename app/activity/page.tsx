@@ -1,13 +1,13 @@
 export default function Page() {
   return (
-    <main className="shell page-shell" data-page="overview">
+    <main className="shell page-shell" data-page="jobs">
       <aside className="side-nav">
         <div className="brand-block">
           <p className="eyebrow">SOLWAL</p>
-          <h1>HOME</h1>
+          <h1>ACTIVITY</h1>
         </div>
         <nav className="nav-list" id="main-nav">
-          <a data-page="overview" className="active" href="/">
+          <a data-page="overview" className="" href="/">
             Home
           </a>
           <a data-page="terminal" className="" href="/terminal">
@@ -25,7 +25,7 @@ export default function Page() {
           <a data-page="trade" className="" href="/trade">
             Trade
           </a>
-          <a data-page="jobs" className="" href="/activity">
+          <a data-page="jobs" className="active" href="/activity">
             Activity
           </a>
         </nav>
@@ -43,14 +43,14 @@ export default function Page() {
         <header className="page-header">
           <div>
             <p className="eyebrow">SOLWAL // LOCAL COMMAND CONSOLE</p>
-            <h2>Terminal. Wallets. Launches.</h2>
+            <h2>Launch and execution activity.</h2>
             <p className="muted">
-              Control surface for live Pump streams, watchlists, wallet groups,
-              launch plans, trades, and run activity.
+              High-level launches, executions, logs, and low-level retry
+              attempts separated from real failures.
             </p>
           </div>
         </header>
-        <section id="app-root" data-page="overview" className="panel">
+        <section id="app-root" data-page="jobs" className="panel">
           Loading console…
         </section>
       </section>

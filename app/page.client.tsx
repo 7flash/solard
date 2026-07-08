@@ -179,6 +179,27 @@ const state: State = {
   watchGroupName: "main",
 };
 
+function pageFromPath(): State["tab"] {
+  const path = window.location.pathname.replace(/\/+$/, "");
+  if (path.endsWith("/wallets")) return "wallets";
+  if (path.endsWith("/terminal")) return "terminal";
+  if (path.endsWith("/watchlists")) return "watchlists";
+  if (path.endsWith("/launch")) return "launch";
+  if (path.endsWith("/trade")) return "trade";
+  if (path.endsWith("/activity")) return "jobs";
+  return "overview";
+}
+
+function pageHref(page: State["tab"]): string {
+  if (page === "overview") return "/";
+  if (page === "jobs") return "/activity";
+  return `/${page}`;
+}
+
+function navigatePage(page: State["tab"]): void {
+  window.location.href = pageHref(page);
+}
+
 function authHeaders(): HeadersInit {
   return state.token ? { "x-solwal-web-token": state.token } : {};
 }
@@ -846,10 +867,7 @@ function LaunchRunSummary({ job }: { job: AnyRow | null }) {
           <button
             type="button"
             className="secondary compact"
-            onClick={() => {
-              state.tab = "jobs";
-              update();
-            }}
+            onClick={() => navigatePage("jobs")}
           >
             Open activity
           </button>
@@ -941,22 +959,13 @@ function OverviewView() {
           </p>
         </div>
         <div className="quick-actions">
-          <button
-            type="button"
-            onClick={() => {
-              state.tab = "terminal";
-              update();
-            }}
-          >
+          <button type="button" onClick={() => navigatePage("terminal")}>
             Open Pump terminal
           </button>
           <button
             type="button"
             className="secondary"
-            onClick={() => {
-              state.tab = "launch";
-              update();
-            }}
+            onClick={() => navigatePage("launch")}
           >
             Build launch
           </button>
@@ -983,10 +992,7 @@ function OverviewView() {
             <button
               type="button"
               className="secondary compact"
-              onClick={() => {
-                state.tab = "wallets";
-                update();
-              }}
+              onClick={() => navigatePage("wallets")}
             >
               Manage
             </button>
@@ -1040,10 +1046,7 @@ function OverviewView() {
             <button
               type="button"
               className="secondary compact"
-              onClick={() => {
-                state.tab = "jobs";
-                update();
-              }}
+              onClick={() => navigatePage("jobs")}
             >
               Open Activity
             </button>
@@ -2675,21 +2678,14 @@ function update() {
   const root = document.getElementById("app-root");
   if (root) render(<App />, root);
   document
-    .querySelectorAll<HTMLButtonElement>("#tabs button")
-    .forEach((button) =>
-      button.classList.toggle("active", button.dataset.tab === state.tab),
+    .querySelectorAll<HTMLAnchorElement>("#main-nav a")
+    .forEach((link) =>
+      link.classList.toggle("active", link.dataset.page === state.tab),
     );
 }
 
 export default function mount() {
-  document
-    .querySelectorAll<HTMLButtonElement>("#tabs button")
-    .forEach((button) => {
-      button.addEventListener("click", () => {
-        state.tab = button.dataset.tab as State["tab"];
-        update();
-      });
-    });
+  state.tab = pageFromPath();
   void runAction(async () => {
     await refreshOverview();
     await refreshJobs();

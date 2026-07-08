@@ -1,19 +1,19 @@
 export default function Page() {
   return (
-    <main className="shell page-shell" data-page="overview">
+    <main className="shell page-shell" data-page="watchlists">
       <aside className="side-nav">
         <div className="brand-block">
           <p className="eyebrow">SOLWAL</p>
-          <h1>HOME</h1>
+          <h1>WATCHLISTS</h1>
         </div>
         <nav className="nav-list" id="main-nav">
-          <a data-page="overview" className="active" href="/">
+          <a data-page="overview" className="" href="/">
             Home
           </a>
           <a data-page="terminal" className="" href="/terminal">
             Pump terminal
           </a>
-          <a data-page="watchlists" className="" href="/watchlists">
+          <a data-page="watchlists" className="active" href="/watchlists">
             Watchlists
           </a>
           <a data-page="launch" className="" href="/launch">
@@ -43,14 +43,14 @@ export default function Page() {
         <header className="page-header">
           <div>
             <p className="eyebrow">SOLWAL // LOCAL COMMAND CONSOLE</p>
-            <h2>Terminal. Wallets. Launches.</h2>
+            <h2>Watched token grids.</h2>
             <p className="muted">
-              Control surface for live Pump streams, watchlists, wallet groups,
-              launch plans, trades, and run activity.
+              Groups of tracked tokens with live market-cap samples, SMA
+              columns, and movement sorting.
             </p>
           </div>
         </header>
-        <section id="app-root" data-page="overview" className="panel">
+        <section id="app-root" data-page="watchlists" className="panel">
           Loading console…
         </section>
       </section>
