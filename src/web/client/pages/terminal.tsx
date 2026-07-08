@@ -58,6 +58,10 @@ function inspectRow(row: PumpFeedRow): void {
   fixTerminalInspector(row);
   if (holderHoverTimer) clearTimeout(holderHoverTimer);
   if (!isLikelySolanaPublicKey(row.mint)) return;
+  // Only auto-load holders once the row has a confirmed curve/mcap snapshot.
+  // Bad parser rows and stale cache entries otherwise hammer RPC with
+  // “not a Token mint” lookups on every hover. Manual Refresh remains available.
+  if (latestMcap(row) == null) return;
   const key = pumpRowKey(row);
   const mint = row.mint!;
   holderHoverTimer = setTimeout(() => {
@@ -69,7 +73,7 @@ function inspectRow(row: PumpFeedRow): void {
         .then(update)
         .catch(() => undefined);
     }
-  }, 275);
+  }, 900);
 }
 
 function SocialLinks({ row }: { row: PumpFeedRow }) {

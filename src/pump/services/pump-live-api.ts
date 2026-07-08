@@ -31,6 +31,8 @@ type Source = "pumpportal" | "helius";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const PUMP_TOKEN_DECIMALS = 6;
+const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEiNGyNxDbhNQrUVgktvRFw4A9h7";
 
 type PumpCurveSnapshot = {
   virtualTokenReservesRaw: string;
@@ -238,6 +240,81 @@ function publicKey(value: string | null | undefined): PublicKey | null {
   }
 }
 
+function rawAccountDataBase64(account: Raw | null | undefined): string | null {
+  const data = account?.data;
+  if (typeof data === "string") return data;
+  if (Array.isArray(data) && typeof data[0] === "string") return data[0];
+  return null;
+}
+
+function accountOwner(account: Raw | null | undefined): string | null {
+  const owner = account?.owner;
+  if (typeof owner === "string") return owner;
+  if (owner && typeof (owner as { toBase58?: unknown }).toBase58 === "function")
+    return (owner as { toBase58: () => string }).toBase58();
+  return null;
+}
+
+function isSplMintAccount(account: Raw | null | undefined): boolean {
+  const owner = accountOwner(account);
+  if (owner !== TOKEN_PROGRAM_ID && owner !== TOKEN_2022_PROGRAM_ID)
+    return false;
+  const data = rawAccountDataBase64(account);
+  if (!data) return false;
+  try {
+    const len = Buffer.from(data, "base64").length;
+    // Classic SPL mint accounts are exactly 82 bytes. Token accounts are 165
+    // bytes, so do not accept “>= 82” or we will accidentally pick an ATA.
+    // Pump launches today are classic Tokenkeg mints; keep Token-2022 support
+    // conservative so holder/mcap lookups never receive token accounts/PDAs.
+    if (owner === TOKEN_PROGRAM_ID) return len === 82;
+    if (owner === TOKEN_2022_PROGRAM_ID) return len >= 82 && len < 165;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function rawStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .map(clean)
+        .filter((item): item is string => !!item && !!publicKey(item))
+    : [];
+}
+
+async function resolveConfirmedPumpMint(raw: Raw): Promise<string | null> {
+  const candidates = [
+    ...rawStringArray(raw.postTokenBalanceMints),
+    clean(raw.mint),
+    ...rawStringArray(raw.parserAccounts),
+  ].filter((item): item is string => !!item && !!publicKey(item));
+  const unique = [...new Set(candidates)];
+  if (!unique.length) return null;
+  // Prefer vanity pump suffixes, but only after confirming the account is an SPL mint.
+  unique.sort(
+    (a, b) => (/pump$/i.test(b) ? 1 : 0) - (/pump$/i.test(a) ? 1 : 0),
+  );
+  try {
+    const accountList = await rpc<Raw>("getMultipleAccounts", [
+      unique,
+      { encoding: "base64", commitment: "confirmed" },
+    ]);
+    const values = Array.isArray((accountList as Raw | undefined)?.value)
+      ? ((accountList as Raw).value as Array<Raw | null>)
+      : [];
+    for (let i = 0; i < unique.length; i += 1) {
+      if (isSplMintAccount(values[i] ?? null)) return unique[i];
+    }
+  } catch {
+    // If validation RPC itself is flaky, do not insert the unchecked account-index
+    // guess. Returning null is better than poisoning the DB with a curve/PDA that
+    // later breaks mcap and holder lookups.
+    return null;
+  }
+  return null;
+}
+
 function derivePumpBondingCurve(
   mint: string | null | undefined,
 ): string | null {
@@ -379,11 +456,21 @@ async function normalizeHeliusSignature(
   if ((tx.meta as Raw | undefined)?.err) return null;
   const raw = findPumpCreateInTransaction(tx, signature);
   if (!raw) return null;
-  let snapshot = await loadBondingCurveSnapshot(clean(raw.bondingCurveKey));
-  if (!snapshot)
-    snapshot = await loadBondingCurveSnapshot(
-      derivePumpBondingCurve(clean(raw.mint)),
-    );
+
+  const confirmedMint = await resolveConfirmedPumpMint(raw);
+  if (!confirmedMint) return null;
+  raw.mint = confirmedMint;
+
+  // The derived PDA from the confirmed mint is safer than a parser account-index
+  // guess. Use parser-provided curve only as a fallback.
+  const derivedCurve = derivePumpBondingCurve(confirmedMint);
+  raw.bondingCurveKey = derivedCurve ?? clean(raw.bondingCurveKey);
+
+  let snapshot = await loadBondingCurveSnapshot(
+    raw.bondingCurveKey as string | null,
+  );
+  if (!snapshot && derivedCurve)
+    snapshot = await loadBondingCurveSnapshot(derivedCurve);
   if (snapshot) {
     raw.bondingCurveSnapshot = snapshot;
     raw.marketCapSol = snapshot.marketCapSol;
@@ -794,9 +881,9 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
                 });
             })
             .catch((error) => {
-              send("warning", {
+              send("status", {
+                status: "curve-refresh-degraded",
                 source,
-                kind: "curve-refresh",
                 error: error instanceof Error ? error.message : String(error),
                 at: new Date().toISOString(),
               });

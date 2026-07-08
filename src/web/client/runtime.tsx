@@ -338,6 +338,7 @@ export const state: State = {
 };
 
 const runtimeMeasure = createClientMeasureScope("solard:web");
+const toastDedupedAt: Record<string, number> = {};
 
 export async function measureClient<T>(
   label: string,
@@ -381,12 +382,22 @@ export function pushToast(
   ttlMs = 6000,
 ): void {
   const now = Date.now();
+  const cleanTitle = trimText(title, 80);
+  const cleanMessage = message == null ? null : trimText(message, 220);
+  const key = `${kind}:${cleanTitle}:${cleanMessage ?? ""}`;
+  const dedupeMs = /local issuer certificate|certificate/i.test(
+    cleanMessage ?? "",
+  )
+    ? 60_000
+    : 8_000;
+  if (toastDedupedAt[key] && now - toastDedupedAt[key] < dedupeMs) return;
+  toastDedupedAt[key] = now;
   state.toasts = [
     {
       id: `${now}:${Math.random().toString(36).slice(2)}`,
       kind,
-      title: trimText(title, 80),
-      message: message == null ? null : trimText(message, 220),
+      title: cleanTitle,
+      message: cleanMessage,
       createdAtMs: now,
       expiresAtMs: now + Math.max(1000, ttlMs),
     },
@@ -961,7 +972,12 @@ export async function refreshPumpLive(): Promise<void> {
     newTokens: PumpFeedRow[];
     watchGroups: TokenWatchGroup[];
   }>("/api/pump-live");
-  for (const row of live.newTokens ?? []) mergePumpToken(row);
+  // Terminal is a live feed, not a DB dump. Do not seed 500 stale cached rows
+  // into it; stream events and curve-poll updates populate the page. Watchlists
+  // can still use the same endpoint to load persisted token state.
+  if (state.tab !== "terminal") {
+    for (const row of live.newTokens ?? []) mergePumpToken(row);
+  }
   state.watchGroups = live.watchGroups ?? state.watchGroups;
   if (!state.selectedWatchGroupId && state.watchGroups[0])
     state.selectedWatchGroupId = state.watchGroups[0].id;
@@ -1306,6 +1322,12 @@ export async function startPumpFeed(): Promise<void> {
   state.pumpFeedAbort = abort;
   state.pumpFeedStatus = "connecting";
   state.pumpFeedError = null;
+  // Keep explicitly pinned rows, but clear stale cached DB rows so Terminal
+  // behaves like a real-time feed instead of a historical dump.
+  state.pumpFeed = state.pumpFeed.filter(
+    (row) => row.mint && state.terminalPinnedMints.includes(row.mint),
+  );
+  followLatestInTerminalInspector();
   update();
   try {
     const response = await fetch(
@@ -1424,7 +1446,7 @@ export async function refreshCurrentPage(): Promise<void> {
   } else if (state.tab === "wallets") {
     await refreshSolBalances().catch(() => undefined);
   } else if (state.tab === "terminal") {
-    await Promise.allSettled([refreshPumpLive(), refreshWatchGroups()]);
+    await refreshWatchGroups().catch(() => undefined);
   } else if (state.tab === "watchlists") {
     await Promise.allSettled([refreshWatchGroups(), refreshPumpLive()]);
   } else if (state.tab === "portfolio") {
