@@ -119,6 +119,96 @@ async function loadBondingCurveSnapshot(
   }
 }
 
+async function loadBondingCurveSnapshots(
+  curves: string[],
+): Promise<Map<string, PumpCurveSnapshot>> {
+  const keys = [
+    ...new Set(
+      curves
+        .map(clean)
+        .filter((value): value is string => !!value && !!publicKey(value)),
+    ),
+  ];
+  const out = new Map<string, PumpCurveSnapshot>();
+  if (!keys.length) return out;
+  try {
+    const accountList = await rpc<Raw>("getMultipleAccounts", [
+      keys,
+      { encoding: "base64", commitment: "confirmed" },
+    ]);
+    const values = Array.isArray((accountList as Raw | undefined)?.value)
+      ? ((accountList as Raw).value as Raw[])
+      : [];
+    values.forEach((account, index) => {
+      const data = Array.isArray(account?.data)
+        ? (account.data as unknown[])[0]
+        : null;
+      const snapshot =
+        typeof data === "string" ? decodePumpBondingCurveSnapshot(data) : null;
+      if (snapshot) out.set(keys[index], snapshot);
+    });
+  } catch {
+    // batched curve refresh is best-effort; individual create enrichment still runs
+  }
+  return out;
+}
+
+async function refreshRecentCurveSnapshots(
+  send?: (event: string, data: unknown) => void,
+): Promise<{ checked: number; updated: number }> {
+  const limit = Math.max(
+    1,
+    intEnv(
+      "SOLARD_PUMP_CURVE_REFRESH_LIMIT",
+      intEnv("SOLWAL_PUMP_CURVE_REFRESH_LIMIT", 80),
+    ),
+  );
+  const rows = listPumpLiveState().newTokens.slice(0, limit);
+  const pairs = rows
+    .map((token: Raw) => ({
+      token,
+      mint: clean(token.mint),
+      curve:
+        clean(token.bondingCurveKey) ??
+        derivePumpBondingCurve(clean(token.mint)),
+    }))
+    .filter((pair) => pair.mint && pair.curve && publicKey(pair.curve));
+  const snapshots = await loadBondingCurveSnapshots(
+    pairs.map((pair) => pair.curve!),
+  );
+  let updated = 0;
+  for (const pair of pairs) {
+    const snapshot = snapshots.get(pair.curve!);
+    if (!snapshot || snapshot.marketCapSol == null) continue;
+    const next = recordPumpTrade({
+      ...(pair.token.raw && typeof pair.token.raw === "object"
+        ? (pair.token.raw as Raw)
+        : {}),
+      mint: pair.mint,
+      name: pair.token.name,
+      symbol: pair.token.symbol,
+      uri: pair.token.uri,
+      image: pair.token.image,
+      website: pair.token.website,
+      twitter: pair.token.twitter,
+      telegram: pair.token.telegram,
+      creator: pair.token.creator,
+      signature: pair.token.signature,
+      bondingCurveKey: pair.curve,
+      bondingCurveSnapshot: snapshot,
+      marketCapSol: snapshot.marketCapSol,
+      priceSolPerToken: snapshot.priceSolPerToken,
+      txType: "curve-poll",
+      source: "curve-poll",
+    });
+    if (next) {
+      updated += 1;
+      send?.("trade", { ...next, eventType: "trade" });
+    }
+  }
+  return { checked: pairs.length, updated };
+}
+
 function sse(event: string, data: unknown): Uint8Array {
   return new TextEncoder().encode(
     `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
@@ -484,10 +574,10 @@ function runHeliusStream(args: {
       const token = await normalizeHeliusSignature(signature);
       if (token) args.send("token", token);
       else
-        args.send("warning", {
+        args.send("status", {
+          status: "parser-skip",
           source: "helius",
           signature,
-          error: "create log seen but transaction parser did not extract token",
           at: new Date().toISOString(),
         });
     } catch (error) {
@@ -659,6 +749,8 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
       start(controller) {
         let closed = false;
         let stopSource: (() => void) | null = null;
+        let heartbeat: ReturnType<typeof setInterval> | null = null;
+        let curveRefresh: ReturnType<typeof setInterval> | null = null;
         const send = (event: string, data: unknown) => {
           if (closed) return;
           try {
@@ -670,7 +762,8 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
         const close = () => {
           if (closed) return;
           closed = true;
-          clearInterval(heartbeat);
+          if (heartbeat) clearInterval(heartbeat);
+          if (curveRefresh) clearInterval(curveRefresh);
           try {
             stopSource?.();
           } catch {}
@@ -678,15 +771,44 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
             controller.close();
           } catch {}
         };
-        const heartbeat = setInterval(
+        heartbeat = setInterval(
           () => send("ping", { at: new Date().toISOString() }),
           15_000,
         );
+        const curveRefreshMs = Math.max(
+          1000,
+          intEnv(
+            "SOLARD_PUMP_CURVE_REFRESH_MS",
+            intEnv("SOLWAL_PUMP_CURVE_REFRESH_MS", 2500),
+          ),
+        );
+        curveRefresh = setInterval(() => {
+          void refreshRecentCurveSnapshots(send)
+            .then((result) => {
+              if (result.updated > 0)
+                send("status", {
+                  status: "curve-refresh",
+                  source,
+                  ...result,
+                  at: new Date().toISOString(),
+                });
+            })
+            .catch((error) => {
+              send("warning", {
+                source,
+                kind: "curve-refresh",
+                error: error instanceof Error ? error.message : String(error),
+                at: new Date().toISOString(),
+              });
+            });
+        }, curveRefreshMs);
+        void refreshRecentCurveSnapshots(send).catch(() => undefined);
         request.signal.addEventListener("abort", close, { once: true });
         send("status", {
           status: "stream-open",
           source,
           scope: `solard:pump-live:${source}`,
+          curveRefreshMs,
           at: new Date().toISOString(),
         });
         stopSource =

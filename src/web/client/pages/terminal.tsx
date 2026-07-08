@@ -52,12 +52,24 @@ function chooseInspector(rows: PumpFeedRow[]): PumpFeedRow | null {
   return rows[0] ?? state.pumpFeed[0] ?? null;
 }
 
+let holderHoverTimer: ReturnType<typeof setTimeout> | null = null;
+
 function inspectRow(row: PumpFeedRow): void {
   fixTerminalInspector(row);
-  if (isLikelySolanaPublicKey(row.mint))
-    void refreshTokenHolders(row.mint)
-      .then(update)
-      .catch(() => undefined);
+  if (holderHoverTimer) clearTimeout(holderHoverTimer);
+  if (!isLikelySolanaPublicKey(row.mint)) return;
+  const key = pumpRowKey(row);
+  const mint = row.mint!;
+  holderHoverTimer = setTimeout(() => {
+    if (
+      state.terminalInspectorKey === key ||
+      state.terminalInspectorKey === mint
+    ) {
+      void refreshTokenHolders(mint)
+        .then(update)
+        .catch(() => undefined);
+    }
+  }, 275);
 }
 
 function SocialLinks({ row }: { row: PumpFeedRow }) {
@@ -87,7 +99,7 @@ function HolderList({ mint }: { mint?: string | null }) {
   if (loading && !holders.length)
     return <p className="muted tiny">loading holders…</p>;
   if (error && !holders.length)
-    return <p className="muted tiny">holders unavailable: {error}</p>;
+    return <p className="muted tiny">holders indexing / not ready yet</p>;
   if (!holders.length)
     return (
       <p className="muted tiny">
@@ -275,9 +287,6 @@ export function TerminalPage() {
             {state.terminalQuickLive ? "LIVE" : "SIM"}
           </label>
         </div>
-        {state.pumpFeedError ? (
-          <div className="terminal-error">{state.pumpFeedError}</div>
-        ) : null}
       </section>
 
       <section className="terminal-filterbar">

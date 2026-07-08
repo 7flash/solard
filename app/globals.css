@@ -1635,3 +1635,82 @@ html, body { width: 100%; overflow-x: hidden; }
   .terminal-actions-compact { justify-content: flex-start; }
   .terminal-hover-inspector { position: static; max-height: none; }
 }
+
+/* Toasts keep transient stream/RPC errors out of page layout. */
+.toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border: 1px solid var(--line);
+  background: #05080c;
+  color: var(--fg);
+  padding: 9px 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.45);
+  cursor: pointer;
+  text-transform: none;
+}
+.toast b {
+  color: var(--green);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.toast span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.toast-error { border-color: rgba(255,61,103,.75); }
+.toast-warn { border-color: rgba(255,205,84,.75); }
+.toast-success { border-color: rgba(0,255,148,.75); }
+.terminal-error { display: none !important; }
+
+/* Keep terminal density high while preserving stable columns. */
+.terminal-commandbar,
+.terminal-filterbar,
+.terminal-grid-tight {
+  max-width: 100%;
+}
+.terminal-table-wrap {
+  min-width: 0;
+}
+.terminal-tight-table {
+  table-layout: fixed;
+  width: 100%;
+}
+.terminal-tight-table th:nth-child(1),
+.terminal-tight-table td:nth-child(1) { width: 34px; }
+.terminal-tight-table th:nth-child(3),
+.terminal-tight-table td:nth-child(3) { width: 88px; }
+.terminal-tight-table th:nth-child(4),
+.terminal-tight-table td:nth-child(4) { width: 64px; }
+.terminal-tight-table th:nth-child(5),
+.terminal-tight-table td:nth-child(5) { width: 145px; }
+.terminal-tight-table th:nth-child(6),
+.terminal-tight-table td:nth-child(6) { width: 48px; }
+.terminal-tight-table th:nth-child(7),
+.terminal-tight-table td:nth-child(7) { width: 56px; }
+.terminal-token-cell a {
+  min-width: 0;
+}
+.terminal-token-cell span,
+.terminal-token-cell small,
+.terminal-token-cell b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -63,17 +63,28 @@ function parseOwner(parsed: unknown): {
   };
 }
 
-function isParsedMintAccount(value: unknown): boolean {
+function parsedMintStatus(
+  value: unknown,
+): "mint" | "missing" | "not-mint" | "unknown" {
   const account = (value as any)?.value ?? value;
+  if (!account) return "missing";
   const owner =
     typeof account?.owner?.toBase58 === "function"
       ? account.owner.toBase58()
       : String(account?.owner ?? "");
   const parsedType = account?.data?.parsed?.type;
-  return (
+  if (
     (owner === TOKEN_PROGRAM_ID || owner === TOKEN_2022_PROGRAM_ID) &&
     parsedType === "mint"
-  );
+  )
+    return "mint";
+  if (
+    owner === TOKEN_PROGRAM_ID ||
+    owner === TOKEN_2022_PROGRAM_ID ||
+    parsedType
+  )
+    return "not-mint";
+  return "unknown";
 }
 
 export async function loadTokenHolders(
@@ -95,21 +106,20 @@ export async function loadTokenHolders(
       async () => {
         const connection = sowl.connection();
 
-        let mintInfo: unknown;
+        let status: "mint" | "missing" | "not-mint" | "unknown" = "unknown";
         try {
-          mintInfo = await connection.getParsedAccountInfo(mintKey, commitment);
-        } catch (error) {
-          return empty(
-            mint,
-            `mint account lookup failed: ${cleanError(error)}`,
+          const mintInfo = await connection.getParsedAccountInfo(
+            mintKey,
+            commitment,
           );
+          status = parsedMintStatus(mintInfo);
+        } catch {
+          status = "unknown";
         }
 
-        if (!(mintInfo as any)?.value)
-          return empty(mint, "mint account not found");
-        if (!isParsedMintAccount(mintInfo))
-          return empty(mint, "not a Token/SPL mint");
-
+        // Do not hard-fail on the parsed-account check. Brand-new Pump mints can lag
+        // behind RPC indexes for a few seconds, and some providers briefly return
+        // unparsed data. Try the canonical largest-accounts call and degrade softly.
         try {
           const largest = await connection.getTokenLargestAccounts(
             mintKey,
@@ -129,7 +139,7 @@ export async function loadTokenHolders(
                 owner = parsedOwner.owner;
                 decimals = parsedOwner.decimals ?? decimals;
               } catch {
-                // Largest account is still useful even if owner lookup misses.
+                // Largest account amount is still useful even if owner lookup misses.
               }
               return {
                 tokenAccount: account.address.toBase58(),
@@ -146,9 +156,16 @@ export async function loadTokenHolders(
           );
           return { mint, ok: true, holders, unavailableReason: null };
         } catch (error) {
-          // This endpoint is used from hover inspection. A bad cached row must never
-          // become a server-level exception or crash loop.
-          return empty(mint, cleanError(error));
+          const reason = cleanError(error);
+          if (
+            status === "missing" ||
+            /not a Token mint|Invalid param/i.test(reason)
+          ) {
+            return empty(mint, "holders not indexed yet");
+          }
+          if (status === "not-mint")
+            return empty(mint, "not confirmed as mint yet");
+          return empty(mint, reason);
         }
       },
       summarizeForMeasure,

@@ -93,6 +93,15 @@ export type TokenHolder = {
   decimals: number | null;
 };
 
+export type Toast = {
+  id: string;
+  kind: "info" | "warn" | "error" | "success";
+  title: string;
+  message?: string | null;
+  createdAtMs: number;
+  expiresAtMs: number;
+};
+
 export type TokenWatchSample = {
   capturedAtMs: number;
   marketCapSol: number | null;
@@ -242,6 +251,7 @@ export type State = {
   tokenHolderErrors: Record<string, string>;
   tokenHoldersCheckedAt: Record<string, number>;
   tokenHoldersLoadingMint: string | null;
+  toasts: Toast[];
 };
 
 export const state: State = {
@@ -324,6 +334,7 @@ export const state: State = {
   tokenHolderErrors: {},
   tokenHoldersCheckedAt: {},
   tokenHoldersLoadingMint: null,
+  toasts: [],
 };
 
 const runtimeMeasure = createClientMeasureScope("solard:web");
@@ -354,6 +365,47 @@ export function measureClientSync<T>(
 
 function measureEvent(label: string, summary?: unknown): void {
   runtimeMeasure.event(`${state.measureScope}:${label}`, summary);
+}
+
+function trimText(value: unknown, limit = 180): string {
+  const text = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+export function pushToast(
+  kind: Toast["kind"],
+  title: string,
+  message?: unknown,
+  ttlMs = 6000,
+): void {
+  const now = Date.now();
+  state.toasts = [
+    {
+      id: `${now}:${Math.random().toString(36).slice(2)}`,
+      kind,
+      title: trimText(title, 80),
+      message: message == null ? null : trimText(message, 220),
+      createdAtMs: now,
+      expiresAtMs: now + Math.max(1000, ttlMs),
+    },
+    ...state.toasts.filter((toast) => toast.expiresAtMs > now),
+  ].slice(0, 5);
+  window.setTimeout(
+    () => {
+      const at = Date.now();
+      const before = state.toasts.length;
+      state.toasts = state.toasts.filter((toast) => toast.expiresAtMs > at);
+      if (state.toasts.length !== before) update();
+    },
+    Math.max(1000, ttlMs + 50),
+  );
+}
+
+export function dismissToast(id: string): void {
+  state.toasts = state.toasts.filter((toast) => toast.id !== id);
+  update();
 }
 
 export function pageFromPath(): State["tab"] {
@@ -909,13 +961,7 @@ export async function refreshPumpLive(): Promise<void> {
     newTokens: PumpFeedRow[];
     watchGroups: TokenWatchGroup[];
   }>("/api/pump-live");
-  state.pumpFeed = [...(live.newTokens ?? []), ...state.pumpFeed]
-    .filter((row, index, arr) =>
-      row.mint
-        ? arr.findIndex((item) => item.mint === row.mint) === index
-        : index < 500,
-    )
-    .slice(0, 500);
+  for (const row of live.newTokens ?? []) mergePumpToken(row);
   state.watchGroups = live.watchGroups ?? state.watchGroups;
   if (!state.selectedWatchGroupId && state.watchGroups[0])
     state.selectedWatchGroupId = state.watchGroups[0].id;
@@ -942,7 +988,9 @@ export async function refreshTokenHolders(
   }
   if (state.tokenHolders[normalized]?.length) return;
   const lastChecked = state.tokenHoldersCheckedAt[normalized] ?? 0;
-  if (lastChecked && Date.now() - lastChecked < 5 * 60_000) return;
+  const hadError = !!state.tokenHolderErrors[normalized];
+  const ttlMs = hadError ? 15_000 : 90_000;
+  if (lastChecked && Date.now() - lastChecked < ttlMs) return;
   state.tokenHoldersLoadingMint = normalized;
   try {
     const result = await api<{
@@ -1078,29 +1126,131 @@ export function schedulePumpFeedUpdate(): void {
   }, 120);
 }
 
+function normalizeFeedRow(
+  row: PumpFeedRow,
+  existing?: PumpFeedRow,
+): PumpFeedRow {
+  const now = Date.now();
+  const directMcap =
+    typeof row.marketCapSol === "number" && Number.isFinite(row.marketCapSol)
+      ? row.marketCapSol
+      : null;
+  const samples = [...(row.samples ?? [])];
+  if (
+    directMcap != null &&
+    !samples.some(
+      (sample) =>
+        Math.abs(sample.capturedAtMs - now) < 1200 &&
+        sample.marketCapSol === directMcap,
+    )
+  ) {
+    samples.unshift({
+      capturedAtMs: now,
+      marketCapSol: directMcap,
+      source: row.eventType ?? row.raw?.txType ?? row.raw?.source ?? "stream",
+    });
+  }
+  const mergedSamples = [...samples, ...(existing?.samples ?? [])]
+    .filter((sample) => sample && typeof sample.capturedAtMs === "number")
+    .sort((a, b) => b.capturedAtMs - a.capturedAtMs)
+    .filter(
+      (sample, index, arr) =>
+        index ===
+        arr.findIndex(
+          (other) =>
+            Math.abs(other.capturedAtMs - sample.capturedAtMs) < 1000 &&
+            other.marketCapSol === sample.marketCapSol,
+        ),
+    )
+    .slice(0, 300);
+  const last = mergedSamples.find(
+    (sample) =>
+      typeof sample.marketCapSol === "number" &&
+      Number.isFinite(sample.marketCapSol),
+  );
+  const first = [...mergedSamples]
+    .reverse()
+    .find(
+      (sample) =>
+        typeof sample.marketCapSol === "number" &&
+        Number.isFinite(sample.marketCapSol),
+    );
+  const mcap =
+    directMcap ??
+    row.lastMarketCapSol ??
+    last?.marketCapSol ??
+    existing?.marketCapSol ??
+    existing?.lastMarketCapSol ??
+    null;
+  const initial =
+    row.initialMarketCapSol ??
+    existing?.initialMarketCapSol ??
+    first?.marketCapSol ??
+    mcap ??
+    null;
+  const change = mcap != null && initial != null ? mcap - initial : null;
+  const pct =
+    change != null && initial != null && initial > 0
+      ? (change / initial) * 100
+      : null;
+  const avg = (ms: number): number | null => {
+    const vals = mergedSamples
+      .filter((sample) => sample.capturedAtMs >= now - ms)
+      .map((sample) => sample.marketCapSol)
+      .filter(
+        (value): value is number =>
+          typeof value === "number" && Number.isFinite(value),
+      );
+    return vals.length
+      ? vals.reduce((sum, value) => sum + value, 0) / vals.length
+      : null;
+  };
+  return {
+    ...existing,
+    ...row,
+    marketCapSol: mcap,
+    lastMarketCapSol: mcap,
+    initialMarketCapSol: initial,
+    marketCapChangeSol: row.marketCapChangeSol ?? change,
+    marketCapChangePct: row.marketCapChangePct ?? pct,
+    samples: mergedSamples,
+    sma1m: row.sma1m ?? avg(60_000),
+    sma5m: row.sma5m ?? avg(5 * 60_000),
+    sma15m: row.sma15m ?? avg(15 * 60_000),
+    lastTradeAtMs:
+      row.lastTradeAtMs ??
+      (row.eventType === "trade" ? now : existing?.lastTradeAtMs) ??
+      row.updatedAtMs ??
+      existing?.lastTradeAtMs ??
+      row.createdAtMs ??
+      now,
+    updatedAtMs: row.updatedAtMs ?? now,
+  };
+}
+
 export function mergePumpToken(row: PumpFeedRow): void {
   if (!row.mint) return appendPumpFeed(row);
   const existingIndex = state.pumpFeed.findIndex(
     (item) => item.mint === row.mint,
   );
   if (existingIndex >= 0) {
-    state.pumpFeed[existingIndex] = {
-      ...state.pumpFeed[existingIndex],
-      ...row,
-    };
+    const merged = normalizeFeedRow(row, state.pumpFeed[existingIndex]);
     state.pumpFeed = [
-      state.pumpFeed[existingIndex],
+      merged,
       ...state.pumpFeed.filter((_item, index) => index !== existingIndex),
     ].slice(0, 500);
   } else {
-    state.pumpFeed = [row, ...state.pumpFeed].slice(0, 500);
+    state.pumpFeed = [normalizeFeedRow(row), ...state.pumpFeed].slice(0, 500);
   }
   for (const group of state.watchGroups) {
     const tokenIndex = group.tokens.findIndex(
       (token) => token.mint === row.mint,
     );
     if (tokenIndex >= 0)
-      group.tokens[tokenIndex] = { ...group.tokens[tokenIndex], ...row } as any;
+      group.tokens[tokenIndex] = normalizeFeedRow(
+        row as PumpFeedRow,
+        group.tokens[tokenIndex] as any,
+      ) as any;
   }
   schedulePumpFeedUpdate();
 }
@@ -1128,14 +1278,24 @@ export function handleSseBlock(block: string): void {
     else if (event === "status") {
       state.pumpFeedStatus = (payload.status ??
         event) as State["pumpFeedStatus"];
+      if (payload.status === "error")
+        pushToast("error", "Pump feed", payload.error ?? "stream error", 6500);
       state.pumpFeedError = null;
       schedulePumpFeedUpdate();
     } else if (event === "warning") {
-      state.pumpFeedError = payload.error ?? "Pump feed warning";
+      const message = payload.error ?? payload.message ?? "Pump feed warning";
+      state.pumpFeedError = null;
+      pushToast(
+        payload.kind === "rate-limit" ? "warn" : "error",
+        "Pump feed",
+        message,
+        payload.kind === "rate-limit" ? 9000 : 6500,
+      );
       schedulePumpFeedUpdate();
     }
   } catch {
-    state.pumpFeedError = text;
+    state.pumpFeedError = null;
+    pushToast("error", "Pump feed parse", text, 6500);
     schedulePumpFeedUpdate();
   }
 }
@@ -1175,8 +1335,13 @@ export async function startPumpFeed(): Promise<void> {
   } catch (error) {
     if (!abort.signal.aborted) {
       state.pumpFeedStatus = "error";
-      state.pumpFeedError =
-        error instanceof Error ? error.message : String(error);
+      state.pumpFeedError = null;
+      pushToast(
+        "error",
+        "Pump feed disconnected",
+        error instanceof Error ? error.message : String(error),
+        8000,
+      );
     }
   } finally {
     if (state.pumpFeedAbort === abort) state.pumpFeedAbort = null;
@@ -1652,6 +1817,28 @@ let currentPageView: ConsolePage = () => (
 let currentCleanup: (() => void) | null = null;
 let unloadCleanup: (() => void) | null = null;
 
+function ToastHost() {
+  const now = Date.now();
+  const visible = state.toasts.filter((toast) => toast.expiresAtMs > now);
+  if (!visible.length) return null;
+  return (
+    <div className="toast-host">
+      {visible.map((toast) => (
+        <button
+          type="button"
+          className={`toast toast-${toast.kind}`}
+          onClick={() => {
+            dismissToast(toast.id);
+          }}
+        >
+          <b>{toast.title}</b>
+          {toast.message ? <span>{toast.message}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ConsoleRuntime() {
   const Page = currentPageView;
   return (
@@ -1662,6 +1849,7 @@ function ConsoleRuntime() {
         </div>
       ) : null}
       <Page />
+      <ToastHost />
     </>
   );
 }

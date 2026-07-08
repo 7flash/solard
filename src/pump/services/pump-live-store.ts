@@ -788,17 +788,20 @@ export function recordPumpTrade(
     signature: clean(raw.signature) ?? clean(raw.txSignature),
     source: "token-trade",
   };
+  const txType =
+    sample.txType ?? clean(raw.txType) ?? clean(raw.type) ?? "trade";
+  const isCurvePoll =
+    txType === "curve-poll" || clean(raw.source) === "curve-poll";
   token.marketCapSol = marketCapSol;
   token.priceSolPerToken = priceSolPerToken;
-  token.lastTradeAtMs = sample.capturedAtMs;
+  if (!isCurvePoll) token.lastTradeAtMs = sample.capturedAtMs;
   token.samples = [sample, ...(token.samples ?? [])].slice(
     0,
     MAX_SAMPLES_PER_TOKEN,
   );
-  token.trades = [sample, ...(token.trades ?? [])].slice(
-    0,
-    MAX_TRADES_PER_TOKEN,
-  );
+  token.trades = isCurvePoll
+    ? (token.trades ?? []).slice(0, MAX_TRADES_PER_TOKEN)
+    : [sample, ...(token.trades ?? [])].slice(0, MAX_TRADES_PER_TOKEN);
   if (token.initialMarketCapSol == null && marketCapSol != null)
     token.initialMarketCapSol = marketCapSol;
   upsertTokenRow(token);
