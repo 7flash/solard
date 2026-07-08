@@ -108,6 +108,60 @@ function routeMeta(
   return { route: url.pathname, method: request.method, ...extra };
 }
 
+export async function withMeasuredApi<T>(
+  request: Request,
+  label: string,
+  fn: () => Promise<T> | T,
+  options: { auth?: boolean; meta?: Record<string, unknown> } = {},
+): Promise<Response> {
+  const id = requestId();
+  const url = new URL(request.url);
+  const route = url.pathname;
+  const scope = `solard:api:${request.method}:${route}`;
+  try {
+    const measured = await measureSolard(
+      scope,
+      label,
+      async () => {
+        if (options.auth !== false) assertWebAuth(request);
+        return await fn();
+      },
+      {
+        summarize: summarizeForMeasure,
+        meta: {
+          route,
+          method: request.method,
+          requestId: id,
+          ...(options.meta ?? {}),
+        },
+        onError: (error) => {
+          throw error;
+        },
+      },
+    );
+    return jsonResponse({
+      ok: true,
+      value: measured.value,
+      meta: {
+        route,
+        method: request.method,
+        requestId: id,
+        scope: measured.scope,
+        tookMs: measured.tookMs,
+        summary: measured.summary,
+      },
+    });
+  } catch (error) {
+    return errorResponse(
+      error,
+      typeof (error as { status?: unknown }).status === "number"
+        ? (error as { status: number }).status
+        : 500,
+      routeMeta(request, { requestId: id, scope }),
+    );
+  }
+}
+
 export async function withSowl<T>(
   request: Request,
   fn: (sowl: Sowl) => Promise<T> | T,

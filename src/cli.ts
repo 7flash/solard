@@ -10,18 +10,26 @@ import {
   configureTokenAction,
   createGroupAction,
   createSolardActionContext,
+  createWatchGroupAction,
+  getJobAction,
   healthAction,
   importWalletAction,
   launchPumpTokenAction,
   listGroupsAction,
+  listJobLogsAction,
+  listJobsAction,
+  listSmaAggregatesAction,
   listTokensAction,
   listWalletsAction,
+  listWatchGroupsAction,
   listWatchesAction,
   refreshTokenAction,
+  removeWatchGroupTokenAction,
   sellTokenAction,
   showGroupAction,
   toJson,
   watchAction,
+  addWatchGroupTokenAction,
   type PumpLaunchInput,
 } from "./solard/actions/index.js";
 
@@ -80,6 +88,10 @@ Tokens and watches
   solard watch wallet <wallet> [label] [--json]
   solard watch program <program> [label] [--json]
   solard watch list [--json]
+  solard watch group list [--json]
+  solard watch group create <name> [--json]
+  solard watch group add <group_id> <mint> [--name <name>] [--symbol <symbol>] [--json]
+  solard watch group remove <group_id> <mint> [--json]
 
 Groups
   solard group create <name> [description] [--json]
@@ -92,6 +104,14 @@ Groups
 Trading
   solard buy <token|mint> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|helius-rpc|helius-fast|jito] [--live] [--json]
   solard sell <token|mint> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|helius-rpc|helius-fast|jito] [--live] [--json]
+
+Market data
+  solard sma [mint] [--interval-seconds 60] [--limit 100] [--json]
+
+Jobs
+  solard jobs [--status queued|running|succeeded|failed] [--limit 100] [--json]
+  solard job <id> [--json]
+  solard job logs <id> [--limit 500] [--json]
 
 Launching
   solard launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) --alias <name> --name <name> --symbol <symbol> [--buyer-group <group>] [--creator-buy-sol <amount>] [--live] [--json]
@@ -261,6 +281,55 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
 
+  if (command === "jobs") {
+    const result = await listJobsAction({
+      status: flag(flags, "status"),
+      limit: numberFlag(flags, "limit", 100),
+      includeLogs: has(flags, "include-logs"),
+    });
+    writeResult(
+      result,
+      flags,
+      (rows) =>
+        rows
+          .map(
+            (job: any) =>
+              `${job.status}\t${job.id}\t${new Date(job.createdAtMs).toISOString()}\t${job.input?.alias ?? job.input?.name ?? job.kind}`,
+          )
+          .join("\n") + "\n",
+    );
+    return 0;
+  }
+
+  if (command === "job") {
+    if (values[0] === "logs") {
+      const result = await listJobLogsAction({
+        id: values[1] ?? "",
+        limit: numberFlag(flags, "limit", 500),
+      });
+      writeResult(
+        result,
+        flags,
+        (rows) =>
+          rows
+            .map(
+              (entry: any) =>
+                `${new Date(entry.atMs).toISOString()}\t${entry.label}\t${toJson(entry.value)}`,
+            )
+            .join("\n") + "\n",
+      );
+      return 0;
+    }
+    const result = await getJobAction({ id: values[0] ?? "" });
+    writeResult(
+      result,
+      flags,
+      (job) =>
+        `${OWL} job ${job.status} ${job.id} ${job.input?.alias ?? job.input?.name ?? job.kind}\n`,
+    );
+    return 0;
+  }
+
   const ctx = createSolardActionContext();
   try {
     if (
@@ -378,7 +447,87 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       return 0;
     }
 
+    if (command === "sma" || (command === "market" && values[0] === "sma")) {
+      const mint = command === "sma" ? values[0] : values[1];
+      const rows = await listSmaAggregatesAction(ctx, {
+        mint: mint && !mint.startsWith("--") ? mint : flag(flags, "mint"),
+        intervalSeconds: numberFlag(flags, "interval-seconds", undefined),
+        limit: numberFlag(flags, "limit", 100),
+      });
+      writeResult(
+        rows,
+        flags,
+        (items) =>
+          items
+            .map(
+              (row: any) =>
+                `${row.mint}\t${row.intervalSeconds}s\t${new Date(row.bucketStartMs).toISOString()}\tSMA=${row.smaMarketCapSol}\tlast=${row.lastMarketCapSol}\tn=${row.sampleCount}`,
+            )
+            .join("\n") + "\n",
+      );
+      return 0;
+    }
+
     if (command === "watch") {
+      if (values[0] === "group") {
+        const sub = values[1] ?? "list";
+        if (sub === "list") {
+          const result = await listWatchGroupsAction();
+          writeResult(
+            result,
+            flags,
+            (rows) =>
+              rows
+                .map(
+                  (group: any) =>
+                    `${group.groupId ?? group.id ?? "-"}\t${group.name ?? "-"}\t${(group.tokens ?? []).length} tokens`,
+                )
+                .join("\n") + "\n",
+          );
+          return 0;
+        }
+        if (sub === "create") {
+          const result = await createWatchGroupAction({
+            name: values[2] ?? "",
+          });
+          writeResult(
+            result,
+            flags,
+            (group) => `${OWL} watch group ${group.groupId ?? group.name}\n`,
+          );
+          return 0;
+        }
+        if (sub === "add") {
+          const result = await addWatchGroupTokenAction({
+            groupId: values[2] ?? "main",
+            token: {
+              mint: values[3] ?? "",
+              name: flag(flags, "name"),
+              symbol: flag(flags, "symbol"),
+              source: "solard-cli",
+            },
+          });
+          writeResult(
+            result,
+            flags,
+            () => `${OWL} added ${values[3]} to ${values[2] ?? "main"}\n`,
+          );
+          return 0;
+        }
+        if (sub === "remove") {
+          const result = await removeWatchGroupTokenAction({
+            groupId: values[2] ?? "",
+            mint: values[3] ?? "",
+          });
+          writeResult(
+            result,
+            flags,
+            () => `${OWL} removed ${values[3]} from ${values[2]}\n`,
+          );
+          return 0;
+        }
+        throw new Error("Usage: solard watch group list|create|add|remove ...");
+      }
       if (values[0] === "list") {
         writeResult(listWatchesAction(ctx), flags);
         return 0;
