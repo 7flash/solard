@@ -50,8 +50,46 @@ type PumpFeedRow = {
   raw?: AnyRow;
 };
 
+type TokenWatchSample = {
+  capturedAtMs: number;
+  marketCapSol: number | null;
+  source?: string | null;
+};
+
+type TokenWatchToken = {
+  mint: string;
+  name?: string | null;
+  symbol?: string | null;
+  creator?: string | null;
+  uri?: string | null;
+  signature?: string | null;
+  addedAtMs: number;
+  updatedAtMs: number;
+  samples: TokenWatchSample[];
+  lastMarketCapSol: number | null;
+  sma1m: number | null;
+  sma5m: number | null;
+  sma15m: number | null;
+  sma60m: number | null;
+};
+
+type TokenWatchGroup = {
+  id: string;
+  name: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  tokens: TokenWatchToken[];
+};
+
 type State = {
-  tab: "overview" | "wallets" | "terminal" | "launch" | "trade" | "jobs";
+  tab:
+    | "overview"
+    | "wallets"
+    | "terminal"
+    | "watchlists"
+    | "launch"
+    | "trade"
+    | "jobs";
   overview: Overview | null;
   jobs: AnyRow[];
   selectedJobId: string | null;
@@ -65,6 +103,9 @@ type State = {
   pumpFeedError: string | null;
   pumpFeedFilter: string;
   pumpFeedAbort: AbortController | null;
+  watchGroups: TokenWatchGroup[];
+  selectedWatchGroupId: string | null;
+  watchGroupName: string;
 };
 
 const state: State = {
@@ -82,6 +123,9 @@ const state: State = {
   pumpFeedError: null,
   pumpFeedFilter: "",
   pumpFeedAbort: null,
+  watchGroups: [],
+  selectedWatchGroupId: null,
+  watchGroupName: "main",
 };
 
 function authHeaders(): HeadersInit {
@@ -129,6 +173,109 @@ function formatSol(value: number | null | undefined): string {
 
 function tokenUrl(mint: string | null | undefined): string {
   return mint ? `https://pump.fun/coin/${mint}` : "#";
+}
+
+function formatMcap(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
+  return value >= 1
+    ? value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
+    : value.toExponential(2);
+}
+
+function age(ms: number | null | undefined): string {
+  if (!ms) return "—";
+  const delta = Math.max(0, Date.now() - ms);
+  if (delta < 60_000) return `${Math.floor(delta / 1000)}s`;
+  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m`;
+  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h`;
+  return `${Math.floor(delta / 86_400_000)}d`;
+}
+
+function selectedWatchGroup(): TokenWatchGroup | null {
+  return (
+    state.watchGroups.find(
+      (group) => group.id === state.selectedWatchGroupId,
+    ) ??
+    state.watchGroups[0] ??
+    null
+  );
+}
+
+async function refreshWatchGroups(): Promise<void> {
+  state.watchGroups = await api<TokenWatchGroup[]>("/api/watch-groups");
+  if (!state.selectedWatchGroupId && state.watchGroups[0])
+    state.selectedWatchGroupId = state.watchGroups[0].id;
+  if (
+    state.selectedWatchGroupId &&
+    !state.watchGroups.some((group) => group.id === state.selectedWatchGroupId)
+  ) {
+    state.selectedWatchGroupId = state.watchGroups[0]?.id ?? null;
+  }
+}
+
+async function createWatchGroup(name: string): Promise<void> {
+  const created = await api<TokenWatchGroup>("/api/watch-groups", {
+    method: "POST",
+    body: JSON.stringify({ action: "create-group", name }),
+  });
+  await refreshWatchGroups();
+  state.selectedWatchGroupId = created.id;
+}
+
+async function addWatchedToken(
+  groupId: string,
+  token: {
+    mint: string;
+    name?: string | null;
+    symbol?: string | null;
+    creator?: string | null;
+    uri?: string | null;
+    signature?: string | null;
+    marketCapSol?: number | null;
+    source?: string;
+  },
+): Promise<void> {
+  await api<TokenWatchGroup>("/api/watch-groups", {
+    method: "POST",
+    body: JSON.stringify({ action: "add-token", groupId, token }),
+  });
+  await refreshWatchGroups();
+}
+
+async function removeWatchedToken(
+  groupId: string,
+  mint: string,
+): Promise<void> {
+  await api<TokenWatchGroup>("/api/watch-groups", {
+    method: "POST",
+    body: JSON.stringify({ action: "remove-token", groupId, mint }),
+  });
+  await refreshWatchGroups();
+}
+
+async function starPumpFeedRow(
+  row: PumpFeedRow,
+  groupId?: string | null,
+): Promise<void> {
+  if (!row.mint) throw new Error("Feed row has no mint");
+  let targetGroupId = groupId ?? selectedWatchGroup()?.id ?? null;
+  if (!targetGroupId) {
+    await createWatchGroup("main");
+    targetGroupId = selectedWatchGroup()?.id ?? null;
+  }
+  if (!targetGroupId) throw new Error("No watch group available");
+  await addWatchedToken(targetGroupId, {
+    mint: row.mint,
+    name: row.name ?? null,
+    symbol: row.symbol ?? null,
+    creator: row.creator ?? null,
+    uri: row.uri ?? null,
+    signature: row.signature ?? null,
+    marketCapSol: row.marketCapSol ?? null,
+    source: "pump-feed",
+  });
 }
 
 let pumpFeedUpdateScheduled = false;
@@ -862,6 +1009,18 @@ function TerminalView() {
           </p>
         </div>
         <div className="row">
+          <select
+            value={state.selectedWatchGroupId ?? ""}
+            onInput={(event: any) => {
+              state.selectedWatchGroupId = event.currentTarget.value || null;
+              update();
+            }}
+          >
+            <option value="">watch group…</option>
+            {state.watchGroups.map((group) => (
+              <option value={group.id}>{group.name}</option>
+            ))}
+          </select>
           <span
             className={`pill ${state.pumpFeedStatus === "connected" ? "ok" : state.pumpFeedStatus === "error" ? "bad" : ""}`}
           >
@@ -918,6 +1077,7 @@ function TerminalView() {
                 <th>Initial buy</th>
                 <th>MCap SOL</th>
                 <th>Sig</th>
+                <th>Watch</th>
               </tr>
             </thead>
             <tbody>
@@ -953,6 +1113,16 @@ function TerminalView() {
                   <td>{formatSol(row.initialBuy ?? row.solAmount)}</td>
                   <td>{formatSol(row.marketCapSol)}</td>
                   <td className="code">{short(row.signature)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="secondary compact"
+                      disabled={!row.mint}
+                      onClick={() => void runAction(() => starPumpFeedRow(row))}
+                    >
+                      ★ Star
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -968,6 +1138,172 @@ function TerminalView() {
             Connect to the feed to see new Pump.fun launches.
           </p>
         )}
+      </div>
+    </div>
+  );
+}
+
+function WatchlistsView() {
+  const active = selectedWatchGroup();
+  const tokenRows = active?.tokens ?? [];
+  return (
+    <div className="grid">
+      <div className="card span-12 terminal-head">
+        <div>
+          <h2>Watched token groups</h2>
+          <p className="muted">
+            Star tokens from the Pump terminal into groups. The grid shows
+            market-cap SMA columns from captured feed/sampling points.
+          </p>
+        </div>
+        <form
+          className="row"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const name = state.watchGroupName.trim();
+            if (name) void runAction(() => createWatchGroup(name));
+          }}
+        >
+          <input
+            value={state.watchGroupName}
+            placeholder="group name"
+            onInput={(event: any) => {
+              state.watchGroupName = event.currentTarget.value;
+            }}
+          />
+          <button type="submit">Create group</button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void runAction(refreshWatchGroups)}
+          >
+            Refresh
+          </button>
+        </form>
+      </div>
+
+      <div className="card span-3">
+        <h3>Groups</h3>
+        <div className="watch-group-list">
+          {state.watchGroups.map((group) => (
+            <button
+              type="button"
+              className={group.id === active?.id ? "active-row" : "secondary"}
+              onClick={() => {
+                state.selectedWatchGroupId = group.id;
+                update();
+              }}
+            >
+              <span>{group.name}</span>
+              <span className="pill">{group.tokens.length}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="card span-9">
+        <div className="row between">
+          <h3>{active ? active.name : "No group selected"}</h3>
+          <form
+            className="row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!active) return;
+              const body = formData(event.currentTarget);
+              const mint = String(body.mint ?? "").trim();
+              if (!mint) return;
+              void runAction(() =>
+                addWatchedToken(active.id, {
+                  mint,
+                  name: String(body.name ?? "").trim() || null,
+                  symbol: String(body.symbol ?? "").trim() || null,
+                  marketCapSol: body.marketCapSol
+                    ? Number(body.marketCapSol)
+                    : null,
+                  source: "manual",
+                }),
+              );
+              event.currentTarget.reset();
+            }}
+          >
+            <input name="mint" placeholder="mint" />
+            <input name="symbol" placeholder="symbol" />
+            <input name="name" placeholder="name" />
+            <input name="marketCapSol" placeholder="mcap SOL" />
+            <button type="submit" disabled={!active}>
+              Add
+            </button>
+          </form>
+        </div>
+        <div className="watch-grid-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Token</th>
+                <th>Mint</th>
+                <th>Creator</th>
+                <th>Last mcap</th>
+                <th>SMA 1m</th>
+                <th>SMA 5m</th>
+                <th>SMA 15m</th>
+                <th>SMA 60m</th>
+                <th>Samples</th>
+                <th>Age</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {tokenRows.map((token) => (
+                <tr>
+                  <td>
+                    <div className="token-title">
+                      {token.symbol ? `$${token.symbol}` : "—"}
+                    </div>
+                    <div className="muted small">
+                      {token.name ?? "watched token"}
+                    </div>
+                  </td>
+                  <td className="code">
+                    <a
+                      href={tokenUrl(token.mint)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {short(token.mint)}
+                    </a>
+                  </td>
+                  <td className="code">{short(token.creator)}</td>
+                  <td>{formatMcap(token.lastMarketCapSol)}</td>
+                  <td>{formatMcap(token.sma1m)}</td>
+                  <td>{formatMcap(token.sma5m)}</td>
+                  <td>{formatMcap(token.sma15m)}</td>
+                  <td>{formatMcap(token.sma60m)}</td>
+                  <td>{token.samples.length}</td>
+                  <td>{age(token.addedAtMs)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="danger compact"
+                      onClick={() =>
+                        void runAction(() =>
+                          removeWatchedToken(active!.id, token.mint),
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!tokenRows.length ? (
+          <p className="muted">
+            No watched tokens yet. Star tokens from the Pump terminal or add a
+            mint manually.
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -1322,6 +1658,8 @@ function App() {
         <WalletsView />
       ) : state.tab === "terminal" ? (
         <TerminalView />
+      ) : state.tab === "watchlists" ? (
+        <WatchlistsView />
       ) : state.tab === "launch" ? (
         <LaunchView />
       ) : state.tab === "trade" ? (
@@ -1355,6 +1693,7 @@ export default function mount() {
   void runAction(async () => {
     await refreshOverview();
     await refreshJobs();
+    await refreshWatchGroups();
   });
   const interval = setInterval(() => {
     if (state.tab === "jobs" || state.selectedJobId)

@@ -55,3 +55,11 @@ pre { background: rgba(0,0,0,.24); border: 1px solid rgba(255,255,255,.08); bord
 .token-title { font-weight: 900; letter-spacing: .02em; color: #dff7ff; }
 a { color: #95b5ff; text-decoration: none; }
 a:hover { text-decoration: underline; }
+
+button.compact { padding: 6px 9px; border-radius: 9px; font-size: 12px; }
+.watch-group-list { display: grid; gap: 8px; }
+.watch-group-list button { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+.watch-group-list button.active-row { background: #e9eefc; color: #0c1020; }
+.watch-grid-table { overflow: auto; max-height: 680px; margin-top: 12px; border-radius: 14px; border: 1px solid rgba(255,255,255,.08); }
+.watch-grid-table table { min-width: 1120px; }
+.watch-grid-table tbody tr:hover { background: rgba(131, 162, 255, .08); }
