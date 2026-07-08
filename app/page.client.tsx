@@ -877,12 +877,27 @@ async function refreshStatus(): Promise<void> {
 }
 
 async function refreshOverview(): Promise<void> {
-  const [overview, rpcStatus] = await Promise.all([
-    api<Overview>("/api/overview"),
-    api<AnyRow>("/api/status").catch(() => null),
-  ]);
-  state.overview = overview;
+  const rpcStatus = await api<AnyRow>("/api/status").catch(() => null);
   if (rpcStatus) state.rpcStatus = rpcStatus;
+
+  try {
+    state.overview = await api<Overview>("/api/overview");
+  } catch (error) {
+    // The home screen must stay usable even when RPC/account enrichment is unavailable.
+    // Keep the last successful overview and surface the issue in the global status area.
+    const message = error instanceof Error ? error.message : String(error);
+    state.error = `Overview unavailable: ${message}`;
+    if (!state.overview) {
+      state.overview = {
+        wallets: [],
+        tokens: [],
+        groups: [],
+        executions: [],
+        balances: [],
+      };
+    }
+  }
+
   const status = document.getElementById("connection-status");
   if (status) {
     status.textContent =
@@ -1187,7 +1202,8 @@ function OverviewView() {
               void runAction(async () => {
                 await refreshOverview();
                 await refreshJobs();
-                await refreshPumpLive();
+                if (state.tab === "terminal" || state.tab === "watchlists")
+                  await refreshPumpLive();
               })
             }
           >
@@ -3251,12 +3267,13 @@ export default function mount() {
   state.tab = pageFromPath();
   void runAction(async () => {
     await refreshOverview();
-    await refreshStatus();
-    await refreshJobs();
-    await refreshPumpLive();
-    await refreshSignals();
+    await refreshStatus().catch(() => undefined);
+    await refreshJobs().catch(() => undefined);
+    if (state.tab === "terminal" || state.tab === "watchlists")
+      await refreshPumpLive().catch(() => undefined);
+    if (state.tab === "signals") await refreshSignals().catch(() => undefined);
   });
-  void startPumpFeed();
+  if (state.tab === "terminal") void startPumpFeed();
   const interval = setInterval(() => {
     if (state.tab === "jobs" || state.selectedJobId)
       void refreshJobs()

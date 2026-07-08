@@ -814,3 +814,34 @@ button.primary.compact {
 .signals-table td { vertical-align: top; }
 .signal-text { max-width: 520px; white-space: pre-wrap; line-height: 1.45; }
 textarea { width: 100%; min-height: 120px; resize: vertical; }
+
+/* Stability cleanup: make console pages fit the viewport and avoid home-page overflow. */
+html, body { width: 100%; overflow-x: hidden; }
+.page-shell { grid-template-columns: 248px minmax(0, 1fr); width: 100%; overflow-x: hidden; }
+.main-console { min-width: 0; max-width: 100%; overflow-x: hidden; }
+.main-console > .panel, #app-root { min-width: 0; max-width: 100%; overflow-x: hidden; }
+.card, .panel, .metric-card, .home-top, .activity-hero { min-width: 0; }
+.card table { min-width: 0; }
+.card { overflow: hidden; }
+.home-columns { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.clean-table { table-layout: fixed; width: 100%; }
+.clean-table th, .clean-table td { overflow: hidden; text-overflow: ellipsis; }
+.clean-table .code, .balance-main, .holdings { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.holdings { display: flex; flex-wrap: wrap; gap: 4px; }
+.connection-strip {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  overflow: hidden;
+}
+.connection-strip > * { min-width: 0; }
+.conn-select, .conn-amount { min-width: 0; }
+.conn-select select, .conn-amount input { min-width: 0; }
+.conn-cell:first-child { grid-column: span 2; }
+@media (max-width: 1400px) {
+  .home-columns { grid-template-columns: 1fr; }
+  .conn-cell:first-child { grid-column: span 1; }
+}
+@media (max-width: 900px) {
+  body { overflow-x: hidden; }
+  .page-shell { grid-template-columns: 1fr; }
+  .connection-strip { grid-template-columns: 1fr; }
+}
