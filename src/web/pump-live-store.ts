@@ -5,11 +5,14 @@ import { openDatabase } from "../db/database.js";
 import type { TokenRow } from "../db/schema.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const MAX_NEW_TOKENS = 2_000;
 const MAX_TRADES_PER_TOKEN = 2_000;
 const MAX_SAMPLES_PER_TOKEN = 4_000;
 const METADATA_ENRICH_LIMIT_MS = 4_000;
+const TRADED_GROUP_ID = "traded";
+const SESSION_GROUP_ID = "current-session";
+const SESSION_GROUP_NAME = "Current session";
+const TRADED_GROUP_NAME = "Tokens I traded";
 
 export type PumpLiveSample = {
   capturedAtMs: number;
@@ -33,9 +36,6 @@ export type PumpLiveToken = {
   signature?: string | null;
   bondingCurveKey?: string | null;
   associatedBondingCurve?: string | null;
-  isMayhemMode?: boolean | null;
-  quoteAsset?: string | null;
-  quoteMint?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
   lastTradeAtMs?: number | null;
@@ -43,6 +43,12 @@ export type PumpLiveToken = {
   priceSolPerToken?: number | null;
   samples: PumpLiveSample[];
   trades: PumpLiveSample[];
+  initialMarketCapSol?: number | null;
+  marketCapChangeSol?: number | null;
+  marketCapChangePct?: number | null;
+  isMayhemMode?: boolean | null;
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
   raw?: Record<string, unknown> | null;
 };
 
@@ -61,10 +67,7 @@ export type PumpLiveVault = {
 };
 
 export type PumpLiveTokenSummary = PumpLiveToken & {
-  initialMarketCapSol: number | null;
   lastMarketCapSol: number | null;
-  marketCapChangeSol: number | null;
-  marketCapChangePct: number | null;
   sma1m: number | null;
   sma5m: number | null;
   sma15m: number | null;
@@ -98,90 +101,14 @@ function num(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function boolish(value: unknown): boolean | null {
+function bool(value: unknown): boolean | null {
   if (typeof value === "boolean") return value;
-  if (typeof value === "number")
-    return value === 1 ? true : value === 0 ? false : null;
-  if (typeof value !== "string") return null;
-  const cleanValue = value.trim().toLowerCase();
-  if (["true", "1", "yes", "y", "mayhem"].includes(cleanValue)) return true;
-  if (["false", "0", "no", "n", "normal", "standard"].includes(cleanValue))
-    return false;
-  return null;
-}
-
-function firstRaw(raw: Record<string, unknown>, keys: string[]): unknown {
-  for (const key of keys) {
-    if (raw[key] != null && raw[key] !== "") return raw[key];
+  if (typeof value === "string") {
+    const clean = value.trim().toLowerCase();
+    if (["true", "1", "yes"].includes(clean)) return true;
+    if (["false", "0", "no"].includes(clean)) return false;
   }
   return null;
-}
-
-function inferMayhemMode(
-  raw: Record<string, unknown>,
-  fallback?: boolean | null,
-): boolean | null {
-  const direct = firstRaw(raw, [
-    "isMayhemMode",
-    "mayhemMode",
-    "mayhem",
-    "isMayhem",
-    "isMayhemLaunch",
-    "isMayhemToken",
-  ]);
-  const parsed = boolish(direct);
-  if (parsed != null) return parsed;
-  const text = String(
-    firstRaw(raw, [
-      "mode",
-      "launchMode",
-      "curveType",
-      "kind",
-      "poolType",
-      "tokenMode",
-    ]) ?? "",
-  ).toLowerCase();
-  if (text.includes("mayhem")) return true;
-  return fallback ?? null;
-}
-
-function inferQuoteMint(
-  raw: Record<string, unknown>,
-  fallback?: string | null,
-): string | null {
-  const value = clean(
-    firstRaw(raw, [
-      "quoteMint",
-      "quote_mint",
-      "quoteTokenMint",
-      "quoteToken",
-      "quote",
-      "quoteAddress",
-      "quoteCurrencyMint",
-    ]),
-  );
-  return value ?? fallback ?? null;
-}
-
-function inferQuoteAsset(
-  raw: Record<string, unknown>,
-  quoteMint?: string | null,
-  fallback?: string | null,
-): string | null {
-  const direct = clean(
-    firstRaw(raw, [
-      "quoteAsset",
-      "quoteSymbol",
-      "quoteCurrency",
-      "quoteTokenSymbol",
-      "quoteMintSymbol",
-      "quoteTicker",
-    ]),
-  );
-  const text = String(direct ?? quoteMint ?? "").toLowerCase();
-  if (text.includes("usdc") || quoteMint === USDC_MINT) return "USDC";
-  if (text.includes("sol") || quoteMint === SOL_MINT) return "SOL";
-  return direct ?? fallback ?? "SOL";
 }
 
 function groupId(name: string): string {
@@ -275,6 +202,32 @@ function upsertToken(vault: PumpLiveVault, mint: string): PumpLiveToken {
   return token;
 }
 
+function ensureGroup(
+  vault: PumpLiveVault,
+  id: string,
+  name: string,
+): TokenWatchGroup {
+  let group = vault.watchGroups.find((item) => item.id === id);
+  if (!group) {
+    const now = Date.now();
+    group = { id, name, createdAtMs: now, updatedAtMs: now, tokens: [] };
+    vault.watchGroups.unshift(group);
+  }
+  return group;
+}
+
+function addMintToGroup(
+  vault: PumpLiveVault,
+  id: string,
+  name: string,
+  mint: string,
+): TokenWatchGroup {
+  const group = ensureGroup(vault, id, name);
+  if (!group.tokens.includes(mint)) group.tokens.unshift(mint);
+  group.updatedAtMs = Date.now();
+  return group;
+}
+
 function sampleMarketCap(
   samples: PumpLiveSample[],
   periodMs: number,
@@ -299,39 +252,41 @@ function summarize(
   const samples = [...(token.samples ?? [])].sort(
     (a, b) => b.capturedAtMs - a.capturedAtMs,
   );
-  const chronologicalSamples = [...samples].reverse();
-  const first = chronologicalSamples.find(
-    (sample) =>
-      typeof sample.marketCapSol === "number" &&
-      Number.isFinite(sample.marketCapSol),
-  );
   const last = samples.find(
     (sample) =>
       typeof sample.marketCapSol === "number" &&
       Number.isFinite(sample.marketCapSol),
   );
-  const initialMarketCapSol = first?.marketCapSol ?? null;
+  const first = [...samples]
+    .reverse()
+    .find(
+      (sample) =>
+        typeof sample.marketCapSol === "number" &&
+        Number.isFinite(sample.marketCapSol),
+    );
   const lastMarketCapSol = token.marketCapSol ?? last?.marketCapSol ?? null;
+  const initialMarketCapSol =
+    token.initialMarketCapSol ?? first?.marketCapSol ?? null;
   const marketCapChangeSol =
-    initialMarketCapSol != null && lastMarketCapSol != null
+    lastMarketCapSol != null && initialMarketCapSol != null
       ? lastMarketCapSol - initialMarketCapSol
       : null;
   const marketCapChangePct =
+    marketCapChangeSol != null &&
     initialMarketCapSol != null &&
-    initialMarketCapSol > 0 &&
-    marketCapChangeSol != null
+    initialMarketCapSol > 0
       ? (marketCapChangeSol / initialMarketCapSol) * 100
       : null;
   return {
     ...token,
+    initialMarketCapSol,
+    marketCapChangeSol,
+    marketCapChangePct,
     samples,
     trades: [...(token.trades ?? [])].sort(
       (a, b) => b.capturedAtMs - a.capturedAtMs,
     ),
-    initialMarketCapSol,
     lastMarketCapSol,
-    marketCapChangeSol,
-    marketCapChangePct,
     sma1m: sampleMarketCap(samples, 60_000, now),
     sma5m: sampleMarketCap(samples, 5 * 60_000, now),
     sma15m: sampleMarketCap(samples, 15 * 60_000, now),
@@ -355,10 +310,11 @@ function writeTokenToDb(token: PumpLiveToken, sample?: PumpLiveSample): void {
       uri: token.uri ?? null,
       bondingCurveKey: token.bondingCurveKey ?? null,
       associatedBondingCurve: token.associatedBondingCurve ?? null,
+      lastPumpMarketCapSol: token.marketCapSol ?? null,
+      initialPumpMarketCapSol: token.initialMarketCapSol ?? null,
       isMayhemMode: token.isMayhemMode ?? null,
       quoteAsset: token.quoteAsset ?? null,
       quoteMint: token.quoteMint ?? null,
-      lastPumpMarketCapSol: token.marketCapSol ?? null,
     });
     if (existing) {
       existing.name = token.name ?? existing.name;
@@ -380,7 +336,7 @@ function writeTokenToDb(token: PumpLiveToken, sample?: PumpLiveSample): void {
         decimals: 6,
         createKind: "unknown",
         creator: token.creator ?? null,
-        quoteMint: SOL_MINT,
+        quoteMint: token.quoteMint ?? SOL_MINT,
         quoteTokenProgram: null,
         baseTokenProgram: null,
         bondingCurve:
@@ -402,7 +358,7 @@ function writeTokenToDb(token: PumpLiveToken, sample?: PumpLiveSample): void {
       db.priceSamples.insert({
         mint: token.mint,
         venue: "pumpportal",
-        quoteMint: SOL_MINT,
+        quoteMint: token.quoteMint ?? SOL_MINT,
         quoteKind: "native-sol",
         priceQuotePerToken: sample.priceSolPerToken,
         baseReserveRaw: null,
@@ -477,14 +433,20 @@ export function normalizePumpNewToken(
     clean(raw.bondingCurveKey) ?? token.bondingCurveKey ?? null;
   token.associatedBondingCurve =
     clean(raw.associatedBondingCurve) ?? token.associatedBondingCurve ?? null;
-  token.isMayhemMode = inferMayhemMode(raw, token.isMayhemMode ?? null);
-  token.quoteMint = inferQuoteMint(raw, token.quoteMint ?? null);
-  token.quoteAsset = inferQuoteAsset(
-    raw,
-    token.quoteMint,
-    token.quoteAsset ?? null,
-  );
   token.marketCapSol = num(raw.marketCapSol) ?? token.marketCapSol ?? null;
+  if (token.initialMarketCapSol == null && token.marketCapSol != null)
+    token.initialMarketCapSol = token.marketCapSol;
+  token.isMayhemMode =
+    bool(raw.isMayhemMode) ??
+    bool(raw.mayhemMode) ??
+    token.isMayhemMode ??
+    null;
+  token.quoteAsset =
+    clean(raw.quoteAsset) ??
+    clean(raw.quoteSymbol) ??
+    token.quoteAsset ??
+    "SOL";
+  token.quoteMint = clean(raw.quoteMint) ?? token.quoteMint ?? SOL_MINT;
   token.updatedAtMs = now;
   token.raw = { ...raw, seq, receivedAt: new Date(now).toISOString() };
   if (token.marketCapSol != null) {
@@ -501,6 +463,7 @@ export function normalizePumpNewToken(
     token,
     ...vault.newTokens.filter((item) => item.mint !== mint),
   ].slice(0, MAX_NEW_TOKENS);
+  addMintToGroup(vault, SESSION_GROUP_ID, SESSION_GROUP_NAME, mint);
   writeVault(vault);
   writeTokenToDb(token, token.samples[token.samples.length - 1]);
   if (token.uri && !token.image) void enrichTokenMetadata(mint, token.uri);
@@ -523,16 +486,22 @@ export function recordPumpTrade(
     clean(raw.bondingCurveKey) ?? token.bondingCurveKey ?? null;
   token.associatedBondingCurve =
     clean(raw.associatedBondingCurve) ?? token.associatedBondingCurve ?? null;
-  token.isMayhemMode = inferMayhemMode(raw, token.isMayhemMode ?? null);
-  token.quoteMint = inferQuoteMint(raw, token.quoteMint ?? null);
-  token.quoteAsset = inferQuoteAsset(
-    raw,
-    token.quoteMint,
-    token.quoteAsset ?? null,
-  );
   const solAmount = num(raw.solAmount);
   const tokenAmount = num(raw.tokenAmount);
   const marketCapSol = num(raw.marketCapSol) ?? token.marketCapSol ?? null;
+  if (token.initialMarketCapSol == null && marketCapSol != null)
+    token.initialMarketCapSol = marketCapSol;
+  token.isMayhemMode =
+    bool(raw.isMayhemMode) ??
+    bool(raw.mayhemMode) ??
+    token.isMayhemMode ??
+    null;
+  token.quoteAsset =
+    clean(raw.quoteAsset) ??
+    clean(raw.quoteSymbol) ??
+    token.quoteAsset ??
+    "SOL";
+  token.quoteMint = clean(raw.quoteMint) ?? token.quoteMint ?? SOL_MINT;
   const priceSolPerToken =
     solAmount != null && tokenAmount != null && tokenAmount > 0
       ? solAmount / tokenAmount
@@ -634,10 +603,10 @@ export function addTokenToWatchGroup(args: {
   image?: string | null;
   signature?: string | null;
   marketCapSol?: number | null;
-  source?: string | null;
   isMayhemMode?: boolean | null;
   quoteAsset?: string | null;
   quoteMint?: string | null;
+  source?: string | null;
 }): TokenWatchGroupSummary {
   const mint = clean(args.mint);
   if (!mint) throw new Error("Token mint is required");
@@ -661,18 +630,20 @@ export function addTokenToWatchGroup(args: {
   token.uri = clean(args.uri) ?? token.uri ?? null;
   token.image = clean(args.image) ?? token.image ?? null;
   token.signature = clean(args.signature) ?? token.signature ?? null;
-  token.isMayhemMode = args.isMayhemMode ?? token.isMayhemMode ?? null;
-  token.quoteMint = clean(args.quoteMint) ?? token.quoteMint ?? null;
-  token.quoteAsset =
-    clean(args.quoteAsset) ??
-    token.quoteAsset ??
-    inferQuoteAsset({}, token.quoteMint, token.quoteAsset ?? null);
+  token.isMayhemMode =
+    typeof args.isMayhemMode === "boolean"
+      ? args.isMayhemMode
+      : (token.isMayhemMode ?? null);
+  token.quoteAsset = clean(args.quoteAsset) ?? token.quoteAsset ?? "SOL";
+  token.quoteMint = clean(args.quoteMint) ?? token.quoteMint ?? SOL_MINT;
   token.updatedAtMs = Date.now();
   if (
     typeof args.marketCapSol === "number" &&
     Number.isFinite(args.marketCapSol)
   ) {
     token.marketCapSol = args.marketCapSol;
+    if (token.initialMarketCapSol == null)
+      token.initialMarketCapSol = args.marketCapSol;
     token.samples.push({
       capturedAtMs: Date.now(),
       marketCapSol: args.marketCapSol,
@@ -690,6 +661,34 @@ export function addTokenToWatchGroup(args: {
   writeTokenToDb(token, token.samples[token.samples.length - 1]);
   if (token.uri && !token.image) void enrichTokenMetadata(mint, token.uri);
   return listPumpLiveState().watchGroups.find((item) => item.id === group!.id)!;
+}
+
+export function addTokenToTradedGroup(
+  args: Omit<Parameters<typeof addTokenToWatchGroup>[0], "groupId">,
+): TokenWatchGroupSummary {
+  return addTokenToWatchGroup({
+    ...args,
+    groupId: TRADED_GROUP_ID,
+    source: args.source ?? "trade",
+  });
+}
+
+export function clearCurrentSessionWatchGroup(): TokenWatchGroupSummary {
+  const vault = readVault();
+  const group = ensureGroup(vault, SESSION_GROUP_ID, SESSION_GROUP_NAME);
+  group.tokens = [];
+  group.updatedAtMs = Date.now();
+  writeVault(vault);
+  return listPumpLiveState().watchGroups.find(
+    (item) => item.id === SESSION_GROUP_ID,
+  )!;
+}
+
+export function currentSessionWatchGroupId(): string {
+  return SESSION_GROUP_ID;
+}
+export function tradedWatchGroupId(): string {
+  return TRADED_GROUP_ID;
 }
 
 export function removeTokenFromWatchGroup(

@@ -7,6 +7,7 @@ import {
 } from "../../../src/web/http.js";
 import {
   addTokenToWatchGroup,
+  clearCurrentSessionWatchGroup,
   createTokenWatchGroup,
   listPumpLiveState,
   normalizePumpNewToken,
@@ -406,6 +407,7 @@ export function GET(request: Request): Response {
     const source = (
       url.searchParams.get("source") === "pumpportal" ? "pumpportal" : "helius"
     ) as Source;
+    clearCurrentSessionWatchGroup();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         let closed = false;
@@ -484,6 +486,8 @@ export async function POST(request: Request): Promise<Response> {
           String(body.mint ?? ""),
         ),
       });
+    if (action === "clear-current-session")
+      return jsonResponse({ ok: true, value: clearCurrentSessionWatchGroup() });
     throw new Error(`Unknown pump-live action: ${action || "(empty)"}`);
   } catch (error) {
     return errorResponse(

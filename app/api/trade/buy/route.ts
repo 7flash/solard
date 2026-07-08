@@ -8,6 +8,7 @@ import {
   requireString,
   withSowl,
 } from "../../../../src/web/http.js";
+import { addTokenToTradedGroup } from "../../../../src/web/token-watch-store.js";
 
 function installWebTradeSenders(sowl: any): void {
   const rpcUrl =
@@ -43,6 +44,10 @@ export async function POST(request: Request): Promise<Response> {
     installWebTradeSenders(sowl);
     const token = requireString(body, "token");
     const wallet = requireString(body, "wallet");
+    const tokenMeta =
+      body.tokenMeta && typeof body.tokenMeta === "object"
+        ? (body.tokenMeta as Record<string, unknown>)
+        : {};
     const amountSol = requireString(body, "amountSol");
     const slippageBps = numberValue(body, "slippageBps", 1500);
     const via = optionalString(body, "sender") ?? "rpc";
@@ -96,6 +101,37 @@ export async function POST(request: Request): Promise<Response> {
       skipSimulation,
       skipPreflight,
     });
-    return { mode: "live", receipt };
+    let watchGroup = null;
+    if (receipt.status !== "failed") {
+      watchGroup = addTokenToTradedGroup({
+        mint: token,
+        name: typeof tokenMeta.name === "string" ? tokenMeta.name : null,
+        symbol: typeof tokenMeta.symbol === "string" ? tokenMeta.symbol : null,
+        creator:
+          typeof tokenMeta.creator === "string" ? tokenMeta.creator : null,
+        uri: typeof tokenMeta.uri === "string" ? tokenMeta.uri : null,
+        image: typeof tokenMeta.image === "string" ? tokenMeta.image : null,
+        signature:
+          typeof tokenMeta.signature === "string"
+            ? tokenMeta.signature
+            : (receipt.signature ?? null),
+        marketCapSol:
+          tokenMeta.marketCapSol == null || tokenMeta.marketCapSol === ""
+            ? null
+            : Number(tokenMeta.marketCapSol),
+        isMayhemMode:
+          typeof tokenMeta.isMayhemMode === "boolean"
+            ? tokenMeta.isMayhemMode
+            : null,
+        quoteAsset:
+          typeof tokenMeta.quoteAsset === "string"
+            ? tokenMeta.quoteAsset
+            : null,
+        quoteMint:
+          typeof tokenMeta.quoteMint === "string" ? tokenMeta.quoteMint : null,
+        source: "web-terminal-buy",
+      });
+    }
+    return { mode: "live", receipt, watchGroup };
   });
 }

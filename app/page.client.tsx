@@ -600,6 +600,9 @@ async function addWatchedToken(
     image?: string | null;
     signature?: string | null;
     marketCapSol?: number | null;
+    isMayhemMode?: boolean | null;
+    quoteAsset?: string | null;
+    quoteMint?: string | null;
     source?: string;
   },
 ): Promise<void> {
@@ -663,6 +666,19 @@ async function quickBuyPumpFeedRow(row: PumpFeedRow): Promise<void> {
     body: JSON.stringify({
       wallet: state.terminalDefaultWallet.trim(),
       token: row.mint,
+      tokenMeta: {
+        mint: row.mint,
+        name: row.name ?? null,
+        symbol: row.symbol ?? null,
+        creator: row.creator ?? null,
+        uri: row.uri ?? null,
+        image: row.image ?? null,
+        signature: row.signature ?? null,
+        marketCapSol: row.marketCapSol ?? row.lastMarketCapSol ?? null,
+        isMayhemMode: row.isMayhemMode ?? null,
+        quoteAsset: row.quoteAsset ?? null,
+        quoteMint: row.quoteMint ?? null,
+      },
       amountSol: state.terminalDefaultBuySol.trim(),
       slippageBps: state.terminalDefaultSlippageBps.trim() || "9999",
       sender: state.terminalDefaultSender,
@@ -674,6 +690,7 @@ async function quickBuyPumpFeedRow(row: PumpFeedRow): Promise<void> {
       skipPreflight: "true",
     }),
   });
+  await refreshPumpLive();
 }
 
 let pumpFeedUpdateScheduled = false;
@@ -736,6 +753,10 @@ function handleSseBlock(block: string): void {
       state.pumpFeedStatus = (payload.status ??
         event) as State["pumpFeedStatus"];
       state.pumpFeedError = null;
+      if (state.pumpFeedStatus === "connected")
+        void refreshPumpLive()
+          .then(() => update())
+          .catch(() => undefined);
       schedulePumpFeedUpdate();
     } else if (event === "warning") {
       state.pumpFeedError = payload.error ?? "Pump feed warning";
@@ -1999,6 +2020,8 @@ function TerminalView() {
                 <th>Creator</th>
                 <th>Initial buy</th>
                 <th>MCap SOL</th>
+                <th>SMA 1m</th>
+                <th>SMA 5m</th>
                 <th>Δ MCap</th>
                 <th>Δ %</th>
                 <th>Last trade</th>
@@ -2052,6 +2075,8 @@ function TerminalView() {
                   <td className="code">{short(row.creator)}</td>
                   <td>{formatSol(row.initialBuy ?? row.solAmount)}</td>
                   <td>{formatSol(latestMcap(row))}</td>
+                  <td>{formatSol(row.sma1m)}</td>
+                  <td>{formatSol(row.sma5m)}</td>
                   <td
                     className={
                       mcapChange(row) != null && mcapChange(row)! > 0
