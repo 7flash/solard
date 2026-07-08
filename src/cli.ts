@@ -1,840 +1,502 @@
 #!/usr/bin/env bun
-import type { TokenRow } from "./db/schema.js";
 import { emit } from "./core/ui.js";
-import { listScripts, runScript } from "./runner/run-script.js";
+import { shortKey } from "./core/log.js";
+import { formatRaw } from "./core/amounts.js";
+import {
+  addManyWalletsToGroupAction,
+  addTokenAction,
+  addWalletToGroupAction,
+  buyTokenAction,
+  configureTokenAction,
+  createGroupAction,
+  createSolardActionContext,
+  healthAction,
+  importWalletAction,
+  launchPumpTokenAction,
+  listGroupsAction,
+  listTokensAction,
+  listWalletsAction,
+  listWatchesAction,
+  refreshTokenAction,
+  sellTokenAction,
+  showGroupAction,
+  toJson,
+  watchAction,
+  type PumpLaunchInput,
+} from "./solard/actions/index.js";
 
 const OWL = "🦉";
+
 type Flags = Map<string, string>;
-function args(input: string[]): { values: string[]; flags: Flags } {
-  const values: string[] = [],
-    flags = new Map<string, string>();
-  for (let i = 0; i < input.length; i++) {
-    const current = input[i]!;
+
+type ParsedArgs = {
+  command?: string;
+  values: string[];
+  flags: Flags;
+};
+
+export function parseCliArgs(input: string[]): ParsedArgs {
+  const [command, ...rest] = input;
+  const values: string[] = [];
+  const flags = new Map<string, string>();
+  for (let index = 0; index < rest.length; index += 1) {
+    const current = rest[index]!;
     if (current === "-w") {
-      flags.set("wallet", input[++i] ?? "");
+      flags.set("wallet", rest[++index] ?? "");
       continue;
     }
     if (current.startsWith("--")) {
       const [key, inline] = current.slice(2).split("=", 2);
       if (inline != null) flags.set(key!, inline);
-      else if (input[i + 1] && !input[i + 1]!.startsWith("-"))
-        flags.set(key!, input[++i]!);
+      else if (rest[index + 1] && !rest[index + 1]!.startsWith("-"))
+        flags.set(key!, rest[++index]!);
       else flags.set(key!, "true");
       continue;
     }
     values.push(current);
   }
-  return { values, flags };
+  return { command, values, flags };
 }
-function need(flags: Flags, key: string): string {
-  const value = flags.get(key);
-  if (!value || value === "true") throw new Error(`Missing --${key} <value>`);
-  return value;
+
+function help(): string {
+  return `${OWL} solard — CLI-first Solana wallet, watch, trade, and launch control plane
+
+Core
+  solard health [--json]
+  solard start [--host 127.0.0.1] [--port 3000] [--open]
+
+Wallets
+  solard wallet import <private_key> [name] [--json]
+  solard import <private_key> [name] [--json]
+  solard wallets [--token <token>] [--show-zero] [--addresses-only] [--json]
+
+Tokens and watches
+  solard token add <mint> [name] [--metadata-json <json>] [--json]
+  solard token <mint> [name] [--metadata-json <json>] [--json]
+  solard token set <token|mint> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>] [--json]
+  solard token refresh <token|mint> [--json]
+  solard tokens [--json]
+  solard watch token <token|mint> [label] [--json]
+  solard watch wallet <wallet> [label] [--json]
+  solard watch program <program> [label] [--json]
+  solard watch list [--json]
+
+Groups
+  solard group create <name> [description] [--json]
+  solard group add <group> <wallet> [weight_bps] [--json]
+  solard group add-many <group> <wallet1,wallet2,...> [--json]
+  solard group show <group> [--json]
+  solard group list [--json]
+  solard groups [--json]
+
+Trading
+  solard buy <token|mint> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|helius-rpc|helius-fast|jito] [--live] [--json]
+  solard sell <token|mint> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|helius-rpc|helius-fast|jito] [--live] [--json]
+
+Launching
+  solard launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) --alias <name> --name <name> --symbol <symbol> [--buyer-group <group>] [--creator-buy-sol <amount>] [--live] [--json]
+
+Safety
+  Live trade and launch commands require both --live and SOLARD_ENABLE_LIVE_TRADES=1.
+  Without --live, buy/sell/launch commands run simulation/dry-run mode.
+`;
 }
-function int(flags: Flags, key: string, fallback?: number): number | undefined {
+
+function flag(flags: Flags, key: string): string | undefined {
   const value = flags.get(key);
-  if (!value) return fallback;
+  return value && value !== "true" ? value : undefined;
+}
+
+function has(flags: Flags, key: string): boolean {
+  return flags.has(key) && flags.get(key) !== "false" && flags.get(key) !== "0";
+}
+
+function numberFlag(
+  flags: Flags,
+  key: string,
+  fallback?: number,
+): number | undefined {
+  const value = flag(flags, key);
+  if (value == null) return fallback;
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`Invalid --${key}: ${value}`);
   return parsed;
 }
-function json(value: unknown): string {
-  return JSON.stringify(
-    value,
-    (_, item) => (typeof item === "bigint" ? item.toString() : item),
-    2,
-  );
-}
-function formatError(error: unknown): string {
-  if (error instanceof Error) {
-    const code =
-      "code" in error &&
-      typeof (error as Error & { code?: unknown }).code === "string"
-        ? ` [${String((error as Error & { code?: unknown }).code)}]`
-        : "";
-    const message = error.message.trim();
-    const summary = `${error.name}${code}${message ? `: ${message}` : " (no message)"}`;
-    return error.stack && error.stack !== summary
-      ? `${summary}\n${error.stack}`
-      : summary;
-  }
-  try {
-    const encoded = json(error);
-    return encoded && encoded !== "undefined" ? encoded : String(error);
-  } catch {
-    return String(error);
-  }
-}
-function duration(value: string | undefined, fallbackMs: number): number {
-  if (!value) return fallbackMs;
-  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/i.exec(value.trim());
-  if (!match)
-    throw new Error(`Invalid duration: ${value}. Use e.g. 500ms, 5s, 15m, 1h.`);
-  const n = Number(match[1]);
-  const scale = ({ ms: 1, s: 1_000, m: 60_000, h: 3_600_000 } as const)[
-    (match[2]?.toLowerCase() ?? "ms") as "ms" | "s" | "m" | "h"
-  ];
-  return Math.floor(n * scale);
-}
-function formatPrice(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return "n/a";
-  return value >= 0.001
-    ? value.toFixed(9).replace(/0+$/, "").replace(/\.$/, "")
-    : value.toExponential(6);
+
+function requiredFlag(flags: Flags, key: string): string {
+  const value = flag(flags, key);
+  if (!value) throw new Error(`Missing --${key} <value>`);
+  return value;
 }
 
-function csv(value: string | undefined): string[] {
+function splitCsv(value: string | undefined): string[] {
   return (value ?? "")
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
 }
-function targetWallets(
-  sowl: { groupWallets(name: string): unknown[] },
+
+function jsonMode(flags: Flags): boolean {
+  return has(flags, "json");
+}
+
+function writeResult(
+  value: unknown,
   flags: Flags,
-  usage: string,
-): { mode: "wallet" | "wallets" | "group"; refs: string[]; group?: string } {
-  const wallet = flags.get("wallet");
-  const wallets = csv(flags.get("wallets"));
-  const group = flags.get("group");
-  const selected = [Boolean(wallet), wallets.length > 0, Boolean(group)].filter(
-    Boolean,
-  ).length;
-  if (selected !== 1)
-    throw new Error(
-      `${usage} Supply exactly one of --wallet, --wallets, or --group.`,
-    );
-  if (wallet) return { mode: "wallet", refs: [wallet] };
-  if (wallets.length > 0) return { mode: "wallets", refs: wallets };
+  human?: (value: any) => string,
+): void {
+  if (jsonMode(flags) || !human) emit(toJson(value) + "\n");
+  else emit(human(value));
+}
+
+async function readStdin(): Promise<string> {
+  return await new Response(Bun.stdin.stream()).text();
+}
+
+function targetFromFlags(flags: Flags) {
   return {
-    mode: "group",
-    refs: sowl.groupWallets(group!).map((ref) => String(ref)),
-    group,
+    wallet: flag(flags, "wallet"),
+    wallets: splitCsv(flag(flags, "wallets")),
+    group: flag(flags, "group"),
   };
 }
-function help(): string {
-  return `${OWL} sowl — multi-wallet Solana CLI + SDK for traders and AI agents
 
-Wallets and tokens
-  sowl import <private_key> [name]
-  cat key.json | sowl import --stdin [name]
-  sowl wallets [--token <token>] [--addresses-only]    Show SOL and registered-token balances
-  sowl token <token_ca> [name] [--metadata-json <json>]
-  sowl token set <token|ca> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>]
-  sowl token refresh <token|ca>
-  sowl tokens
-
-Metadata and launching
-  solwal launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--alias <name>] [--buyer-group <group>] [--live] [--skip-simulation]
-                    [--submit-mode after-deploy-processed|spam-after-market-ready|fast-spam] [--sender-tps 40] [--helius-tip-sol 0.01]
-  sowl metadata upload --image <local_path> --name <name> --symbol <symbol> --description <text> [--provider pump-frontend|pinata]
-                       [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
-  sowl deploy pump --wallet <wallet> --name <name> --symbol <symbol> (--uri <metadata_uri> | --image <local_path> --description <text>) [--alias <name>] [--live]
-                   [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
-  sowl run launch-pump-token --creator <wallet> --metadata <token.json> [--creator-buy-sol <amount>] [--buyer-group <group>] [--live]
-  sowl run prepare-pump-launch-alt --creator <wallet> --metadata <token.json> --creator-buy-sol <amount> [--create --live]
-
-Prices
-  sowl quote buy <token|ca> --sol <amount>           Inspect buy quote without submitting
-  sowl price <token|ca>                              Sample current venue price
-  sowl price average <token|ca> --period 15m         Average stored samples in a period
-  sowl price watch <token|ca...> [--interval 1s] [--period 1m]
-
-Trading
-  sowl buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
-  sowl sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
-  sowl unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--simulate-only]
-  sowl claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
-
-Scripts (strategies stay outside the kernel)
-  sowl scripts                              List scripts registered in sowl.config.ts
-  sowl run <name-or-path> [script flags...] Execute a script that imports sowl
-  sowl run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
-  sowl run claim-trade-send --claim <token> --buy <token> --wallet <wallet> --recipient <address>
-
-Groups and agents
-  sowl group create <name> [description]
-  sowl group add <group> <wallet> [weight_bps]
-  sowl group add-many <group> <wallet1,wallet2,...>
-  sowl group show <group>
-  sowl group list
-  sowl buy <token|ca> --group <name> --sol <amount> --sender jito      Submit group buys as Jito bundles, five tx per bundle
-  sowl sell <token|ca> --group <name> --sender jito              Submit group sells as Jito bundles, five tx per bundle
-  sowl agent create <name> --wallet <wallet> [--config-json <json>]
-  sowl agent list
-
-Watching
-  sowl watch token <token|ca> [label]
-  sowl watch wallet <wallet> [label]
-  sowl watch program <address> [label]
-  sowl watch list
-
-Transactions and ALTs
-  sowl history
-  sowl jito tip-accounts [--endpoint <block-engine-url>]
-  sowl alt add <address> [label]
-  sowl alt list
-  sowl alt create --wallet <wallet>
-  sowl alt extend <address> --wallet <wallet> <account...>
-
-Environment
-  SOWL_DB_PATH      local shared database; default ./sowl.db
-  SOWL_MASTER_KEY   required to import/decrypt stored wallets
-  RPC_ENDPOINT      required only for chain operations
-  HELIUS_SENDER_URL regional/global Helius Sender endpoint used by launch scripts
-  HELIUS_RPC_URL    RPC endpoint used for ordinary Helius-RPC buyer lane
-  HELIUS_TIP_ACCOUNT, HELIUS_TIP_LAMPORTS, HELIUS_PRIORITY_MICRO_LAMPORTS launch transport policy
-  SOWL_LAUNCH_*     launch resend/timeout policy; shared environment, not per-token metadata
-  JITO_BLOCK_ENGINE_URL only when explicitly selecting the separate Jito sender
-  SOWL_METADATA_UPLOADER metadata provider; default pump-frontend; optional pinata
-  PUMP_IPFS_ENDPOINT browser-facing Pump metadata upload endpoint; default https://pump.fun/api/ipfs
-  PINATA_JWT       required only with --provider pinata or explicit pinata fallback
-  IPFS_PUBLIC_GATEWAY optional Pinata returned metadata gateway; default https://ipfs.io/ipfs
-`;
+function pumpInputFromCli(values: string[], flags: Flags): PumpLaunchInput {
+  if (values[0] !== "pump" && values[0] !== "pump-token") {
+    throw new Error("Usage: solard launch pump [flags]");
+  }
+  return {
+    creator: requiredFlag(flags, "creator"),
+    buyerGroup: flag(flags, "buyer-group"),
+    buyPlanJson: flag(flags, "buy-plan-json"),
+    buyPlanPath: flag(flags, "buy-plan"),
+    metadataPath: flag(flags, "metadata"),
+    alias: flag(flags, "alias"),
+    name: flag(flags, "name"),
+    symbol: flag(flags, "symbol"),
+    uri: flag(flags, "uri"),
+    imagePath: flag(flags, "image"),
+    description: flag(flags, "description"),
+    website: flag(flags, "website"),
+    twitter: flag(flags, "twitter"),
+    telegram: flag(flags, "telegram"),
+    video: flag(flags, "video"),
+    showName: has(flags, "hide-name") ? false : undefined,
+    creatorBuySol: flag(flags, "creator-buy-sol"),
+    creatorBuyLamports: flag(flags, "creator-buy-lamports"),
+    creatorReserveSol: flag(flags, "creator-reserve-sol"),
+    buyerMinBps: numberFlag(flags, "buyer-min-bps", undefined),
+    buyerMaxBps: numberFlag(flags, "buyer-max-bps", undefined),
+    buyerReserveSol: flag(flags, "buyer-reserve-sol"),
+    deploymentSender: flag(flags, "deployment-sender"),
+    buyerSender: flag(flags, "buyer-sender"),
+    submitMode: flag(flags, "submit-mode"),
+    senderTps: numberFlag(flags, "sender-tps", undefined),
+    retryIntervalMs: numberFlag(flags, "retry-interval-ms", undefined),
+    retryRecompileIntervalMs: numberFlag(
+      flags,
+      "retry-recompile-interval-ms",
+      undefined,
+    ),
+    blockhashRefreshIntervalMs: numberFlag(
+      flags,
+      "blockhash-refresh-interval-ms",
+      undefined,
+    ),
+    freshQuoteDelayMs: numberFlag(flags, "fresh-quote-delay-ms", undefined),
+    retryTimeoutMs: numberFlag(flags, "retry-timeout-ms", undefined),
+    maxFailedAttempts: numberFlag(flags, "max-failed-attempts", undefined),
+    rateLimitBackoffMs: numberFlag(flags, "rate-limit-backoff-ms", undefined),
+    retryJitterMs: numberFlag(flags, "retry-jitter-ms", undefined),
+    heliusTipSol: flag(flags, "helius-tip-sol"),
+    buyerPriorityMicroLamports: numberFlag(
+      flags,
+      "buyer-priority-micro-lamports",
+      undefined,
+    ),
+    deploymentPriorityMicroLamports: numberFlag(
+      flags,
+      "deployment-priority-micro-lamports",
+      undefined,
+    ),
+    slippageBps: numberFlag(flags, "slippage-bps", undefined),
+    live: has(flags, "live"),
+    skipSimulation: has(flags, "skip-simulation"),
+    out: flag(flags, "out"),
+  };
 }
 
-async function main() {
-  const [command, ...rest] = process.argv.slice(2);
-  const { values, flags } = args(rest);
+export async function runCli(argv = process.argv.slice(2)): Promise<number> {
+  const { command, values, flags } = parseCliArgs(argv);
   if (!command || command === "help" || command === "--help") {
     emit(help());
-    return;
+    return 0;
   }
-  if (command === "scripts") {
-    emit(json(await listScripts()) + "\n");
-    return;
+
+  if (command === "health") {
+    writeResult(
+      healthAction(),
+      flags,
+      (value) =>
+        `${OWL} health ok db=${value.db.path} rpc=${value.rpc.configured ? "configured" : "missing"} live=${value.env.SOLARD_ENABLE_LIVE_TRADES ? "enabled" : "disabled"}\n`,
+    );
+    return 0;
   }
-  if (command === "run") {
-    const [script, ...scriptArgs] = rest;
-    if (!script)
-      throw new Error("Usage: sowl run <name-or-path> [script flags...]");
-    process.exitCode = await runScript(script, scriptArgs);
-    return;
-  }
-  if (
-    command === "launch" &&
-    (values[0] === "pump" || values[0] === "pump-token")
-  ) {
-    const { runPumpTokenLaunchFromArgs } =
-      await import("./launches/pump/token-launch-cli.js");
-    await runPumpTokenLaunchFromArgs(rest.slice(1), {
-      defaultSubmitMode: "after-deploy-processed",
-      defaultDeploymentPriorityMicroLamports: 500_000,
-      defaultBuyerPriorityMicroLamports: 1_500_000,
-      defaultSlippageBps: 1_500,
-      persistOnLive: true,
-      report: (label, value) => emit(`${label}: ${json(value)}\n`),
-    });
-    return;
-  }
-  if (command === "jito" && values[0] === "tip-accounts") {
-    const endpoint = (
-      flags.get("endpoint") ??
-      process.env.JITO_BLOCK_ENGINE_URL ??
-      "https://mainnet.block-engine.jito.wtf"
-    ).replace(/\/$/, "");
-    const response = await fetch(`${endpoint}/api/v1/bundles`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: Date.now(),
-        method: "getTipAccounts",
-        params: [],
-      }),
-    });
-    const payload = (await response.json()) as {
-      result?: string[];
-      error?: unknown;
-    };
-    if (!response.ok || payload.error || !Array.isArray(payload.result))
-      throw new Error(
-        `Jito getTipAccounts failed: ${JSON.stringify(payload.error ?? response.status)}`,
-      );
-    emit(json({ endpoint, tipAccounts: payload.result }) + "\n");
-    return;
-  }
-  if (command === "metadata" && values[0] === "upload") {
-    const { uploadPumpMetadata } = await import("./metadata/pump-metadata.js");
-    const uploaded = await uploadPumpMetadata(
+
+  if (command === "launch") {
+    const result = await launchPumpTokenAction(
+      pumpInputFromCli(values, flags),
       {
-        imagePath: need(flags, "image"),
-        name: need(flags, "name"),
-        symbol: need(flags, "symbol"),
-        description: need(flags, "description"),
-        twitter: flags.get("twitter"),
-        telegram: flags.get("telegram"),
-        website: flags.get("website"),
-        video: flags.get("video"),
-        showName: !flags.has("hide-name"),
-      },
-      {
-        provider: (flags.get("provider") ??
-          process.env.SOWL_METADATA_UPLOADER ??
-          "pump-frontend") as "pump-frontend" | "pinata",
-        endpoint: flags.get("endpoint"),
-        fallback: flags.get("fallback") === "pinata" ? "pinata" : null,
+        report: has(flags, "json")
+          ? undefined
+          : (label, value) => emit(`${label}: ${toJson(value)}\n`),
       },
     );
-    emit(json(uploaded) + "\n");
-    return;
+    writeResult(
+      result,
+      flags,
+      (value) =>
+        `${OWL} pump launch ${value.live ? "live" : "dry-run"} mint=${value.token.mint} alias=${value.token.alias}\n`,
+    );
+    return 0;
   }
-  const [{ sol, formatRaw }, { shortKey }, { createTraderSowl }] =
-    await Promise.all([
-      import("./core/amounts.js"),
-      import("./core/log.js"),
-      import("./presets/trader.js"),
-    ]);
-  const sowl = createTraderSowl();
+
+  const ctx = createSolardActionContext();
   try {
-    if (command === "import") {
-      const input = flags.has("stdin")
-        ? (await new Response(Bun.stdin.stream()).text()).trim()
-        : values[0];
-      if (!input)
-        throw new Error(
-          "Usage: sowl import <private_key> [name] or cat key.json | sowl import --stdin [name]",
-        );
-      const name = flags.has("stdin") ? values[0] : values[1];
-      const wallet = sowl.importWallet(input, name);
-      emit(`${OWL} imported @${wallet.name} ${wallet.address}\n`);
-      return;
-    }
-    if (command === "wallets") {
-      const wallets = sowl.wallets.list();
-      if (flags.has("addresses-only")) {
-        for (const wallet of wallets)
-          emit(`@${wallet.name}\t${wallet.address}\n`);
-        return;
-      }
-      const selectedTokens = flags.get("token")
-        ? [sowl.resolveToken(flags.get("token")!)]
-        : sowl.tokens.list();
-      for (const wallet of wallets) {
-        const balances = await sowl.walletBalances(wallet, selectedTokens);
-        const holdings = balances.tokenBalances
-          .filter(
-            (balance) =>
-              balance.amountRaw > 0n ||
-              flags.has("show-zero") ||
-              Boolean(flags.get("token")),
-          )
-          .map(
-            (balance) =>
-              `${balance.token.symbol ? "$" + balance.token.symbol : (balance.token.name ?? shortKey(balance.token.mint))}=${formatRaw(balance.amountRaw, balance.decimals)}`,
-          )
-          .join("  ");
-        emit(
-          `@${wallet.name}\t${wallet.address}\tSOL=${formatRaw(balances.solLamports, 9)}${holdings ? `  ${holdings}` : ""}\n`,
-        );
-      }
-      return;
-    }
-    if (command === "deploy") {
-      const launchpad = values[0] ?? "pump";
-      const wallet = need(flags, "wallet");
-      const name = need(flags, "name");
-      const symbol = need(flags, "symbol");
-      let uri = flags.get("uri");
-      let uploadedMetadata: unknown = null;
-      if (!uri || uri === "true") {
-        if (!flags.get("image"))
-          throw new Error(
-            "Provide --uri <metadata_uri> or --image <local_path> --description <text>",
-          );
-        const { uploadPumpMetadata } =
-          await import("./metadata/pump-metadata.js");
-        uploadedMetadata = await uploadPumpMetadata(
-          {
-            imagePath: need(flags, "image"),
-            name,
-            symbol,
-            description: need(flags, "description"),
-            twitter: flags.get("twitter"),
-            telegram: flags.get("telegram"),
-            website: flags.get("website"),
-            video: flags.get("video"),
-            showName: !flags.has("hide-name"),
-          },
-          {
-            provider: (flags.get("provider") ??
-              process.env.SOWL_METADATA_UPLOADER ??
-              "pump-frontend") as "pump-frontend" | "pinata",
-            endpoint: flags.get("endpoint"),
-            fallback: flags.get("fallback") === "pinata" ? "pinata" : null,
-          },
-        );
-        uri = (uploadedMetadata as { metadataUri: string }).metadataUri;
-      }
-      const creator = flags.get("creator")
-        ? sowl.resolveWallet(flags.get("creator")!).address
-        : sowl.signer(wallet).publicKey;
-      const deployment = await sowl.prepareTokenDeployment(launchpad, wallet, {
-        name,
-        symbol,
-        uri,
-        creator,
-        mayhemMode: flags.has("mayhem"),
-        cashback: flags.has("cashback"),
-      });
-      const plan = await sowl
-        .transaction(wallet)
-        .addMany(deployment.instructions, {
-          kind: "deploy-token",
-          mint: deployment.mint.publicKey,
-          meta: { launchpad, name, symbol },
-        })
-        .withSigner(deployment.mint)
-        .build();
-      const header = {
-        launchpad,
-        mint: deployment.mint.publicKey.toBase58(),
-        name,
-        symbol,
-        uri,
-        uploadedMetadata,
-        live: flags.has("live"),
-      };
-      if (!flags.has("live")) {
-        const simulation = await sowl.simulatePlan(plan);
-        emit(json({ ...header, simulation }) + "\n");
-        return;
-      }
-      const receipt = await sowl.sendPlan(
-        plan,
-        flags.get("sender") ?? "rpc",
-        `deploy:${launchpad}`,
-        {
-          skipSimulation: flags.has("skip-simulation"),
-          skipPreflight: flags.has("skip-simulation"),
-        },
-      );
-      const token = sowl.persistPreparedDeployment(
-        deployment,
-        flags.get("alias"),
-      );
-      emit(json({ ...header, receipt, token }) + "\n");
-      return;
-    }
-    if (command === "token" && values[0] !== "set" && values[0] !== "refresh") {
-      const [mint, name] = values;
-      if (!mint) throw new Error("Usage: sowl token <token_ca> [name]");
-      const metadata = flags.get("metadata-json");
-      const token = await sowl.addToken(
-        mint,
-        name,
-        metadata ? { metadataJson: metadata } : {},
-      );
-      emit(
-        `${OWL} token ${token.name ?? token.symbol ?? "-"} ${token.mint} venue=${token.venueHint}\n`,
-      );
-      return;
-    }
-    if (command === "token" && values[0] === "refresh") {
-      const ref = values[1];
-      if (!ref) throw new Error("Usage: sowl token refresh <token|ca>");
-      emit(json(await sowl.refreshToken(ref)) + "\n");
-      return;
-    }
-    if (command === "token" && values[0] === "set") {
-      const ref = values[1];
-      if (!ref) throw new Error("Usage: sowl token set <token|ca> [flags]");
-      const patch: Partial<TokenRow> = {};
-      if (flags.get("pool")) patch.pool = flags.get("pool");
-      if (flags.get("quote-mint")) patch.quoteMint = flags.get("quote-mint");
-      if (flags.get("quote-program"))
-        patch.quoteTokenProgram = flags.get("quote-program");
-      if (flags.get("metadata-json"))
-        patch.metadataJson = flags.get("metadata-json");
-      const token = sowl.configureToken(ref, patch);
-      emit(`${OWL} updated ${token.name ?? shortKey(token.mint)}\n`);
-      return;
-    }
-    if (command === "tokens") {
-      for (const token of sowl.tokens.list())
-        emit(
-          `${token.name ?? "-"}\t${token.symbol ? "$" + token.symbol : "-"}\t${token.mint}\t${token.venueHint}\n`,
-        );
-      return;
-    }
-    if (command === "quote" && values[0] === "buy") {
-      const tokenRef = values[1];
-      if (!tokenRef)
-        throw new Error(
-          "Usage: sowl quote buy <token|ca> --sol <amount> [--slippage-bps 1500]",
-        );
-      const spend = need(flags, "sol");
-      const result = await sowl.quoteBuy(
-        tokenRef,
-        sol(spend),
-        int(flags, "slippage-bps", 1500),
-      );
-      emit(
-        json({
-          token: {
-            mint: result.token.mint,
-            name: result.token.name,
-            symbol: result.token.symbol,
-          },
-          venue: result.venue,
-          quoteAsset:
-            result.quoteAsset.kind === "native-sol"
-              ? "SOL"
-              : result.quoteAsset.mint.toBase58(),
-          spendRaw: result.quote.inputRaw,
-          expectedOutputRaw: result.quote.expectedOutputRaw,
-          minimumOutputRaw: result.quote.minimumOutputRaw,
-          meta: result.quote.meta ?? {},
-        }) + "\n",
-      );
-      return;
-    }
-    if (command === "price" && values[0] === "average") {
-      const tokenRef = values[1];
-      if (!tokenRef)
-        throw new Error("Usage: sowl price average <token|ca> --period 15m");
-      const token = sowl.resolveToken(tokenRef);
-      const window = sowl.averagePrice(
-        token,
-        duration(flags.get("period"), 60_000),
-      );
-      emit(
-        `${token.symbol ? "$" + token.symbol : (token.name ?? shortKey(token.mint))} samples=${window.samples} avg=${formatPrice(window.averagePriceQuotePerToken)} min=${formatPrice(window.minimumPriceQuotePerToken)} max=${formatPrice(window.maximumPriceQuotePerToken)} last=${formatPrice(window.lastPriceQuotePerToken)}\n`,
-      );
-      return;
-    }
-    if (command === "price" && values[0] === "watch") {
-      const tokenRefs = values.slice(1);
-      if (tokenRefs.length === 0)
-        throw new Error(
-          "Usage: sowl price watch <token|ca...> [--interval 1s] [--period 1m]",
-        );
-      const controller = new AbortController();
-      process.once("SIGINT", () => controller.abort());
-      for await (const event of sowl.watchPrices(tokenRefs, {
-        intervalMs: duration(flags.get("interval"), 1_000),
-        averagePeriodMs: duration(flags.get("period"), 60_000),
-        signal: controller.signal,
-      })) {
-        const label = event.token.symbol
-          ? "$" + event.token.symbol
-          : (event.token.name ?? shortKey(event.token.mint));
-        emit(
-          `${new Date(event.sample.capturedAtMs).toISOString()} ${label} venue=${event.sample.venue} price=${formatPrice(event.sample.priceQuotePerToken)} avg=${formatPrice(event.average.averagePriceQuotePerToken)} samples=${event.average.samples}\n`,
-        );
-      }
-      return;
-    }
-    if (command === "price") {
-      const tokenRef = values[0];
-      if (!tokenRef) throw new Error("Usage: sowl price <token|ca>");
-      const token = sowl.resolveToken(tokenRef);
-      const sample = await sowl.samplePrice(token);
-      const label = token.symbol
-        ? "$" + token.symbol
-        : (token.name ?? shortKey(token.mint));
-      emit(
-        `${label} venue=${sample.venue} price=${formatPrice(sample.priceQuotePerToken)} quote=${sample.quoteAsset.kind === "native-sol" ? "SOL" : shortKey(sample.quoteAsset.mint.toBase58())} captured=${new Date(sample.capturedAtMs).toISOString()}\n`,
-      );
-      return;
-    }
-    if (command === "buy") {
-      const token = values[0];
-      if (!token)
-        throw new Error(
-          "Usage: sowl buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) --sol <amount>",
-        );
-      const amount = flags.get("sol");
-      if (!amount) throw new Error("Buy requires explicit --sol <amount>");
-      const targets = targetWallets(
-        sowl,
-        flags,
-        "Usage: sowl buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) --sol <amount>.",
-      );
-      const options = {
-        slippageBps: int(flags, "slippage-bps", 1500),
-        via: flags.get("sender") ?? "rpc",
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-      };
-      if (flags.has("simulate-only")) {
-        const plans =
-          targets.refs.length === 1
-            ? [
-                await sowl
-                  .tx(targets.refs[0]!)
-                  .buy(token, sol(amount), options)
-                  .build(),
-              ]
-            : await sowl
-                .composeMany(targets.refs)
-                .buy(token, sol(amount), options)
-                .build();
-        const results = await Promise.all(
-          plans.map((plan) => sowl.simulatePlan(plan)),
-        );
-        emit(json({ mode: "simulation", target: targets, results }) + "\n");
-        return;
-      }
-      const receipts =
-        targets.refs.length === 1
-          ? await sowl.buy(token, targets.refs[0]!, sol(amount), options)
-          : await sowl.buyMany(token, targets.refs, sol(amount), options);
-      emit(json(receipts) + "\n");
-      return;
-    }
-    if (command === "sell") {
-      const token = values[0];
-      if (!token)
-        throw new Error(
-          "Usage: sowl sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>)",
-        );
-      const targets = targetWallets(
-        sowl,
-        flags,
-        "Usage: sowl sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>).",
-      );
-      const sellOptions = {
-        bps: int(flags, "bps", 10000),
-        slippageBps: int(flags, "slippage-bps", 1500),
-        via: flags.get("sender") ?? "rpc",
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-      };
-      if (flags.has("simulate-only")) {
-        const plans =
-          targets.refs.length === 1
-            ? [await sowl.tx(targets.refs[0]!).sell(token, sellOptions).build()]
-            : await sowl
-                .composeMany(targets.refs)
-                .sell(token, sellOptions)
-                .build();
-        const results = await Promise.all(
-          plans.map((plan) => sowl.simulatePlan(plan)),
-        );
-        emit(json({ mode: "simulation", target: targets, results }) + "\n");
-        return;
-      }
-      const receipts =
-        targets.refs.length === 1
-          ? await sowl.sell(token, targets.refs[0]!, sellOptions)
-          : await sowl.sellMany(token, targets.refs, sellOptions);
-      emit(json(receipts) + "\n");
-      return;
-    }
     if (
-      command === "unwrap-wsol" ||
-      (command === "unwrap" && values[0] === "wsol")
+      command === "import" ||
+      (command === "wallet" && values[0] === "import")
     ) {
-      const targets = targetWallets(
-        sowl,
+      const offset = command === "wallet" ? 1 : 0;
+      const privateKey = has(flags, "stdin")
+        ? (await readStdin()).trim()
+        : values[offset];
+      const name = has(flags, "stdin") ? values[offset] : values[offset + 1];
+      if (!privateKey)
+        throw new Error("Usage: solard wallet import <private_key> [name]");
+      const wallet = importWalletAction(ctx, { privateKey, name });
+      writeResult(
+        wallet,
         flags,
-        "Usage: sowl unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <group>).",
+        (row) => `${OWL} imported @${row.name ?? "wallet"} ${row.address}\n`,
       );
-      const destination = flags.get("destination");
-      if (destination && targets.refs.length !== 1)
-        throw new Error(
-          "--destination is only supported with a single --wallet unwrap.",
+      return 0;
+    }
+
+    if (command === "wallets") {
+      const wallets = await listWalletsAction(ctx, {
+        token: flag(flags, "token"),
+        showZero: has(flags, "show-zero"),
+      });
+      if (has(flags, "addresses-only")) {
+        for (const wallet of wallets)
+          emit(
+            `@${wallet.name ?? shortKey(wallet.address)}\t${wallet.address}\n`,
+          );
+      } else {
+        writeResult(
+          wallets,
+          flags,
+          (rows) =>
+            rows
+              .map((wallet: any) => {
+                const holdings = (wallet.tokenBalances ?? [])
+                  .map((balance: any) => `${balance.label}=${balance.amountUi}`)
+                  .join("  ");
+                const solText = wallet.solLamports
+                  ? formatRaw(BigInt(wallet.solLamports), 9)
+                  : "n/a";
+                return `@${wallet.name ?? shortKey(wallet.address)}\t${wallet.address}\tSOL=${solText}${holdings ? `  ${holdings}` : ""}`;
+              })
+              .join("\n") + "\n",
         );
-      const unwrapOptions = {
-        via: flags.get("sender") ?? "rpc",
-        destination,
-        skipMissing: flags.has("ignore-missing") || flags.has("skip-missing"),
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-      };
-      if (flags.has("simulate-only")) {
-        const plans =
-          targets.refs.length === 1
-            ? [
-                await sowl
-                  .tx(targets.refs[0]!)
-                  .unwrapWsol({
-                    destination,
-                    skipMissing: unwrapOptions.skipMissing,
-                  })
-                  .build(),
-              ]
-            : await sowl
-                .composeMany(targets.refs)
-                .unwrapWsol({ skipMissing: unwrapOptions.skipMissing })
-                .build();
-        const results = await Promise.all(
-          plans.map((plan) => sowl.simulatePlan(plan)),
-        );
-        emit(json({ mode: "simulation", target: targets, results }) + "\n");
-        return;
       }
-      const receipts =
-        targets.refs.length === 1
-          ? await sowl.unwrapWsol(targets.refs[0]!, unwrapOptions)
-          : await sowl.unwrapWsolMany(targets.refs, unwrapOptions);
-      emit(json(receipts) + "\n");
-      return;
+      return 0;
     }
-    if (command === "claim") {
-      const token = values[0];
-      if (!token)
-        throw new Error("Usage: sowl claim <token|ca> --wallet <wallet>");
-      emit(
-        json(
-          await sowl.claim(token, need(flags, "wallet"), {
-            via: flags.get("sender") ?? "rpc",
-          }),
-        ) + "\n",
+
+    if (
+      command === "token" &&
+      (values[0] === "add" ||
+        (values[0] && values[0] !== "set" && values[0] !== "refresh"))
+    ) {
+      const offset = values[0] === "add" ? 1 : 0;
+      const token = await addTokenAction(ctx, {
+        mint: values[offset] ?? "",
+        name: values[offset + 1],
+        metadataJson: flag(flags, "metadata-json"),
+      });
+      writeResult(
+        token,
+        flags,
+        (row) =>
+          `${OWL} token ${row.name ?? row.symbol ?? "-"} ${row.mint} venue=${row.venueHint}\n`,
       );
-      return;
+      return 0;
     }
-    if (command === "history") {
-      emit(json(sowl.executions.history()) + "\n");
-      return;
+
+    if (command === "token" && values[0] === "set") {
+      const token = configureTokenAction(ctx, {
+        token: values[1] ?? "",
+        pool: flag(flags, "pool"),
+        quoteMint: flag(flags, "quote-mint"),
+        quoteProgram: flag(flags, "quote-program"),
+        metadataJson: flag(flags, "metadata-json"),
+      });
+      writeResult(
+        token,
+        flags,
+        (row) =>
+          `${OWL} updated ${row.name ?? row.symbol ?? shortKey(row.mint)}\n`,
+      );
+      return 0;
     }
+
+    if (command === "token" && values[0] === "refresh") {
+      const token = await refreshTokenAction(ctx, { token: values[1] ?? "" });
+      writeResult(
+        token,
+        flags,
+        (row) =>
+          `${OWL} refreshed ${row.name ?? row.symbol ?? shortKey(row.mint)}\n`,
+      );
+      return 0;
+    }
+
+    if (command === "tokens") {
+      const tokens = listTokensAction(ctx);
+      writeResult(
+        tokens,
+        flags,
+        (rows) =>
+          rows
+            .map(
+              (token: any) =>
+                `${token.name ?? "-"}\t${token.symbol ? "$" + token.symbol : "-"}\t${token.mint}\t${token.venueHint}`,
+            )
+            .join("\n") + "\n",
+      );
+      return 0;
+    }
+
+    if (command === "watch") {
+      if (values[0] === "list") {
+        writeResult(listWatchesAction(ctx), flags);
+        return 0;
+      }
+      const kind = values[0] as "token" | "wallet" | "program" | undefined;
+      if (!kind || !["token", "wallet", "program"].includes(kind))
+        throw new Error(
+          "Usage: solard watch token|wallet|program <ref> [label]",
+        );
+      const watch = watchAction(ctx, {
+        kind,
+        ref: values[1] ?? "",
+        label: values[2],
+      });
+      writeResult(watch, flags, () => `${OWL} watching ${kind} ${values[1]}\n`);
+      return 0;
+    }
+
     if (command === "group" && values[0] === "create") {
-      const name = values[1];
-      if (!name)
-        throw new Error("Usage: sowl group create <name> [description]");
-      emit(
-        json(sowl.groups.create(name, values.slice(2).join(" ") || undefined)) +
-          "\n",
-      );
-      return;
+      const group = createGroupAction(ctx, {
+        name: values[1] ?? "",
+        description: values.slice(2).join(" ") || undefined,
+      });
+      writeResult(group, flags);
+      return 0;
     }
     if (command === "group" && values[0] === "add") {
-      const [_, group, wallet, weight] = values;
-      if (!group || !wallet)
-        throw new Error("Usage: sowl group add <group> <wallet> [weight_bps]");
-      const resolved = sowl.resolveWallet(wallet);
-      emit(
-        json(
-          sowl.groups.addWallet(
-            group,
-            resolved.address.toBase58(),
-            weight ? Number(weight) : 10000,
-          ),
-        ) + "\n",
-      );
-      return;
+      const row = addWalletToGroupAction(ctx, {
+        group: values[1] ?? "",
+        wallet: values[2] ?? "",
+        weightBps: values[3] ? Number(values[3]) : 10000,
+      });
+      writeResult(row, flags);
+      return 0;
     }
     if (command === "group" && values[0] === "add-many") {
-      const group = values[1];
-      const raw = values[2];
-      if (!group || !raw)
-        throw new Error(
-          "Usage: sowl group add-many <group> <wallet1,wallet2,...>",
-        );
-      sowl.groups.create(group);
-      const members = raw
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean)
-        .map((ref) => {
-          const resolved = sowl.resolveWallet(ref);
-          return sowl.groups.addWallet(
-            group,
-            resolved.address.toBase58(),
-            10000,
-          );
-        });
-      emit(json({ group, added: members.length, members }) + "\n");
-      return;
+      const result = addManyWalletsToGroupAction(ctx, {
+        group: values[1] ?? "",
+        wallets: splitCsv(values[2]),
+      });
+      writeResult(result, flags);
+      return 0;
     }
     if (command === "group" && values[0] === "show") {
-      const group = values[1];
-      if (!group) throw new Error("Usage: sowl group show <group>");
-      const members = sowl.groups.wallets(group).map((row) => {
-        const wallet = sowl.resolveWallet(row.walletAddress);
-        return {
-          name: wallet.row?.name ?? null,
-          address: wallet.address.toBase58(),
-          weightBps: row.weightBps,
-        };
+      writeResult(showGroupAction(ctx, { group: values[1] ?? "" }), flags);
+      return 0;
+    }
+    if ((command === "group" && values[0] === "list") || command === "groups") {
+      writeResult(listGroupsAction(ctx), flags);
+      return 0;
+    }
+
+    if (command === "buy") {
+      const result = await buyTokenAction(ctx, {
+        token: values[0] ?? "",
+        amountSol: requiredFlag(flags, "sol"),
+        target: targetFromFlags(flags),
+        slippageBps: numberFlag(flags, "slippage-bps", 1500),
+        sender: flag(flags, "sender"),
+        live: has(flags, "live"),
+        skipSimulation: has(flags, "skip-simulation"),
+        skipPreflight: has(flags, "skip-preflight"),
+        priorityMicroLamports: numberFlag(
+          flags,
+          "priority-micro-lamports",
+          undefined,
+        ),
+        cuLimit: numberFlag(flags, "cu-limit", undefined),
+        tipSol: flag(flags, "tip-sol"),
       });
-      emit(json({ group, members }) + "\n");
-      return;
-    }
-    if (command === "group" && values[0] === "list") {
-      emit(json(sowl.groups.list()) + "\n");
-      return;
-    }
-    if (command === "agent" && values[0] === "create") {
-      const name = values[1];
-      if (!name)
-        throw new Error(
-          "Usage: sowl agent create <name> --wallet <wallet> [--config-json <json>]",
-        );
-      const supplied = flags.get("config-json")
-        ? (JSON.parse(flags.get("config-json")!) as Record<string, unknown>)
-        : {};
-      const wallet = need(flags, "wallet");
-      const agent = sowl.configureAgent(name, { ...supplied, wallet });
-      emit(json(agent.row) + "\n");
-      return;
-    }
-    if (command === "agent" && values[0] === "list") {
-      emit(json(sowl.listAgents()) + "\n");
-      return;
-    }
-    if (command === "watch" && values[0] === "token") {
-      const ref = values[1];
-      if (!ref) throw new Error("Usage: sowl watch token <token|ca> [label]");
-      emit(json(sowl.watchToken(ref, values[2])) + "\n");
-      return;
-    }
-    if (command === "watch" && values[0] === "wallet") {
-      const ref = values[1];
-      if (!ref) throw new Error("Usage: sowl watch wallet <wallet> [label]");
-      emit(json(sowl.watchWallet(ref, values[2])) + "\n");
-      return;
-    }
-    if (command === "watch" && values[0] === "program") {
-      const address = values[1];
-      if (!address)
-        throw new Error("Usage: sowl watch program <address> [label]");
-      emit(json(sowl.watchProgram(address, values[2])) + "\n");
-      return;
-    }
-    if (command === "watch" && values[0] === "list") {
-      emit(json(sowl.db.watches.select().where({ isActive: 1 }).all()) + "\n");
-      return;
-    }
-    if (command === "alt" && values[0] === "add") {
-      if (!values[1]) throw new Error("Usage: sowl alt add <address> [label]");
-      emit(json(sowl.alts.register(values[1], values[2])) + "\n");
-      return;
-    }
-    if (command === "alt" && values[0] === "list") {
-      emit(json(sowl.alts.list()) + "\n");
-      return;
-    }
-    if (command === "alt" && values[0] === "create") {
-      emit(json(await sowl.createAlt(need(flags, "wallet"))) + "\n");
-      return;
-    }
-    if (command === "alt" && values[0] === "extend") {
-      if (!values[1] || values.length < 3)
-        throw new Error(
-          "Usage: sowl alt extend <address> --wallet <wallet> <account...>",
-        );
-      emit(
-        json(
-          await sowl.extendAlt(
-            values[1],
-            need(flags, "wallet"),
-            values.slice(2),
-          ),
-        ) + "\n",
+      writeResult(
+        result,
+        flags,
+        (value) =>
+          `${OWL} ${value.action} ${value.mode} target=${value.target.mode}:${value.target.refs.length}\n`,
       );
-      return;
+      return 0;
     }
+
+    if (command === "sell") {
+      const result = await sellTokenAction(ctx, {
+        token: values[0] ?? "",
+        target: targetFromFlags(flags),
+        bps: numberFlag(flags, "bps", 10000),
+        slippageBps: numberFlag(flags, "slippage-bps", 1500),
+        sender: flag(flags, "sender"),
+        live: has(flags, "live"),
+        skipSimulation: has(flags, "skip-simulation"),
+        skipPreflight: has(flags, "skip-preflight"),
+      });
+      writeResult(
+        result,
+        flags,
+        (value) =>
+          `${OWL} ${value.action} ${value.mode} target=${value.target.mode}:${value.target.refs.length}\n`,
+      );
+      return 0;
+    }
+
     throw new Error(`Unknown command: ${command}\n\n${help()}`);
   } finally {
-    sowl.close();
+    ctx.close();
   }
 }
-main().catch((error) => {
-  emit(`${OWL} error: ${formatError(error)}\n`);
-  process.exitCode = 1;
-});
+
+export function formatCliError(error: unknown): string {
+  return error instanceof Error
+    ? (error.stack ?? error.message)
+    : String(error);
+}
+
+if (import.meta.main) {
+  runCli()
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error) => {
+      emit(`${OWL} error: ${formatCliError(error)}\n`);
+      process.exitCode = 1;
+    });
+}

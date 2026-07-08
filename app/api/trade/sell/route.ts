@@ -7,38 +7,23 @@ import {
   withSowl,
 } from "../../../../src/web/http.js";
 import {
-  assertLiveTradeAllowed,
-  installWebTradeSenders,
-} from "../../../../src/web/live-safety.js";
+  createSolardActionContext,
+  sellTokenAction,
+} from "../../../../src/solard/actions/index.js";
 
 export async function POST(request: Request): Promise<Response> {
   const body = await readJson(request);
   return withSowl(request, async (sowl) => {
-    installWebTradeSenders(sowl);
-    const token = requireString(body, "token");
-    const wallet = requireString(body, "wallet");
-    const bps = numberValue(body, "bps", 10000);
-    const slippageBps = numberValue(body, "slippageBps", 1500);
-    const via = optionalString(body, "sender") ?? "rpc";
-    const live = boolValue(body, "live", false);
-    if (live) assertLiveTradeAllowed("web sell");
-
-    if (!live) {
-      const plan = await sowl
-        .tx(wallet)
-        .sell(token, { bps, slippageBps })
-        .build();
-      const simulation = await sowl.simulatePlan(plan);
-      return { mode: "dry-run", simulation };
-    }
-
-    const receipt = await sowl.sell(token, wallet, {
-      bps,
-      slippageBps,
-      via,
+    const ctx = createSolardActionContext({ sowl });
+    return await sellTokenAction(ctx, {
+      token: requireString(body, "token"),
+      target: { wallet: requireString(body, "wallet") },
+      bps: numberValue(body, "bps", 10000),
+      slippageBps: numberValue(body, "slippageBps", 1500),
+      sender: optionalString(body, "sender") ?? "rpc",
+      live: boolValue(body, "live", false),
       skipSimulation: boolValue(body, "skipSimulation", false),
       skipPreflight: boolValue(body, "skipPreflight", true),
     });
-    return { mode: "live", receipt };
   });
 }

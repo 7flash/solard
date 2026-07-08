@@ -1,27 +1,20 @@
-import { jsonResponse } from "../../../src/web/http.js";
 import {
-  loadSolardRuntimeConfig,
-  publicSolardConfig,
-} from "../../../src/solard/config.js";
+  assertWebAuth,
+  errorResponse,
+  jsonResponse,
+} from "../../../src/web/http.js";
+import { healthAction } from "../../../src/solard/actions/index.js";
 
-export function GET(): Response {
-  const config = loadSolardRuntimeConfig();
-  const errorCount = config.issues.filter(
-    (issue) => issue.level === "error",
-  ).length;
-  return jsonResponse(
-    {
-      ok: errorCount === 0,
-      value: {
-        status: errorCount === 0 ? "ok" : "degraded",
-        config: publicSolardConfig(config),
-      },
-      meta: {
-        route: "/api/health",
-        method: "GET",
-        checkedAtMs: Date.now(),
-      },
-    },
-    { status: errorCount === 0 ? 200 : 503 },
-  );
+export function GET(request: Request): Response {
+  try {
+    assertWebAuth(request);
+    return jsonResponse({ ok: true, value: healthAction() });
+  } catch (error) {
+    return errorResponse(
+      error,
+      typeof (error as { status?: unknown }).status === "number"
+        ? (error as { status: number }).status
+        : 500,
+    );
+  }
 }

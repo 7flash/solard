@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { startSolardConsole } from "../src/solard/start.js";
+import { runCli, formatCliError } from "../src/cli.js";
 
 function flag(argv: string[], name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -9,28 +10,23 @@ function flag(argv: string[], name: string): string | undefined {
   return index >= 0 ? argv[index + 1] : undefined;
 }
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
-  if (!command || command === "help" || command === "--help") {
-    console.log(
-      `solard\n\nCommands:\n  solard start [--host 127.0.0.1] [--port 3000] [--open]\n`,
-    );
-    return;
-  }
   if (command === "start") {
-    process.exitCode = await startSolardConsole({
+    return await startSolardConsole({
       host: flag(rest, "host"),
       port: flag(rest, "port"),
       open: rest.includes("--open"),
     });
-    return;
   }
-  throw new Error(`Unknown command: ${command}`);
+  return await runCli(process.argv.slice(2));
 }
 
-main().catch((error) => {
-  console.error(
-    error instanceof Error ? (error.stack ?? error.message) : String(error),
-  );
-  process.exitCode = 1;
-});
+main()
+  .then((code) => {
+    process.exitCode = code;
+  })
+  .catch((error) => {
+    console.error(formatCliError(error));
+    process.exitCode = 1;
+  });
