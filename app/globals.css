@@ -140,3 +140,45 @@ button.compact { padding: 6px 9px; border-radius: 9px; font-size: 12px; }
   .plan-card-top { grid-template-columns: 1fr; }
   .lane-badge { width: auto; justify-content: start; padding: 8px 10px; }
 }
+
+/* UX cleanup: home and activity center */
+.tabs button[data-tab="jobs"]::after { content: ""; }
+.home-layout { display: grid; gap: 16px; }
+.home-top, .activity-hero { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 18px; border-radius: 22px; background: linear-gradient(135deg, rgba(22, 31, 54, .9), rgba(8, 12, 24, .9)); border: 1px solid rgba(148,163,184,.16); }
+.home-top h2, .activity-hero h2 { margin: 0 0 6px; font-size: 28px; letter-spacing: -.035em; }
+.quick-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.home-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.metric-card { padding: 16px; border-radius: 18px; background: rgba(15,23,42,.72); border: 1px solid rgba(148,163,184,.14); }
+.home-columns { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: 16px; align-items: start; }
+.clean-table th, .clean-table td { padding: 10px 8px; vertical-align: middle; }
+.balance-main { font-weight: 900; color: #eaf1ff; margin-bottom: 6px; }
+.callout { margin: 10px 0; padding: 10px 12px; border-radius: 14px; background: rgba(59,130,246,.10); border: 1px solid rgba(96,165,250,.20); color: #dbeafe; font-size: 13px; }
+.callout.warn { background: rgba(245,158,11,.10); border-color: rgba(245,158,11,.24); color: #fdecc8; }
+.callout.bad { background: rgba(244,63,94,.10); border-color: rgba(244,63,94,.24); color: #fecdd3; }
+.pill.warn { background: rgba(245,158,11,.13); border-color: rgba(245,158,11,.28); color: #fde68a; }
+.run-card { border-radius: 20px; border: 1px solid rgba(148,163,184,.16); background: rgba(15,23,42,.72); padding: 16px; display: grid; gap: 12px; }
+.run-card-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.run-card h3 { margin: 0 0 4px; }
+.run-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.run-metrics span { display: grid; gap: 3px; padding: 10px; border-radius: 14px; background: rgba(2,6,23,.35); border: 1px solid rgba(148,163,184,.12); overflow: hidden; }
+.run-metrics b { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-metrics small { color: #93a4c6; }
+.activity-layout { display: grid; gap: 16px; }
+.activity-columns { display: grid; grid-template-columns: minmax(260px, .7fr) minmax(0, 1.5fr); gap: 16px; align-items: start; }
+.activity-columns.lower { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.runs-list { display: grid; gap: 10px; }
+.run-list-item { width: 100%; display: grid; gap: 6px; text-align: left; background: rgba(255,255,255,.045); border: 1px solid rgba(148,163,184,.14); color: #dbeafe; }
+.run-list-item.active-row { background: #e9eefc; color: #0c1020; }
+.run-list-item span { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.run-list-item small { opacity: .75; }
+.run-detail { min-height: 360px; }
+.job-log-list { display: grid; gap: 8px; margin-top: 14px; max-height: 620px; overflow: auto; }
+.log-entry { border: 1px solid rgba(148,163,184,.12); background: rgba(2,6,23,.30); border-radius: 12px; padding: 8px 10px; }
+.log-entry summary { cursor: pointer; }
+.log-entry pre { margin-top: 8px; max-height: 280px; }
+@media (max-width: 980px) {
+  .home-metrics, .home-columns, .activity-columns, .activity-columns.lower { grid-template-columns: 1fr; }
+  .home-top, .activity-hero, .run-card-head { display: grid; }
+  .quick-actions { justify-content: flex-start; }
+  .run-metrics { grid-template-columns: 1fr; }
+}

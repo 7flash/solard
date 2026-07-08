@@ -760,25 +760,162 @@ async function runAction<T>(fn: () => Promise<T>): Promise<T | undefined> {
   }
 }
 
+function statusClass(status: string | undefined | null): string {
+  if (status === "succeeded" || status === "confirmed") return "ok";
+  if (status === "failed") return "bad";
+  if (status === "running" || status === "planned" || status === "broadcast")
+    return "warn";
+  return "";
+}
+
+function isRetryExecution(row: AnyRow): boolean {
+  const kind = String(row.kind ?? "");
+  return (
+    kind.includes(":attempt:") ||
+    /:trader:\d+/.test(kind) ||
+    kind.includes(":retry")
+  );
+}
+
+function friendlyExecutionKind(kind: unknown): string {
+  const text = String(kind ?? "—");
+  if (text.includes("launch:pump") || text.includes("launch-pump"))
+    return "Pump launch";
+  if (text.includes(":create-and-creator-buy")) return "Create token";
+  if (text.includes(":trader:")) return "Follower buy attempt";
+  if (text.includes("buy")) return "Buy";
+  if (text.includes("sell")) return "Sell";
+  return text.replace(/^cli:/, "");
+}
+
+function jobHeadline(job: AnyRow | null | undefined): string {
+  if (!job) return "No run selected";
+  const token =
+    job.result?.token?.symbol ||
+    job.result?.token?.alias ||
+    job.result?.token?.mint;
+  return token ? `Pump launch: ${token}` : String(job.kind ?? "Launch run");
+}
+
+function jobStatusPill(job: AnyRow | null | undefined) {
+  if (!job) return null;
+  return (
+    <span className={`pill ${statusClass(job.status)}`}>{job.status}</span>
+  );
+}
+
+function latestJob(): AnyRow | null {
+  return state.selectedJob ?? state.jobs[0] ?? null;
+}
+
+function LaunchRunSummary({ job }: { job: AnyRow | null }) {
+  if (!job) return null;
+  const logs = Array.isArray(job.logs) ? job.logs : [];
+  const fatal =
+    logs.findLast?.((entry: AnyRow) =>
+      String(entry.label ?? "")
+        .toLowerCase()
+        .includes("fatal"),
+    ) ??
+    logs.find((entry: AnyRow) =>
+      String(entry.label ?? "")
+        .toLowerCase()
+        .includes("fatal"),
+    );
+  const plan = logs.find((entry: AnyRow) =>
+    String(entry.label ?? "").includes("plan"),
+  );
+  const result =
+    job.result ??
+    logs.findLast?.((entry: AnyRow) =>
+      String(entry.label ?? "").includes("result"),
+    )?.value;
+  return (
+    <div className="run-card">
+      <div className="run-card-head">
+        <div>
+          <div className="section-kicker">Current run</div>
+          <h3>{jobHeadline(job)}</h3>
+          <p className="muted small">
+            Started {new Date(job.createdAtMs).toLocaleString()} · updated{" "}
+            {new Date(job.updatedAtMs ?? job.createdAtMs).toLocaleTimeString()}
+          </p>
+        </div>
+        <div className="row">
+          {jobStatusPill(job)}
+          <button
+            type="button"
+            className="secondary compact"
+            onClick={() => {
+              state.tab = "jobs";
+              update();
+            }}
+          >
+            Open activity
+          </button>
+        </div>
+      </div>
+      {fatal ? (
+        <div className="callout bad">
+          <b>Run failed:</b>{" "}
+          {String(fatal.value ?? job.error ?? "Unknown error").slice(0, 420)}
+        </div>
+      ) : null}
+      {job.status === "running" ? (
+        <div className="callout warn">
+          Running. Expected transient retry failures are hidden from Home; open
+          Activity for detailed logs.
+        </div>
+      ) : null}
+      <div className="run-metrics">
+        <span>
+          <b>{logs.length}</b>
+          <small>log events</small>
+        </span>
+        <span>
+          <b>
+            {plan?.value?.participants?.length ?? result?.buyers?.length ?? "—"}
+          </b>
+          <small>follower lanes</small>
+        </span>
+        <span>
+          <b>{result?.mint ?? result?.token?.mint ?? "—"}</b>
+          <small>mint</small>
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function Stats() {
   const data = state.overview;
+  const visibleExecutions = (data?.executions ?? []).filter(
+    (row: AnyRow) => !isRetryExecution(row),
+  );
+  const hiddenRetries =
+    (data?.executions ?? []).length - visibleExecutions.length;
   return (
-    <div className="grid">
-      <div className="card span-3">
+    <div className="home-metrics">
+      <div className="metric-card">
         <div className="muted small">Wallets</div>
         <div className="stat">{data?.wallets.length ?? "—"}</div>
       </div>
-      <div className="card span-3">
+      <div className="metric-card">
         <div className="muted small">Groups</div>
         <div className="stat">{data?.groups.length ?? "—"}</div>
       </div>
-      <div className="card span-3">
+      <div className="metric-card">
         <div className="muted small">Tokens</div>
         <div className="stat">{data?.tokens.length ?? "—"}</div>
       </div>
-      <div className="card span-3">
-        <div className="muted small">Executions</div>
-        <div className="stat">{data?.executions.length ?? "—"}</div>
+      <div className="metric-card">
+        <div className="muted small">High-level executions</div>
+        <div className="stat">{visibleExecutions.length}</div>
+        {hiddenRetries > 0 ? (
+          <div className="muted small">
+            {hiddenRetries} retry attempts hidden
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -786,81 +923,169 @@ function Stats() {
 
 function OverviewView() {
   const data = state.overview;
+  const visibleExecutions = (data?.executions ?? [])
+    .filter((row: AnyRow) => !isRetryExecution(row))
+    .slice(0, 12);
+  const hiddenRetries = (data?.executions ?? []).filter((row: AnyRow) =>
+    isRetryExecution(row),
+  ).length;
   return (
-    <div className="grid">
-      <div className="span-12">
-        <Stats />
+    <div className="home-layout">
+      <div className="home-top">
+        <div>
+          <div className="section-kicker">Console home</div>
+          <h2>What needs attention</h2>
+          <p className="muted">
+            Home shows only high-level runs and balances. Spam/retry attempts
+            are expected noise and are hidden here.
+          </p>
+        </div>
+        <div className="quick-actions">
+          <button
+            type="button"
+            onClick={() => {
+              state.tab = "terminal";
+              update();
+            }}
+          >
+            Open Pump terminal
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => {
+              state.tab = "launch";
+              update();
+            }}
+          >
+            Build launch
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() =>
+              void runAction(async () => {
+                await refreshOverview();
+                await refreshJobs();
+                await refreshPumpLive();
+              })
+            }
+          >
+            Refresh all
+          </button>
+        </div>
       </div>
-      <div className="card span-6">
-        <h2>Wallet balances</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Address</th>
-              <th>SOL</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(data?.balances ?? []).map((row: AnyRow) => (
+      <Stats />
+      <div className="home-columns">
+        <div className="card">
+          <div className="row between">
+            <h2>Wallet balances</h2>
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={() => {
+                state.tab = "wallets";
+                update();
+              }}
+            >
+              Manage
+            </button>
+          </div>
+          <table className="clean-table">
+            <thead>
               <tr>
-                <td>{row.wallet?.name ?? "—"}</td>
-                <td className="code">{short(row.wallet?.address)}</td>
-                <td>
-                  {row.error ? (
-                    row.error
-                  ) : (
-                    <>
-                      <div>{solFromLamports(row.solLamports)}</div>
-                      <div className="holdings">
-                        {(row.visibleTokenBalances ?? [])
-                          .slice(0, 8)
-                          .map((token: AnyRow) => (
-                            <span className="holding">
-                              {token.symbol
-                                ? `$${token.symbol}`
-                                : short(token.mint, 3, 3)}{" "}
-                              {token.amountUi ?? token.amountRaw}
-                            </span>
-                          ))}
-                      </div>
-                    </>
-                  )}
-                </td>
+                <th>Name</th>
+                <th>Address</th>
+                <th>SOL / holdings</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="card span-6">
-        <h2>Recent executions</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>Kind</th>
-              <th>Wallet</th>
-              <th>Sig</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(data?.executions ?? []).slice(0, 18).map((row: AnyRow) => (
+            </thead>
+            <tbody>
+              {(data?.balances ?? []).slice(0, 12).map((row: AnyRow) => (
+                <tr>
+                  <td>{row.wallet?.name ?? "—"}</td>
+                  <td className="code">{short(row.wallet?.address)}</td>
+                  <td>
+                    {row.error ? (
+                      <span className="pill bad">
+                        {String(row.error).slice(0, 80)}
+                      </span>
+                    ) : (
+                      <>
+                        <div className="balance-main">
+                          {solFromLamports(row.solLamports)} SOL
+                        </div>
+                        <div className="holdings">
+                          {(row.visibleTokenBalances ?? [])
+                            .slice(0, 8)
+                            .map((token: AnyRow) => (
+                              <span className="holding">
+                                {token.symbol
+                                  ? `$${token.symbol}`
+                                  : short(token.mint, 3, 3)}{" "}
+                                {token.amountUi ?? token.amountRaw}
+                              </span>
+                            ))}
+                        </div>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="card">
+          <div className="row between">
+            <h2>Launch / trade activity</h2>
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={() => {
+                state.tab = "jobs";
+                update();
+              }}
+            >
+              Open Activity
+            </button>
+          </div>
+          {hiddenRetries > 0 ? (
+            <div className="callout">
+              {hiddenRetries} low-level retry attempts are hidden here. This
+              does not mean the app failed; it means spam lanes retried.
+            </div>
+          ) : null}
+          <table className="clean-table">
+            <thead>
               <tr>
-                <td>
-                  <span
-                    className={`pill ${row.status === "confirmed" ? "ok" : row.status === "failed" ? "bad" : ""}`}
-                  >
-                    {row.status}
-                  </span>
-                </td>
-                <td>{row.kind}</td>
-                <td className="code">{short(row.walletAddress)}</td>
-                <td className="code">{short(row.signature)}</td>
+                <th>Status</th>
+                <th>Action</th>
+                <th>Wallet</th>
+                <th>Signature</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {visibleExecutions.map((row: AnyRow) => (
+                <tr>
+                  <td>
+                    <span className={`pill ${statusClass(row.status)}`}>
+                      {row.status}
+                    </span>
+                  </td>
+                  <td>{friendlyExecutionKind(row.kind)}</td>
+                  <td className="code">{short(row.walletAddress)}</td>
+                  <td className="code">
+                    {row.signature ? short(row.signature) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!visibleExecutions.length ? (
+            <p className="muted">No high-level execution rows yet.</p>
+          ) : null}
+        </div>
       </div>
+      <LaunchRunSummary job={latestJob()} />
     </div>
   );
 }
@@ -1978,7 +2203,6 @@ function LaunchView() {
             body: JSON.stringify(body),
           });
           state.selectedJobId = started.id;
-          state.tab = "jobs";
           await refreshJobs();
         });
       }}
@@ -2005,6 +2229,10 @@ function LaunchView() {
             Start launch job
           </button>
         </div>
+      </div>
+
+      <div className="span-12">
+        <LaunchRunSummary job={latestJob()} />
       </div>
 
       <div className="launch-panel span-7">
@@ -2249,49 +2477,153 @@ function TradeView() {
 }
 
 function JobsView() {
-  const selected = state.selectedJob;
+  const selected = state.selectedJob ?? state.jobs[0] ?? null;
+  const jobs = state.jobs;
+  const executions = state.overview?.executions ?? [];
+  const rawRetries = executions
+    .filter((row: AnyRow) => isRetryExecution(row))
+    .slice(0, 60);
+  const highLevel = executions
+    .filter((row: AnyRow) => !isRetryExecution(row))
+    .slice(0, 20);
   return (
-    <div className="grid">
-      <div className="card span-4">
-        <h2>Jobs</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {state.jobs.map((job: AnyRow) => (
-              <tr
-                onClick={() => {
-                  state.selectedJobId = job.id;
-                  void refreshJobs().then(update);
-                }}
-              >
-                <td>
-                  <span
-                    className={`pill ${job.status === "succeeded" ? "ok" : job.status === "failed" ? "bad" : ""}`}
-                  >
-                    {job.status}
-                  </span>
-                </td>
-                <td>{new Date(job.createdAtMs).toLocaleTimeString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="activity-layout">
+      <div className="activity-hero">
+        <div>
+          <div className="section-kicker">Activity center</div>
+          <h2>Runs, not noise</h2>
+          <p className="muted">
+            A launch can generate thousands of retry attempts. This page
+            separates the launch job from low-level attempts so “failed retry”
+            does not look like “failed app”.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() =>
+            void runAction(async () => {
+              await refreshJobs();
+              await refreshOverview();
+            })
+          }
+        >
+          Refresh activity
+        </button>
       </div>
-      <div className="card span-8">
-        <h2>Selected job</h2>
-        {selected ? (
-          <>
-            <p className="code">{selected.id}</p>
-            <pre>{JSON.stringify(selected, null, 2)}</pre>
-          </>
-        ) : (
-          <p className="muted">Select a job.</p>
-        )}
+
+      <div className="activity-columns">
+        <div className="card runs-list">
+          <h3>Launch runs</h3>
+          {!jobs.length ? (
+            <p className="muted">No launch jobs in this server process yet.</p>
+          ) : null}
+          {jobs.map((job: AnyRow) => (
+            <button
+              type="button"
+              className={`run-list-item ${selected?.id === job.id ? "active-row" : ""}`}
+              onClick={() => {
+                state.selectedJobId = job.id;
+                void refreshJobs().then(update);
+              }}
+            >
+              <span>
+                {jobStatusPill(job)} <b>{jobHeadline(job)}</b>
+              </span>
+              <small>{new Date(job.createdAtMs).toLocaleTimeString()}</small>
+            </button>
+          ))}
+        </div>
+
+        <div className="card run-detail">
+          <h3>Selected run</h3>
+          {selected ? (
+            <>
+              <LaunchRunSummary job={selected} />
+              <div className="job-log-list">
+                {(selected.logs ?? [])
+                  .slice(-80)
+                  .reverse()
+                  .map((entry: AnyRow) => (
+                    <details className="log-entry">
+                      <summary>
+                        <span className="muted small">
+                          {new Date(entry.atMs).toLocaleTimeString()}
+                        </span>{" "}
+                        <b>{entry.label}</b>
+                      </summary>
+                      <pre>{JSON.stringify(entry.value, null, 2)}</pre>
+                    </details>
+                  ))}
+              </div>
+            </>
+          ) : (
+            <p className="muted">Select a launch run.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="activity-columns lower">
+        <div className="card">
+          <h3>High-level executions</h3>
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Action</th>
+                <th>Wallet</th>
+                <th>Sig</th>
+              </tr>
+            </thead>
+            <tbody>
+              {highLevel.map((row: AnyRow) => (
+                <tr>
+                  <td>
+                    <span className={`pill ${statusClass(row.status)}`}>
+                      {row.status}
+                    </span>
+                  </td>
+                  <td>{friendlyExecutionKind(row.kind)}</td>
+                  <td className="code">{short(row.walletAddress)}</td>
+                  <td className="code">
+                    {row.signature ? short(row.signature) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="card">
+          <h3>Retry attempt log</h3>
+          <div className="callout warn">
+            These rows are expected during spam modes. A failed retry only means
+            that one attempt failed; the lane may still continue.
+          </div>
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Attempt</th>
+                <th>Wallet</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rawRetries.map((row: AnyRow) => (
+                <tr>
+                  <td>
+                    <span className={`pill ${statusClass(row.status)}`}>
+                      {row.status}
+                    </span>
+                  </td>
+                  <td className="code">
+                    {String(row.kind ?? "").replace(/^cli:/, "")}
+                  </td>
+                  <td className="code">{short(row.walletAddress)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

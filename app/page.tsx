@@ -4,10 +4,10 @@ export default function HomePage() {
       <header className="hero">
         <div>
           <p className="eyebrow">Solwal local trading console</p>
-          <h1>Wallets, groups, launches, trades.</h1>
+          <h1>Trade terminal, watchlists, launches.</h1>
           <p className="muted">
-            Run this only on a trusted local machine. Browser actions can sign
-            transactions through your encrypted local Solwal wallet store.
+            A local admin console for Pump streams, wallet groups, launch plans,
+            trades, and live run activity.
           </p>
         </div>
         <div className="status-card">
@@ -22,14 +22,14 @@ export default function HomePage() {
 
       <nav className="tabs" id="tabs">
         <button data-tab="overview" className="active">
-          Overview
+          Home
         </button>
-        <button data-tab="wallets">Wallets & groups</button>
         <button data-tab="terminal">Pump terminal</button>
         <button data-tab="watchlists">Watchlists</button>
-        <button data-tab="launch">Launch pump</button>
+        <button data-tab="launch">Launch</button>
+        <button data-tab="wallets">Wallets</button>
         <button data-tab="trade">Trade</button>
-        <button data-tab="jobs">Jobs</button>
+        <button data-tab="jobs">Activity</button>
       </nav>
 
       <section id="app-root" className="panel">
