@@ -239,6 +239,8 @@ export type State = {
   terminalInspectorFixed: boolean;
   terminalPinnedMints: string[];
   tokenHolders: Record<string, TokenHolder[]>;
+  tokenHolderErrors: Record<string, string>;
+  tokenHoldersCheckedAt: Record<string, number>;
   tokenHoldersLoadingMint: string | null;
 };
 
@@ -319,6 +321,8 @@ export const state: State = {
     }
   })(),
   tokenHolders: {},
+  tokenHolderErrors: {},
+  tokenHoldersCheckedAt: {},
   tokenHoldersLoadingMint: null,
 };
 
@@ -917,18 +921,48 @@ export async function refreshPumpLive(): Promise<void> {
     state.selectedWatchGroupId = state.watchGroups[0].id;
 }
 
+const SOLANA_PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+export function isLikelySolanaPublicKey(
+  value: string | null | undefined,
+): boolean {
+  return SOLANA_PUBKEY_RE.test(String(value ?? "").trim());
+}
+
 export async function refreshTokenHolders(
   mint: string | null | undefined,
 ): Promise<void> {
   const normalized = String(mint ?? "").trim();
   if (!normalized) return;
+  if (!isLikelySolanaPublicKey(normalized)) {
+    state.tokenHolderErrors[normalized] = "not a Solana public key";
+    state.tokenHolders[normalized] = [];
+    state.tokenHoldersCheckedAt[normalized] = Date.now();
+    return;
+  }
   if (state.tokenHolders[normalized]?.length) return;
+  const lastChecked = state.tokenHoldersCheckedAt[normalized] ?? 0;
+  if (lastChecked && Date.now() - lastChecked < 5 * 60_000) return;
   state.tokenHoldersLoadingMint = normalized;
   try {
-    const result = await api<{ mint: string; holders: TokenHolder[] }>(
-      `/api/token-holders?mint=${encodeURIComponent(normalized)}&limit=12`,
-    );
-    state.tokenHolders[result.mint] = result.holders ?? [];
+    const result = await api<{
+      mint: string;
+      ok?: boolean;
+      holders: TokenHolder[];
+      unavailableReason?: string | null;
+    }>(`/api/token-holders?mint=${encodeURIComponent(normalized)}&limit=12`);
+    const key = result.mint || normalized;
+    state.tokenHolders[key] = result.holders ?? [];
+    state.tokenHoldersCheckedAt[key] = Date.now();
+    if (result.ok === false || result.unavailableReason)
+      state.tokenHolderErrors[key] =
+        result.unavailableReason || "holders unavailable";
+    else delete state.tokenHolderErrors[key];
+  } catch (error) {
+    state.tokenHolders[normalized] = [];
+    state.tokenHoldersCheckedAt[normalized] = Date.now();
+    state.tokenHolderErrors[normalized] =
+      error instanceof Error ? error.message : String(error);
   } finally {
     if (state.tokenHoldersLoadingMint === normalized)
       state.tokenHoldersLoadingMint = null;

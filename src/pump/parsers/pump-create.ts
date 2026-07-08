@@ -3,11 +3,17 @@ import bs58 from "bs58";
 export const PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const CREATE_D8 = Buffer.from([24, 30, 200, 40, 5, 28, 7, 119]);
 const CREATE_V2_D8 = Buffer.from([214, 144, 76, 236, 95, 139, 49, 180]);
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+const BASE58_PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 type Raw = Record<string, unknown>;
 
 function clean(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isPubkey(value: unknown): value is string {
+  return typeof value === "string" && BASE58_PUBKEY_RE.test(value.trim());
 }
 
 function readString(
@@ -72,22 +78,86 @@ export function txAccountKey(value: unknown): string | null {
   return null;
 }
 
-function collectAccountKeys(message: Raw): string[] {
+function collectLoadedAddresses(tx: Raw, message: Raw): string[] {
+  const fromMessage = (message as any).loadedAddresses;
+  const fromMeta = (tx.meta as Raw | undefined as any)?.loadedAddresses;
+  const source = fromMessage ?? fromMeta;
+  const writable = Array.isArray(source?.writable)
+    ? (source.writable.map(txAccountKey).filter(Boolean) as string[])
+    : [];
+  const readonly = Array.isArray(source?.readonly)
+    ? (source.readonly.map(txAccountKey).filter(Boolean) as string[])
+    : [];
+  return [...writable, ...readonly];
+}
+
+function collectAccountKeys(tx: Raw, message: Raw): string[] {
   const accountKeys = Array.isArray(message.accountKeys)
     ? (message.accountKeys.map(txAccountKey).filter(Boolean) as string[])
     : [];
-  const lookups = (message as any).loadedAddresses;
-  const writable = Array.isArray(lookups?.writable)
-    ? (lookups.writable.map(txAccountKey).filter(Boolean) as string[])
-    : [];
-  const readonly = Array.isArray(lookups?.readonly)
-    ? (lookups.readonly.map(txAccountKey).filter(Boolean) as string[])
-    : [];
-  return [...accountKeys, ...writable, ...readonly];
+  return [...accountKeys, ...collectLoadedAddresses(tx, message)];
 }
 
 function accountAt(accounts: string[], index: number): string | null {
   return typeof accounts[index] === "string" ? accounts[index] : null;
+}
+
+function tokenBalanceMint(balance: unknown): string | null {
+  const mint = clean((balance as Raw | undefined)?.mint);
+  if (!mint || mint === SOL_MINT) return null;
+  return isPubkey(mint) ? mint : null;
+}
+
+function mintsFromTokenBalances(tx: Raw): string[] {
+  const meta = tx.meta as Raw | undefined;
+  const post = Array.isArray(meta?.postTokenBalances)
+    ? (meta!.postTokenBalances as unknown[])
+    : [];
+  const pre = Array.isArray(meta?.preTokenBalances)
+    ? (meta!.preTokenBalances as unknown[])
+    : [];
+  const all = [...post, ...pre]
+    .map(tokenBalanceMint)
+    .filter(Boolean) as string[];
+  return [...new Set(all)];
+}
+
+function choosePumpMint(tx: Raw, accounts: string[]): string | null {
+  // The token balance mint is the safest source. Some create_v2 account layouts
+  // differ, and using a hard-coded account index can accidentally pick a curve,
+  // token account, or PDA. That later explodes getTokenLargestAccounts.
+  const balanceMints = mintsFromTokenBalances(tx);
+  const pumpMint = balanceMints.find((mint) => /pump$/i.test(mint));
+  if (pumpMint) return pumpMint;
+  if (balanceMints[0]) return balanceMints[0];
+  const indexMint = accountAt(accounts, 0);
+  return isPubkey(indexMint) ? indexMint : null;
+}
+
+function ixAccounts(ix: Raw, accountKeys: string[]): string[] {
+  return Array.isArray(ix.accounts)
+    ? (ix.accounts
+        .map((account) =>
+          typeof account === "number" ? accountKeys[account] : clean(account),
+        )
+        .filter(Boolean) as string[])
+    : [];
+}
+
+function allInstructions(tx: Raw, message: Raw): Raw[] {
+  const outer = Array.isArray(message.instructions)
+    ? (message.instructions as Raw[])
+    : [];
+  const meta = tx.meta as Raw | undefined;
+  const innerGroups = Array.isArray(meta?.innerInstructions)
+    ? (meta!.innerInstructions as Raw[])
+    : [];
+  const inner = innerGroups.flatMap((group) =>
+    Array.isArray((group as Raw).instructions)
+      ? ((group as Raw).instructions as Raw[])
+      : [],
+  );
+  return [...outer, ...inner];
 }
 
 export function findPumpCreateInTransaction(
@@ -96,10 +166,8 @@ export function findPumpCreateInTransaction(
 ): Raw | null {
   const transaction = (tx.transaction as Raw | undefined) ?? {};
   const message = ((transaction.message as Raw | undefined) ?? {}) as Raw;
-  const accountKeys = collectAccountKeys(message);
-  const instructions = Array.isArray(message.instructions)
-    ? (message.instructions as Raw[])
-    : [];
+  const accountKeys = collectAccountKeys(tx, message);
+  const instructions = allInstructions(tx, message);
   for (const ix of instructions) {
     const programId =
       clean(ix.programId) ??
@@ -107,22 +175,20 @@ export function findPumpCreateInTransaction(
         ? accountKeys[ix.programIdIndex]
         : null);
     if (programId !== PUMP_PROGRAM_ID) continue;
-    const accounts = Array.isArray(ix.accounts)
-      ? (ix.accounts
-          .map((account) =>
-            typeof account === "number" ? accountKeys[account] : clean(account),
-          )
-          .filter(Boolean) as string[])
-      : [];
+    const accounts = ixAccounts(ix, accountKeys);
     const decoded =
       typeof ix.data === "string" ? parsePumpCreateData(ix.data) : null;
     if (!decoded) continue;
-    const user = accountAt(accounts, 7) ?? accountAt(accounts, 5);
+    const user =
+      accountAt(accounts, 7) ??
+      accountAt(accounts, 5) ??
+      accountAt(accounts, accounts.length - 1);
+    const mint = choosePumpMint(tx, accounts);
     return {
       txType: "create",
       source: "helius-logs",
       signature,
-      mint: accountAt(accounts, 0),
+      mint,
       creator: clean(decoded.creator) ?? user,
       traderPublicKey: clean(decoded.creator) ?? user,
       name: decoded.name,
@@ -134,6 +200,8 @@ export function findPumpCreateInTransaction(
       associatedBondingCurve: accountAt(accounts, 3),
       quoteAsset: "SOL",
       rawTransactionSlot: tx.slot ?? null,
+      parserAccounts: accounts,
+      postTokenBalanceMints: mintsFromTokenBalances(tx),
     };
   }
   return null;

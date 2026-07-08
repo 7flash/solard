@@ -25,6 +25,7 @@ import {
   followLatestInTerminalInspector,
   tokenSocialLinks,
   refreshTokenHolders,
+  isLikelySolanaPublicKey,
 } from "../runtime";
 import type { AnyRow, PumpFeedRow, TokenHolder } from "../runtime";
 
@@ -53,7 +54,7 @@ function chooseInspector(rows: PumpFeedRow[]): PumpFeedRow | null {
 
 function inspectRow(row: PumpFeedRow): void {
   fixTerminalInspector(row);
-  if (row.mint)
+  if (isLikelySolanaPublicKey(row.mint))
     void refreshTokenHolders(row.mint)
       .then(update)
       .catch(() => undefined);
@@ -80,8 +81,13 @@ function HolderList({ mint }: { mint?: string | null }) {
   if (!mint) return <p className="muted tiny">No mint.</p>;
   const holders = state.tokenHolders[mint] ?? [];
   const loading = state.tokenHoldersLoadingMint === mint;
+  const error = state.tokenHolderErrors[mint];
+  if (!isLikelySolanaPublicKey(mint))
+    return <p className="muted tiny">No valid token mint extracted yet.</p>;
   if (loading && !holders.length)
     return <p className="muted tiny">loading holders…</p>;
+  if (error && !holders.length)
+    return <p className="muted tiny">holders unavailable: {error}</p>;
   if (!holders.length)
     return (
       <p className="muted tiny">
@@ -543,7 +549,7 @@ export function TerminalPage() {
                   <button
                     type="button"
                     className="secondary compact"
-                    disabled={!inspector.mint}
+                    disabled={!isLikelySolanaPublicKey(inspector.mint)}
                     onClick={() =>
                       inspector.mint &&
                       void refreshTokenHolders(inspector.mint).then(update)

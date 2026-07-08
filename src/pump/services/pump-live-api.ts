@@ -1,3 +1,4 @@
+import { PublicKey } from "@solana/web3.js";
 import {
   assertWebAuth,
   errorResponse,
@@ -101,15 +102,21 @@ async function loadBondingCurveSnapshot(
   curve: string | null | undefined,
 ): Promise<PumpCurveSnapshot | null> {
   const key = clean(curve);
-  if (!key) return null;
-  const account = await rpc<Raw | null>("getAccountInfo", [
-    key,
-    { encoding: "base64", commitment: "confirmed" },
-  ]);
-  const data = Array.isArray((account?.value as Raw | undefined)?.data)
-    ? ((account?.value as Raw).data as unknown[])[0]
-    : null;
-  return typeof data === "string" ? decodePumpBondingCurveSnapshot(data) : null;
+  if (!key || !publicKey(key)) return null;
+  try {
+    const account = await rpc<Raw | null>("getAccountInfo", [
+      key,
+      { encoding: "base64", commitment: "confirmed" },
+    ]);
+    const data = Array.isArray((account?.value as Raw | undefined)?.data)
+      ? ((account?.value as Raw).data as unknown[])[0]
+      : null;
+    return typeof data === "string"
+      ? decodePumpBondingCurveSnapshot(data)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function sse(event: string, data: unknown): Uint8Array {
@@ -130,6 +137,32 @@ function subscribeWatched(ws: WebSocket): void {
 
 function clean(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function publicKey(value: string | null | undefined): PublicKey | null {
+  if (!value) return null;
+  try {
+    return new PublicKey(value);
+  } catch {
+    return null;
+  }
+}
+
+function derivePumpBondingCurve(
+  mint: string | null | undefined,
+): string | null {
+  const mintKey = publicKey(mint);
+  const programKey = publicKey(PUMP_PROGRAM_ID);
+  if (!mintKey || !programKey) return null;
+  try {
+    const [curve] = PublicKey.findProgramAddressSync(
+      [Buffer.from("bonding-curve"), mintKey.toBuffer()],
+      programKey,
+    );
+    return curve.toBase58();
+  } catch {
+    return null;
+  }
 }
 
 function rpcHttpUrl(): string {
@@ -256,7 +289,11 @@ async function normalizeHeliusSignature(
   if ((tx.meta as Raw | undefined)?.err) return null;
   const raw = findPumpCreateInTransaction(tx, signature);
   if (!raw) return null;
-  const snapshot = await loadBondingCurveSnapshot(clean(raw.bondingCurveKey));
+  let snapshot = await loadBondingCurveSnapshot(clean(raw.bondingCurveKey));
+  if (!snapshot)
+    snapshot = await loadBondingCurveSnapshot(
+      derivePumpBondingCurve(clean(raw.mint)),
+    );
   if (snapshot) {
     raw.bondingCurveSnapshot = snapshot;
     raw.marketCapSol = snapshot.marketCapSol;
