@@ -887,3 +887,32 @@ html, body { width: 100%; overflow-x: hidden; }
   .wallet-balance-scroll { max-height: 70vh; }
   .connection-strip { grid-template-columns: 1fr; }
 }
+
+/* Wallet management polish */
+.wallets-page { display: grid; gap: 16px; }
+.console-panel { border: 1px solid var(--line); background: var(--panel); padding: 16px; }
+.hero-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 16px; align-items: start; }
+.wallet-default-card { border: 1px solid var(--line); padding: 12px; background: var(--panel-2); display: grid; gap: 10px; }
+.wallet-default-card label { display: grid; gap: 6px; }
+.wallet-default-card span, .wallet-default-card label span { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.wallet-default-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.wallet-default-meta b { color: var(--fg); }
+.wallet-action-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.wallet-action-grid .console-panel { display: grid; gap: 10px; align-content: start; }
+.wallet-action-grid h3 { margin: 0 0 4px; text-transform: uppercase; }
+.wallet-action-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.wallet-action-grid textarea { min-height: 96px; resize: vertical; }
+.table-scroll { overflow: auto; border: 1px solid var(--line); }
+.tall-table { max-height: 58vh; }
+.wallet-table thead th { position: sticky; top: 0; background: var(--panel); z-index: 2; }
+.wallet-table .holdings { max-width: 100%; }
+.toolbar { display: flex; gap: 8px; align-items: center; }
+.compact-toolbar input, .inline-search { min-width: 220px; }
+.group-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 12px; }
+.group-card { border: 1px solid var(--line); background: var(--panel-2); padding: 12px; min-width: 0; }
+.group-card h3 { margin: 0; text-transform: uppercase; }
+.member-chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.member-chip { border: 1px solid var(--line); background: var(--bg); padding: 4px 6px; font-size: 11px; font-weight: 800; }
+.member-chip small { color: var(--muted); margin-left: 4px; }
+.wrap { flex-wrap: wrap; }
+@media (max-width: 980px) { .hero-panel, .wallet-action-grid { grid-template-columns: 1fr; } }

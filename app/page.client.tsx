@@ -196,6 +196,8 @@ type State = {
   signalSourceChatRef: string;
   signalSourceId: string;
   signalText: string;
+  walletSearch: string;
+  groupSearch: string;
 };
 
 const state: State = {
@@ -250,6 +252,8 @@ const state: State = {
   signalSourceChatRef: "",
   signalSourceId: "",
   signalText: "",
+  walletSearch: localStorage.getItem("solard:wallet-search") ?? "",
+  groupSearch: localStorage.getItem("solard:group-search") ?? "",
 };
 
 function pageFromPath(): State["tab"] {
@@ -1348,139 +1352,344 @@ function OverviewView() {
   );
 }
 
+function walletBalanceForAddress(address: string | undefined): AnyRow | null {
+  if (!address) return null;
+  const target = String(address).toLowerCase();
+  return (
+    (state.overview?.balances ?? []).find(
+      (row: AnyRow) =>
+        String(row.wallet?.address ?? "").toLowerCase() === target,
+    ) ?? null
+  );
+}
+
 function WalletsView() {
   const data = state.overview;
+  const walletQuery = state.walletSearch.trim().toLowerCase();
+  const groupQuery = state.groupSearch.trim().toLowerCase();
+  const wallets = (data?.wallets ?? []).filter((wallet: AnyRow) => {
+    if (!walletQuery) return true;
+    return (
+      String(wallet.name ?? "")
+        .toLowerCase()
+        .includes(walletQuery) ||
+      String(wallet.address ?? "")
+        .toLowerCase()
+        .includes(walletQuery)
+    );
+  });
+  const groups = (data?.groups ?? []).filter((group: AnyRow) => {
+    if (!groupQuery) return true;
+    const haystack = [
+      group.name,
+      group.description,
+      ...(group.wallets ?? []).map(
+        (member: AnyRow) =>
+          member.name ?? member.walletAddress ?? member.address,
+      ),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(groupQuery);
+  });
+  const selectedWallet = state.terminalDefaultWallet
+    ? data?.wallets?.find(
+        (wallet: AnyRow) => wallet.address === state.terminalDefaultWallet,
+      )
+    : null;
+  const selectedBalance = walletBalanceForAddress(state.terminalDefaultWallet);
   return (
-    <div className="grid">
-      <form
-        className="card span-4"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const body = formData(event.currentTarget);
-          void runAction(() =>
-            api("/api/wallets/import", {
-              method: "POST",
-              body: JSON.stringify(body),
-            }),
-          );
-        }}
-      >
-        <h2>Import wallet</h2>
-        <div className="form-grid">
-          <label className="full">
+    <div className="wallets-page">
+      <section className="console-panel hero-panel">
+        <div>
+          <div className="section-kicker">Wallet command center</div>
+          <h2>Wallets and groups</h2>
+          <p className="muted">
+            Encrypted local wallet store, buyer groups, default trading wallet,
+            and live balances in one place.
+          </p>
+        </div>
+        <div className="wallet-default-card">
+          <label>
+            <span>Default trading wallet</span>
+            <select
+              value={state.terminalDefaultWallet}
+              onInput={(event: any) => {
+                state.terminalDefaultWallet = event.currentTarget.value;
+                localStorage.setItem(
+                  "solwal:terminal-default-wallet",
+                  state.terminalDefaultWallet,
+                );
+                update();
+              }}
+            >
+              <option value="">select wallet…</option>
+              {(data?.wallets ?? []).map((wallet: AnyRow) => (
+                <option value={wallet.address}>
+                  {wallet.name
+                    ? `${wallet.name} · ${short(wallet.address)}`
+                    : wallet.address}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="wallet-default-meta">
+            <b>{selectedWallet?.name ?? "no wallet selected"}</b>
+            <span className="code">
+              {selectedWallet?.address
+                ? short(selectedWallet.address, 8, 8)
+                : "—"}
+            </span>
+            <span>
+              {selectedBalance
+                ? `${solFromLamports(selectedBalance.solLamports)} SOL`
+                : "—"}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <div className="wallet-action-grid">
+        <form
+          className="console-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const body = formData(event.currentTarget);
+            void runAction(async () => {
+              await api("/api/wallets/import", {
+                method: "POST",
+                body: JSON.stringify(body),
+              });
+              await refreshOverview();
+            });
+          }}
+        >
+          <h3>Import wallet</h3>
+          <label>
             Name
             <input name="name" placeholder="main / buyer-1" />
           </label>
-          <label className="full">
+          <label>
             Private key
             <textarea
               name="privateKey"
               placeholder="base58 secret or keypair JSON"
             />
           </label>
-          <button className="full" type="submit">
-            Import encrypted wallet
-          </button>
-        </div>
-      </form>
-      <form
-        className="card span-4"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const body = formData(event.currentTarget);
-          void runAction(() =>
-            api("/api/groups/create", {
-              method: "POST",
-              body: JSON.stringify(body),
-            }),
-          );
-        }}
-      >
-        <h2>Create group</h2>
-        <div className="form-grid">
-          <label className="full">
+          <button type="submit">Import encrypted wallet</button>
+        </form>
+        <form
+          className="console-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const body = formData(event.currentTarget);
+            void runAction(async () => {
+              await api("/api/groups/create", {
+                method: "POST",
+                body: JSON.stringify(body),
+              });
+              await refreshOverview();
+            });
+          }}
+        >
+          <h3>Create group</h3>
+          <label>
             Group name
             <input name="name" placeholder="mind-buyers" />
           </label>
-          <label className="full">
+          <label>
             Description
-            <input name="description" placeholder="Launch buyers" />
+            <input name="description" placeholder="Launch buyers / scalpers" />
           </label>
-          <button className="full" type="submit">
-            Create group
-          </button>
-        </div>
-      </form>
-      <form
-        className="card span-4"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const body = formData(event.currentTarget);
-          void runAction(() =>
-            api("/api/groups/add", {
-              method: "POST",
-              body: JSON.stringify(body),
-            }),
-          );
-        }}
-      >
-        <h2>Add wallet to group</h2>
-        <div className="form-grid">
+          <button type="submit">Create group</button>
+        </form>
+        <form
+          className="console-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const body = formData(event.currentTarget);
+            void runAction(async () => {
+              await api("/api/groups/add", {
+                method: "POST",
+                body: JSON.stringify(body),
+              });
+              await refreshOverview();
+            });
+          }}
+        >
+          <h3>Add member</h3>
           <label>
             Group
-            <input name="groupName" placeholder="mind-buyers" />
+            <select name="groupName">
+              <option value="">select group…</option>
+              {(data?.groups ?? []).map((group: AnyRow) => (
+                <option value={group.name}>{group.name}</option>
+              ))}
+            </select>
           </label>
           <label>
             Wallet
-            <input name="wallet" placeholder="name or address" />
+            <select name="wallet">
+              <option value="">select wallet…</option>
+              {(data?.wallets ?? []).map((wallet: AnyRow) => (
+                <option value={wallet.address}>
+                  {wallet.name
+                    ? `${wallet.name} · ${short(wallet.address)}`
+                    : wallet.address}
+                </option>
+              ))}
+            </select>
           </label>
-          <label className="full">
+          <label>
             Weight bps
             <input name="weightBps" defaultValue="10000" />
           </label>
-          <button className="full" type="submit">
-            Add member
-          </button>
+          <button type="submit">Add to group</button>
+        </form>
+      </div>
+
+      <section className="console-panel">
+        <div className="row between wrap">
+          <div>
+            <div className="section-kicker">Wallet inventory</div>
+            <h2>All wallets</h2>
+            <p className="muted small">
+              {wallets.length}/{data?.wallets?.length ?? 0} wallets shown.
+              Balances are best-effort RPC reads.
+            </p>
+          </div>
+          <div className="toolbar compact-toolbar">
+            <input
+              value={state.walletSearch}
+              placeholder="search name/address"
+              onInput={(event: any) => {
+                state.walletSearch = event.currentTarget.value;
+                localStorage.setItem(
+                  "solard:wallet-search",
+                  state.walletSearch,
+                );
+                update();
+              }}
+            />
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={() => void runAction(refreshOverview)}
+            >
+              Refresh
+            </button>
+          </div>
         </div>
-      </form>
-      <div className="card span-6">
-        <h2>Wallets</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Address</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(data?.wallets ?? []).map((w: AnyRow) => (
+        <div className="table-scroll tall-table">
+          <table className="clean-table wallet-table">
+            <thead>
               <tr>
-                <td>{w.name}</td>
-                <td className="code">{w.address}</td>
+                <th>Name</th>
+                <th>Address</th>
+                <th>SOL</th>
+                <th>Holdings</th>
+                <th>Use</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="card span-6">
-        <h2>Groups</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Members</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(data?.groups ?? []).map((g: AnyRow) => (
-              <tr>
-                <td>{g.name}</td>
-                <td>{g.wallets?.length ?? 0}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {wallets.map((wallet: AnyRow) => {
+                const balance = walletBalanceForAddress(wallet.address);
+                return (
+                  <tr>
+                    <td className="strong-cell">{wallet.name ?? "—"}</td>
+                    <td className="code address-cell" title={wallet.address}>
+                      {short(wallet.address, 8, 8)}
+                    </td>
+                    <td className="sol-cell">
+                      {balance
+                        ? `${solFromLamports(balance.solLamports)} SOL`
+                        : "—"}
+                    </td>
+                    <td>
+                      <div className="holdings">
+                        {walletHoldingsChips(balance?.visibleTokenBalances)}
+                      </div>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="secondary compact"
+                        onClick={() => {
+                          state.terminalDefaultWallet = wallet.address;
+                          localStorage.setItem(
+                            "solwal:terminal-default-wallet",
+                            state.terminalDefaultWallet,
+                          );
+                          update();
+                        }}
+                      >
+                        Set default
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="console-panel">
+        <div className="row between wrap">
+          <div>
+            <div className="section-kicker">Buyer groups</div>
+            <h2>Groups</h2>
+            <p className="muted small">
+              {groups.length}/{data?.groups?.length ?? 0} groups shown. Members
+              are rendered as wallet chips.
+            </p>
+          </div>
+          <input
+            className="inline-search"
+            value={state.groupSearch}
+            placeholder="search groups"
+            onInput={(event: any) => {
+              state.groupSearch = event.currentTarget.value;
+              localStorage.setItem("solard:group-search", state.groupSearch);
+              update();
+            }}
+          />
+        </div>
+        <div className="group-grid">
+          {groups.map((group: AnyRow) => (
+            <div className="group-card">
+              <div className="row between">
+                <h3>{group.name}</h3>
+                <span className="pill">
+                  {group.wallets?.length ?? 0} wallets
+                </span>
+              </div>
+              {group.description ? (
+                <p className="muted small">{group.description}</p>
+              ) : null}
+              <div className="member-chip-list">
+                {(group.wallets ?? []).map((member: AnyRow) => {
+                  const address =
+                    member.address ?? member.walletAddress ?? member.wallet;
+                  const wallet = (data?.wallets ?? []).find(
+                    (item: AnyRow) =>
+                      item.address === address || item.name === member.name,
+                  );
+                  return (
+                    <span className="member-chip" title={address}>
+                      {wallet?.name ?? member.name ?? short(address)}{" "}
+                      <small>{short(address, 4, 4)}</small>
+                    </span>
+                  );
+                })}
+                {!(group.wallets ?? []).length ? (
+                  <span className="muted tiny">empty group</span>
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
