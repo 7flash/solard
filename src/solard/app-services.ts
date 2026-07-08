@@ -7,9 +7,28 @@ import {
   clearTelegramSignals,
   deleteTelegramSignalSource,
 } from "../signals/telegram-signal-service.js";
+import {
+  addTokenToWatchGroup,
+  clearCurrentSessionWatchGroup,
+  createTokenWatchGroup,
+  listPumpLiveState,
+  removeTokenFromWatchGroup,
+} from "../web/pump-live-store.js";
 
 export type SolardAppServices = {
   sowl: Sowl;
+  pumpLive: {
+    list(): ReturnType<typeof listPumpLiveState>;
+    createGroup(name: string): ReturnType<typeof createTokenWatchGroup>;
+    addToken(
+      input: Parameters<typeof addTokenToWatchGroup>[0],
+    ): ReturnType<typeof addTokenToWatchGroup>;
+    removeToken(
+      groupId: string,
+      mint: string,
+    ): ReturnType<typeof removeTokenFromWatchGroup>;
+    clearCurrentSession(): ReturnType<typeof clearCurrentSessionWatchGroup>;
+  };
   signals: {
     list(): ReturnType<typeof listTelegramSignals>;
     upsertSource(
@@ -29,7 +48,8 @@ export type SolardAppServices = {
 
 /**
  * Shared app service factory for CLI commands and web API routes.
- * Keep route/command handlers as thin adapters over this object.
+ * Route/command handlers should be thin adapters over this object or over
+ * service modules in src/pump, src/signals, src/launches, and src/tx.
  */
 export function createSolardAppServices(
   args: { rpcUrl?: string } = {},
@@ -37,6 +57,13 @@ export function createSolardAppServices(
   const sowl = createTraderSowl({ rpcUrl: args.rpcUrl });
   return {
     sowl,
+    pumpLive: {
+      list: () => listPumpLiveState(),
+      createGroup: (name) => createTokenWatchGroup(name),
+      addToken: (input) => addTokenToWatchGroup(input),
+      removeToken: (groupId, mint) => removeTokenFromWatchGroup(groupId, mint),
+      clearCurrentSession: () => clearCurrentSessionWatchGroup(),
+    },
     signals: {
       list: () => listTelegramSignals(sowl),
       upsertSource: (input) => upsertTelegramSignalSource(sowl, input),
