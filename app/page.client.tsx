@@ -49,12 +49,19 @@ type PumpFeedRow = {
   marketCapSol?: number | null;
   priceSolPerToken?: number | null;
   image?: string | null;
+  samples?: TokenWatchSample[];
+  initialMarketCapSol?: number | null;
   lastMarketCapSol?: number | null;
+  marketCapChangeSol?: number | null;
+  marketCapChangePct?: number | null;
   sma1m?: number | null;
   sma5m?: number | null;
   sma15m?: number | null;
   sma60m?: number | null;
   lastTradeAtMs?: number | null;
+  isMayhemMode?: boolean | null;
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
   trades?: AnyRow[];
   raw?: AnyRow;
 };
@@ -76,9 +83,14 @@ type TokenWatchToken = {
   addedAtMs: number;
   updatedAtMs: number;
   samples: TokenWatchSample[];
-  image?: string | null;
   priceSolPerToken?: number | null;
   lastTradeAtMs?: number | null;
+  initialMarketCapSol?: number | null;
+  marketCapChangeSol?: number | null;
+  marketCapChangePct?: number | null;
+  isMayhemMode?: boolean | null;
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
   trades?: AnyRow[];
   lastMarketCapSol: number | null;
   sma1m: number | null;
@@ -116,6 +128,23 @@ type State = {
   pumpFeedStatus: "idle" | "connecting" | "connected" | "error" | "closed";
   pumpFeedError: string | null;
   pumpFeedFilter: string;
+  pumpFeedSort:
+    | "newest"
+    | "mcap-desc"
+    | "mcap-asc"
+    | "mcap-change-desc"
+    | "mcap-change-pct-desc"
+    | "trades-desc";
+  watchSort:
+    | "mcap-desc"
+    | "mcap-asc"
+    | "mcap-change-desc"
+    | "mcap-change-pct-desc"
+    | "sma1m-desc"
+    | "trades-desc"
+    | "newest";
+  hideMayhem: boolean;
+  hideUsdc: boolean;
   pumpFeedAbort: AbortController | null;
   watchGroups: TokenWatchGroup[];
   selectedWatchGroupId: string | null;
@@ -136,6 +165,14 @@ const state: State = {
   pumpFeedStatus: "idle",
   pumpFeedError: null,
   pumpFeedFilter: "",
+  pumpFeedSort:
+    (localStorage.getItem("solwal:pump-feed-sort") as State["pumpFeedSort"]) ||
+    "newest",
+  watchSort:
+    (localStorage.getItem("solwal:watch-sort") as State["watchSort"]) ||
+    "mcap-desc",
+  hideMayhem: localStorage.getItem("solwal:pump-hide-mayhem") === "1",
+  hideUsdc: localStorage.getItem("solwal:pump-hide-usdc") === "1",
   pumpFeedAbort: null,
   watchGroups: [],
   selectedWatchGroupId: null,
@@ -200,6 +237,86 @@ function tokenImage(row: {
     : image;
 }
 
+function isMayhemToken(row: {
+  isMayhemMode?: boolean | null;
+  raw?: AnyRow;
+}): boolean {
+  if (row.isMayhemMode === true) return true;
+  const raw = row.raw ?? {};
+  return [
+    "isMayhemMode",
+    "mayhemMode",
+    "mayhem",
+    "isMayhem",
+    "mode",
+    "launchMode",
+    "curveType",
+  ].some(
+    (key) =>
+      String(raw[key] ?? "")
+        .toLowerCase()
+        .includes("mayhem") || raw[key] === true,
+  );
+}
+
+function isUsdcToken(row: {
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
+  raw?: AnyRow;
+}): boolean {
+  const text = [
+    row.quoteAsset,
+    row.quoteMint,
+    row.raw?.quoteAsset,
+    row.raw?.quoteSymbol,
+    row.raw?.quoteMint,
+    row.raw?.quoteTokenMint,
+    row.raw?.quoteCurrency,
+  ]
+    .map((value) => String(value ?? "").toLowerCase())
+    .join(" ");
+  return (
+    text.includes("usdc") ||
+    text.includes("epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v")
+  );
+}
+
+function passesBadgeFilters(row: {
+  isMayhemMode?: boolean | null;
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
+  raw?: AnyRow;
+}): boolean {
+  if (state.hideMayhem && isMayhemToken(row)) return false;
+  if (state.hideUsdc && isUsdcToken(row)) return false;
+  return true;
+}
+
+function TokenBadges(row: {
+  isMayhemMode?: boolean | null;
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
+  raw?: AnyRow;
+}) {
+  const mayhem = isMayhemToken(row);
+  const usdc = isUsdcToken(row);
+  const quote = usdc
+    ? "USDC"
+    : String(
+        row.quoteAsset ?? row.raw?.quoteAsset ?? row.raw?.quoteSymbol ?? "SOL",
+      ).toUpperCase();
+  return (
+    <span className="badges">
+      {mayhem ? <span className="badge mayhem">MAYHEM</span> : null}
+      {usdc ? (
+        <span className="badge usdc">USDC</span>
+      ) : quote && quote !== "SOL" ? (
+        <span className="badge quote">{quote}</span>
+      ) : null}
+    </span>
+  );
+}
+
 function formatMcap(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
@@ -207,6 +324,163 @@ function formatMcap(value: number | null | undefined): string {
   return value >= 1
     ? value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
     : value.toExponential(2);
+}
+
+function latestMcap(row: {
+  marketCapSol?: number | null;
+  lastMarketCapSol?: number | null;
+  samples?: TokenWatchSample[];
+}): number | null {
+  const direct = row.marketCapSol ?? row.lastMarketCapSol;
+  if (typeof direct === "number" && Number.isFinite(direct)) return direct;
+  const samples = [...(row.samples ?? [])].sort(
+    (a, b) => b.capturedAtMs - a.capturedAtMs,
+  );
+  return (
+    samples.find(
+      (sample) =>
+        typeof sample.marketCapSol === "number" &&
+        Number.isFinite(sample.marketCapSol),
+    )?.marketCapSol ?? null
+  );
+}
+
+function initialMcap(row: {
+  initialMarketCapSol?: number | null;
+  marketCapSol?: number | null;
+  samples?: TokenWatchSample[];
+}): number | null {
+  if (
+    typeof row.initialMarketCapSol === "number" &&
+    Number.isFinite(row.initialMarketCapSol)
+  )
+    return row.initialMarketCapSol;
+  const samples = [...(row.samples ?? [])].sort(
+    (a, b) => a.capturedAtMs - b.capturedAtMs,
+  );
+  return (
+    samples.find(
+      (sample) =>
+        typeof sample.marketCapSol === "number" &&
+        Number.isFinite(sample.marketCapSol),
+    )?.marketCapSol ??
+    (typeof row.marketCapSol === "number" ? row.marketCapSol : null)
+  );
+}
+
+function mcapChange(row: {
+  initialMarketCapSol?: number | null;
+  marketCapSol?: number | null;
+  lastMarketCapSol?: number | null;
+  marketCapChangeSol?: number | null;
+  samples?: TokenWatchSample[];
+}): number | null {
+  if (
+    typeof row.marketCapChangeSol === "number" &&
+    Number.isFinite(row.marketCapChangeSol)
+  )
+    return row.marketCapChangeSol;
+  const first = initialMcap(row);
+  const last = latestMcap(row);
+  return first != null && last != null ? last - first : null;
+}
+
+function mcapChangePct(row: {
+  initialMarketCapSol?: number | null;
+  marketCapSol?: number | null;
+  lastMarketCapSol?: number | null;
+  marketCapChangePct?: number | null;
+  samples?: TokenWatchSample[];
+}): number | null {
+  if (
+    typeof row.marketCapChangePct === "number" &&
+    Number.isFinite(row.marketCapChangePct)
+  )
+    return row.marketCapChangePct;
+  const first = initialMcap(row);
+  const change = mcapChange(row);
+  return first != null && first > 0 && change != null
+    ? (change / first) * 100
+    : null;
+}
+
+function formatSignedMcap(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatMcap(value)}`;
+}
+
+function formatPct(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(Math.abs(value) >= 10 ? 0 : 1)}%`;
+}
+
+function sortFeedRows(rows: PumpFeedRow[]): PumpFeedRow[] {
+  const copy = [...rows];
+  const byTime = (row: PumpFeedRow) =>
+    row.receivedAt
+      ? new Date(row.receivedAt).getTime()
+      : (row.lastTradeAtMs ?? 0);
+  const byTrades = (row: PumpFeedRow) => row.trades?.length ?? 0;
+  switch (state.pumpFeedSort) {
+    case "mcap-desc":
+      return copy.sort(
+        (a, b) => (latestMcap(b) ?? -Infinity) - (latestMcap(a) ?? -Infinity),
+      );
+    case "mcap-asc":
+      return copy.sort(
+        (a, b) => (latestMcap(a) ?? Infinity) - (latestMcap(b) ?? Infinity),
+      );
+    case "mcap-change-desc":
+      return copy.sort(
+        (a, b) => (mcapChange(b) ?? -Infinity) - (mcapChange(a) ?? -Infinity),
+      );
+    case "mcap-change-pct-desc":
+      return copy.sort(
+        (a, b) =>
+          (mcapChangePct(b) ?? -Infinity) - (mcapChangePct(a) ?? -Infinity),
+      );
+    case "trades-desc":
+      return copy.sort((a, b) => byTrades(b) - byTrades(a));
+    default:
+      return copy.sort((a, b) => byTime(b) - byTime(a));
+  }
+}
+
+function sortWatchRows(rows: TokenWatchToken[]): TokenWatchToken[] {
+  const copy = [...rows];
+  switch (state.watchSort) {
+    case "mcap-asc":
+      return copy.sort(
+        (a, b) => (latestMcap(a) ?? Infinity) - (latestMcap(b) ?? Infinity),
+      );
+    case "mcap-change-desc":
+      return copy.sort(
+        (a, b) => (mcapChange(b) ?? -Infinity) - (mcapChange(a) ?? -Infinity),
+      );
+    case "mcap-change-pct-desc":
+      return copy.sort(
+        (a, b) =>
+          (mcapChangePct(b) ?? -Infinity) - (mcapChangePct(a) ?? -Infinity),
+      );
+    case "sma1m-desc":
+      return copy.sort(
+        (a, b) => (b.sma1m ?? -Infinity) - (a.sma1m ?? -Infinity),
+      );
+    case "trades-desc":
+      return copy.sort(
+        (a, b) =>
+          (b.trades?.length ?? b.samples.length) -
+          (a.trades?.length ?? a.samples.length),
+      );
+    case "newest":
+      return copy.sort((a, b) => b.addedAtMs - a.addedAtMs);
+    default:
+      return copy.sort(
+        (a, b) => (latestMcap(b) ?? -Infinity) - (latestMcap(a) ?? -Infinity),
+      );
+  }
 }
 
 function age(ms: number | null | undefined): string {
@@ -318,6 +592,9 @@ async function starPumpFeedRow(
     image: row.image ?? null,
     signature: row.signature ?? null,
     marketCapSol: row.marketCapSol ?? null,
+    isMayhemMode: row.isMayhemMode ?? null,
+    quoteAsset: row.quoteAsset ?? null,
+    quoteMint: row.quoteMint ?? null,
     source: "pump-feed",
   });
 }
@@ -809,21 +1086,22 @@ function buyPlanPayload(): AnyRow[] {
 
 function BuyPlanTable() {
   const wallets = state.overview?.wallets ?? [];
+  const groups = state.overview?.groups ?? [];
   return (
-    <div className="card span-12">
-      <div className="row between">
+    <div className="launch-panel span-12 buy-plan-panel">
+      <div className="section-head">
         <div>
-          <h3>Follower buy plan</h3>
+          <div className="section-kicker">Parallel followers</div>
+          <h2>Follower buy plan</h2>
           <p className="muted">
-            Optional. When rows are present, these rows override the
-            buyer-group/global buyer settings. Each wallet runs in parallel with
-            its own sender, strategy, fees and retry rhythm.
+            Each card is one wallet lane. Mix amount rules, sender, strategy,
+            fees and retry rhythm in the same launch.
           </p>
         </div>
-        <div className="row">
-          <select id="buy-plan-group-select">
-            <option value="">load group…</option>
-            {(state.overview?.groups ?? []).map((group: AnyRow) => (
+        <div className="plan-toolbar">
+          <select id="buy-plan-group-select" className="group-picker">
+            <option value="">Load wallets from group…</option>
+            {groups.map((group: AnyRow) => (
               <option value={group.name}>{group.name}</option>
             ))}
           </select>
@@ -842,234 +1120,323 @@ function BuyPlanTable() {
           <button
             type="button"
             onClick={() => {
-              state.buyPlanRows = [...state.buyPlanRows, newBuyPlanRow()];
+              state.buyPlanRows = [
+                ...state.buyPlanRows,
+                newBuyPlanRow({
+                  label: `buyer-${state.buyPlanRows.length + 1}`,
+                }),
+              ];
               update();
             }}
           >
-            Add row
+            Add wallet
           </button>
         </div>
       </div>
-      <div className="wide-table">
-        <table>
-          <thead>
-            <tr>
-              <th>Wallet</th>
-              <th>Amount</th>
-              <th>Execution</th>
-              <th>Fees</th>
-              <th>Retry</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {state.buyPlanRows.map((row) => (
-              <tr>
-                <td>
-                  <input
-                    placeholder="label"
-                    value={row.label}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        label: event.currentTarget.value,
-                      })
-                    }
-                  />
-                  <select
-                    value={row.wallet}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        wallet: event.currentTarget.value,
-                      })
-                    }
-                  >
-                    <option value="">select wallet…</option>
-                    {wallets.map((wallet: AnyRow) => (
-                      <option value={wallet.address}>
-                        {walletLabel(wallet)}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-                <td>
-                  <select
-                    value={row.amountMode}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        amountMode: event.currentTarget.value,
-                      })
-                    }
-                  >
-                    <option value="range-bps">balance % range</option>
-                    <option value="exact-sol">exact SOL</option>
-                    <option value="exact-lamports">exact lamports</option>
-                  </select>
+
+      <div className="plan-summary">
+        <span>
+          <b>{state.buyPlanRows.length}</b> wallet lanes
+        </span>
+        <span>
+          <b>
+            {
+              state.buyPlanRows.filter((row) => row.sender === "helius-fast")
+                .length
+            }
+          </b>{" "}
+          Helius fast
+        </span>
+        <span>
+          <b>
+            {
+              state.buyPlanRows.filter((row) => row.strategy.includes("spam"))
+                .length
+            }
+          </b>{" "}
+          spam lanes
+        </span>
+        <span>Rows override the fallback buyer group settings.</span>
+      </div>
+
+      <div className="plan-list">
+        {state.buyPlanRows.map((row, index) => (
+          <div className="plan-card" data-sender={row.sender}>
+            <div className="plan-card-top">
+              <div className="lane-badge">#{index + 1}</div>
+              <label className="field label-field">
+                <span>Label</span>
+                <input
+                  placeholder="buyer-1"
+                  value={row.label}
+                  onInput={(event: any) =>
+                    updateBuyPlanRow(row.id, {
+                      label: event.currentTarget.value,
+                    })
+                  }
+                />
+              </label>
+              <label className="field wallet-field">
+                <span>Wallet</span>
+                <select
+                  value={row.wallet}
+                  onInput={(event: any) =>
+                    updateBuyPlanRow(row.id, {
+                      wallet: event.currentTarget.value,
+                    })
+                  }
+                >
+                  <option value="">Select wallet…</option>
+                  {wallets.map((wallet: AnyRow) => (
+                    <option value={wallet.address}>
+                      {walletLabel(wallet)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field sender-field">
+                <span>Sender</span>
+                <select
+                  value={row.sender}
+                  onInput={(event: any) =>
+                    updateBuyPlanRow(row.id, {
+                      sender: event.currentTarget.value,
+                    })
+                  }
+                >
+                  <option value="helius-fast">Helius fast</option>
+                  <option value="helius-rpc">Helius RPC</option>
+                </select>
+              </label>
+              <label className="field strategy-field">
+                <span>Strategy</span>
+                <select
+                  value={row.strategy}
+                  onInput={(event: any) =>
+                    updateBuyPlanRow(row.id, {
+                      strategy: event.currentTarget.value,
+                    })
+                  }
+                >
+                  <option value="fast-spam">Fast spam</option>
+                  <option value="spam-after-market-ready">
+                    Market-ready spam
+                  </option>
+                  <option value="after-deploy-processed">
+                    After processed
+                  </option>
+                  <option value="after-deploy-confirmed">
+                    After confirmed
+                  </option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="danger compact"
+                onClick={() => removeBuyPlanRow(row.id)}
+              >
+                Remove
+              </button>
+            </div>
+
+            <div className="plan-card-body">
+              <div className="plan-block amount-block">
+                <div className="block-title">Amount</div>
+                <div className="inline-fields">
+                  <label className="field wide">
+                    <span>Mode</span>
+                    <select
+                      value={row.amountMode}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          amountMode: event.currentTarget.value,
+                        })
+                      }
+                    >
+                      <option value="range-bps">Balance % range</option>
+                      <option value="exact-sol">Exact SOL</option>
+                      <option value="exact-lamports">Exact lamports</option>
+                    </select>
+                  </label>
                   {row.amountMode === "range-bps" ? (
-                    <div className="mini-grid">
-                      <input
-                        title="min bps"
-                        value={row.minBps}
-                        onInput={(event: any) =>
-                          updateBuyPlanRow(row.id, {
-                            minBps: event.currentTarget.value,
-                          })
-                        }
-                      />
-                      <input
-                        title="max bps"
-                        value={row.maxBps}
-                        onInput={(event: any) =>
-                          updateBuyPlanRow(row.id, {
-                            maxBps: event.currentTarget.value,
-                          })
-                        }
-                      />
-                      <input
-                        title="reserve SOL"
-                        value={row.reserveSol}
-                        onInput={(event: any) =>
-                          updateBuyPlanRow(row.id, {
-                            reserveSol: event.currentTarget.value,
-                          })
-                        }
-                      />
-                    </div>
+                    <>
+                      <label className="field">
+                        <span>Min %</span>
+                        <input
+                          value={String(Number(row.minBps || "0") / 100)}
+                          onInput={(event: any) =>
+                            updateBuyPlanRow(row.id, {
+                              minBps: String(
+                                Math.round(
+                                  Number(event.currentTarget.value || "0") *
+                                    100,
+                                ),
+                              ),
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Max %</span>
+                        <input
+                          value={String(Number(row.maxBps || "0") / 100)}
+                          onInput={(event: any) =>
+                            updateBuyPlanRow(row.id, {
+                              maxBps: String(
+                                Math.round(
+                                  Number(event.currentTarget.value || "0") *
+                                    100,
+                                ),
+                              ),
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Reserve SOL</span>
+                        <input
+                          value={row.reserveSol}
+                          onInput={(event: any) =>
+                            updateBuyPlanRow(row.id, {
+                              reserveSol: event.currentTarget.value,
+                            })
+                          }
+                        />
+                      </label>
+                    </>
                   ) : null}
                   {row.amountMode === "exact-sol" ? (
-                    <input
-                      placeholder="exact SOL"
-                      value={row.exactSol}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          exactSol: event.currentTarget.value,
-                        })
-                      }
-                    />
+                    <label className="field">
+                      <span>Exact SOL</span>
+                      <input
+                        placeholder="0.25"
+                        value={row.exactSol}
+                        onInput={(event: any) =>
+                          updateBuyPlanRow(row.id, {
+                            exactSol: event.currentTarget.value,
+                          })
+                        }
+                      />
+                    </label>
                   ) : null}
                   {row.amountMode === "exact-lamports" ? (
+                    <label className="field">
+                      <span>Lamports</span>
+                      <input
+                        placeholder="250000000"
+                        value={row.exactLamports}
+                        onInput={(event: any) =>
+                          updateBuyPlanRow(row.id, {
+                            exactLamports: event.currentTarget.value,
+                          })
+                        }
+                      />
+                    </label>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="plan-block fee-block">
+                <div className="block-title">Fees & slippage</div>
+                <div className="inline-fields">
+                  <label className="field">
+                    <span>Tip SOL</span>
                     <input
-                      placeholder="exact lamports"
-                      value={row.exactLamports}
+                      value={row.tipSol}
+                      disabled={row.sender !== "helius-fast"}
                       onInput={(event: any) =>
                         updateBuyPlanRow(row.id, {
-                          exactLamports: event.currentTarget.value,
+                          tipSol: event.currentTarget.value,
                         })
                       }
                     />
-                  ) : null}
-                </td>
-                <td>
-                  <select
-                    value={row.sender}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        sender: event.currentTarget.value,
-                      })
-                    }
-                  >
-                    <option value="helius-fast">helius-fast</option>
-                    <option value="helius-rpc">helius-rpc</option>
-                  </select>
-                  <select
-                    value={row.strategy}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        strategy: event.currentTarget.value,
-                      })
-                    }
-                  >
-                    <option value="fast-spam">fast-spam</option>
-                    <option value="spam-after-market-ready">
-                      market-ready spam
-                    </option>
-                    <option value="after-deploy-processed">
-                      after processed
-                    </option>
-                    <option value="after-deploy-confirmed">
-                      after confirmed
-                    </option>
-                  </select>
-                </td>
-                <td>
-                  <input
-                    title="tip SOL"
-                    value={row.tipSol}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        tipSol: event.currentTarget.value,
-                      })
-                    }
-                  />
-                  <input
-                    title="priority micro lamports"
-                    value={row.priorityMicroLamports}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        priorityMicroLamports: event.currentTarget.value,
-                      })
-                    }
-                  />
-                  <input
-                    title="slippage bps"
-                    value={row.slippageBps}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        slippageBps: event.currentTarget.value,
-                      })
-                    }
-                  />
-                </td>
-                <td>
-                  <input
-                    title="retry ms"
-                    value={row.retryIntervalMs}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        retryIntervalMs: event.currentTarget.value,
-                      })
-                    }
-                  />
-                  <input
-                    title="recompile ms"
-                    value={row.recompileIntervalMs}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        recompileIntervalMs: event.currentTarget.value,
-                      })
-                    }
-                  />
-                  <input
-                    title="fresh quote delay"
-                    value={row.freshQuoteDelayMs}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        freshQuoteDelayMs: event.currentTarget.value,
-                      })
-                    }
-                  />
-                  <input
-                    title="max failed"
-                    value={row.maxFailedAttempts}
-                    onInput={(event: any) =>
-                      updateBuyPlanRow(row.id, {
-                        maxFailedAttempts: event.currentTarget.value,
-                      })
-                    }
-                  />
-                </td>
-                <td>
-                  <button
-                    type="button"
-                    className="danger"
-                    onClick={() => removeBuyPlanRow(row.id)}
-                  >
-                    Remove
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                  </label>
+                  <label className="field">
+                    <span>Priority µ-lamports</span>
+                    <input
+                      value={row.priorityMicroLamports}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          priorityMicroLamports: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Slippage bps</span>
+                    <input
+                      value={row.slippageBps}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          slippageBps: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="plan-block retry-block">
+                <div className="block-title">Retry</div>
+                <div className="inline-fields">
+                  <label className="field">
+                    <span>Retry ms</span>
+                    <input
+                      value={row.retryIntervalMs}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          retryIntervalMs: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Recompile ms</span>
+                    <input
+                      value={row.recompileIntervalMs}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          recompileIntervalMs: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Fresh quote delay</span>
+                    <input
+                      value={row.freshQuoteDelayMs}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          freshQuoteDelayMs: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Max failed</span>
+                    <input
+                      value={row.maxFailedAttempts}
+                      onInput={(event: any) =>
+                        updateBuyPlanRow(row.id, {
+                          maxFailedAttempts: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+        {state.buyPlanRows.length === 0 ? (
+          <div className="empty-plan">
+            <b>No custom follower rows.</b>
+            <span>
+              Load a group or add wallets manually. Without rows, the fallback
+              buyer-group settings are used.
+            </span>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -1077,15 +1444,18 @@ function BuyPlanTable() {
 
 function TerminalView() {
   const filter = state.pumpFeedFilter.trim().toLowerCase();
-  const rows = filter
-    ? state.pumpFeed.filter((row) =>
-        [row.name, row.symbol, row.mint, row.creator].some((value) =>
-          String(value ?? "")
-            .toLowerCase()
-            .includes(filter),
+  const visibleFeed = state.pumpFeed.filter(passesBadgeFilters);
+  const filteredRows = filter
+    ? visibleFeed.filter((row) =>
+        [row.name, row.symbol, row.mint, row.creator, row.quoteAsset].some(
+          (value) =>
+            String(value ?? "")
+              .toLowerCase()
+              .includes(filter),
         ),
       )
-    : state.pumpFeed;
+    : visibleFeed;
+  const rows = sortFeedRows(filteredRows);
   return (
     <div className="grid">
       <div className="card span-12 terminal-head">
@@ -1147,6 +1517,57 @@ function TerminalView() {
                 }}
               />
             </label>
+            <label>
+              Sort
+              <select
+                value={state.pumpFeedSort}
+                onInput={(event: any) => {
+                  state.pumpFeedSort = event.currentTarget.value;
+                  localStorage.setItem(
+                    "solwal:pump-feed-sort",
+                    state.pumpFeedSort,
+                  );
+                  update();
+                }}
+              >
+                <option value="newest">Newest</option>
+                <option value="mcap-desc">MCap high → low</option>
+                <option value="mcap-asc">MCap low → high</option>
+                <option value="mcap-change-desc">Raised most SOL</option>
+                <option value="mcap-change-pct-desc">Raised most %</option>
+                <option value="trades-desc">Most trades</option>
+              </select>
+            </label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={state.hideMayhem}
+                onInput={(event: any) => {
+                  state.hideMayhem = event.currentTarget.checked;
+                  localStorage.setItem(
+                    "solwal:pump-hide-mayhem",
+                    state.hideMayhem ? "1" : "0",
+                  );
+                  update();
+                }}
+              />
+              <span>Hide Mayhem</span>
+            </label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={state.hideUsdc}
+                onInput={(event: any) => {
+                  state.hideUsdc = event.currentTarget.checked;
+                  localStorage.setItem(
+                    "solwal:pump-hide-usdc",
+                    state.hideUsdc ? "1" : "0",
+                  );
+                  update();
+                }}
+              />
+              <span>Hide USDC</span>
+            </label>
             <span className="pill">
               {rows.length} shown / {state.pumpFeed.length} cached
             </span>
@@ -1166,6 +1587,8 @@ function TerminalView() {
                 <th>Creator</th>
                 <th>Initial buy</th>
                 <th>MCap SOL</th>
+                <th>Δ MCap</th>
+                <th>Δ %</th>
                 <th>Last trade</th>
                 <th>Sig</th>
                 <th>Watch</th>
@@ -1194,7 +1617,8 @@ function TerminalView() {
                   </td>
                   <td>
                     <div className="token-title">
-                      {row.symbol ? `$${row.symbol}` : "—"}
+                      {row.symbol ? `$${row.symbol}` : "—"}{" "}
+                      <TokenBadges {...row} />
                     </div>
                     <div className="muted small">
                       {row.name ?? row.eventType ?? "new token"}
@@ -1215,7 +1639,29 @@ function TerminalView() {
                   </td>
                   <td className="code">{short(row.creator)}</td>
                   <td>{formatSol(row.initialBuy ?? row.solAmount)}</td>
-                  <td>{formatSol(row.marketCapSol ?? row.lastMarketCapSol)}</td>
+                  <td>{formatSol(latestMcap(row))}</td>
+                  <td
+                    className={
+                      mcapChange(row) != null && mcapChange(row)! > 0
+                        ? "gain"
+                        : mcapChange(row) != null && mcapChange(row)! < 0
+                          ? "loss"
+                          : ""
+                    }
+                  >
+                    {formatSignedMcap(mcapChange(row))}
+                  </td>
+                  <td
+                    className={
+                      mcapChangePct(row) != null && mcapChangePct(row)! > 0
+                        ? "gain"
+                        : mcapChangePct(row) != null && mcapChangePct(row)! < 0
+                          ? "loss"
+                          : ""
+                    }
+                  >
+                    {formatPct(mcapChangePct(row))}
+                  </td>
                   <td>{row.lastTradeAtMs ? age(row.lastTradeAtMs) : "—"}</td>
                   <td className="code">{short(row.signature)}</td>
                   <td>
@@ -1250,7 +1696,9 @@ function TerminalView() {
 
 function WatchlistsView() {
   const active = selectedWatchGroup();
-  const tokenRows = active?.tokens ?? [];
+  const tokenRows = sortWatchRows(
+    (active?.tokens ?? []).filter(passesBadgeFilters),
+  );
   return (
     <div className="grid">
       <div className="card span-12 terminal-head">
@@ -1285,6 +1733,55 @@ function WatchlistsView() {
           >
             Refresh
           </button>
+          <label>
+            Sort
+            <select
+              value={state.watchSort}
+              onInput={(event: any) => {
+                state.watchSort = event.currentTarget.value;
+                localStorage.setItem("solwal:watch-sort", state.watchSort);
+                update();
+              }}
+            >
+              <option value="mcap-desc">MCap high → low</option>
+              <option value="mcap-asc">MCap low → high</option>
+              <option value="mcap-change-desc">Raised most SOL</option>
+              <option value="mcap-change-pct-desc">Raised most %</option>
+              <option value="sma1m-desc">SMA 1m high → low</option>
+              <option value="trades-desc">Most trades</option>
+              <option value="newest">Newest added</option>
+            </select>
+          </label>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={state.hideMayhem}
+              onInput={(event: any) => {
+                state.hideMayhem = event.currentTarget.checked;
+                localStorage.setItem(
+                  "solwal:pump-hide-mayhem",
+                  state.hideMayhem ? "1" : "0",
+                );
+                update();
+              }}
+            />
+            <span>Hide Mayhem</span>
+          </label>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={state.hideUsdc}
+              onInput={(event: any) => {
+                state.hideUsdc = event.currentTarget.checked;
+                localStorage.setItem(
+                  "solwal:pump-hide-usdc",
+                  state.hideUsdc ? "1" : "0",
+                );
+                update();
+              }}
+            />
+            <span>Hide USDC</span>
+          </label>
         </form>
       </div>
 
@@ -1350,6 +1847,8 @@ function WatchlistsView() {
                 <th>Mint</th>
                 <th>Creator</th>
                 <th>Last mcap</th>
+                <th>Δ MCap</th>
+                <th>Δ %</th>
                 <th>SMA 1m</th>
                 <th>SMA 5m</th>
                 <th>SMA 15m</th>
@@ -1375,7 +1874,8 @@ function WatchlistsView() {
                   </td>
                   <td>
                     <div className="token-title">
-                      {token.symbol ? `$${token.symbol}` : "—"}
+                      {token.symbol ? `$${token.symbol}` : "—"}{" "}
+                      <TokenBadges {...token} />
                     </div>
                     <div className="muted small">
                       {token.name ?? "watched token"}
@@ -1391,7 +1891,30 @@ function WatchlistsView() {
                     </a>
                   </td>
                   <td className="code">{short(token.creator)}</td>
-                  <td>{formatMcap(token.lastMarketCapSol)}</td>
+                  <td>{formatMcap(latestMcap(token))}</td>
+                  <td
+                    className={
+                      mcapChange(token) != null && mcapChange(token)! > 0
+                        ? "gain"
+                        : mcapChange(token) != null && mcapChange(token)! < 0
+                          ? "loss"
+                          : ""
+                    }
+                  >
+                    {formatSignedMcap(mcapChange(token))}
+                  </td>
+                  <td
+                    className={
+                      mcapChangePct(token) != null && mcapChangePct(token)! > 0
+                        ? "gain"
+                        : mcapChangePct(token) != null &&
+                            mcapChangePct(token)! < 0
+                          ? "loss"
+                          : ""
+                    }
+                  >
+                    {formatPct(mcapChangePct(token))}
+                  </td>
                   <td>{formatMcap(token.sma1m)}</td>
                   <td>{formatMcap(token.sma5m)}</td>
                   <td>{formatMcap(token.sma15m)}</td>
@@ -1432,7 +1955,7 @@ function WatchlistsView() {
 function LaunchView() {
   return (
     <form
-      className="grid"
+      className="launch-grid"
       onSubmit={(event) => {
         event.preventDefault();
         const body = formData(event.currentTarget);
@@ -1460,137 +1983,162 @@ function LaunchView() {
         });
       }}
     >
-      <div className="card span-12">
-        <h2>Launch pump token</h2>
-        <p className="muted">
-          Use metadata path for server-local JSON, or fill
-          alias/name/symbol/uri/image fields directly.
-        </p>
-      </div>
-      <div className="card span-6">
-        <h3>Token</h3>
-        <div className="form-grid">
-          <label className="full">
-            Metadata JSON path
-            <input name="metadataPath" placeholder="./metadata/mind.json" />
-          </label>
-          <label>
-            Alias
-            <input name="alias" />
-          </label>
-          <label>
-            Name
-            <input name="name" />
-          </label>
-          <label>
-            Symbol
-            <input name="symbol" />
-          </label>
-          <label>
-            Metadata URI
-            <input name="uri" />
-          </label>
-          <label className="full">
-            Server image path
-            <input name="imagePath" />
-          </label>
-          <label className="full">
-            Description
-            <input name="description" />
-          </label>
+      <div className="launch-hero span-12">
+        <div>
+          <div className="section-kicker">Pump launch builder</div>
+          <h2>Build a token launch + parallel follower plan</h2>
+          <p className="muted">
+            Configure metadata, creator buy, per-wallet follower lanes, and
+            sender strategy in one place before starting the job.
+          </p>
         </div>
-      </div>
-      <div className="card span-6">
-        <h3>Participants</h3>
-        <div className="form-grid">
-          <label>
-            Creator
-            <input name="creator" required />
-          </label>
-          <label>
-            Buyer group fallback
-            <input name="buyerGroup" placeholder="mind-buyers" />
-          </label>
-          <label>
-            Creator buy SOL
-            <input name="creatorBuySol" placeholder="0" />
-          </label>
-          <label>
-            Buyer reserve SOL
-            <input name="buyerReserveSol" defaultValue="0.02" />
-          </label>
-          <label>
-            Buyer min bps
-            <input name="buyerMinBps" defaultValue="5000" />
-          </label>
-          <label>
-            Buyer max bps
-            <input name="buyerMaxBps" defaultValue="8000" />
-          </label>
-        </div>
-      </div>
-      <BuyPlanTable />
-      <div className="card span-12">
-        <h3>Global defaults</h3>
-        <div className="form-grid">
-          <label>
-            Deployment sender
-            <select name="deploymentSender">
-              <option value="helius-rpc">helius-rpc</option>
-              <option value="helius-fast">helius-fast</option>
-            </select>
-          </label>
-          <label>
-            Buyer sender
-            <select name="buyerSender">
-              <option value="helius-fast">helius-fast</option>
-              <option value="helius-rpc">helius-rpc</option>
-            </select>
-          </label>
-          <label>
-            Submit mode
-            <select name="submitMode">
-              <option value="fast-spam">fast-spam</option>
-              <option value="spam-after-market-ready">
-                spam-after-market-ready
-              </option>
-              <option value="after-deploy-processed">
-                after-deploy-processed
-              </option>
-              <option value="after-deploy-confirmed">
-                after-deploy-confirmed
-              </option>
-            </select>
-          </label>
-          <label>
-            Sender TPS
-            <input name="senderTps" defaultValue="40" />
-          </label>
-          <label>
-            Helius tip SOL
-            <input name="heliusTipSol" defaultValue="0.001" />
-          </label>
-          <label>
-            Buyer priority µ-lamports
-            <input name="buyerPriorityMicroLamports" defaultValue="1500000" />
-          </label>
-          <label>
-            Slippage bps
-            <input name="slippageBps" defaultValue="9999" />
-          </label>
-          <label>
-            Fresh quote delay ms
-            <input name="freshQuoteDelayMs" defaultValue="-1" />
-          </label>
-          <label>
+        <div className="launch-actions">
+          <label className="toggle-card">
             <span>Live</span>
             <input type="checkbox" name="live" />
           </label>
-          <label>
-            <span>Skip simulation</span>
+          <label className="toggle-card">
+            <span>Skip sim</span>
             <input type="checkbox" name="skipSimulation" defaultChecked />
           </label>
-          <button className="full" type="submit">
+          <button type="submit" className="primary-large">
+            Start launch job
+          </button>
+        </div>
+      </div>
+
+      <div className="launch-panel span-7">
+        <div className="section-head compact-head">
+          <div>
+            <div className="section-kicker">01</div>
+            <h3>Token metadata</h3>
+          </div>
+        </div>
+        <div className="clean-form token-form">
+          <label className="field full">
+            <span>Metadata JSON path</span>
+            <input name="metadataPath" placeholder="./metadata/mind.json" />
+          </label>
+          <label className="field">
+            <span>Alias</span>
+            <input name="alias" placeholder="mind" />
+          </label>
+          <label className="field">
+            <span>Name</span>
+            <input name="name" placeholder="Mind Token" />
+          </label>
+          <label className="field">
+            <span>Symbol</span>
+            <input name="symbol" placeholder="MIND" />
+          </label>
+          <label className="field">
+            <span>Metadata URI</span>
+            <input name="uri" placeholder="ipfs:// or https://" />
+          </label>
+          <label className="field full">
+            <span>Server image path</span>
+            <input name="imagePath" placeholder="./metadata/mind.png" />
+          </label>
+          <label className="field full">
+            <span>Description</span>
+            <textarea
+              name="description"
+              placeholder="Optional; auto-filled if empty."
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="launch-panel span-5">
+        <div className="section-head compact-head">
+          <div>
+            <div className="section-kicker">02</div>
+            <h3>Launch defaults</h3>
+          </div>
+        </div>
+        <div className="clean-form defaults-form">
+          <label className="field full">
+            <span>Creator wallet</span>
+            <input name="creator" required placeholder="name or address" />
+          </label>
+          <label className="field">
+            <span>Creator buy SOL</span>
+            <input name="creatorBuySol" placeholder="0" />
+          </label>
+          <label className="field">
+            <span>Buyer group fallback</span>
+            <input name="buyerGroup" placeholder="mind-buyers" />
+          </label>
+          <label className="field">
+            <span>Buyer min %</span>
+            <input name="buyerMinBps" defaultValue="5000" />
+          </label>
+          <label className="field">
+            <span>Buyer max %</span>
+            <input name="buyerMaxBps" defaultValue="8000" />
+          </label>
+          <label className="field">
+            <span>Reserve SOL</span>
+            <input name="buyerReserveSol" defaultValue="0.02" />
+          </label>
+          <label className="field">
+            <span>Deploy sender</span>
+            <select name="deploymentSender">
+              <option value="helius-rpc">Helius RPC</option>
+              <option value="helius-fast">Helius fast</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Buyer sender</span>
+            <select name="buyerSender">
+              <option value="helius-fast">Helius fast</option>
+              <option value="helius-rpc">Helius RPC</option>
+            </select>
+          </label>
+          <label className="field full">
+            <span>Submit mode</span>
+            <select name="submitMode">
+              <option value="fast-spam">Fast spam</option>
+              <option value="spam-after-market-ready">Market-ready spam</option>
+              <option value="after-deploy-processed">After processed</option>
+              <option value="after-deploy-confirmed">After confirmed</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <BuyPlanTable />
+
+      <div className="launch-panel span-12 global-strip">
+        <div>
+          <div className="section-kicker">03</div>
+          <h3>Global execution defaults</h3>
+          <p className="muted small">
+            Used when a follower row does not override the value.
+          </p>
+        </div>
+        <div className="global-fields">
+          <label className="field">
+            <span>Sender TPS</span>
+            <input name="senderTps" defaultValue="40" />
+          </label>
+          <label className="field">
+            <span>Helius tip SOL</span>
+            <input name="heliusTipSol" defaultValue="0.001" />
+          </label>
+          <label className="field">
+            <span>Buyer priority</span>
+            <input name="buyerPriorityMicroLamports" defaultValue="1500000" />
+          </label>
+          <label className="field">
+            <span>Slippage bps</span>
+            <input name="slippageBps" defaultValue="9999" />
+          </label>
+          <label className="field">
+            <span>Fresh quote delay</span>
+            <input name="freshQuoteDelayMs" defaultValue="-1" />
+          </label>
+          <button type="submit" className="primary-large bottom-submit">
             Start launch job
           </button>
         </div>
