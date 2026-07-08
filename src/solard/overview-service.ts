@@ -117,12 +117,10 @@ export async function loadSolardOverview(
     Math.min(5_000, options.executionLimit ?? 100),
   );
 
-  const rawGroups = sowl.groups
-    .list()
-    .map((group: any) => ({
-      ...group,
-      wallets: sowl.groups.wallets(group.name),
-    }));
+  const rawGroups = sowl.groups.list().map((group: any) => ({
+    ...group,
+    wallets: sowl.groups.wallets(group.name),
+  }));
   const walletGroups = groupNamesByWallet(rawGroups);
   const wallets = sowl.wallets
     .list()

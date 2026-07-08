@@ -44,6 +44,4 @@ declare module "measure-fn" {
     options?: { maxResultLength?: number },
   ): MeasureScope;
   export function configure(options: Record<string, unknown>): void;
-  export const measure: MeasureFn;
-  export const measureSync: MeasureSyncFn;
 }

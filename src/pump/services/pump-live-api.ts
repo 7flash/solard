@@ -5,6 +5,10 @@ import {
   readJson,
 } from "../../web/http.js";
 import {
+  measureSolard,
+  summarizeForMeasure,
+} from "../../solard/api-response.js";
+import {
   addTokenToWatchGroup,
   clearCurrentSessionWatchGroup,
   createTokenWatchGroup,
@@ -108,30 +112,43 @@ function retryAfterMs(response: Response, fallbackMs: number): number {
 }
 
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
-  const response = await fetch(rpcHttpUrl(), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
-  });
-  const text = await response.text();
-  let payload: { result?: T; error?: unknown } = {};
-  try {
-    payload = text ? JSON.parse(text) : {};
-  } catch {
-    payload = { error: text };
-  }
-  if (response.status === 429) {
-    const waitMs = retryAfterMs(
-      response,
-      intEnv("SOLWAL_HELIUS_429_BACKOFF_MS", 10_000),
-    );
-    throw new RpcRateLimitError(`RPC ${method} rate limited`, waitMs);
-  }
-  if (!response.ok || payload.error)
-    throw new Error(
-      `RPC ${method} failed: ${JSON.stringify(payload.error ?? response.status)}`,
-    );
-  return payload.result as T;
+  const measured = await measureSolard(
+    `solard:pump-live:rpc:${method}`,
+    method,
+    async () => {
+      const response = await fetch(rpcHttpUrl(), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: Date.now(),
+          method,
+          params,
+        }),
+      });
+      const text = await response.text();
+      let payload: { result?: T; error?: unknown } = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { error: text };
+      }
+      if (response.status === 429) {
+        const waitMs = retryAfterMs(
+          response,
+          intEnv("SOLWAL_HELIUS_429_BACKOFF_MS", 10_000),
+        );
+        throw new RpcRateLimitError(`RPC ${method} rate limited`, waitMs);
+      }
+      if (!response.ok || payload.error)
+        throw new Error(
+          `RPC ${method} failed: ${JSON.stringify(payload.error ?? response.status)}`,
+        );
+      return payload.result as T;
+    },
+    (value) => ({ method, result: summarizeForMeasure(value) }),
+  );
+  return measured.value;
 }
 
 async function normalizeHeliusSignature(
@@ -479,12 +496,28 @@ function runHeliusStream(args: {
   };
 }
 
-export function handlePumpLiveGet(request: Request): Response {
+export async function handlePumpLiveGet(request: Request): Promise<Response> {
   try {
     assertWebAuth(request);
     const url = new URL(request.url);
     if (url.searchParams.get("stream") !== "1") {
-      return jsonResponse({ ok: true, value: listPumpLiveState() });
+      const measured = await measureSolard(
+        "solard:api:GET:/api/pump-live",
+        "list-state",
+        () => listPumpLiveState(),
+        summarizeForMeasure,
+      );
+      return jsonResponse({
+        ok: true,
+        value: measured.value,
+        meta: {
+          route: "/api/pump-live",
+          method: "GET",
+          scope: measured.scope,
+          tookMs: measured.tookMs,
+          summary: measured.summary,
+        },
+      });
     }
 
     const source = (
@@ -519,6 +552,12 @@ export function handlePumpLiveGet(request: Request): Response {
           15_000,
         );
         request.signal.addEventListener("abort", close, { once: true });
+        send("status", {
+          status: "stream-open",
+          source,
+          scope: `solard:pump-live:${source}`,
+          at: new Date().toISOString(),
+        });
         stopSource =
           source === "helius"
             ? runHeliusStream({ request, controller, send, close })
@@ -548,30 +587,41 @@ export async function handlePumpLivePost(request: Request): Promise<Response> {
     assertWebAuth(request);
     const body = await readJson(request);
     const action = String(body.action ?? "");
-    if (action === "create-group")
-      return jsonResponse({
-        ok: true,
-        value: createTokenWatchGroup(String(body.name ?? "")),
-      });
-    if (action === "add-token")
-      return jsonResponse({
-        ok: true,
-        value: addTokenToWatchGroup({
-          groupId: String(body.groupId ?? "main"),
-          ...body.token,
-        }),
-      });
-    if (action === "remove-token")
-      return jsonResponse({
-        ok: true,
-        value: removeTokenFromWatchGroup(
-          String(body.groupId ?? ""),
-          String(body.mint ?? ""),
-        ),
-      });
-    if (action === "clear-current-session")
-      return jsonResponse({ ok: true, value: clearCurrentSessionWatchGroup() });
-    throw new Error(`Unknown pump-live action: ${action || "(empty)"}`);
+    const measured = await measureSolard(
+      `solard:api:POST:/api/pump-live:${action || "unknown"}`,
+      action || "unknown",
+      () => {
+        if (action === "create-group")
+          return createTokenWatchGroup(String(body.name ?? ""));
+        if (action === "add-token")
+          return addTokenToWatchGroup({
+            groupId: String(body.groupId ?? "main"),
+            ...(body.token && typeof body.token === "object"
+              ? (body.token as Raw)
+              : {}),
+          });
+        if (action === "remove-token")
+          return removeTokenFromWatchGroup(
+            String(body.groupId ?? ""),
+            String(body.mint ?? ""),
+          );
+        if (action === "clear-current-session")
+          return clearCurrentSessionWatchGroup();
+        throw new Error(`Unknown pump-live action: ${action || "(empty)"}`);
+      },
+      summarizeForMeasure,
+    );
+    return jsonResponse({
+      ok: true,
+      value: measured.value,
+      meta: {
+        route: "/api/pump-live",
+        method: "POST",
+        scope: measured.scope,
+        tookMs: measured.tookMs,
+        summary: measured.summary,
+      },
+    });
   } catch (error) {
     return errorResponse(
       error,

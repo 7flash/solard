@@ -1,4 +1,10 @@
 import { render } from "tradjs/client";
+import {
+  createClientMeasureScope,
+  clientMeasureStore,
+  summarizeForClient,
+  type ClientMeasureEvent,
+} from "./measure";
 
 export type AnyRow = Record<string, any>;
 export type Overview = {
@@ -214,6 +220,11 @@ export type State = {
   signalText: string;
   walletSearch: string;
   groupSearch: string;
+  mountId: number;
+  previousTab: State["tab"] | null;
+  measureScope: string;
+  measureEvents: ClientMeasureEvent[];
+  measureOpen: boolean;
 };
 
 export const state: State = {
@@ -273,7 +284,55 @@ export const state: State = {
   signalText: "",
   walletSearch: localStorage.getItem("solard:wallet-search") ?? "",
   groupSearch: localStorage.getItem("solard:group-search") ?? "",
+  mountId: 0,
+  previousTab: null,
+  measureScope: "solard:web:boot",
+  measureEvents: clientMeasureStore.snapshot(),
+  measureOpen: localStorage.getItem("solard:measure-open") === "1",
 };
+
+const runtimeMeasure = createClientMeasureScope("solard:web");
+
+function syncMeasureEvents(): void {
+  state.measureEvents = clientMeasureStore.snapshot();
+}
+
+export async function measureClient<T>(
+  label: string,
+  fn: () => Promise<T> | T,
+  summarize: (value: T) => unknown = summarizeForClient,
+): Promise<T> {
+  try {
+    return await runtimeMeasure.measure(
+      `${state.measureScope}:${label}`,
+      fn,
+      summarize,
+    );
+  } finally {
+    syncMeasureEvents();
+  }
+}
+
+export function measureClientSync<T>(
+  label: string,
+  fn: () => T,
+  summarize: (value: T) => unknown = summarizeForClient,
+): T {
+  try {
+    return runtimeMeasure.measureSync(
+      `${state.measureScope}:${label}`,
+      fn,
+      summarize,
+    );
+  } finally {
+    syncMeasureEvents();
+  }
+}
+
+function measureEvent(label: string, summary?: unknown): void {
+  runtimeMeasure.event(`${state.measureScope}:${label}`, summary);
+  syncMeasureEvents();
+}
 
 export function pageFromPath(): State["tab"] {
   const path = window.location.pathname.replace(/\/+$/, "");
@@ -318,26 +377,41 @@ export async function api<T>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      "content-type": "application/json",
-      ...authHeaders(),
-      ...(options.headers ?? {}),
+  const method = String(options.method ?? "GET").toUpperCase();
+  const path = (() => {
+    try {
+      const parsed = new URL(url, window.location.origin);
+      return `${method} ${parsed.pathname}${parsed.search ? "?…" : ""}`;
+    } catch {
+      return `${method} ${url}`;
+    }
+  })();
+  return await measureClient(
+    path,
+    async () => {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          "content-type": "application/json",
+          ...authHeaders(),
+          ...(options.headers ?? {}),
+        },
+      });
+      const text = await response.text();
+      let payload: any = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { ok: false, error: text || `HTTP ${response.status}` };
+      }
+      if (!response.ok)
+        throw new Error(
+          payload?.error ?? payload?.message ?? `HTTP ${response.status}`,
+        );
+      return unwrapApiPayload<T>(payload, response.status);
     },
-  });
-  const text = await response.text();
-  let payload: any = {};
-  try {
-    payload = text ? JSON.parse(text) : {};
-  } catch {
-    payload = { ok: false, error: text || `HTTP ${response.status}` };
-  }
-  if (!response.ok)
-    throw new Error(
-      payload?.error ?? payload?.message ?? `HTTP ${response.status}`,
-    );
-  return unwrapApiPayload<T>(payload, response.status);
+    (value: T) => summarizeForClient(value),
+  );
 }
 
 function emptyOverview(): Overview {
@@ -1370,11 +1444,110 @@ export function buyPlanPayload(): AnyRow[] {
     }));
 }
 
+function resetPageScopedState(
+  previous: State["tab"] | null,
+  next: State["tab"],
+): void {
+  state.previousTab = previous;
+  state.error = null;
+  state.busy = false;
+  if (previous && previous !== next) {
+    measureEvent("page-switch", {
+      from: previous,
+      to: next,
+      mountId: state.mountId + 1,
+    });
+  }
+  if (previous === "terminal" && next !== "terminal") {
+    state.pumpFeedAbort?.abort();
+    state.pumpFeedAbort = null;
+    state.pumpFeedStatus = "closed";
+    state.pumpFeedError = null;
+  }
+  if (next === "terminal") {
+    state.pumpFeedError = null;
+  }
+  if (next !== "jobs") {
+    state.selectedJob = null;
+  }
+}
+
+function MeasurePanel() {
+  const events = (state.measureEvents ?? []).slice(-18).reverse();
+  const latestError = events.find((event) => event.status === "error");
+  return (
+    <div className="measure-panel">
+      <div className="measure-head">
+        <div>
+          <span className={`dot ${latestError ? "bad" : "good"}`} />
+          <b>measure</b>
+          <span className="muted small">
+            {state.measureScope} · mount #{state.mountId}
+          </span>
+        </div>
+        <button
+          type="button"
+          className="secondary compact"
+          onClick={() => {
+            state.measureOpen = !state.measureOpen;
+            localStorage.setItem(
+              "solard:measure-open",
+              state.measureOpen ? "1" : "0",
+            );
+            update();
+          }}
+        >
+          {state.measureOpen ? "hide" : "show"}
+        </button>
+      </div>
+      {state.measureOpen ? (
+        <div className="measure-rows">
+          {events.length ? (
+            events.map((event) => (
+              <details
+                className={`measure-row ${event.status}`}
+                open={event.status === "error"}
+              >
+                <summary>
+                  <span className="code">#{event.id}</span>
+                  <span
+                    className={`pill ${event.status === "error" ? "bad" : event.status === "ok" ? "ok" : ""}`}
+                  >
+                    {event.status}
+                  </span>
+                  <span className="measure-label">{event.label}</span>
+                  <span className="muted small">
+                    {event.tookMs != null
+                      ? `${event.tookMs}ms`
+                      : new Date(event.atMs).toLocaleTimeString()}
+                  </span>
+                </summary>
+                <pre>
+                  {JSON.stringify(
+                    event.error
+                      ? { error: event.error }
+                      : (event.summary ?? {}),
+                    null,
+                    2,
+                  )}
+                </pre>
+              </details>
+            ))
+          ) : (
+            <p className="muted small">No measurements yet.</p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export type ConsolePage = () => any;
 let currentPageView: ConsolePage = () => (
   <p className="muted">No page mounted.</p>
 );
 let currentCleanup: (() => void) | null = null;
+let unloadCleanup: (() => void) | null = null;
 
 function ConsoleRuntime() {
   const Page = currentPageView;
@@ -1403,6 +1576,7 @@ function ConsoleRuntime() {
         {state.error ? <span className="pill bad">{state.error}</span> : null}
       </div>
       <ConnectionStrip />
+      <MeasurePanel />
       <Page />
     </>
   );
@@ -1419,67 +1593,102 @@ export function update() {
 }
 
 export function mountPage(page: State["tab"], view: ConsolePage) {
+  const previous = state.tab;
+  if (unloadCleanup) window.removeEventListener("beforeunload", unloadCleanup);
+  unloadCleanup = null;
   currentCleanup?.();
   currentCleanup = null;
+  state.mountId += 1;
+  state.measureScope = `solard:web:${page}#${state.mountId}`;
+  resetPageScopedState(previous, page);
   state.tab = page;
   currentPageView = view;
+  measureEvent("mount", {
+    page,
+    previous,
+    url: window.location.pathname,
+    moduleSingleton: true,
+  });
   update();
 
   void runAction(async () => {
-    // Always load the local wallet/group/token index first. This is SQLite-only
-    // and keeps the default wallet dropdown populated on every page.
-    await refreshLocalOverview();
-    await refreshStatus().catch(() => undefined);
+    await measureClient("mount-load", async () => {
+      // Always load the local wallet/group/token index first. This is SQLite-only
+      // and keeps the default wallet dropdown populated on every page.
+      await refreshLocalOverview();
+      await refreshStatus().catch(() => undefined);
 
-    if (page === "overview")
-      await Promise.allSettled([refreshSolBalances(), refreshJobs()]);
-    else if (page === "wallets")
-      await refreshSolBalances().catch(() => undefined);
-    else if (page === "terminal")
-      await Promise.allSettled([refreshPumpLive(), refreshWatchGroups()]);
-    else if (page === "watchlists")
-      await Promise.allSettled([refreshWatchGroups(), refreshPumpLive()]);
-    else if (page === "portfolio")
-      await refreshPortfolio().catch(() => undefined);
-    else if (page === "signals") await refreshSignals().catch(() => undefined);
-    else if (page === "jobs") await refreshJobs().catch(() => undefined);
+      if (page === "overview")
+        await Promise.allSettled([refreshSolBalances(), refreshJobs()]);
+      else if (page === "wallets")
+        await refreshSolBalances().catch(() => undefined);
+      else if (page === "terminal")
+        await Promise.allSettled([refreshPumpLive(), refreshWatchGroups()]);
+      else if (page === "watchlists")
+        await Promise.allSettled([refreshWatchGroups(), refreshPumpLive()]);
+      else if (page === "portfolio")
+        await refreshPortfolio().catch(() => undefined);
+      else if (page === "signals")
+        await refreshSignals().catch(() => undefined);
+      else if (page === "jobs") await refreshJobs().catch(() => undefined);
+      return {
+        page,
+        wallets: state.overview?.wallets?.length ?? 0,
+        groups: state.overview?.groups?.length ?? 0,
+      };
+    });
   });
 
-  if (page === "terminal") void startPumpFeed();
+  if (page === "terminal")
+    void measureClient("terminal-start-feed", startPumpFeed, () => ({
+      status: state.pumpFeedStatus,
+      source: state.pumpFeedSource,
+    }));
 
   const dataInterval = setInterval(
     () => {
-      if (state.tab === "jobs" || state.selectedJobId)
-        void refreshJobs()
-          .then(update)
-          .catch(() => undefined);
-      if (state.tab === "watchlists" || state.tab === "terminal")
-        void refreshPumpLive()
-          .then(update)
-          .catch(() => undefined);
-      if (state.tab === "signals")
-        void refreshSignals()
-          .then(update)
-          .catch(() => undefined);
-      if (state.tab === "portfolio")
-        void refreshPortfolio()
-          .then(update)
-          .catch(() => undefined);
+      void measureClient("interval:data", async () => {
+        if (state.tab === "jobs" || state.selectedJobId)
+          await refreshJobs()
+            .then(update)
+            .catch(() => undefined);
+        if (state.tab === "watchlists" || state.tab === "terminal")
+          await refreshPumpLive()
+            .then(update)
+            .catch(() => undefined);
+        if (state.tab === "signals")
+          await refreshSignals()
+            .then(update)
+            .catch(() => undefined);
+        if (state.tab === "portfolio")
+          await refreshPortfolio()
+            .then(update)
+            .catch(() => undefined);
+        return { page: state.tab };
+      }).catch(() => undefined);
     },
     state.tab === "terminal" ? 2500 : 5000,
   );
 
   const statusInterval = setInterval(() => {
-    void refreshStatus()
-      .then(update)
-      .catch(() => undefined);
+    void measureClient("interval:status", async () => {
+      await refreshStatus()
+        .then(update)
+        .catch(() => undefined);
+      return { ok: state.rpcStatus?.ok, slot: state.rpcStatus?.slot };
+    }).catch(() => undefined);
   }, 10_000);
 
-  currentCleanup = () => {
-    clearInterval(dataInterval);
-    clearInterval(statusInterval);
-    state.pumpFeedAbort?.abort();
-    state.pumpFeedAbort = null;
-  };
-  return currentCleanup;
+  const cleanup = () =>
+    measureClientSync("unmount", () => {
+      clearInterval(dataInterval);
+      clearInterval(statusInterval);
+      state.pumpFeedAbort?.abort();
+      state.pumpFeedAbort = null;
+      return { page, mountId: state.mountId };
+    });
+  currentCleanup = cleanup;
+  unloadCleanup = cleanup;
+  window.addEventListener("beforeunload", cleanup, { once: true });
+  return cleanup;
 }

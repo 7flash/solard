@@ -1,4 +1,5 @@
 import { createTraderSowl, type Sowl } from "../index.js";
+import { measureSolard, summarizeForMeasure } from "../solard/api-response.js";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -18,13 +19,20 @@ export function jsonResponse(
   });
 }
 
-export function errorResponse(error: unknown, status = 500): Response {
+export function errorResponse(
+  error: unknown,
+  status = 500,
+  meta?: Record<string, unknown>,
+): Response {
   const message = error instanceof Error ? error.message : String(error);
   const stack =
     process.env.SOLWAL_WEB_DEBUG === "1" && error instanceof Error
       ? error.stack
       : undefined;
-  return jsonResponse({ ok: false, error: message, stack }, { status });
+  return jsonResponse(
+    { ok: false, error: message, ...(meta ? { meta } : {}), stack },
+    { status },
+  );
 }
 
 export async function readJson<T extends JsonRecord = JsonRecord>(
@@ -84,24 +92,63 @@ export function assertWebAuth(request: Request): void {
   }
 }
 
+function requestId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function routeMeta(
+  request: Request,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const url = new URL(request.url);
+  return { route: url.pathname, method: request.method, ...extra };
+}
+
 export async function withSowl<T>(
   request: Request,
   fn: (sowl: Sowl) => Promise<T> | T,
 ): Promise<Response> {
   let sowl: Sowl | null = null;
+  const id = requestId();
+  const url = new URL(request.url);
+  const route = url.pathname;
+  const scope = `solard:api:${request.method}:${route}`;
   try {
-    assertWebAuth(request);
-    sowl = createTraderSowl({
-      rpcUrl: process.env.HELIUS_RPC_URL || process.env.RPC_ENDPOINT,
+    const measured = await measureSolard(
+      scope,
+      "withSowl",
+      async () => {
+        assertWebAuth(request);
+        sowl = createTraderSowl({
+          rpcUrl: process.env.HELIUS_RPC_URL || process.env.RPC_ENDPOINT,
+        });
+        return await fn(sowl);
+      },
+      summarizeForMeasure,
+    );
+    return jsonResponse({
+      ok: true,
+      value: measured.value,
+      meta: {
+        route,
+        method: request.method,
+        requestId: id,
+        scope: measured.scope,
+        tookMs: measured.tookMs,
+        summary: measured.summary,
+      },
     });
-    const value = await fn(sowl);
-    return jsonResponse({ ok: true, value });
   } catch (error) {
     return errorResponse(
       error,
       typeof (error as { status?: unknown }).status === "number"
         ? (error as { status: number }).status
         : 500,
+      routeMeta(request, { requestId: id, scope }),
     );
   } finally {
     sowl?.close();

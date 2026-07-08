@@ -1069,3 +1069,104 @@ html, body { width: 100%; overflow-x: hidden; }
   .portfolio-table-panel { overflow-x: auto; }
   .portfolio-controls label { min-width: 100%; }
 }
+
+/* Scoped measure console -------------------------------------------------- */
+.measure-panel {
+  border: 1px solid var(--line);
+  background: rgba(12, 17, 24, 0.76);
+  margin: 12px 0 16px;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+.measure-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.measure-head > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.measure-head .muted {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(820px, 62vw);
+}
+.measure-rows {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  max-height: 310px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.measure-row {
+  border: 1px solid rgba(96, 112, 132, 0.55);
+  background: rgba(0, 0, 0, 0.24);
+}
+.measure-row.error {
+  border-color: rgba(255, 75, 105, 0.75);
+}
+.measure-row summary {
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 52px 78px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+}
+.measure-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.measure-row pre {
+  margin: 0;
+  padding: 8px 10px 10px;
+  max-height: 220px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted);
+}
+@media (max-width: 760px) {
+  .measure-row summary {
+    grid-template-columns: 48px 70px minmax(0, 1fr);
+  }
+  .measure-row summary .muted.small {
+    display: none;
+  }
+}
+
+/* Solard route host cleanup: layout.tsx owns the one and only shell/sidebar. */
+.client-root {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+.client-root > .notice:first-child,
+.client-root > .connection-strip,
+.client-root > .measure-panel,
+.client-root > .terminal-page,
+.client-root > .home-page,
+.client-root > .wallets-page,
+.client-root > .portfolio-page,
+.client-root > .watchlists-page,
+.client-root > .signals-page,
+.client-root > .launch-page,
+.client-root > .trade-page,
+.client-root > .activity-page {
+  min-width: 0;
+  max-width: 100%;
+}
+.main-console > .client-root {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
