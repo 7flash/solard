@@ -56,6 +56,12 @@ export async function POST(request: Request): Promise<Response> {
             token.marketCapSol == null || token.marketCapSol === ""
               ? null
               : Number(token.marketCapSol),
+          isMayhemMode:
+            typeof token.isMayhemMode === "boolean" ? token.isMayhemMode : null,
+          quoteAsset:
+            typeof token.quoteAsset === "string" ? token.quoteAsset : null,
+          quoteMint:
+            typeof token.quoteMint === "string" ? token.quoteMint : null,
           source: typeof token.source === "string" ? token.source : "manual",
         }),
       });

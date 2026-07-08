@@ -5,6 +5,7 @@ import { openDatabase } from "../db/database.js";
 import type { TokenRow } from "../db/schema.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const MAX_NEW_TOKENS = 2_000;
 const MAX_TRADES_PER_TOKEN = 2_000;
 const MAX_SAMPLES_PER_TOKEN = 4_000;
@@ -32,6 +33,9 @@ export type PumpLiveToken = {
   signature?: string | null;
   bondingCurveKey?: string | null;
   associatedBondingCurve?: string | null;
+  isMayhemMode?: boolean | null;
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
   lastTradeAtMs?: number | null;
@@ -89,6 +93,92 @@ function num(value: unknown): number | null {
         ? Number(value)
         : NaN;
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function boolish(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number")
+    return value === 1 ? true : value === 0 ? false : null;
+  if (typeof value !== "string") return null;
+  const cleanValue = value.trim().toLowerCase();
+  if (["true", "1", "yes", "y", "mayhem"].includes(cleanValue)) return true;
+  if (["false", "0", "no", "n", "normal", "standard"].includes(cleanValue))
+    return false;
+  return null;
+}
+
+function firstRaw(raw: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (raw[key] != null && raw[key] !== "") return raw[key];
+  }
+  return null;
+}
+
+function inferMayhemMode(
+  raw: Record<string, unknown>,
+  fallback?: boolean | null,
+): boolean | null {
+  const direct = firstRaw(raw, [
+    "isMayhemMode",
+    "mayhemMode",
+    "mayhem",
+    "isMayhem",
+    "isMayhemLaunch",
+    "isMayhemToken",
+  ]);
+  const parsed = boolish(direct);
+  if (parsed != null) return parsed;
+  const text = String(
+    firstRaw(raw, [
+      "mode",
+      "launchMode",
+      "curveType",
+      "kind",
+      "poolType",
+      "tokenMode",
+    ]) ?? "",
+  ).toLowerCase();
+  if (text.includes("mayhem")) return true;
+  return fallback ?? null;
+}
+
+function inferQuoteMint(
+  raw: Record<string, unknown>,
+  fallback?: string | null,
+): string | null {
+  const value = clean(
+    firstRaw(raw, [
+      "quoteMint",
+      "quote_mint",
+      "quoteTokenMint",
+      "quoteToken",
+      "quote",
+      "quoteAddress",
+      "quoteCurrencyMint",
+    ]),
+  );
+  return value ?? fallback ?? null;
+}
+
+function inferQuoteAsset(
+  raw: Record<string, unknown>,
+  quoteMint?: string | null,
+  fallback?: string | null,
+): string | null {
+  const direct = clean(
+    firstRaw(raw, [
+      "quoteAsset",
+      "quoteSymbol",
+      "quoteCurrency",
+      "quoteTokenSymbol",
+      "quoteMintSymbol",
+      "quoteTicker",
+    ]),
+  );
+  const text = String(direct ?? quoteMint ?? "").toLowerCase();
+  if (text.includes("usdc") || quoteMint === USDC_MINT) return "USDC";
+  if (text.includes("sol") || quoteMint === SOL_MINT) return "SOL";
+  return direct ?? fallback ?? "SOL";
 }
 
 function groupId(name: string): string {
@@ -241,6 +331,9 @@ function writeTokenToDb(token: PumpLiveToken, sample?: PumpLiveSample): void {
       uri: token.uri ?? null,
       bondingCurveKey: token.bondingCurveKey ?? null,
       associatedBondingCurve: token.associatedBondingCurve ?? null,
+      isMayhemMode: token.isMayhemMode ?? null,
+      quoteAsset: token.quoteAsset ?? null,
+      quoteMint: token.quoteMint ?? null,
       lastPumpMarketCapSol: token.marketCapSol ?? null,
     });
     if (existing) {
@@ -360,6 +453,13 @@ export function normalizePumpNewToken(
     clean(raw.bondingCurveKey) ?? token.bondingCurveKey ?? null;
   token.associatedBondingCurve =
     clean(raw.associatedBondingCurve) ?? token.associatedBondingCurve ?? null;
+  token.isMayhemMode = inferMayhemMode(raw, token.isMayhemMode ?? null);
+  token.quoteMint = inferQuoteMint(raw, token.quoteMint ?? null);
+  token.quoteAsset = inferQuoteAsset(
+    raw,
+    token.quoteMint,
+    token.quoteAsset ?? null,
+  );
   token.marketCapSol = num(raw.marketCapSol) ?? token.marketCapSol ?? null;
   token.updatedAtMs = now;
   token.raw = { ...raw, seq, receivedAt: new Date(now).toISOString() };
@@ -399,6 +499,13 @@ export function recordPumpTrade(
     clean(raw.bondingCurveKey) ?? token.bondingCurveKey ?? null;
   token.associatedBondingCurve =
     clean(raw.associatedBondingCurve) ?? token.associatedBondingCurve ?? null;
+  token.isMayhemMode = inferMayhemMode(raw, token.isMayhemMode ?? null);
+  token.quoteMint = inferQuoteMint(raw, token.quoteMint ?? null);
+  token.quoteAsset = inferQuoteAsset(
+    raw,
+    token.quoteMint,
+    token.quoteAsset ?? null,
+  );
   const solAmount = num(raw.solAmount);
   const tokenAmount = num(raw.tokenAmount);
   const marketCapSol = num(raw.marketCapSol) ?? token.marketCapSol ?? null;
@@ -504,6 +611,9 @@ export function addTokenToWatchGroup(args: {
   signature?: string | null;
   marketCapSol?: number | null;
   source?: string | null;
+  isMayhemMode?: boolean | null;
+  quoteAsset?: string | null;
+  quoteMint?: string | null;
 }): TokenWatchGroupSummary {
   const mint = clean(args.mint);
   if (!mint) throw new Error("Token mint is required");
@@ -527,6 +637,12 @@ export function addTokenToWatchGroup(args: {
   token.uri = clean(args.uri) ?? token.uri ?? null;
   token.image = clean(args.image) ?? token.image ?? null;
   token.signature = clean(args.signature) ?? token.signature ?? null;
+  token.isMayhemMode = args.isMayhemMode ?? token.isMayhemMode ?? null;
+  token.quoteMint = clean(args.quoteMint) ?? token.quoteMint ?? null;
+  token.quoteAsset =
+    clean(args.quoteAsset) ??
+    token.quoteAsset ??
+    inferQuoteAsset({}, token.quoteMint, token.quoteAsset ?? null);
   token.updatedAtMs = Date.now();
   if (
     typeof args.marketCapSol === "number" &&
