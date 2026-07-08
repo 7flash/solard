@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "sqlite-zod-orm";
 import { measure } from "../core/log.js";
+import { ensureSolardDatabaseRuntimeObjects } from "./maintenance.js";
 import {
   AgentSchema,
   AltSchema,
@@ -24,8 +25,6 @@ import {
   PumpHolderCurrentSchema,
   PumpBalanceDeltaSchema,
   PumpPriceAggregateSchema,
-  LaunchJobSchema,
-  LaunchJobLogSchema,
   type SowlDatabase,
 } from "./schema.js";
 
@@ -65,8 +64,6 @@ export function openDatabase(input?: string): SowlDatabase {
       pumpHoldersCurrent: PumpHolderCurrentSchema,
       pumpBalanceDeltas: PumpBalanceDeltaSchema,
       pumpPriceAggregates: PumpPriceAggregateSchema,
-      launchJobs: LaunchJobSchema,
-      launchJobLogs: LaunchJobLogSchema,
     },
     {
       timestamps: false,
@@ -91,7 +88,6 @@ export function openDatabase(input?: string): SowlDatabase {
         pumpHoldersCurrent: [["mint", "owner"]],
         pumpBalanceDeltas: [["signature", "owner", "mint"]],
         pumpPriceAggregates: [["mint", "intervalSeconds", "bucketStartMs"]],
-        launchJobs: [["jobId"]],
       },
       indexes: {
         wallets: ["name", "address", "isActive"],
@@ -109,11 +105,10 @@ export function openDatabase(input?: string): SowlDatabase {
         pumpHoldersCurrent: ["mint", "pctSupply", "balanceUi", "lastUpdatedMs"],
         pumpBalanceDeltas: ["mint", "owner", "createdAtMs"],
         pumpPriceAggregates: ["mint", "intervalSeconds", "bucketStartMs"],
-        launchJobs: ["jobId", "status", "updatedAtMs"],
-        launchJobLogs: ["jobId", "atMs", "label"],
       },
     },
   ) as SowlDatabase;
+  ensureSolardDatabaseRuntimeObjects(db);
   open.set(path, db);
   m.measureSync(`open ${path}`, () => `ready`);
   return db;

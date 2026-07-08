@@ -4,10 +4,12 @@ export type SolardApiMeta = {
   route?: string;
   method?: string;
   scope?: string;
+  label?: string;
   requestId?: string;
   tookMs?: number;
   summary?: unknown;
   warnings?: string[];
+  [key: string]: unknown;
 };
 
 export type SolardApiOk<T> = {
@@ -28,6 +30,7 @@ const SENSITIVE_KEY =
   /secret|private|mnemonic|seed|keypair|password|authorization|cookie|token/i;
 const BIG_ARRAY_SAMPLE = 2;
 const BIG_OBJECT_KEYS = 32;
+const DEFAULT_MAX_RESULT_LENGTH = 1600;
 
 export function solardOk<T>(value: T, meta?: SolardApiMeta): SolardApiOk<T> {
   return { ok: true, value, ...(meta ? { meta } : {}) };
@@ -52,8 +55,17 @@ export function summarizeForMeasure(value: unknown, depth = 0): unknown {
     if (value.length <= 160) return value;
     return `${value.slice(0, 80)}…${value.slice(-24)} (${value.length} chars)`;
   }
-  if (value instanceof Error)
-    return { name: value.name, message: value.message };
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack:
+        process.env.SOLARD_MEASURE_STACK === "1" ||
+        process.env.SOLWAL_WEB_DEBUG === "1"
+          ? value.stack
+          : undefined,
+    };
+  }
   if (Array.isArray(value)) {
     if (depth >= 2) return { type: "array", length: value.length };
     return {
@@ -97,30 +109,47 @@ export function summarizeForMeasure(value: unknown, depth = 0): unknown {
 
 type SolardMeasureScope = ReturnType<typeof createMeasure>;
 
+export type SolardMeasureOptions<T> = {
+  result?: (value: T) => unknown;
+  summarize?: (value: T) => unknown;
+  onError?: (error: unknown) => unknown;
+  start?: () => unknown;
+  end?: (value: T) => unknown;
+  meta?: Record<string, unknown>;
+  maxResultLength?: number;
+};
+
 type MeasureAction<T = unknown> =
   | string
   | {
       label: string;
       start?: () => unknown;
-      /** measure-fn result mapper: trims/redacts the actual return value in logs. */
+      end?: (value: T) => unknown;
       result?: (value: T) => unknown;
+      onError?: (error: unknown) => unknown;
       maxResultLength?: number;
       meta?: Record<string, unknown>;
       [key: string]: unknown;
     };
 
-export type MeasureSolardOptions<T> = {
-  summarize?: (value: T) => unknown;
-  onError?: (error: unknown) => T | null | Promise<T | null>;
-  meta?: Record<string, unknown>;
-};
+function maxResultLength(input?: number): number {
+  const parsed = Number(
+    input ??
+      process.env.SOLARD_MEASURE_MAX_RESULT_LENGTH ??
+      DEFAULT_MAX_RESULT_LENGTH,
+  );
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : DEFAULT_MAX_RESULT_LENGTH;
+}
 
-function safeScope(name: string): SolardMeasureScope | null {
+function safeScope(
+  name: string,
+  maxLength?: number,
+): SolardMeasureScope | null {
   try {
     return createMeasure(name, {
-      maxResultLength: Number(
-        process.env.SOLARD_MEASURE_MAX_RESULT_LENGTH ?? "1600",
-      ),
+      maxResultLength: maxResultLength(maxLength),
     }) as SolardMeasureScope;
   } catch {
     return null;
@@ -129,39 +158,32 @@ function safeScope(name: string): SolardMeasureScope | null {
 
 function measureAction<T>(
   label: string,
-  summarize: (value: T) => unknown,
-  meta?: Record<string, unknown>,
+  options: SolardMeasureOptions<T>,
 ): MeasureAction<T> {
+  const result = options.result ?? options.summarize ?? summarizeForMeasure;
   return {
     label,
-    start: () => label,
-    result: summarize,
-    maxResultLength: Number(
-      process.env.SOLARD_MEASURE_MAX_RESULT_LENGTH ?? "1600",
-    ),
-    ...(meta ? { meta } : {}),
+    start: options.start ?? (() => ({ label, ...(options.meta ?? {}) })),
+    end: options.end ?? result,
+    result,
+    onError: options.onError ?? summarizeForMeasure,
+    maxResultLength: maxResultLength(options.maxResultLength),
+    ...(options.meta ? { meta: summarizeForMeasure(options.meta) } : {}),
   };
 }
 
 function normalizeMeasureOptions<T>(
-  summarizeOrOptions?: ((value: T) => unknown) | MeasureSolardOptions<T>,
-): Required<Pick<MeasureSolardOptions<T>, "summarize">> &
-  Pick<MeasureSolardOptions<T>, "onError" | "meta"> {
-  if (typeof summarizeOrOptions === "function") {
-    return { summarize: summarizeOrOptions };
-  }
-  return {
-    summarize: summarizeOrOptions?.summarize ?? summarizeForMeasure,
-    onError: summarizeOrOptions?.onError,
-    meta: summarizeOrOptions?.meta,
-  };
+  input?: ((value: T) => unknown) | SolardMeasureOptions<T>,
+): SolardMeasureOptions<T> {
+  if (typeof input === "function") return { result: input };
+  return input ?? { result: summarizeForMeasure };
 }
 
 export async function measureSolard<T>(
   scopeName: string,
   label: string,
   operation: () => Promise<T> | T,
-  summarizeOrOptions?: ((value: T) => unknown) | MeasureSolardOptions<T>,
+  optionsOrSummarize?: ((value: T) => unknown) | SolardMeasureOptions<T>,
 ): Promise<{
   value: T;
   tookMs: number;
@@ -169,38 +191,28 @@ export async function measureSolard<T>(
   scope: string;
   label: string;
 }> {
-  const options = normalizeMeasureOptions<T>(summarizeOrOptions);
-  const scope = safeScope(scopeName);
+  const options = normalizeMeasureOptions(optionsOrSummarize);
+  const result = options.result ?? options.summarize ?? summarizeForMeasure;
+  const scope = safeScope(scopeName, options.maxResultLength);
   const started = Date.now();
-  let value: T | null;
-  if (scope) {
-    value = (await scope.measure(
-      measureAction(label, options.summarize, options.meta),
-      async () => await operation(),
-      async (error: unknown) => {
-        if (options.onError) return await options.onError(error);
-        throw error;
-      },
-    )) as T | null;
-  } else {
-    try {
-      value = await operation();
-    } catch (error) {
-      if (options.onError) value = await options.onError(error);
-      else throw error;
-    }
+  try {
+    const value = scope
+      ? ((await scope.measure(
+          measureAction(label, options),
+          async () => await operation(),
+        )) as T)
+      : await operation();
+    return {
+      value,
+      tookMs: Date.now() - started,
+      summary: result(value),
+      scope: scopeName,
+      label,
+    };
+  } catch (error) {
+    if (options.onError) options.onError(error);
+    throw error;
   }
-
-  if (value === null) throw new Error(`${scopeName}:${label} returned null`);
-
-  const summary = options.summarize(value);
-  return {
-    value,
-    tookMs: Date.now() - started,
-    summary,
-    scope: scopeName,
-    label,
-  };
 }
 
 export async function measured<T>(
@@ -211,11 +223,16 @@ export async function measured<T>(
     `solard:api:${route}`,
     "handler",
     fn,
-    summarizeForMeasure,
+    {
+      result: summarizeForMeasure,
+      onError: summarizeForMeasure,
+      meta: { route },
+    },
   );
   return solardOk(measuredValue.value, {
     route,
     scope: measuredValue.scope,
+    label: measuredValue.label,
     tookMs: measuredValue.tookMs,
     summary: measuredValue.summary,
   });

@@ -19,6 +19,9 @@ import {
   listJobLogsAction,
   listJobsAction,
   listSmaAggregatesAction,
+  listTerminalFeedAction,
+  getTerminalFeedStatsAction,
+  listTerminalHoldersAction,
   listTokensAction,
   listWalletsAction,
   listWatchGroupsAction,
@@ -106,7 +109,10 @@ Trading
   solard sell <token|mint> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|helius-rpc|helius-fast|jito] [--live] [--json]
 
 Market data
-  solard sma [mint] [--interval-seconds 60] [--limit 100] [--json]
+  solard sma [mint] [--interval-seconds 60] [--latest] [--limit 100] [--json]
+  solard terminal feed [--since-ms <ms>] [--pinned-mints <csv>] [--limit 250] [--json]
+  solard terminal holders <mint> [--limit 12] [--json]
+  solard terminal stats [--json]
 
 Jobs
   solard jobs [--status queued|running|succeeded|failed] [--limit 100] [--json]
@@ -330,6 +336,59 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
 
+  if (command === "terminal" || command === "feed") {
+    const subcommand = command === "feed" ? "feed" : values[0];
+    if (subcommand === "feed") {
+      const offsetValues = command === "feed" ? values : values.slice(1);
+      const result = await listTerminalFeedAction({
+        sinceMs: flag(flags, "since-ms"),
+        pinnedMints: flag(flags, "pinned-mints") ?? offsetValues.join(","),
+        limit: numberFlag(flags, "limit", 250),
+      });
+      writeResult(
+        result,
+        flags,
+        (rows) =>
+          rows
+            .map(
+              (row: any) =>
+                `${row.symbol ? "$" + row.symbol : "-"}	${row.mint}	mcap=${row.marketCapSol ?? row.lastMarketCapSol ?? "-"}	sma1=${row.sma1m ?? "-"}	sma5=${row.sma5m ?? "-"}	sma15=${row.sma15m ?? "-"}`,
+            )
+            .join("\n") + "\n",
+      );
+      return 0;
+    }
+    if (subcommand === "holders") {
+      const result = await listTerminalHoldersAction({
+        mint: values[1] ?? "",
+        limit: numberFlag(flags, "limit", 12),
+      });
+      writeResult(
+        result,
+        flags,
+        (rows) =>
+          rows
+            .map(
+              (row: any) =>
+                `${row.owner}	balance=${row.balanceUi ?? row.balanceRaw ?? "-"}	delta=${row.lastDeltaUi ?? row.lastDeltaRaw ?? "-"}	${row.lastSignature ?? ""}`,
+            )
+            .join("\n") + "\n",
+      );
+      return 0;
+    }
+    if (subcommand === "stats") {
+      const result = await getTerminalFeedStatsAction();
+      writeResult(
+        result,
+        flags,
+        (stats) =>
+          `${OWL} terminal feed tokens=${stats.tokens} swaps=${stats.swaps} holders=${stats.holders} aggregates=${stats.aggregates} latest=${stats.latestUpdatedAtMs ?? "-"}\n`,
+      );
+      return 0;
+    }
+    throw new Error("Usage: solard terminal feed|holders|stats ...");
+  }
+
   const ctx = createSolardActionContext();
   try {
     if (
@@ -453,6 +512,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         mint: mint && !mint.startsWith("--") ? mint : flag(flags, "mint"),
         intervalSeconds: numberFlag(flags, "interval-seconds", undefined),
         limit: numberFlag(flags, "limit", 100),
+        latestOnly: has(flags, "latest") || has(flags, "latest-only"),
       });
       writeResult(
         rows,

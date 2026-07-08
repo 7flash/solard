@@ -108,60 +108,6 @@ function routeMeta(
   return { route: url.pathname, method: request.method, ...extra };
 }
 
-export async function withMeasuredApi<T>(
-  request: Request,
-  label: string,
-  fn: () => Promise<T> | T,
-  options: { auth?: boolean; meta?: Record<string, unknown> } = {},
-): Promise<Response> {
-  const id = requestId();
-  const url = new URL(request.url);
-  const route = url.pathname;
-  const scope = `solard:api:${request.method}:${route}`;
-  try {
-    const measured = await measureSolard(
-      scope,
-      label,
-      async () => {
-        if (options.auth !== false) assertWebAuth(request);
-        return await fn();
-      },
-      {
-        summarize: summarizeForMeasure,
-        meta: {
-          route,
-          method: request.method,
-          requestId: id,
-          ...(options.meta ?? {}),
-        },
-        onError: (error) => {
-          throw error;
-        },
-      },
-    );
-    return jsonResponse({
-      ok: true,
-      value: measured.value,
-      meta: {
-        route,
-        method: request.method,
-        requestId: id,
-        scope: measured.scope,
-        tookMs: measured.tookMs,
-        summary: measured.summary,
-      },
-    });
-  } catch (error) {
-    return errorResponse(
-      error,
-      typeof (error as { status?: unknown }).status === "number"
-        ? (error as { status: number }).status
-        : 500,
-      routeMeta(request, { requestId: id, scope }),
-    );
-  }
-}
-
 export async function withSowl<T>(
   request: Request,
   fn: (sowl: Sowl) => Promise<T> | T,
@@ -183,11 +129,9 @@ export async function withSowl<T>(
         return await fn(sowl);
       },
       {
-        summarize: summarizeForMeasure,
+        result: summarizeForMeasure,
+        onError: summarizeForMeasure,
         meta: { route, method: request.method, requestId: id },
-        onError: (error) => {
-          throw error;
-        },
       },
     );
     return jsonResponse({
@@ -212,6 +156,66 @@ export async function withSowl<T>(
     );
   } finally {
     sowl?.close();
+  }
+}
+
+export type MeasuredApiOptions<T = unknown> = {
+  meta?: Record<string, unknown>;
+  status?: number;
+  result?: (value: T) => unknown;
+  onError?: (error: unknown) => unknown;
+};
+
+export async function withMeasuredApi<T>(
+  request: Request,
+  label: string,
+  fn: () => Promise<T> | T,
+  options: MeasuredApiOptions<T> = {},
+): Promise<Response> {
+  const id = requestId();
+  const url = new URL(request.url);
+  const route = url.pathname;
+  const scope = `solard:api:${request.method}:${route}`;
+  const meta = {
+    route,
+    method: request.method,
+    requestId: id,
+    ...(options.meta ?? {}),
+  };
+  try {
+    const measured = await measureSolard(
+      scope,
+      label,
+      async () => {
+        assertWebAuth(request);
+        return await fn();
+      },
+      {
+        result: options.result ?? summarizeForMeasure,
+        onError: options.onError ?? summarizeForMeasure,
+        meta,
+      },
+    );
+    return jsonResponse(
+      {
+        ok: true,
+        value: measured.value,
+        meta: {
+          ...meta,
+          scope: measured.scope,
+          label: measured.label,
+          tookMs: measured.tookMs,
+          summary: measured.summary,
+        },
+      },
+      { status: options.status ?? 200 },
+    );
+  } catch (error) {
+    const status =
+      typeof (error as { status?: unknown }).status === "number"
+        ? (error as { status: number }).status
+        : 500;
+    return errorResponse(error, status, { ...meta, scope, label });
   }
 }
 

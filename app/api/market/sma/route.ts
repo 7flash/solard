@@ -6,6 +6,12 @@ import { withMeasuredApi } from "../../../../src/web/http.js";
 
 export function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
+  const mint = url.searchParams.get("mint");
+  const intervalSeconds = url.searchParams.get("intervalSeconds");
+  const latestOnly =
+    url.searchParams.get("latest") === "1" ||
+    url.searchParams.get("latestOnly") === "1" ||
+    url.searchParams.get("latestOnly") === "true";
   return withMeasuredApi(
     request,
     "listSmaAggregates",
@@ -13,21 +19,18 @@ export function GET(request: Request): Promise<Response> {
       const ctx = createSolardActionContext({ installSenders: false });
       try {
         return await listSmaAggregatesAction(ctx, {
-          mint: url.searchParams.get("mint"),
-          intervalSeconds: url.searchParams.get("intervalSeconds")
-            ? Number(url.searchParams.get("intervalSeconds"))
-            : null,
+          mint,
+          intervalSeconds: intervalSeconds ? Number(intervalSeconds) : null,
           limit: Number(url.searchParams.get("limit") ?? "100"),
+          latestOnly,
         });
       } finally {
         ctx.close();
       }
     },
     {
-      meta: {
-        mint: url.searchParams.get("mint"),
-        intervalSeconds: url.searchParams.get("intervalSeconds"),
-      },
+      meta: { mint, intervalSeconds, latestOnly },
+      result: (rows) => ({ count: rows.length, latestOnly }),
     },
   );
 }
