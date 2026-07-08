@@ -61,7 +61,10 @@ export type PumpLiveVault = {
 };
 
 export type PumpLiveTokenSummary = PumpLiveToken & {
+  initialMarketCapSol: number | null;
   lastMarketCapSol: number | null;
+  marketCapChangeSol: number | null;
+  marketCapChangePct: number | null;
   sma1m: number | null;
   sma5m: number | null;
   sma15m: number | null;
@@ -296,18 +299,39 @@ function summarize(
   const samples = [...(token.samples ?? [])].sort(
     (a, b) => b.capturedAtMs - a.capturedAtMs,
   );
+  const chronologicalSamples = [...samples].reverse();
+  const first = chronologicalSamples.find(
+    (sample) =>
+      typeof sample.marketCapSol === "number" &&
+      Number.isFinite(sample.marketCapSol),
+  );
   const last = samples.find(
     (sample) =>
       typeof sample.marketCapSol === "number" &&
       Number.isFinite(sample.marketCapSol),
   );
+  const initialMarketCapSol = first?.marketCapSol ?? null;
+  const lastMarketCapSol = token.marketCapSol ?? last?.marketCapSol ?? null;
+  const marketCapChangeSol =
+    initialMarketCapSol != null && lastMarketCapSol != null
+      ? lastMarketCapSol - initialMarketCapSol
+      : null;
+  const marketCapChangePct =
+    initialMarketCapSol != null &&
+    initialMarketCapSol > 0 &&
+    marketCapChangeSol != null
+      ? (marketCapChangeSol / initialMarketCapSol) * 100
+      : null;
   return {
     ...token,
     samples,
     trades: [...(token.trades ?? [])].sort(
       (a, b) => b.capturedAtMs - a.capturedAtMs,
     ),
-    lastMarketCapSol: token.marketCapSol ?? last?.marketCapSol ?? null,
+    initialMarketCapSol,
+    lastMarketCapSol,
+    marketCapChangeSol,
+    marketCapChangePct,
     sma1m: sampleMarketCap(samples, 60_000, now),
     sma5m: sampleMarketCap(samples, 5 * 60_000, now),
     sma15m: sampleMarketCap(samples, 15 * 60_000, now),
