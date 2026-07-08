@@ -3,7 +3,7 @@ export default function Page() {
     <main className="shell page-shell" data-page="terminal">
       <aside className="side-nav">
         <div className="brand-block">
-          <p className="eyebrow">SOLWAL</p>
+          <p className="eyebrow">SOLARD</p>
           <h1>PUMP TERMINAL</h1>
         </div>
         <nav className="nav-list" id="main-nav">
@@ -15,6 +15,9 @@ export default function Page() {
           </a>
           <a data-page="watchlists" className="" href="/watchlists">
             Watchlists
+          </a>
+          <a data-page="signals" className="" href="/signals">
+            Signals
           </a>
           <a data-page="launch" className="" href="/launch">
             Launch
@@ -42,7 +45,7 @@ export default function Page() {
       <section className="main-console">
         <header className="page-header">
           <div>
-            <p className="eyebrow">SOLWAL // LOCAL COMMAND CONSOLE</p>
+            <p className="eyebrow">SOLARD // LOCAL COMMAND CONSOLE</p>
             <h2>New Pump.fun tokens.</h2>
             <p className="muted">
               Real-time launch feed, market-cap movement, badges, filters, and

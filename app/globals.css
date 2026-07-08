@@ -805,3 +805,12 @@ button.primary.compact {
 @media (max-width: 1200px) {
   .connection-strip { grid-template-columns: 1fr 1fr; }
 }
+
+/* Signals console */
+.signals-layout { display: grid; gap: 16px; }
+.signals-layout .source-list { display: grid; gap: 8px; margin-top: 12px; }
+.source-row { display: flex; justify-content: space-between; gap: 10px; width: 100%; text-align: left; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 10px; }
+.source-row.active-row { border-color: var(--accent); background: var(--panel-2); }
+.signals-table td { vertical-align: top; }
+.signal-text { max-width: 520px; white-space: pre-wrap; line-height: 1.45; }
+textarea { width: 100%; min-height: 120px; resize: vertical; }

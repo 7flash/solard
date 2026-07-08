@@ -107,12 +107,45 @@ type TokenWatchGroup = {
   tokens: TokenWatchToken[];
 };
 
+type TelegramSignalSource = {
+  id: string;
+  kind: "telegram" | "manual";
+  name: string;
+  chatRef?: string | null;
+  isActive: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+type TelegramSignal = {
+  id: string;
+  sourceId: string | null;
+  sourceName: string | null;
+  receivedAtMs: number;
+  direction: "buy" | "sell" | "watch" | "unknown";
+  confidence: number;
+  text: string;
+  mints: string[];
+  symbols: string[];
+  urls: string[];
+  amountSol: string | null;
+  status: "new" | "watched" | "ignored" | "traded";
+  notes?: string | null;
+};
+
+type TelegramSignalsState = {
+  version: 1;
+  sources: TelegramSignalSource[];
+  signals: TelegramSignal[];
+};
+
 type State = {
   tab:
     | "overview"
     | "wallets"
     | "terminal"
     | "watchlists"
+    | "signals"
     | "launch"
     | "trade"
     | "jobs";
@@ -158,6 +191,11 @@ type State = {
   watchGroups: TokenWatchGroup[];
   selectedWatchGroupId: string | null;
   watchGroupName: string;
+  signals: TelegramSignalsState | null;
+  signalSourceName: string;
+  signalSourceChatRef: string;
+  signalSourceId: string;
+  signalText: string;
 };
 
 const state: State = {
@@ -207,6 +245,11 @@ const state: State = {
   watchGroups: [],
   selectedWatchGroupId: null,
   watchGroupName: "main",
+  signals: null,
+  signalSourceName: "Telegram alpha",
+  signalSourceChatRef: "",
+  signalSourceId: "",
+  signalText: "",
 };
 
 function pageFromPath(): State["tab"] {
@@ -214,6 +257,7 @@ function pageFromPath(): State["tab"] {
   if (path.endsWith("/wallets")) return "wallets";
   if (path.endsWith("/terminal")) return "terminal";
   if (path.endsWith("/watchlists")) return "watchlists";
+  if (path.endsWith("/signals")) return "signals";
   if (path.endsWith("/launch")) return "launch";
   if (path.endsWith("/trade")) return "trade";
   if (path.endsWith("/activity")) return "jobs";
@@ -563,6 +607,23 @@ async function refreshWatchGroups(): Promise<void> {
   ) {
     state.selectedWatchGroupId = state.watchGroups[0]?.id ?? null;
   }
+}
+
+async function refreshSignals(): Promise<void> {
+  state.signals = await api<TelegramSignalsState>("/api/signals");
+  const source = state.signals.sources[0];
+  if (!state.signalSourceId && source) state.signalSourceId = source.id;
+}
+
+async function signalAction(
+  action: string,
+  payload: AnyRow = {},
+): Promise<void> {
+  const result = await api<any>("/api/signals", {
+    method: "POST",
+    body: JSON.stringify({ action, ...payload }),
+  });
+  state.signals = action === "ingest" && result?.state ? result.state : result;
 }
 
 async function refreshPumpLive(): Promise<void> {
@@ -2766,6 +2827,218 @@ function TradeView() {
   );
 }
 
+function SignalsView() {
+  const signals = state.signals;
+  const sources = signals?.sources ?? [];
+  const rows = signals?.signals ?? [];
+  const activeSource =
+    sources.find((source) => source.id === state.signalSourceId) ??
+    sources[0] ??
+    null;
+  return (
+    <div className="signals-layout">
+      <div className="activity-hero">
+        <div>
+          <div className="section-kicker">Telegram signals</div>
+          <h2>Signal parser</h2>
+          <p className="muted">
+            Paste Telegram calls or wire a connector later. The parser extracts
+            mint addresses, symbols, links, side, and SOL sizing into the shared
+            Solard database state.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => void runAction(refreshSignals)}
+        >
+          Refresh signals
+        </button>
+      </div>
+
+      <div className="grid two">
+        <form
+          className="card"
+          onSubmit={(event: any) => {
+            event.preventDefault();
+            void runAction(async () => {
+              await signalAction("upsert-source", {
+                name: state.signalSourceName,
+                chatRef: state.signalSourceChatRef,
+              });
+              await refreshSignals();
+            });
+          }}
+        >
+          <h3>Sources</h3>
+          <div className="form-grid">
+            <label>
+              Name
+              <input
+                value={state.signalSourceName}
+                onInput={(event: any) => {
+                  state.signalSourceName = event.currentTarget.value;
+                }}
+              />
+            </label>
+            <label>
+              Telegram group/channel ref
+              <input
+                placeholder="@group, invite, chat id"
+                value={state.signalSourceChatRef}
+                onInput={(event: any) => {
+                  state.signalSourceChatRef = event.currentTarget.value;
+                }}
+              />
+            </label>
+            <button className="secondary full">Save source</button>
+          </div>
+          <div className="source-list">
+            {sources.map((source) => (
+              <button
+                type="button"
+                className={`source-row ${activeSource?.id === source.id ? "active-row" : ""}`}
+                onClick={() => {
+                  state.signalSourceId = source.id;
+                  state.signalSourceName = source.name;
+                  state.signalSourceChatRef = source.chatRef ?? "";
+                  update();
+                }}
+              >
+                <b>{source.name}</b>
+                <small>{source.chatRef || "manual"}</small>
+              </button>
+            ))}
+          </div>
+        </form>
+
+        <form
+          className="card"
+          onSubmit={(event: any) => {
+            event.preventDefault();
+            void runAction(async () => {
+              await signalAction("ingest", {
+                sourceId: activeSource?.id ?? null,
+                text: state.signalText,
+              });
+              state.signalText = "";
+              await refreshSignals();
+            });
+          }}
+        >
+          <h3>Manual ingest</h3>
+          <label>
+            Paste Telegram signal
+            <textarea
+              rows={8}
+              value={state.signalText}
+              onInput={(event: any) => {
+                state.signalText = event.currentTarget.value;
+              }}
+              placeholder="Example: BUY $ABC 0.2 SOL mint 7x... website https://..."
+            />
+          </label>
+          <div className="row">
+            <button>Parse signal</button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                state.signalText = "";
+                update();
+              }}
+            >
+              Clear text
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() =>
+                void runAction(async () => {
+                  await signalAction("clear");
+                  await refreshSignals();
+                })
+              }
+            >
+              Clear signals
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div className="card">
+        <h3>Parsed signals</h3>
+        <table className="clean-table signals-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Side</th>
+              <th>Source</th>
+              <th>Mint / symbol</th>
+              <th>Amount</th>
+              <th>Links</th>
+              <th>Status</th>
+              <th>Text</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((signal) => (
+              <tr>
+                <td className="code">
+                  {new Date(signal.receivedAtMs).toLocaleTimeString()}
+                </td>
+                <td>
+                  <span
+                    className={`pill ${signal.direction === "buy" ? "good" : signal.direction === "sell" ? "bad" : ""}`}
+                  >
+                    {signal.direction}
+                  </span>
+                </td>
+                <td>{signal.sourceName ?? "manual"}</td>
+                <td className="code">
+                  {signal.mints[0]
+                    ? short(signal.mints[0])
+                    : signal.symbols.map((symbol) => `$${symbol}`).join(", ") ||
+                      "—"}
+                </td>
+                <td>{signal.amountSol ? `${signal.amountSol} SOL` : "—"}</td>
+                <td>
+                  {signal.urls.slice(0, 2).map((url) => (
+                    <a target="_blank" href={url}>
+                      link
+                    </a>
+                  ))}
+                </td>
+                <td>
+                  <select
+                    value={signal.status}
+                    onChange={(event: any) =>
+                      void runAction(async () => {
+                        await signalAction("status", {
+                          id: signal.id,
+                          status: event.currentTarget.value,
+                        });
+                        await refreshSignals();
+                      })
+                    }
+                  >
+                    <option value="new">new</option>
+                    <option value="watched">watched</option>
+                    <option value="ignored">ignored</option>
+                    <option value="traded">traded</option>
+                  </select>
+                </td>
+                <td className="signal-text">{signal.text}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length ? <p className="muted">No signals yet.</p> : null}
+      </div>
+    </div>
+  );
+}
+
 function JobsView() {
   const selected = state.selectedJob ?? state.jobs[0] ?? null;
   const jobs = state.jobs;
@@ -2951,6 +3224,8 @@ function App() {
         <TerminalView />
       ) : state.tab === "watchlists" ? (
         <WatchlistsView />
+      ) : state.tab === "signals" ? (
+        <SignalsView />
       ) : state.tab === "launch" ? (
         <LaunchView />
       ) : state.tab === "trade" ? (
@@ -2979,6 +3254,7 @@ export default function mount() {
     await refreshStatus();
     await refreshJobs();
     await refreshPumpLive();
+    await refreshSignals();
   });
   void startPumpFeed();
   const interval = setInterval(() => {
@@ -2988,6 +3264,10 @@ export default function mount() {
         .catch(() => undefined);
     if (state.tab === "watchlists" || state.tab === "terminal")
       void refreshPumpLive()
+        .then(update)
+        .catch(() => undefined);
+    if (state.tab === "signals")
+      void refreshSignals()
         .then(update)
         .catch(() => undefined);
     void refreshStatus()

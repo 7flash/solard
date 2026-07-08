@@ -1,10 +1,10 @@
 export default function Page() {
   return (
-    <main className="shell page-shell" data-page="wallets">
+    <main className="shell page-shell" data-page="signals">
       <aside className="side-nav">
         <div className="brand-block">
           <p className="eyebrow">SOLARD</p>
-          <h1>WALLETS</h1>
+          <h1>SIGNALS</h1>
         </div>
         <nav className="nav-list" id="main-nav">
           <a data-page="overview" className="" href="/">
@@ -16,13 +16,13 @@ export default function Page() {
           <a data-page="watchlists" className="" href="/watchlists">
             Watchlists
           </a>
-          <a data-page="signals" className="" href="/signals">
+          <a data-page="signals" className="active" href="/signals">
             Signals
           </a>
           <a data-page="launch" className="" href="/launch">
             Launch
           </a>
-          <a data-page="wallets" className="active" href="/wallets">
+          <a data-page="wallets" className="" href="/wallets">
             Wallets
           </a>
           <a data-page="trade" className="" href="/trade">
@@ -46,14 +46,14 @@ export default function Page() {
         <header className="page-header">
           <div>
             <p className="eyebrow">SOLARD // LOCAL COMMAND CONSOLE</p>
-            <h2>Wallets and groups.</h2>
+            <h2>Telegram signal parser.</h2>
             <p className="muted">
-              Manage encrypted local wallets, buyer groups, balances, and token
-              holdings.
+              Capture Telegram group calls, parse mints/symbols/links/sizing,
+              and promote signals into watch/trade workflows.
             </p>
           </div>
         </header>
-        <section id="app-root" data-page="wallets" className="panel">
+        <section id="app-root" data-page="signals" className="panel">
           Loading console…
         </section>
       </section>
