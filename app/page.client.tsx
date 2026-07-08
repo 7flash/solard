@@ -1138,18 +1138,25 @@ function Stats() {
   );
   const hiddenRetries =
     (data?.executions ?? []).length - visibleExecutions.length;
+  const walletCount = data?.wallets.length ?? 0;
+  const balanceCount = data?.balances.length ?? 0;
   return (
     <div className="home-metrics">
       <div className="metric-card">
-        <div className="muted small">Wallets</div>
-        <div className="stat">{data?.wallets.length ?? "—"}</div>
+        <div className="muted small">Wallets loaded</div>
+        <div className="stat">{walletCount || "—"}</div>
+        <div className="muted small">
+          {balanceCount
+            ? `${balanceCount}/${walletCount} balance rows`
+            : "waiting for overview"}
+        </div>
       </div>
       <div className="metric-card">
         <div className="muted small">Groups</div>
         <div className="stat">{data?.groups.length ?? "—"}</div>
       </div>
       <div className="metric-card">
-        <div className="muted small">Tokens</div>
+        <div className="muted small">Tokens tracked</div>
         <div className="stat">{data?.tokens.length ?? "—"}</div>
       </div>
       <div className="metric-card">
@@ -1163,6 +1170,21 @@ function Stats() {
       </div>
     </div>
   );
+}
+
+function walletHoldingsChips(tokens: AnyRow[] | undefined): any {
+  const rows = tokens ?? [];
+  if (!rows.length)
+    return <span className="muted tiny">no non-zero token holdings</span>;
+  return rows.slice(0, 12).map((token: AnyRow) => (
+    <span
+      className="holding"
+      title={`${token.mint ?? ""} ${token.amountUi ?? token.amountRaw ?? ""}`}
+    >
+      {token.symbol ? `$${token.symbol}` : short(token.mint, 3, 3)}{" "}
+      {token.amountUi ?? token.amountRaw}
+    </span>
+  ));
 }
 
 function OverviewView() {
@@ -1215,7 +1237,13 @@ function OverviewView() {
       <div className="home-columns">
         <div className="card">
           <div className="row between">
-            <h2>Wallet balances</h2>
+            <div>
+              <h2>Wallet balances</h2>
+              <div className="muted small">
+                Showing all {(data?.balances ?? []).length} wallets from the
+                local encrypted store.
+              </div>
+            </div>
             <button
               type="button"
               className="secondary compact"
@@ -1224,43 +1252,48 @@ function OverviewView() {
               Manage
             </button>
           </div>
-          <table className="clean-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Address</th>
-                <th>SOL / holdings</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(data?.balances ?? []).slice(0, 12).map((row: AnyRow) => (
+          <div className="wallet-balance-scroll">
+            <table className="clean-table wallet-table">
+              <thead>
                 <tr>
-                  <td>{row.wallet?.name ?? "—"}</td>
-                  <td className="code">{short(row.wallet?.address)}</td>
-                  <td>
-                    <div className="balance-main">
-                      {solFromLamports(row.solLamports)} SOL
-                    </div>
-                    <div className="holdings">
-                      {(row.visibleTokenBalances ?? [])
-                        .slice(0, 8)
-                        .map((token: AnyRow) => (
-                          <span className="holding">
-                            {token.symbol
-                              ? `$${token.symbol}`
-                              : short(token.mint, 3, 3)}{" "}
-                            {token.amountUi ?? token.amountRaw}
-                          </span>
-                        ))}
-                    </div>
-                    {row.balanceWarning ? (
-                      <div className="muted tiny">partial balance data</div>
-                    ) : null}
-                  </td>
+                  <th>Name</th>
+                  <th>Address</th>
+                  <th>SOL</th>
+                  <th>Non-zero holdings</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(data?.balances ?? []).map((row: AnyRow) => (
+                  <tr>
+                    <td className="strong-cell">{row.wallet?.name ?? "—"}</td>
+                    <td
+                      className="code address-cell"
+                      title={row.wallet?.address}
+                    >
+                      {short(row.wallet?.address)}
+                    </td>
+                    <td className="sol-cell">
+                      {solFromLamports(row.solLamports)} SOL
+                    </td>
+                    <td>
+                      <div className="holdings">
+                        {walletHoldingsChips(row.visibleTokenBalances)}
+                      </div>
+                      {row.balanceWarning ? (
+                        <div className="muted tiny">partial balance data</div>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!(data?.balances ?? []).length ? (
+            <p className="muted">
+              No wallets returned by overview yet. Check SOWL_MASTER_KEY /
+              SOLARD_MASTER_KEY and refresh.
+            </p>
+          ) : null}
         </div>
         <div className="card">
           <div className="row between">

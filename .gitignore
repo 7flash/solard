@@ -22,3 +22,5 @@ package-lock.json
 bun.lock
 metadata
 .config.toml
+
+*.db

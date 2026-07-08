@@ -845,3 +845,45 @@ html, body { width: 100%; overflow-x: hidden; }
   .page-shell { grid-template-columns: 1fr; }
   .connection-strip { grid-template-columns: 1fr; }
 }
+
+/* Home all-wallet polish */
+.home-top { padding: 16px; }
+.home-columns { grid-template-columns: minmax(0, 1.28fr) minmax(340px, .72fr); }
+.wallet-balance-scroll {
+  margin-top: 10px;
+  max-height: min(62vh, 760px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: #05070a;
+}
+.wallet-table { min-width: 820px; }
+.wallet-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #090b0f;
+  border-bottom: 1px solid var(--line-strong);
+}
+.wallet-table th:nth-child(1), .wallet-table td:nth-child(1) { width: 150px; }
+.wallet-table th:nth-child(2), .wallet-table td:nth-child(2) { width: 140px; }
+.wallet-table th:nth-child(3), .wallet-table td:nth-child(3) { width: 130px; text-align: right; white-space: nowrap; }
+.wallet-table th:nth-child(4), .wallet-table td:nth-child(4) { width: auto; }
+.strong-cell { font-weight: 950; color: var(--text); }
+.address-cell { white-space: nowrap; }
+.sol-cell { font-weight: 950; color: var(--green); }
+.holdings { max-width: none; overflow: visible; }
+.holding { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.connection-strip {
+  align-items: stretch;
+  grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(120px, 1fr)) minmax(180px, 1.2fr) minmax(120px, .8fr) auto;
+}
+.conn-cell, .conn-select, .conn-amount { min-height: 64px; }
+.conn-cell:first-child { grid-column: auto; }
+@media (max-width: 1100px) {
+  .home-columns { grid-template-columns: 1fr; }
+  .connection-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .wallet-balance-scroll { max-height: 70vh; }
+  .connection-strip { grid-template-columns: 1fr; }
+}
