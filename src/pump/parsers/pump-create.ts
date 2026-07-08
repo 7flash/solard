@@ -1,6 +1,7 @@
 import bs58 from "bs58";
 
 export const PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const CREATE_D8 = Buffer.from([24, 30, 200, 40, 5, 28, 7, 119]);
 const CREATE_V2_D8 = Buffer.from([214, 144, 76, 236, 95, 139, 49, 180]);
 
 type Raw = Record<string, unknown>;
@@ -16,7 +17,7 @@ function readString(
   if (offset + 4 > buffer.length) return null;
   const length = buffer.readUInt32LE(offset);
   offset += 4;
-  if (length > 1024 || offset + length > buffer.length) return null;
+  if (length > 2048 || offset + length > buffer.length) return null;
   const value = buffer.subarray(offset, offset + length).toString("utf8");
   return { value, offset: offset + length };
 }
@@ -28,8 +29,14 @@ export function parsePumpCreateData(data: string): Partial<Raw> | null {
   } catch {
     return null;
   }
-  if (buffer.length < 8 || !buffer.subarray(0, 8).equals(CREATE_V2_D8))
-    return null;
+  if (buffer.length < 8) return null;
+  const d8 = buffer.subarray(0, 8);
+  const createKind = d8.equals(CREATE_V2_D8)
+    ? "create_v2"
+    : d8.equals(CREATE_D8)
+      ? "create"
+      : null;
+  if (!createKind) return null;
   let offset = 8;
   const name = readString(buffer, offset);
   if (!name) return null;
@@ -44,9 +51,10 @@ export function parsePumpCreateData(data: string): Partial<Raw> | null {
     offset + 32 <= buffer.length
       ? bs58.encode(buffer.subarray(offset, offset + 32))
       : null;
-  offset += creator ? 32 : 0;
+  if (creator) offset += 32;
   const mayhemMode = offset < buffer.length ? buffer[offset] === 1 : null;
   return {
+    createKind,
     name: name.value,
     symbol: symbol.value,
     uri: uri.value,
@@ -64,14 +72,31 @@ export function txAccountKey(value: unknown): string | null {
   return null;
 }
 
+function collectAccountKeys(message: Raw): string[] {
+  const accountKeys = Array.isArray(message.accountKeys)
+    ? (message.accountKeys.map(txAccountKey).filter(Boolean) as string[])
+    : [];
+  const lookups = (message as any).loadedAddresses;
+  const writable = Array.isArray(lookups?.writable)
+    ? (lookups.writable.map(txAccountKey).filter(Boolean) as string[])
+    : [];
+  const readonly = Array.isArray(lookups?.readonly)
+    ? (lookups.readonly.map(txAccountKey).filter(Boolean) as string[])
+    : [];
+  return [...accountKeys, ...writable, ...readonly];
+}
+
+function accountAt(accounts: string[], index: number): string | null {
+  return typeof accounts[index] === "string" ? accounts[index] : null;
+}
+
 export function findPumpCreateInTransaction(
   tx: Raw,
   signature: string,
 ): Raw | null {
-  const message = ((tx.transaction as Raw | undefined)?.message ?? {}) as Raw;
-  const accountKeys = Array.isArray(message.accountKeys)
-    ? (message.accountKeys.map(txAccountKey).filter(Boolean) as string[])
-    : [];
+  const transaction = (tx.transaction as Raw | undefined) ?? {};
+  const message = ((transaction.message as Raw | undefined) ?? {}) as Raw;
+  const accountKeys = collectAccountKeys(message);
   const instructions = Array.isArray(message.instructions)
     ? (message.instructions as Raw[])
     : [];
@@ -92,17 +117,21 @@ export function findPumpCreateInTransaction(
     const decoded =
       typeof ix.data === "string" ? parsePumpCreateData(ix.data) : null;
     if (!decoded) continue;
+    const user = accountAt(accounts, 7) ?? accountAt(accounts, 5);
     return {
       txType: "create",
       source: "helius-logs",
       signature,
-      mint: accounts[0] ?? null,
-      creator: clean(decoded.creator) ?? accounts[5] ?? null,
-      traderPublicKey: clean(decoded.creator) ?? accounts[5] ?? null,
+      mint: accountAt(accounts, 0),
+      creator: clean(decoded.creator) ?? user,
+      traderPublicKey: clean(decoded.creator) ?? user,
       name: decoded.name,
       symbol: decoded.symbol,
       uri: decoded.uri,
       isMayhemMode: decoded.isMayhemMode,
+      createKind: decoded.createKind,
+      bondingCurveKey: accountAt(accounts, 2),
+      associatedBondingCurve: accountAt(accounts, 3),
       quoteAsset: "SOL",
       rawTransactionSlot: tx.slot ?? null,
     };

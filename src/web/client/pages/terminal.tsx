@@ -2,20 +2,15 @@ import {
   state,
   update,
   runAction,
-  mountPage,
   startPumpFeed,
   stopPumpFeed,
   short,
-  formatSol,
   tokenUrl,
   tokenImage,
-  TokenBadges,
   passesBadgeFilters,
   formatMcap,
   latestMcap,
-  mcapChange,
   mcapChangePct,
-  formatSignedMcap,
   formatPct,
   sortFeedRows,
   age,
@@ -65,9 +60,9 @@ function inspectRow(row: PumpFeedRow): void {
 }
 
 function SocialLinks({ row }: { row: PumpFeedRow }) {
-  const links = tokenSocialLinks(row);
+  const links = tokenSocialLinks(row).filter((link) => link.kind !== "uri");
   return (
-    <div className="inspector-socials">
+    <div className="terminal-socials">
       {links.length ? (
         links.slice(0, 5).map((link) => (
           <a href={link.href} target="_blank" rel="noreferrer">
@@ -88,12 +83,16 @@ function HolderList({ mint }: { mint?: string | null }) {
   if (loading && !holders.length)
     return <p className="muted tiny">loading holders…</p>;
   if (!holders.length)
-    return <p className="muted tiny">holders not loaded yet</p>;
+    return (
+      <p className="muted tiny">
+        hover keeps inspector here; click refresh holders.
+      </p>
+    );
   return (
-    <div className="holder-list">
-      {holders.slice(0, 12).map((holder: TokenHolder, index: number) => (
+    <div className="terminal-holder-list">
+      {holders.slice(0, 10).map((holder: TokenHolder, index: number) => (
         <a
-          className="holder-row"
+          className="terminal-holder"
           href={`https://solscan.io/account/${holder.owner ?? holder.tokenAccount}`}
           target="_blank"
           rel="noreferrer"
@@ -107,17 +106,17 @@ function HolderList({ mint }: { mint?: string | null }) {
   );
 }
 
-function SmaMini({ row }: { row: PumpFeedRow }) {
+function SmaInline({ row }: { row: PumpFeedRow }) {
   return (
-    <div className="sma-mini">
-      <span>{formatMcap(row.sma1m)}</span>
-      <span>{formatMcap(row.sma5m)}</span>
-      <span>{formatMcap(row.sma15m)}</span>
-    </div>
+    <span className="terminal-sma-inline">
+      <b>{formatMcap(row.sma1m)}</b>
+      <b>{formatMcap(row.sma5m)}</b>
+      <b>{formatMcap(row.sma15m)}</b>
+    </span>
   );
 }
 
-async function addPinnedToWatch(row: PumpFeedRow): Promise<void> {
+async function addToSelectedWatch(row: PumpFeedRow): Promise<void> {
   const group = selectedWatchGroup() ?? state.watchGroups[0];
   if (!group) throw new Error("Create or select a watch group first");
   if (!row.mint) throw new Error("Token mint is required");
@@ -164,26 +163,23 @@ export function TerminalPage() {
   const rows = sortPinnedFirst(sortFeedRows(filteredRows));
   const inspector = chooseInspector(rows);
   const currentMcap = latestMcap(inspector ?? {});
-  const currentDelta = mcapChange(inspector ?? {});
+  const currentDeltaPct = mcapChangePct(inspector ?? {});
 
   return (
-    <div className="terminal-compact">
-      <section className="terminal-topline">
-        <div className="terminal-titleline">
+    <div className="terminal-page-only">
+      <section className="terminal-commandbar">
+        <div className="terminal-title-compact">
           <span
             className={`dot ${state.pumpFeedStatus === "connected" ? "good" : state.pumpFeedStatus === "error" ? "bad" : ""}`}
           />
-          <h2>Pump terminal</h2>
+          <h2>Pump</h2>
           <span className="muted tiny">
-            {state.pumpFeedSource === "helius" ? "Helius direct" : "PumpPortal"}{" "}
-            · {rows.length}/{state.pumpFeed.length} shown ·{" "}
+            {state.pumpFeedSource === "helius" ? "Helius" : "PumpPortal"} ·{" "}
+            {rows.length}/{state.pumpFeed.length} ·{" "}
             {state.terminalPinnedMints.length} pinned
           </span>
-          {state.pumpFeedError ? (
-            <span className="pill bad">{state.pumpFeedError}</span>
-          ) : null}
         </div>
-        <div className="terminal-controls-inline">
+        <div className="terminal-actions-compact">
           <select
             value={state.pumpFeedSource}
             onInput={(event: any) => {
@@ -257,7 +253,7 @@ export function TerminalPage() {
               update();
             }}
           />
-          <label className="switch micro-switch">
+          <label className="terminal-sim">
             <input
               type="checkbox"
               checked={state.terminalQuickLive}
@@ -270,15 +266,18 @@ export function TerminalPage() {
                 update();
               }}
             />
-            <span>{state.terminalQuickLive ? "LIVE" : "SIM"}</span>
+            {state.terminalQuickLive ? "LIVE" : "SIM"}
           </label>
         </div>
+        {state.pumpFeedError ? (
+          <div className="terminal-error">{state.pumpFeedError}</div>
+        ) : null}
       </section>
 
-      <section className="terminal-filterline">
+      <section className="terminal-filterbar">
         <input
           value={state.pumpFeedFilter}
-          placeholder="filter symbol / name / mint / creator"
+          placeholder="filter symbol / name"
           onInput={(event: any) => {
             state.pumpFeedFilter = event.currentTarget.value;
             update();
@@ -295,14 +294,13 @@ export function TerminalPage() {
           <option value="newest">newest</option>
           <option value="mcap-desc">mcap ↓</option>
           <option value="mcap-asc">mcap ↑</option>
-          <option value="mcap-change-desc">Δ SOL ↓</option>
-          <option value="mcap-change-pct-desc">Δ % ↓</option>
+          <option value="mcap-change-pct-desc">Δ% ↓</option>
           <option value="sma1m-desc">SMA 1m ↓</option>
           <option value="sma5m-desc">SMA 5m ↓</option>
           <option value="sma15m-desc">SMA 15m ↓</option>
           <option value="trades-desc">trades ↓</option>
         </select>
-        <label className="switch micro-switch">
+        <label>
           <input
             type="checkbox"
             checked={state.hideMayhem}
@@ -314,10 +312,10 @@ export function TerminalPage() {
               );
               update();
             }}
-          />
-          <span>hide mayhem</span>
+          />{" "}
+          hide mayhem
         </label>
-        <label className="switch micro-switch">
+        <label>
           <input
             type="checkbox"
             checked={state.hideUsdc}
@@ -329,8 +327,8 @@ export function TerminalPage() {
               );
               update();
             }}
-          />
-          <span>hide usdc</span>
+          />{" "}
+          hide usdc
         </label>
         <button
           type="button"
@@ -338,37 +336,32 @@ export function TerminalPage() {
           onClick={() => {
             state.pumpFeed = [];
             followLatestInTerminalInspector();
+            update();
           }}
         >
           clear
         </button>
       </section>
 
-      <section className="terminal-split compact-split">
-        <div className="terminal-feed-compact">
-          <table className="terminal-feed-table">
+      <section className="terminal-grid-tight">
+        <div className="terminal-table-wrap">
+          <table className="terminal-tight-table">
             <thead>
               <tr>
                 <th></th>
                 <th>token</th>
                 <th>mcap</th>
-                <th>Δ</th>
                 <th>Δ%</th>
-                <th className="sma-head">
-                  SMA
-                  <br />
-                  <span>1m / 5m / 15m</span>
-                </th>
+                <th>SMA 1/5/15</th>
                 <th>trd</th>
                 <th>age</th>
-                <th></th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => {
                 const pinned = isTerminalPinned(row);
                 const inspected =
-                  pumpRowKey(row) === pumpRowKey(inspector ?? {});
+                  inspector && pumpRowKey(row) === pumpRowKey(inspector);
                 return (
                   <tr
                     className={`${pinned ? "pinned-row" : ""} ${inspected ? "inspected-row" : ""}`}
@@ -388,7 +381,7 @@ export function TerminalPage() {
                         {pinned ? "◆" : "◇"}
                       </button>
                     </td>
-                    <td className="feed-token-link">
+                    <td className="terminal-token-cell">
                       <a
                         href={tokenUrl(row.mint)}
                         target="_blank"
@@ -396,35 +389,17 @@ export function TerminalPage() {
                         onFocus={() => inspectRow(row)}
                       >
                         {tokenImage(row) ? (
-                          <img
-                            className="token-img compact-img"
-                            src={tokenImage(row)!}
-                            loading="lazy"
-                          />
+                          <img src={tokenImage(row)!} loading="lazy" />
                         ) : (
-                          <span className="token-img compact-img placeholder" />
+                          <span className="img-placeholder" />
                         )}
                         <span>
                           <b>{row.symbol ? `$${row.symbol}` : "—"}</b>
-                          <small>
-                            {row.name ?? row.eventType ?? "new token"}
-                          </small>
+                          <small>{row.name ?? "new token"}</small>
                         </span>
-                        <TokenBadges {...row} />
                       </a>
                     </td>
                     <td className="num-cell">{formatMcap(latestMcap(row))}</td>
-                    <td
-                      className={
-                        mcapChange(row) != null && mcapChange(row)! > 0
-                          ? "gain"
-                          : mcapChange(row) != null && mcapChange(row)! < 0
-                            ? "loss"
-                            : ""
-                      }
-                    >
-                      {formatSignedMcap(mcapChange(row))}
-                    </td>
                     <td
                       className={
                         mcapChangePct(row) != null && mcapChangePct(row)! > 0
@@ -438,7 +413,7 @@ export function TerminalPage() {
                       {formatPct(mcapChangePct(row))}
                     </td>
                     <td>
-                      <SmaMini row={row} />
+                      <SmaInline row={row} />
                     </td>
                     <td>{row.trades?.length ?? 0}</td>
                     <td>
@@ -447,34 +422,6 @@ export function TerminalPage() {
                         : row.createdAtMs
                           ? age(row.createdAtMs)
                           : "—"}
-                    </td>
-                    <td>
-                      <div className="row-actions nowrap">
-                        <button
-                          type="button"
-                          className="primary compact"
-                          disabled={!row.mint || !state.terminalDefaultWallet}
-                          onClick={(event: any) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            void runAction(() => quickBuyPumpFeedRow(row));
-                          }}
-                        >
-                          {state.terminalQuickLive ? "BUY" : "SIM"}
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary compact"
-                          disabled={!row.mint}
-                          onClick={(event: any) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            void runAction(() => starPumpFeedRow(row));
-                          }}
-                        >
-                          ★
-                        </button>
-                      </div>
                     </td>
                   </tr>
                 );
@@ -489,52 +436,52 @@ export function TerminalPage() {
           ) : null}
         </div>
 
-        <aside className="terminal-inspector-compact">
-          <div className="inspector-headline">
+        <aside className="terminal-hover-inspector">
+          <header>
             <span className="section-kicker">Inspector</span>
             <button
               type="button"
               className="secondary compact"
-              onClick={followLatestInTerminalInspector}
+              onClick={() => {
+                followLatestInTerminalInspector();
+                update();
+              }}
             >
               latest
             </button>
-          </div>
+          </header>
           {inspector ? (
-            <div className="inspector-content compact-inspector">
-              <div className="inspector-token compact-token">
+            <div className="terminal-inspector-body">
+              <div className="terminal-inspector-token">
                 {tokenImage(inspector) ? (
-                  <img
-                    className="token-img xlarge"
-                    src={tokenImage(inspector)!}
-                    loading="lazy"
-                  />
+                  <img src={tokenImage(inspector)!} loading="lazy" />
                 ) : (
-                  <div className="token-img xlarge placeholder" />
+                  <div className="img-placeholder large" />
                 )}
                 <div>
                   <h3>{inspector.symbol ? `$${inspector.symbol}` : "Token"}</h3>
-                  <p className="muted tiny">
-                    {inspector.name ?? inspector.mint ?? "latest feed event"}
-                  </p>
+                  <p>{inspector.name ?? "latest feed token"}</p>
                   <SocialLinks row={inspector} />
                 </div>
               </div>
-              <div className="inspector-actions compact-actions">
+              <div className="terminal-inspector-actions">
                 <button
                   type="button"
                   className={`secondary compact ${isTerminalPinned(inspector) ? "active" : ""}`}
                   disabled={!inspector.mint}
-                  onClick={() => toggleTerminalPinned(inspector)}
+                  onClick={() => {
+                    toggleTerminalPinned(inspector);
+                    update();
+                  }}
                 >
-                  {isTerminalPinned(inspector) ? "unpin" : "pin top"}
+                  {isTerminalPinned(inspector) ? "unpin" : "pin"}
                 </button>
                 <button
                   type="button"
                   className="secondary compact"
                   disabled={!inspector.mint}
                   onClick={() =>
-                    void runAction(() => addPinnedToWatch(inspector))
+                    void runAction(() => addToSelectedWatch(inspector))
                   }
                 >
                   watch
@@ -549,37 +496,56 @@ export function TerminalPage() {
                 >
                   {state.terminalQuickLive ? "BUY" : "SIM"}
                 </button>
+                <button
+                  type="button"
+                  className="secondary compact"
+                  disabled={!inspector.mint}
+                  onClick={() => void starPumpFeedRow(inspector)}
+                >
+                  ★
+                </button>
               </div>
-              <div className="kv-grid dense-kv">
+              <div className="terminal-kv">
                 <span>MCap</span>
-                <b>{formatMcap(currentMcap)}</b>
-                <span>Δ SOL</span>
-                <b>{formatSignedMcap(currentDelta)}</b>
+                <b>{formatMcap(currentMcap)} SOL</b>
                 <span>Δ %</span>
-                <b>{formatPct(mcapChangePct(inspector))}</b>
+                <b
+                  className={
+                    currentDeltaPct != null && currentDeltaPct > 0
+                      ? "gain"
+                      : currentDeltaPct != null && currentDeltaPct < 0
+                        ? "loss"
+                        : ""
+                  }
+                >
+                  {formatPct(currentDeltaPct)}
+                </b>
                 <span>SMA 1m</span>
                 <b>{formatMcap(inspector.sma1m)}</b>
                 <span>SMA 5m</span>
                 <b>{formatMcap(inspector.sma5m)}</b>
                 <span>SMA 15m</span>
                 <b>{formatMcap(inspector.sma15m)}</b>
+                <span>Trades</span>
+                <b>{inspector.trades?.length ?? 0}</b>
                 <span>Mint</span>
                 <a
-                  className="code"
                   href={tokenUrl(inspector.mint)}
                   target="_blank"
                   rel="noreferrer"
                 >
-                  {short(inspector.mint, 5, 5)}
+                  {short(inspector.mint ?? "", 5, 5)}
                 </a>
               </div>
-              <div className="holder-section">
-                <div className="row between">
-                  <h4>Top holders</h4>
+              <div className="terminal-holders">
+                <div>
+                  <b>Top holders</b>
                   <button
+                    type="button"
                     className="secondary compact"
                     disabled={!inspector.mint}
                     onClick={() =>
+                      inspector.mint &&
                       void refreshTokenHolders(inspector.mint).then(update)
                     }
                   >
@@ -588,20 +554,21 @@ export function TerminalPage() {
                 </div>
                 <HolderList mint={inspector.mint} />
               </div>
-              <details>
+              <details className="raw-json">
                 <summary>raw</summary>
-                <pre>{JSON.stringify(inspector, null, 2)}</pre>
+                <pre>
+                  {JSON.stringify(inspector.raw ?? inspector, null, 2).slice(
+                    0,
+                    4000,
+                  )}
+                </pre>
               </details>
             </div>
           ) : (
-            <p className="muted">No event selected yet.</p>
+            <p className="muted">No token selected yet.</p>
           )}
         </aside>
       </section>
     </div>
   );
-}
-
-export default function mount() {
-  return mountPage("terminal", TerminalPage);
 }

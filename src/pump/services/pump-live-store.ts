@@ -98,6 +98,32 @@ function num(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function curveMarket(raw: Record<string, unknown>): {
+  marketCapSol: number | null;
+  priceSolPerToken: number | null;
+} {
+  const vSol = num(raw.vSolInBondingCurve) ?? num(raw.virtualSolReservesSol);
+  const vTokens =
+    num(raw.vTokensInBondingCurve) ?? num(raw.virtualTokenReservesTokens);
+  const supply = num(raw.tokenTotalSupply) ?? 1_000_000_000;
+  if (
+    vSol == null ||
+    vTokens == null ||
+    vTokens <= 0 ||
+    supply == null ||
+    supply <= 0
+  )
+    return { marketCapSol: null, priceSolPerToken: null };
+  const priceSolPerToken = vSol / vTokens;
+  const marketCapSol = priceSolPerToken * supply;
+  return {
+    priceSolPerToken: Number.isFinite(priceSolPerToken)
+      ? priceSolPerToken
+      : null,
+    marketCapSol: Number.isFinite(marketCapSol) ? marketCapSol : null,
+  };
+}
+
 function bool(value: unknown): boolean | null {
   if (typeof value === "boolean") return value;
   if (typeof value === "string") {
@@ -638,7 +664,23 @@ function tokenFromRaw(
   const mint = clean(raw.mint);
   if (!mint) return null;
   const now = Date.now();
-  const marketCapSol = num(raw.marketCapSol) ?? existing?.marketCapSol ?? null;
+  const snapshot =
+    raw.bondingCurveSnapshot && typeof raw.bondingCurveSnapshot === "object"
+      ? (raw.bondingCurveSnapshot as Record<string, unknown>)
+      : {};
+  const curve = curveMarket(raw);
+  const marketCapSol =
+    num(raw.marketCapSol) ??
+    num(snapshot.marketCapSol) ??
+    curve.marketCapSol ??
+    existing?.marketCapSol ??
+    null;
+  const priceSolPerToken =
+    num(raw.priceSolPerToken) ??
+    num(snapshot.priceSolPerToken) ??
+    curve.priceSolPerToken ??
+    existing?.priceSolPerToken ??
+    null;
   return {
     mint,
     name: clean(raw.name) ?? existing?.name ?? null,
@@ -669,9 +711,11 @@ function tokenFromRaw(
     createdAtMs: existing?.createdAtMs ?? now,
     updatedAtMs: now,
     receivedAt: new Date(now).toISOString(),
-    lastTradeAtMs: existing?.lastTradeAtMs ?? null,
+    lastTradeAtMs: num(raw.blockTime)
+      ? Number(raw.blockTime) * 1000
+      : (existing?.lastTradeAtMs ?? null),
     marketCapSol,
-    priceSolPerToken: existing?.priceSolPerToken ?? null,
+    priceSolPerToken,
     samples: existing?.samples ?? [],
     trades: existing?.trades ?? [],
     initialMarketCapSol: existing?.initialMarketCapSol ?? marketCapSol,

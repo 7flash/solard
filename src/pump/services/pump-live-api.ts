@@ -16,7 +16,7 @@ import {
   normalizePumpNewToken,
   recordPumpTrade,
   removeTokenFromWatchGroup,
-} from "../../web/pump-live-store.js";
+} from "./pump-live-store.js";
 import {
   PUMP_PROGRAM_ID,
   findPumpCreateInTransaction,
@@ -27,6 +27,90 @@ const DEFAULT_PUMP_FEED_WS_URL = "wss://pumpportal.fun/api/data";
 type Raw = Record<string, unknown>;
 
 type Source = "pumpportal" | "helius";
+
+const LAMPORTS_PER_SOL = 1_000_000_000;
+const PUMP_TOKEN_DECIMALS = 6;
+
+type PumpCurveSnapshot = {
+  virtualTokenReservesRaw: string;
+  virtualSolReservesRaw: string;
+  realTokenReservesRaw: string;
+  realSolReservesRaw: string;
+  tokenTotalSupplyRaw: string;
+  complete: boolean;
+  priceSolPerToken: number | null;
+  marketCapSol: number | null;
+};
+
+function readU64(buffer: Buffer, offset: number): bigint | null {
+  if (offset + 8 > buffer.length) return null;
+  return buffer.readBigUInt64LE(offset);
+}
+
+function decodePumpBondingCurveSnapshot(
+  data: string,
+): PumpCurveSnapshot | null {
+  let buffer: Buffer;
+  try {
+    buffer = Buffer.from(data, "base64");
+  } catch {
+    return null;
+  }
+  if (buffer.length < 49) return null;
+  const virtualTokenReserves = readU64(buffer, 8);
+  const virtualSolReserves = readU64(buffer, 16);
+  const realTokenReserves = readU64(buffer, 24);
+  const realSolReserves = readU64(buffer, 32);
+  const tokenTotalSupply = readU64(buffer, 40);
+  if (
+    virtualTokenReserves == null ||
+    virtualSolReserves == null ||
+    realTokenReserves == null ||
+    realSolReserves == null ||
+    tokenTotalSupply == null
+  )
+    return null;
+  const vTokens = Number(virtualTokenReserves) / 10 ** PUMP_TOKEN_DECIMALS;
+  const vSol = Number(virtualSolReserves) / LAMPORTS_PER_SOL;
+  const totalSupply = Number(tokenTotalSupply) / 10 ** PUMP_TOKEN_DECIMALS;
+  const priceSolPerToken =
+    Number.isFinite(vTokens) && vTokens > 0 ? vSol / vTokens : null;
+  const marketCapSol =
+    priceSolPerToken != null && Number.isFinite(totalSupply) && totalSupply > 0
+      ? priceSolPerToken * totalSupply
+      : null;
+  return {
+    virtualTokenReservesRaw: virtualTokenReserves.toString(),
+    virtualSolReservesRaw: virtualSolReserves.toString(),
+    realTokenReservesRaw: realTokenReserves.toString(),
+    realSolReservesRaw: realSolReserves.toString(),
+    tokenTotalSupplyRaw: tokenTotalSupply.toString(),
+    complete: buffer[48] === 1,
+    priceSolPerToken:
+      priceSolPerToken != null && Number.isFinite(priceSolPerToken)
+        ? priceSolPerToken
+        : null,
+    marketCapSol:
+      marketCapSol != null && Number.isFinite(marketCapSol)
+        ? marketCapSol
+        : null,
+  };
+}
+
+async function loadBondingCurveSnapshot(
+  curve: string | null | undefined,
+): Promise<PumpCurveSnapshot | null> {
+  const key = clean(curve);
+  if (!key) return null;
+  const account = await rpc<Raw | null>("getAccountInfo", [
+    key,
+    { encoding: "base64", commitment: "confirmed" },
+  ]);
+  const data = Array.isArray((account?.value as Raw | undefined)?.data)
+    ? ((account?.value as Raw).data as unknown[])[0]
+    : null;
+  return typeof data === "string" ? decodePumpBondingCurveSnapshot(data) : null;
+}
 
 function sse(event: string, data: unknown): Uint8Array {
   return new TextEncoder().encode(
@@ -154,9 +238,8 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
 async function normalizeHeliusSignature(
   signature: string,
 ): Promise<ReturnType<typeof normalizePumpNewToken> | null> {
-  // Helius/Solana getTransaction does not support commitment below confirmed.
-  // Keep logsSubscribe at processed for fastest detection, then wait/retry here
-  // until the transaction is available at confirmed.
+  // logsSubscribe stays processed for detection speed; getTransaction/getAccountInfo
+  // are fetched at confirmed because Helius rejects getTransaction below confirmed.
   const tx = await rpc<Raw | null>("getTransaction", [
     signature,
     {
@@ -172,7 +255,18 @@ async function normalizeHeliusSignature(
     );
   if ((tx.meta as Raw | undefined)?.err) return null;
   const raw = findPumpCreateInTransaction(tx, signature);
-  return raw ? normalizePumpNewToken(raw) : null;
+  if (!raw) return null;
+  const snapshot = await loadBondingCurveSnapshot(clean(raw.bondingCurveKey));
+  if (snapshot) {
+    raw.bondingCurveSnapshot = snapshot;
+    raw.marketCapSol = snapshot.marketCapSol;
+    raw.priceSolPerToken = snapshot.priceSolPerToken;
+    raw.virtualSolReservesRaw = snapshot.virtualSolReservesRaw;
+    raw.virtualTokenReservesRaw = snapshot.virtualTokenReservesRaw;
+    raw.realSolReservesRaw = snapshot.realSolReservesRaw;
+    raw.realTokenReservesRaw = snapshot.realTokenReservesRaw;
+  }
+  return normalizePumpNewToken(raw);
 }
 
 function runPumpPortalStream(args: {
@@ -599,7 +693,7 @@ export async function handlePumpLivePost(request: Request): Promise<Response> {
             ...(body.token && typeof body.token === "object"
               ? (body.token as Raw)
               : {}),
-          });
+          } as Parameters<typeof addTokenToWatchGroup>[0]);
         if (action === "remove-token")
           return removeTokenFromWatchGroup(
             String(body.groupId ?? ""),

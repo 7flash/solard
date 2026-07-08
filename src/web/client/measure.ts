@@ -3,17 +3,21 @@ import { createMeasure } from "measure-fn";
 const SENSITIVE_KEY =
   /secret|private|mnemonic|seed|keypair|password|authorization|cookie|token/i;
 
-type RawMeasureScope = {
-  measure?:
-    | { assert?: <T>(label: string, fn: () => Promise<T>) => Promise<T> }
-    | ((
-        label: string,
-        fn: () => Promise<unknown>,
-      ) => Promise<unknown> | unknown);
-  measureSync?:
-    | { assert?: <T>(label: string, fn: () => T) => T }
-    | ((label: string, fn?: () => unknown) => unknown);
-};
+type MeasureAction<T = unknown> =
+  | string
+  | {
+      label: string;
+      start?: () => unknown;
+      end?: (value: T) => unknown;
+      result?: (value: T) => unknown;
+      maxResultLength?: number;
+      budget?: number;
+      timeout?: number;
+      meta?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+
+type ScopedMeasure = ReturnType<typeof createMeasure>;
 
 export function summarizeForClient(value: unknown, depth = 0): unknown {
   if (value == null) return value;
@@ -25,7 +29,7 @@ export function summarizeForClient(value: unknown, depth = 0): unknown {
       : value;
   if (value instanceof Error)
     return { name: value.name, message: value.message };
-  if (Array.isArray(value))
+  if (Array.isArray(value)) {
     return depth >= 2
       ? { type: "array", length: value.length }
       : {
@@ -35,6 +39,7 @@ export function summarizeForClient(value: unknown, depth = 0): unknown {
             .slice(0, 2)
             .map((item) => summarizeForClient(item, depth + 1)),
         };
+  }
   if (typeof value === "object") {
     const input = value as Record<string, unknown>;
     const keys = Object.keys(input);
@@ -58,84 +63,57 @@ export function summarizeForClient(value: unknown, depth = 0): unknown {
   return String(value);
 }
 
-function safeMeasure(scope: string): RawMeasureScope | null {
-  try {
-    return createMeasure(scope, { maxResultLength: 1200 }) as RawMeasureScope;
-  } catch {
-    return null;
-  }
-}
-
-async function runMeasured<T>(
-  scope: RawMeasureScope | null,
+function makeAction<T>(
   label: string,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const measure = scope?.measure;
-  if (
-    measure &&
-    typeof measure === "object" &&
-    typeof measure.assert === "function"
-  )
-    return await measure.assert(label, fn);
-  if (typeof measure === "function")
-    return await (measure(label, fn) as Promise<T> | T);
-  return await fn();
-}
-
-function runMeasuredSync<T>(
-  scope: RawMeasureScope | null,
-  label: string,
-  fn: () => T,
-): T {
-  const measureSync = scope?.measureSync;
-  if (
-    measureSync &&
-    typeof measureSync === "object" &&
-    typeof measureSync.assert === "function"
-  )
-    return measureSync.assert(label, fn);
-  if (typeof measureSync === "function") return measureSync(label, fn) as T;
-  return fn();
+  summarize?: (value: T) => unknown,
+): MeasureAction<T> {
+  const result = summarize ?? summarizeForClient;
+  return {
+    label,
+    start: () => label,
+    end: result,
+    result,
+    maxResultLength: 1200,
+  };
 }
 
 export function createClientMeasureScope(scopeName: string) {
-  const scope = safeMeasure(scopeName);
+  const scope: ScopedMeasure = createMeasure(scopeName, {
+    maxResultLength: 1200,
+  });
   return {
     event(label: string, summary?: unknown) {
-      runMeasuredSync(scope, label, () => summarizeForClient(summary));
+      scope.measureSync({
+        label,
+        maxResultLength: 1200,
+        meta: { summary: summarizeForClient(summary) },
+      } as MeasureAction);
     },
+
     async measure<T>(
       label: string,
       operation: () => Promise<T> | T,
       summarize: (value: T) => unknown = summarizeForClient,
     ): Promise<T> {
-      let value!: T;
-      let hasValue = false;
-      await runMeasured(scope, label, async () => {
-        value = await operation();
-        hasValue = true;
-        return summarize(value);
-      });
-      if (!hasValue)
-        throw new Error(`Measured operation produced no value: ${label}`);
-      return value;
+      const result = await scope.measure(
+        makeAction(label, summarize),
+        async () => await operation(),
+      );
+      if (result === null) throw new Error(`measure returned null: ${label}`);
+      return result as T;
     },
+
     measureSync<T>(
       label: string,
       operation: () => T,
       summarize: (value: T) => unknown = summarizeForClient,
     ): T {
-      let value!: T;
-      let hasValue = false;
-      runMeasuredSync(scope, label, () => {
-        value = operation();
-        hasValue = true;
-        return summarize(value);
-      });
-      if (!hasValue)
-        throw new Error(`Measured operation produced no value: ${label}`);
-      return value;
+      const result = scope.measureSync(makeAction(label, summarize), () =>
+        operation(),
+      );
+      if (result === null)
+        throw new Error(`measureSync returned null: ${label}`);
+      return result as T;
     },
   };
 }
