@@ -1,6 +1,7 @@
 import { PublicKey, type Commitment } from "@solana/web3.js";
 import type { Sowl } from "../index.js";
 import { measureSolard, summarizeForMeasure } from "./api-response.js";
+import { listObservedPumpHolders } from "./feed/feed-repo.js";
 
 const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEiNGyNxDbhNQrUVgktvRFw4A9h7";
@@ -12,6 +13,11 @@ export type TokenHolder = {
   amount: string | null;
   uiAmount: string | null;
   decimals: number | null;
+  pctSupply?: number | null;
+  label?: string | null;
+  lastDeltaUi?: number | null;
+  lastSignature?: string | null;
+  source?: string | null;
 };
 
 export type TokenHoldersResult = {
@@ -104,6 +110,35 @@ export async function loadTokenHolders(
       "solard:token-holders",
       `load ${short(mint)}`,
       async () => {
+        const observed = listObservedPumpHolders(mint, limit);
+        if (observed.length > 0) {
+          return {
+            mint,
+            ok: true,
+            unavailableReason: null,
+            holders: observed.map((holder) => ({
+              tokenAccount: holder.owner,
+              owner: holder.owner,
+              amount: holder.balanceRaw,
+              uiAmount:
+                holder.balanceUi == null ? null : String(holder.balanceUi),
+              decimals: 6,
+              pctSupply: holder.pctSupply ?? null,
+              label: holder.label ?? null,
+              lastDeltaUi: holder.lastDeltaUi ?? null,
+              lastSignature: holder.lastSignature ?? null,
+              source: "observed-feed",
+            })),
+          };
+        }
+
+        if (
+          process.env.SOLARD_RPC_HOLDER_LOOKUP !== "1" &&
+          process.env.SOLWAL_RPC_HOLDER_LOOKUP !== "1"
+        ) {
+          return empty(mint, "no observed holders yet");
+        }
+
         const connection = sowl.connection();
 
         let status: "mint" | "missing" | "not-mint" | "unknown" = "unknown";

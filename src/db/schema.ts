@@ -161,6 +161,87 @@ export const TokenWatchGroupTokenSchema = z.object({
   updatedAtMs: z.number(),
 });
 
+export const PumpTokenEventSchema = z.object({
+  mint: z.string(),
+  signature: z.string().nullable().default(null),
+  source: z.string(),
+  eventType: z
+    .enum(["create", "trade", "curve-poll", "metadata", "unknown"])
+    .default("unknown"),
+  name: z.string().nullable().default(null),
+  symbol: z.string().nullable().default(null),
+  creator: z.string().nullable().default(null),
+  uri: z.string().nullable().default(null),
+  image: z.string().nullable().default(null),
+  website: z.string().nullable().default(null),
+  twitter: z.string().nullable().default(null),
+  telegram: z.string().nullable().default(null),
+  bondingCurve: z.string().nullable().default(null),
+  marketCapSol: z.number().nullable().default(null),
+  priceSolPerToken: z.number().nullable().default(null),
+  initialMarketCapSol: z.number().nullable().default(null),
+  lastTradeAtMs: z.number().nullable().default(null),
+  rawJson: z.string().nullable().default(null),
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
+export const PumpSwapSchema = z.object({
+  signature: z.string(),
+  mint: z.string(),
+  slot: z.number().nullable().default(null),
+  blockTime: z.number().nullable().default(null),
+  side: z.enum(["buy", "sell", "unknown"]).default("unknown"),
+  trader: z.string().nullable().default(null),
+  tokenAmountRaw: z.string().nullable().default(null),
+  tokenAmountUi: z.number().nullable().default(null),
+  solAmountLamports: z.string().nullable().default(null),
+  solAmount: z.number().nullable().default(null),
+  marketCapSol: z.number().nullable().default(null),
+  priceSolPerToken: z.number().nullable().default(null),
+  source: z.string(),
+  rawJson: z.string().nullable().default(null),
+  createdAtMs: z.number(),
+});
+
+export const PumpHolderCurrentSchema = z.object({
+  mint: z.string(),
+  owner: z.string(),
+  label: z.string().nullable().default(null),
+  balanceRaw: z.string().nullable().default(null),
+  balanceUi: z.number().nullable().default(null),
+  pctSupply: z.number().nullable().default(null),
+  lastDeltaRaw: z.string().nullable().default(null),
+  lastDeltaUi: z.number().nullable().default(null),
+  lastSignature: z.string().nullable().default(null),
+  lastUpdatedMs: z.number(),
+});
+
+export const PumpBalanceDeltaSchema = z.object({
+  mint: z.string(),
+  owner: z.string(),
+  signature: z.string(),
+  side: z.enum(["buy", "sell", "unknown"]).default("unknown"),
+  deltaRaw: z.string().nullable().default(null),
+  deltaUi: z.number().nullable().default(null),
+  postBalanceRaw: z.string().nullable().default(null),
+  postBalanceUi: z.number().nullable().default(null),
+  source: z.string(),
+  blockTime: z.number().nullable().default(null),
+  createdAtMs: z.number(),
+});
+
+export const PumpPriceAggregateSchema = z.object({
+  mint: z.string(),
+  intervalSeconds: z.number(),
+  bucketStartMs: z.number(),
+  smaMarketCapSol: z.number(),
+  sampleCount: z.number(),
+  sumMarketCapSol: z.number(),
+  lastMarketCapSol: z.number(),
+  updatedAtMs: z.number(),
+});
+
 export type WalletRow = z.infer<typeof WalletSchema> & { id: number };
 export type TokenRow = z.infer<typeof TokenSchema> & { id: number };
 export type ExecutionRow = z.infer<typeof ExecutionSchema> & { id: number };
@@ -182,6 +263,19 @@ export type TokenWatchGroupRow = z.infer<typeof TokenWatchGroupSchema> & {
 export type TokenWatchGroupTokenRow = z.infer<
   typeof TokenWatchGroupTokenSchema
 > & { id: number };
+export type PumpTokenEventRow = z.infer<typeof PumpTokenEventSchema> & {
+  id: number;
+};
+export type PumpSwapRow = z.infer<typeof PumpSwapSchema> & { id: number };
+export type PumpHolderCurrentRow = z.infer<typeof PumpHolderCurrentSchema> & {
+  id: number;
+};
+export type PumpBalanceDeltaRow = z.infer<typeof PumpBalanceDeltaSchema> & {
+  id: number;
+};
+export type PumpPriceAggregateRow = z.infer<typeof PumpPriceAggregateSchema> & {
+  id: number;
+};
 
 export type SowlDatabase = Database<{
   wallets: typeof WalletSchema;
@@ -200,4 +294,9 @@ export type SowlDatabase = Database<{
   settings: typeof SettingSchema;
   tokenWatchGroups: typeof TokenWatchGroupSchema;
   tokenWatchGroupTokens: typeof TokenWatchGroupTokenSchema;
+  pumpTokenEvents: typeof PumpTokenEventSchema;
+  pumpSwaps: typeof PumpSwapSchema;
+  pumpHoldersCurrent: typeof PumpHolderCurrentSchema;
+  pumpBalanceDeltas: typeof PumpBalanceDeltaSchema;
+  pumpPriceAggregates: typeof PumpPriceAggregateSchema;
 }>;

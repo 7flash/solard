@@ -18,6 +18,7 @@ import {
   recordPumpTrade,
   removeTokenFromWatchGroup,
 } from "./pump-live-store.js";
+import { recordPumpFeedObservation } from "../../solard/feed/feed-repo.js";
 import {
   PUMP_PROGRAM_ID,
   findPumpCreateInTransaction,
@@ -307,6 +308,17 @@ async function refreshLiveCurveSnapshots(
       updated += 1;
       entry.lastSentAtMs = now;
       entry.token = { ...entry.token, ...next, bondingCurveKey: entry.curve };
+      recordPumpFeedObservation({
+        eventType: "curve-poll",
+        source: "curve-poll",
+        token: next as unknown as Raw,
+        raw: {
+          mint: entry.mint,
+          bondingCurveKey: entry.curve,
+          marketCapSol: snapshot.marketCapSol,
+          priceSolPerToken: snapshot.priceSolPerToken,
+        },
+      });
       send?.("trade", { ...next, eventType: "trade" });
     }
   }
@@ -663,6 +675,12 @@ function runPumpPortalStream(args: {
         const token = normalizePumpNewToken(parsed, ++seq);
         if (token) {
           rememberLiveCurve(token as unknown as Raw);
+          recordPumpFeedObservation({
+            eventType: "create",
+            source: sourceLabel,
+            token: token as unknown as Raw,
+            raw: parsed,
+          });
           args.send("token", token);
         }
         return;
@@ -671,6 +689,12 @@ function runPumpPortalStream(args: {
         const token = recordPumpTrade(parsed);
         if (token) {
           rememberLiveCurve(token as unknown as Raw);
+          recordPumpFeedObservation({
+            eventType: "trade",
+            source: sourceLabel,
+            token: token as unknown as Raw,
+            raw: parsed,
+          });
           args.send("trade", token);
         }
       }
@@ -792,6 +816,12 @@ function runHeliusStream(args: {
       pendingAttempts.delete(signature);
       if (token) {
         rememberLiveCurve(token as unknown as Raw);
+        recordPumpFeedObservation({
+          eventType: "create",
+          source: "helius",
+          token: token as unknown as Raw,
+          raw: { signature },
+        });
         args.send("token", token);
       } else
         args.send("status", {
@@ -984,20 +1014,246 @@ function runHeliusStream(args: {
   };
 }
 
+type PumpWorkerEvent = { event: string; data: unknown; atMs: number };
+type PumpWorkerListener = (event: string, data: unknown) => void;
+
+const pumpWorkerListeners = new Set<PumpWorkerListener>();
+const pumpWorkerRecent: PumpWorkerEvent[] = [];
+let pumpWorkerStopSource: (() => void) | null = null;
+let pumpWorkerCurveTimer: ReturnType<typeof setInterval> | null = null;
+let pumpWorkerStatus: "idle" | "connecting" | "connected" | "closed" | "error" =
+  "idle";
+let pumpWorkerSource: Source = "helius";
+let pumpWorkerStartedAtMs = 0;
+let pumpWorkerLastError: string | null = null;
+
+function emitPumpWorker(event: string, data: unknown): void {
+  const payload =
+    event === "status" && data && typeof data === "object"
+      ? { worker: true, ...(data as Raw) }
+      : data;
+  pumpWorkerRecent.push({ event, data: payload, atMs: Date.now() });
+  while (pumpWorkerRecent.length > 300) pumpWorkerRecent.shift();
+  for (const listener of pumpWorkerListeners) {
+    try {
+      listener(event, payload);
+    } catch {}
+  }
+}
+
+function stopPumpFeedWorker(): void {
+  if (pumpWorkerCurveTimer) clearInterval(pumpWorkerCurveTimer);
+  pumpWorkerCurveTimer = null;
+  try {
+    pumpWorkerStopSource?.();
+  } catch {}
+  pumpWorkerStopSource = null;
+  pumpWorkerStatus = "closed";
+  emitPumpWorker("status", {
+    status: "closed",
+    source: pumpWorkerSource,
+    at: new Date().toISOString(),
+  });
+}
+
+function startPumpFeedWorker(
+  args: { source: Source; resetSession?: boolean } = { source: "helius" },
+): void {
+  if (args.resetSession) {
+    clearCurrentSessionWatchGroup();
+    resetLiveCurveSession();
+    pumpWorkerRecent.length = 0;
+  }
+  if (pumpWorkerStopSource) {
+    emitPumpWorker("status", {
+      status: pumpWorkerStatus,
+      source: pumpWorkerSource,
+      reused: true,
+      startedAtMs: pumpWorkerStartedAtMs,
+      at: new Date().toISOString(),
+    });
+    return;
+  }
+  pumpWorkerSource = args.source;
+  pumpWorkerStatus = "connecting";
+  pumpWorkerStartedAtMs = Date.now();
+  pumpWorkerLastError = null;
+  const useHelius =
+    args.source === "helius" &&
+    process.env.SOLARD_PUMP_HELIUS_STREAM !== "0" &&
+    process.env.SOLWAL_PUMP_HELIUS_STREAM !== "0";
+  const sourceLabel = useHelius ? "helius-worker" : "pumpportal-worker";
+  const close = () => {
+    pumpWorkerStatus = "closed";
+    pumpWorkerStopSource = null;
+    if (pumpWorkerCurveTimer) clearInterval(pumpWorkerCurveTimer);
+    pumpWorkerCurveTimer = null;
+    emitPumpWorker("status", {
+      status: "closed",
+      source: sourceLabel,
+      at: new Date().toISOString(),
+    });
+  };
+  const send = (event: string, data: unknown) => {
+    if (event === "status") {
+      const status = String((data as Raw | undefined)?.status ?? "");
+      if (
+        status === "connected" ||
+        status === "stream-open" ||
+        status === "fallback-enabled"
+      )
+        pumpWorkerStatus = "connected";
+      if (status === "error") pumpWorkerStatus = "error";
+    }
+    if (event === "warning")
+      pumpWorkerLastError = String(
+        (data as Raw | undefined)?.error ??
+          (data as Raw | undefined)?.message ??
+          "warning",
+      );
+    emitPumpWorker(event, data);
+  };
+  emitPumpWorker("status", {
+    status: "stream-open",
+    source: sourceLabel,
+    worker: true,
+    useHelius,
+    at: new Date().toISOString(),
+  });
+  const fakeRequest = new Request("http://solard.local/api/pump-live-worker");
+  const fakeController = {
+    enqueue() {},
+    close() {},
+  } as unknown as ReadableStreamDefaultController<Uint8Array>;
+  pumpWorkerStopSource = useHelius
+    ? runHeliusStream({
+        request: fakeRequest,
+        controller: fakeController,
+        send,
+        close,
+      })
+    : runPumpPortalStream({
+        request: fakeRequest,
+        controller: fakeController,
+        send,
+        close,
+        closeOnClose: false,
+        sourceLabel,
+      });
+
+  const curveRefreshMs = Math.max(
+    10_000,
+    intEnv(
+      "SOLARD_PUMP_CURVE_REFRESH_MS",
+      intEnv("SOLWAL_PUMP_CURVE_REFRESH_MS", 15_000),
+    ),
+  );
+  pumpWorkerCurveTimer = setInterval(() => {
+    if (LIVE_CURVES.size === 0) return;
+    void refreshLiveCurveSnapshots(send)
+      .then((result) => {
+        if (result.updated > 0)
+          send("status", {
+            status: "curve-refresh",
+            source: sourceLabel,
+            ...result,
+            at: new Date().toISOString(),
+          });
+      })
+      .catch((error) => {
+        pumpWorkerLastError =
+          error instanceof Error ? error.message : String(error);
+        send("warning", {
+          source: sourceLabel,
+          kind: "curve-refresh",
+          error: pumpWorkerLastError,
+          at: new Date().toISOString(),
+        });
+      });
+  }, curveRefreshMs);
+}
+
+function subscribePumpFeedWorker(listener: PumpWorkerListener): () => void {
+  pumpWorkerListeners.add(listener);
+  listener("status", {
+    status: pumpWorkerStatus,
+    source: pumpWorkerSource,
+    worker: true,
+    startedAtMs: pumpWorkerStartedAtMs || null,
+    lastError: pumpWorkerLastError,
+    at: new Date().toISOString(),
+  });
+  const cutoff = Date.now() - 20_000;
+  for (const event of pumpWorkerRecent)
+    if (event.atMs >= cutoff) listener(event.event, event.data);
+  return () => {
+    pumpWorkerListeners.delete(listener);
+  };
+}
+
+function tokenRowTimeMs(row: Raw): number {
+  const values = [row.updatedAtMs, row.createdAtMs, row.lastTradeAtMs];
+  for (const value of values)
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  const received = clean(row.receivedAt);
+  const parsed = received ? Date.parse(received) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function filterPumpLiveForTerminal<
+  T extends { newTokens: Raw[]; watchGroups: Raw[] },
+>(state: T, sinceMs: number): T {
+  if (!Number.isFinite(sinceMs) || sinceMs <= 0) return state;
+  const cutoff = sinceMs - 15_000;
+  return {
+    ...state,
+    newTokens: (state.newTokens ?? []).filter(
+      (row) => tokenRowTimeMs(row) >= cutoff,
+    ),
+    watchGroups: (state.watchGroups ?? []).map((group) => {
+      const tokens = Array.isArray(group.tokens)
+        ? group.tokens.filter(
+            (row: Raw) =>
+              tokenRowTimeMs(row) >= cutoff || group.id !== "current-session",
+          )
+        : [];
+      return { ...group, tokens };
+    }),
+  };
+}
+
 export async function handlePumpLiveGet(request: Request): Promise<Response> {
   try {
     assertWebAuth(request);
     const url = new URL(request.url);
     if (url.searchParams.get("stream") !== "1") {
+      const sinceMs = Number(url.searchParams.get("sinceMs") ?? "0");
+      const terminal = url.searchParams.get("terminal") === "1";
       const measured = await measureSolard(
         "solard:api:GET:/api/pump-live",
         "list-state",
-        () => listPumpLiveState(),
+        () => {
+          const state = listPumpLiveState() as unknown as {
+            newTokens: Raw[];
+            watchGroups: Raw[];
+            watchedMints: string[];
+          };
+          return terminal ? filterPumpLiveForTerminal(state, sinceMs) : state;
+        },
         summarizeForMeasure,
       );
       return jsonResponse({
         ok: true,
-        value: measured.value,
+        value: {
+          ...(measured.value as Raw),
+          worker: {
+            status: pumpWorkerStatus,
+            source: pumpWorkerSource,
+            startedAtMs: pumpWorkerStartedAtMs || null,
+            listeners: pumpWorkerListeners.size,
+            lastError: pumpWorkerLastError,
+          },
+        },
         meta: {
           route: "/api/pump-live",
           method: "GET",
@@ -1011,14 +1267,14 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
     const source = (
       url.searchParams.get("source") === "pumpportal" ? "pumpportal" : "helius"
     ) as Source;
-    clearCurrentSessionWatchGroup();
-    resetLiveCurveSession();
+    const resetSession =
+      url.searchParams.get("reset") === "1" ||
+      url.searchParams.get("resetSession") === "1";
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         let closed = false;
-        let stopSource: (() => void) | null = null;
         let heartbeat: ReturnType<typeof setInterval> | null = null;
-        let curveRefresh: ReturnType<typeof setInterval> | null = null;
+        let unsubscribe: (() => void) | null = null;
         const send = (event: string, data: unknown) => {
           if (closed) return;
           try {
@@ -1031,58 +1287,20 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
           if (closed) return;
           closed = true;
           if (heartbeat) clearInterval(heartbeat);
-          if (curveRefresh) clearInterval(curveRefresh);
           try {
-            stopSource?.();
+            unsubscribe?.();
           } catch {}
           try {
             controller.close();
           } catch {}
         };
+        unsubscribe = subscribePumpFeedWorker(send);
+        startPumpFeedWorker({ source, resetSession });
         heartbeat = setInterval(
-          () => send("ping", { at: new Date().toISOString() }),
+          () => send("ping", { at: new Date().toISOString(), worker: true }),
           15_000,
         );
-        const curveRefreshMs = Math.max(
-          5000,
-          intEnv(
-            "SOLARD_PUMP_CURVE_REFRESH_MS",
-            intEnv("SOLWAL_PUMP_CURVE_REFRESH_MS", 10000),
-          ),
-        );
-        curveRefresh = setInterval(() => {
-          if (LIVE_CURVES.size === 0) return;
-          void refreshLiveCurveSnapshots(send)
-            .then((result) => {
-              if (result.updated > 0)
-                send("status", {
-                  status: "curve-refresh",
-                  source,
-                  ...result,
-                  at: new Date().toISOString(),
-                });
-            })
-            .catch((error) => {
-              send("status", {
-                status: "curve-refresh-degraded",
-                source,
-                error: error instanceof Error ? error.message : String(error),
-                at: new Date().toISOString(),
-              });
-            });
-        }, curveRefreshMs);
         request.signal.addEventListener("abort", close, { once: true });
-        send("status", {
-          status: "stream-open",
-          source,
-          scope: `solard:pump-live:${source}`,
-          curveRefreshMs,
-          at: new Date().toISOString(),
-        });
-        stopSource =
-          source === "helius"
-            ? runHeliusStream({ request, controller, send, close })
-            : runPumpPortalStream({ request, controller, send, close });
       },
       cancel() {},
     });
@@ -1126,8 +1344,26 @@ export async function handlePumpLivePost(request: Request): Promise<Response> {
             String(body.groupId ?? ""),
             String(body.mint ?? ""),
           );
-        if (action === "clear-current-session")
-          return clearCurrentSessionWatchGroup();
+        if (action === "clear-current-session") {
+          clearCurrentSessionWatchGroup();
+          resetLiveCurveSession();
+          return listPumpLiveState();
+        }
+        if (action === "start-worker" || action === "connect-session") {
+          startPumpFeedWorker({
+            source: body.source === "pumpportal" ? "pumpportal" : "helius",
+            resetSession: body.resetSession !== false,
+          });
+          return {
+            status: pumpWorkerStatus,
+            source: pumpWorkerSource,
+            startedAtMs: pumpWorkerStartedAtMs,
+          };
+        }
+        if (action === "stop-worker") {
+          stopPumpFeedWorker();
+          return { status: pumpWorkerStatus, source: pumpWorkerSource };
+        }
         resetLiveCurveSession();
         throw new Error(`Unknown pump-live action: ${action || "(empty)"}`);
       },

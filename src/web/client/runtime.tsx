@@ -91,6 +91,11 @@ export type TokenHolder = {
   amount: string | null;
   uiAmount: string | null;
   decimals: number | null;
+  pctSupply?: number | null;
+  label?: string | null;
+  lastDeltaUi?: number | null;
+  lastSignature?: string | null;
+  source?: string | null;
 };
 
 export type Toast = {
@@ -1415,7 +1420,7 @@ export async function startPumpFeed(): Promise<void> {
   update();
   try {
     const response = await fetch(
-      `/api/pump-live?stream=1&source=${encodeURIComponent(state.pumpFeedSource)}`,
+      `/api/pump-live?stream=1&reset=1&source=${encodeURIComponent(state.pumpFeedSource)}`,
       { headers: authHeaders(), signal: abort.signal },
     );
     if (!response.ok || !response.body) {
@@ -1460,6 +1465,10 @@ export function stopPumpFeed(): void {
   state.pumpFeedAbort = null;
   state.pumpFeedStatus = "closed";
   state.terminalSessionStartedAtMs = null;
+  void api("/api/pump-live", {
+    method: "POST",
+    body: JSON.stringify({ action: "stop-worker" }),
+  }).catch(() => {});
   update();
 }
 

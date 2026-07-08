@@ -19,6 +19,11 @@ import {
   TokenWatchGroupSchema,
   TokenWatchGroupTokenSchema,
   WatchSchema,
+  PumpTokenEventSchema,
+  PumpSwapSchema,
+  PumpHolderCurrentSchema,
+  PumpBalanceDeltaSchema,
+  PumpPriceAggregateSchema,
   type SowlDatabase,
 } from "./schema.js";
 
@@ -53,6 +58,11 @@ export function openDatabase(input?: string): SowlDatabase {
       settings: SettingSchema,
       tokenWatchGroups: TokenWatchGroupSchema,
       tokenWatchGroupTokens: TokenWatchGroupTokenSchema,
+      pumpTokenEvents: PumpTokenEventSchema,
+      pumpSwaps: PumpSwapSchema,
+      pumpHoldersCurrent: PumpHolderCurrentSchema,
+      pumpBalanceDeltas: PumpBalanceDeltaSchema,
+      pumpPriceAggregates: PumpPriceAggregateSchema,
     },
     {
       timestamps: false,
@@ -72,6 +82,11 @@ export function openDatabase(input?: string): SowlDatabase {
         settings: [["key"]],
         tokenWatchGroups: [["groupId"], ["name"]],
         tokenWatchGroupTokens: [["groupId", "mint"]],
+        pumpTokenEvents: [["mint"]],
+        pumpSwaps: [["signature"]],
+        pumpHoldersCurrent: [["mint", "owner"]],
+        pumpBalanceDeltas: [["signature", "owner", "mint"]],
+        pumpPriceAggregates: [["mint", "intervalSeconds", "bucketStartMs"]],
       },
       indexes: {
         wallets: ["name", "address", "isActive"],
@@ -84,6 +99,11 @@ export function openDatabase(input?: string): SowlDatabase {
         watches: ["kind", "address", "isActive"],
         tokenWatchGroups: ["groupId", "name"],
         tokenWatchGroupTokens: ["groupId", "mint", "updatedAtMs"],
+        pumpTokenEvents: ["mint", "updatedAtMs", "marketCapSol", "symbol"],
+        pumpSwaps: ["mint", "createdAtMs", "trader"],
+        pumpHoldersCurrent: ["mint", "pctSupply", "balanceUi", "lastUpdatedMs"],
+        pumpBalanceDeltas: ["mint", "owner", "createdAtMs"],
+        pumpPriceAggregates: ["mint", "intervalSeconds", "bucketStartMs"],
       },
     },
   ) as SowlDatabase;
