@@ -135,6 +135,14 @@ type State = {
     | "mcap-change-desc"
     | "mcap-change-pct-desc"
     | "trades-desc";
+  pumpFeedSource: "helius" | "pumpportal";
+  terminalDefaultWallet: string;
+  terminalDefaultBuySol: string;
+  terminalDefaultSender: "helius-fast" | "helius-rpc" | "rpc";
+  terminalDefaultSlippageBps: string;
+  terminalDefaultTipSol: string;
+  terminalDefaultPriorityMicroLamports: string;
+  terminalQuickLive: boolean;
   watchSort:
     | "mcap-desc"
     | "mcap-asc"
@@ -168,6 +176,26 @@ const state: State = {
   pumpFeedSort:
     (localStorage.getItem("solwal:pump-feed-sort") as State["pumpFeedSort"]) ||
     "newest",
+  pumpFeedSource:
+    (localStorage.getItem(
+      "solwal:pump-feed-source",
+    ) as State["pumpFeedSource"]) || "helius",
+  terminalDefaultWallet:
+    localStorage.getItem("solwal:terminal-default-wallet") ?? "",
+  terminalDefaultBuySol:
+    localStorage.getItem("solwal:terminal-default-buy-sol") ?? "0.05",
+  terminalDefaultSender:
+    (localStorage.getItem(
+      "solwal:terminal-default-sender",
+    ) as State["terminalDefaultSender"]) || "helius-fast",
+  terminalDefaultSlippageBps:
+    localStorage.getItem("solwal:terminal-default-slippage-bps") ?? "9999",
+  terminalDefaultTipSol:
+    localStorage.getItem("solwal:terminal-default-tip-sol") ?? "0.001",
+  terminalDefaultPriorityMicroLamports:
+    localStorage.getItem("solwal:terminal-default-priority-micro-lamports") ??
+    "1500000",
+  terminalQuickLive: localStorage.getItem("solwal:terminal-quick-live") === "1",
   watchSort:
     (localStorage.getItem("solwal:watch-sort") as State["watchSort"]) ||
     "mcap-desc",
@@ -620,6 +648,34 @@ async function starPumpFeedRow(
   });
 }
 
+async function quickBuyPumpFeedRow(row: PumpFeedRow): Promise<void> {
+  if (!row.mint) throw new Error("Feed row has no mint");
+  if (!state.terminalDefaultWallet.trim())
+    throw new Error(
+      "Choose a default wallet before quick-buying from the terminal",
+    );
+  if (!state.terminalDefaultBuySol.trim())
+    throw new Error(
+      "Set a default buy amount before quick-buying from the terminal",
+    );
+  await api("/api/trade/buy", {
+    method: "POST",
+    body: JSON.stringify({
+      wallet: state.terminalDefaultWallet.trim(),
+      token: row.mint,
+      amountSol: state.terminalDefaultBuySol.trim(),
+      slippageBps: state.terminalDefaultSlippageBps.trim() || "9999",
+      sender: state.terminalDefaultSender,
+      tipSol: state.terminalDefaultTipSol.trim() || "0.001",
+      priorityMicroLamports:
+        state.terminalDefaultPriorityMicroLamports.trim() || "1500000",
+      live: state.terminalQuickLive ? "true" : "false",
+      skipSimulation: state.terminalQuickLive ? "true" : "false",
+      skipPreflight: "true",
+    }),
+  });
+}
+
 let pumpFeedUpdateScheduled = false;
 function schedulePumpFeedUpdate(): void {
   if (pumpFeedUpdateScheduled) return;
@@ -699,10 +755,10 @@ async function startPumpFeed(): Promise<void> {
   state.pumpFeedError = null;
   update();
   try {
-    const response = await fetch("/api/pump-live?stream=1", {
-      headers: authHeaders(),
-      signal: abort.signal,
-    });
+    const response = await fetch(
+      `/api/pump-live?stream=1&source=${encodeURIComponent(state.pumpFeedSource)}`,
+      { headers: authHeaders(), signal: abort.signal },
+    );
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error ?? `Pump feed HTTP ${response.status}`);
@@ -1690,12 +1746,140 @@ function TerminalView() {
         <div>
           <h2>Pump.fun new-token terminal</h2>
           <p className="muted">
-            Backend streams PumpPortal new-token events, writes tokens/price
-            samples locally, and subscribes to watched-token trades for live
-            market-cap SMA updates.
+            Stream new Pump launches directly from Helius or through PumpPortal.
+            Pick a default wallet and amount, then quick-buy any row.
           </p>
         </div>
-        <div className="row">
+        <div className="terminal-controls">
+          <label className="mini-field">
+            <span>Source</span>
+            <select
+              value={state.pumpFeedSource}
+              onInput={(event: any) => {
+                state.pumpFeedSource = event.currentTarget.value;
+                localStorage.setItem(
+                  "solwal:pump-feed-source",
+                  state.pumpFeedSource,
+                );
+                update();
+              }}
+            >
+              <option value="helius">Helius direct</option>
+              <option value="pumpportal">PumpPortal enriched</option>
+            </select>
+          </label>
+          <label className="mini-field">
+            <span>Wallet</span>
+            <select
+              value={state.terminalDefaultWallet}
+              onInput={(event: any) => {
+                state.terminalDefaultWallet = event.currentTarget.value;
+                localStorage.setItem(
+                  "solwal:terminal-default-wallet",
+                  state.terminalDefaultWallet,
+                );
+                update();
+              }}
+            >
+              <option value="">default wallet…</option>
+              {(state.overview?.wallets ?? []).map((wallet: AnyRow) => (
+                <option value={wallet.name ?? wallet.address}>
+                  {wallet.name ?? short(wallet.address)} ·{" "}
+                  {short(wallet.address, 4, 4)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="mini-field">
+            <span>Buy SOL</span>
+            <input
+              value={state.terminalDefaultBuySol}
+              onInput={(event: any) => {
+                state.terminalDefaultBuySol = event.currentTarget.value;
+                localStorage.setItem(
+                  "solwal:terminal-default-buy-sol",
+                  state.terminalDefaultBuySol,
+                );
+                update();
+              }}
+            />
+          </label>
+          <label className="mini-field">
+            <span>Sender</span>
+            <select
+              value={state.terminalDefaultSender}
+              onInput={(event: any) => {
+                state.terminalDefaultSender = event.currentTarget.value;
+                localStorage.setItem(
+                  "solwal:terminal-default-sender",
+                  state.terminalDefaultSender,
+                );
+                update();
+              }}
+            >
+              <option value="helius-fast">Helius fast</option>
+              <option value="helius-rpc">Helius RPC</option>
+              <option value="rpc">RPC</option>
+            </select>
+          </label>
+          <label className="mini-field">
+            <span>Slippage</span>
+            <input
+              value={state.terminalDefaultSlippageBps}
+              onInput={(event: any) => {
+                state.terminalDefaultSlippageBps = event.currentTarget.value;
+                localStorage.setItem(
+                  "solwal:terminal-default-slippage-bps",
+                  state.terminalDefaultSlippageBps,
+                );
+                update();
+              }}
+            />
+          </label>
+          <label className="mini-field">
+            <span>Tip SOL</span>
+            <input
+              value={state.terminalDefaultTipSol}
+              onInput={(event: any) => {
+                state.terminalDefaultTipSol = event.currentTarget.value;
+                localStorage.setItem(
+                  "solwal:terminal-default-tip-sol",
+                  state.terminalDefaultTipSol,
+                );
+                update();
+              }}
+            />
+          </label>
+          <label className="mini-field">
+            <span>Priority</span>
+            <input
+              value={state.terminalDefaultPriorityMicroLamports}
+              onInput={(event: any) => {
+                state.terminalDefaultPriorityMicroLamports =
+                  event.currentTarget.value;
+                localStorage.setItem(
+                  "solwal:terminal-default-priority-micro-lamports",
+                  state.terminalDefaultPriorityMicroLamports,
+                );
+                update();
+              }}
+            />
+          </label>
+          <label className="quick-live">
+            <input
+              type="checkbox"
+              checked={state.terminalQuickLive}
+              onInput={(event: any) => {
+                state.terminalQuickLive = event.currentTarget.checked;
+                localStorage.setItem(
+                  "solwal:terminal-quick-live",
+                  state.terminalQuickLive ? "1" : "0",
+                );
+                update();
+              }}
+            />
+            <span>LIVE</span>
+          </label>
           <select
             value={state.selectedWatchGroupId ?? ""}
             onInput={(event: any) => {
@@ -1819,7 +2003,7 @@ function TerminalView() {
                 <th>Δ %</th>
                 <th>Last trade</th>
                 <th>Sig</th>
-                <th>Watch</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1893,14 +2077,28 @@ function TerminalView() {
                   <td>{row.lastTradeAtMs ? age(row.lastTradeAtMs) : "—"}</td>
                   <td className="code">{short(row.signature)}</td>
                   <td>
-                    <button
-                      type="button"
-                      className="secondary compact"
-                      disabled={!row.mint}
-                      onClick={() => void runAction(() => starPumpFeedRow(row))}
-                    >
-                      ★ Star
-                    </button>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        className="primary compact"
+                        disabled={!row.mint || !state.terminalDefaultWallet}
+                        onClick={() =>
+                          void runAction(() => quickBuyPumpFeedRow(row))
+                        }
+                      >
+                        {state.terminalQuickLive ? "BUY" : "SIM"}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary compact"
+                        disabled={!row.mint}
+                        onClick={() =>
+                          void runAction(() => starPumpFeedRow(row))
+                        }
+                      >
+                        ★
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

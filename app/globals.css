@@ -592,3 +592,68 @@ tbody tr:hover { background: #10151d; }
   .nav-list a { border-right: 1px solid var(--line); }
   .main-console { padding: 14px; }
 }
+
+/* Terminal quick-trade console controls */
+.terminal-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+.mini-field {
+  display: grid;
+  gap: 3px;
+  min-width: 110px;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted);
+}
+.mini-field input,
+.mini-field select {
+  height: 30px;
+  min-width: 0;
+  border-radius: 0;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 8px;
+}
+.quick-live {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--warn);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 1000;
+  letter-spacing: .08em;
+}
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+button.primary.compact {
+  min-height: 28px;
+  padding: 0 9px;
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+  font-weight: 1000;
+}
+@media (max-width: 1100px) {
+  .terminal-controls { justify-content: flex-start; }
+  .mini-field { min-width: 46%; }
+}

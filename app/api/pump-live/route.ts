@@ -1,3 +1,4 @@
+import bs58 from "bs58";
 import {
   assertWebAuth,
   errorResponse,
@@ -14,8 +15,12 @@ import {
 } from "../../../src/web/pump-live-store.js";
 
 const DEFAULT_PUMP_FEED_WS_URL = "wss://pumpportal.fun/api/data";
+const PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const CREATE_V2_D8 = Buffer.from([214, 144, 76, 236, 95, 139, 49, 180]);
 
 type Raw = Record<string, unknown>;
+
+type Source = "pumpportal" | "helius";
 
 function sse(event: string, data: unknown): Uint8Array {
   return new TextEncoder().encode(
@@ -33,6 +38,363 @@ function subscribeWatched(ws: WebSocket): void {
     ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys }));
 }
 
+function clean(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function rpcHttpUrl(): string {
+  const url =
+    process.env.HELIUS_RPC_URL?.trim() || process.env.RPC_ENDPOINT?.trim();
+  if (!url)
+    throw new Error(
+      "HELIUS_RPC_URL or RPC_ENDPOINT is required for Helius transaction enrichment",
+    );
+  return url;
+}
+
+function heliusWsUrl(): string {
+  const direct =
+    process.env.SOLWAL_HELIUS_WS_URL?.trim() ||
+    process.env.HELIUS_WS_URL?.trim();
+  if (direct) return direct;
+  const apiKey = process.env.HELIUS_API_KEY?.trim();
+  if (apiKey)
+    return `wss://mainnet.helius-rpc.com/?api-key=${encodeURIComponent(apiKey)}`;
+  const rpc =
+    process.env.HELIUS_RPC_URL?.trim() || process.env.RPC_ENDPOINT?.trim();
+  if (rpc?.includes("helius-rpc.com")) {
+    return rpc.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+  }
+  throw new Error(
+    "Set SOLWAL_HELIUS_WS_URL, HELIUS_WS_URL, HELIUS_API_KEY, or a Helius RPC_ENDPOINT for direct Helius stream",
+  );
+}
+
+async function rpc<T>(method: string, params: unknown[]): Promise<T> {
+  const response = await fetch(rpcHttpUrl(), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+  });
+  const payload = (await response.json()) as { result?: T; error?: unknown };
+  if (!response.ok || payload.error)
+    throw new Error(
+      `RPC ${method} failed: ${JSON.stringify(payload.error ?? response.status)}`,
+    );
+  return payload.result as T;
+}
+
+function readString(
+  buffer: Buffer,
+  offset: number,
+): { value: string; offset: number } | null {
+  if (offset + 4 > buffer.length) return null;
+  const length = buffer.readUInt32LE(offset);
+  offset += 4;
+  if (length > 1024 || offset + length > buffer.length) return null;
+  const value = buffer.subarray(offset, offset + length).toString("utf8");
+  return { value, offset: offset + length };
+}
+
+function parseCreateData(data: string): Partial<Raw> | null {
+  let buffer: Buffer;
+  try {
+    buffer = Buffer.from(bs58.decode(data));
+  } catch {
+    return null;
+  }
+  if (buffer.length < 8 || !buffer.subarray(0, 8).equals(CREATE_V2_D8))
+    return null;
+  let offset = 8;
+  const name = readString(buffer, offset);
+  if (!name) return null;
+  offset = name.offset;
+  const symbol = readString(buffer, offset);
+  if (!symbol) return null;
+  offset = symbol.offset;
+  const uri = readString(buffer, offset);
+  if (!uri) return null;
+  offset = uri.offset;
+  const creator =
+    offset + 32 <= buffer.length
+      ? bs58.encode(buffer.subarray(offset, offset + 32))
+      : null;
+  offset += creator ? 32 : 0;
+  const mayhemMode = offset < buffer.length ? buffer[offset] === 1 : null;
+  return {
+    name: name.value,
+    symbol: symbol.value,
+    uri: uri.value,
+    creator,
+    isMayhemMode: mayhemMode,
+  };
+}
+
+function txAccountKey(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const pubkey = (value as { pubkey?: unknown }).pubkey;
+    if (typeof pubkey === "string") return pubkey;
+  }
+  return null;
+}
+
+function findPumpCreate(tx: Raw, signature: string): Raw | null {
+  const message = ((tx.transaction as Raw | undefined)?.message ?? {}) as Raw;
+  const accountKeys = Array.isArray(message.accountKeys)
+    ? (message.accountKeys.map(txAccountKey).filter(Boolean) as string[])
+    : [];
+  const instructions = Array.isArray(message.instructions)
+    ? (message.instructions as Raw[])
+    : [];
+  for (const ix of instructions) {
+    const programId =
+      clean(ix.programId) ??
+      (typeof ix.programIdIndex === "number"
+        ? accountKeys[ix.programIdIndex]
+        : null);
+    if (programId !== PUMP_PROGRAM_ID) continue;
+    const accounts = Array.isArray(ix.accounts)
+      ? (ix.accounts
+          .map((account) =>
+            typeof account === "number" ? accountKeys[account] : clean(account),
+          )
+          .filter(Boolean) as string[])
+      : [];
+    const decoded =
+      typeof ix.data === "string" ? parseCreateData(ix.data) : null;
+    if (!decoded) continue;
+    return {
+      txType: "create",
+      source: "helius-logs",
+      signature,
+      mint: accounts[0] ?? null,
+      creator: clean(decoded.creator) ?? accounts[5] ?? null,
+      traderPublicKey: clean(decoded.creator) ?? accounts[5] ?? null,
+      name: decoded.name,
+      symbol: decoded.symbol,
+      uri: decoded.uri,
+      isMayhemMode: decoded.isMayhemMode,
+      quoteAsset: "SOL",
+      rawTransactionSlot: tx.slot ?? null,
+    };
+  }
+  return null;
+}
+
+async function normalizeHeliusSignature(
+  signature: string,
+): Promise<ReturnType<typeof normalizePumpNewToken> | null> {
+  const tx = await rpc<Raw | null>("getTransaction", [
+    signature,
+    {
+      encoding: "json",
+      maxSupportedTransactionVersion: 0,
+      commitment: "processed",
+    },
+  ]);
+  if (!tx || (tx.meta as Raw | undefined)?.err) return null;
+  const raw = findPumpCreate(tx, signature);
+  return raw ? normalizePumpNewToken(raw) : null;
+}
+
+function runPumpPortalStream(args: {
+  request: Request;
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  send: (event: string, data: unknown) => void;
+  close: () => void;
+}): () => void {
+  const wsUrl =
+    process.env.SOLWAL_PUMP_FEED_WS_URL?.trim() ||
+    process.env.PUMPPORTAL_WS_URL?.trim() ||
+    DEFAULT_PUMP_FEED_WS_URL;
+  let ws: WebSocket | null = null;
+  let subscribed = new Set<string>();
+  let seq = 0;
+  const watchSync = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const keys = watchedMints().filter((mint) => !subscribed.has(mint));
+    if (keys.length > 0) {
+      ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys }));
+      for (const key of keys) subscribed.add(key);
+      args.send("status", {
+        status: "subscribed-token-trades",
+        source: "pumpportal",
+        keys,
+        at: new Date().toISOString(),
+      });
+    }
+  }, 2_000);
+  args.send("status", {
+    status: "connecting",
+    source: "pumpportal",
+    wsUrl,
+    at: new Date().toISOString(),
+  });
+  ws = new WebSocket(wsUrl);
+  ws.addEventListener("open", () => {
+    args.send("status", {
+      status: "connected",
+      source: "pumpportal",
+      wsUrl,
+      at: new Date().toISOString(),
+    });
+    ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
+    subscribeWatched(ws!);
+    subscribed = new Set(watchedMints());
+  });
+  ws.addEventListener("message", (message) => {
+    try {
+      const text =
+        typeof message.data === "string" ? message.data : String(message.data);
+      const parsed = JSON.parse(text) as Raw;
+      const txType =
+        typeof parsed.txType === "string"
+          ? parsed.txType
+          : typeof parsed.type === "string"
+            ? parsed.type
+            : "";
+      const isNew =
+        txType === "create" || parsed.name != null || parsed.uri != null;
+      if (isNew && parsed.mint) {
+        const token = normalizePumpNewToken(parsed, ++seq);
+        if (token) args.send("token", token);
+        return;
+      }
+      if (parsed.mint) {
+        const token = recordPumpTrade(parsed);
+        if (token) args.send("trade", token);
+      }
+    } catch (error) {
+      args.send("warning", {
+        source: "pumpportal",
+        error: error instanceof Error ? error.message : String(error),
+        at: new Date().toISOString(),
+      });
+    }
+  });
+  ws.addEventListener("error", () =>
+    args.send("status", {
+      status: "error",
+      source: "pumpportal",
+      at: new Date().toISOString(),
+    }),
+  );
+  ws.addEventListener("close", (event) => {
+    args.send("status", {
+      status: "closed",
+      source: "pumpportal",
+      code: event.code,
+      reason: event.reason || null,
+      at: new Date().toISOString(),
+    });
+    args.close();
+  });
+  return () => {
+    clearInterval(watchSync);
+    try {
+      ws?.close();
+    } catch {}
+  };
+}
+
+function runHeliusStream(args: {
+  request: Request;
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  send: (event: string, data: unknown) => void;
+  close: () => void;
+}): () => void {
+  const wsUrl = heliusWsUrl();
+  let ws: WebSocket | null = null;
+  const seen = new Set<string>();
+  args.send("status", {
+    status: "connecting",
+    source: "helius",
+    wsUrl: wsUrl.replace(/api-key=[^&]+/, "api-key=***"),
+    at: new Date().toISOString(),
+  });
+  ws = new WebSocket(wsUrl);
+  ws.addEventListener("open", () => {
+    args.send("status", {
+      status: "connected",
+      source: "helius",
+      at: new Date().toISOString(),
+    });
+    ws?.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "logsSubscribe",
+        params: [{ mentions: [PUMP_PROGRAM_ID] }, { commitment: "processed" }],
+      }),
+    );
+  });
+  ws.addEventListener("message", (message) => {
+    void (async () => {
+      try {
+        const text =
+          typeof message.data === "string"
+            ? message.data
+            : String(message.data);
+        const parsed = JSON.parse(text) as Raw;
+        const value = ((
+          (parsed.params as Raw | undefined)?.result as Raw | undefined
+        )?.value ?? {}) as Raw;
+        const signature = clean(value.signature);
+        const logs = Array.isArray(value.logs) ? value.logs.map(String) : [];
+        if (!signature || seen.has(signature)) return;
+        if (
+          !logs.some(
+            (line) =>
+              /Instruction:\s*Create/i.test(line) ||
+              /CreateV2|create_v2/i.test(line),
+          )
+        )
+          return;
+        seen.add(signature);
+        const token = await normalizeHeliusSignature(signature);
+        if (token) args.send("token", token);
+        else
+          args.send("warning", {
+            source: "helius",
+            signature,
+            error:
+              "create log seen but transaction parser did not extract token",
+            at: new Date().toISOString(),
+          });
+      } catch (error) {
+        args.send("warning", {
+          source: "helius",
+          error: error instanceof Error ? error.message : String(error),
+          at: new Date().toISOString(),
+        });
+      }
+    })();
+  });
+  ws.addEventListener("error", () =>
+    args.send("status", {
+      status: "error",
+      source: "helius",
+      at: new Date().toISOString(),
+    }),
+  );
+  ws.addEventListener("close", (event) => {
+    args.send("status", {
+      status: "closed",
+      source: "helius",
+      code: event.code,
+      reason: event.reason || null,
+      at: new Date().toISOString(),
+    });
+    args.close();
+  });
+  return () => {
+    try {
+      ws?.close();
+    } catch {}
+  };
+}
+
 export function GET(request: Request): Response {
   try {
     assertWebAuth(request);
@@ -41,16 +403,13 @@ export function GET(request: Request): Response {
       return jsonResponse({ ok: true, value: listPumpLiveState() });
     }
 
-    const wsUrl =
-      process.env.SOLWAL_PUMP_FEED_WS_URL?.trim() ||
-      process.env.PUMPPORTAL_WS_URL?.trim() ||
-      DEFAULT_PUMP_FEED_WS_URL;
+    const source = (
+      url.searchParams.get("source") === "pumpportal" ? "pumpportal" : "helius"
+    ) as Source;
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         let closed = false;
-        let seq = 0;
-        let ws: WebSocket | null = null;
-        let subscribed = new Set<string>();
+        let stopSource: (() => void) | null = null;
         const send = (event: string, data: unknown) => {
           if (closed) return;
           try {
@@ -63,9 +422,8 @@ export function GET(request: Request): Response {
           if (closed) return;
           closed = true;
           clearInterval(heartbeat);
-          clearInterval(watchSync);
           try {
-            ws?.close();
+            stopSource?.();
           } catch {}
           try {
             controller.close();
@@ -75,79 +433,11 @@ export function GET(request: Request): Response {
           () => send("ping", { at: new Date().toISOString() }),
           15_000,
         );
-        const watchSync = setInterval(() => {
-          if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          const keys = watchedMints().filter((mint) => !subscribed.has(mint));
-          if (keys.length > 0) {
-            ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys }));
-            for (const key of keys) subscribed.add(key);
-            send("status", {
-              status: "subscribed-token-trades",
-              keys,
-              at: new Date().toISOString(),
-            });
-          }
-        }, 2_000);
         request.signal.addEventListener("abort", close, { once: true });
-        send("status", {
-          status: "connecting",
-          wsUrl,
-          at: new Date().toISOString(),
-        });
-        ws = new WebSocket(wsUrl);
-        ws.addEventListener("open", () => {
-          send("status", {
-            status: "connected",
-            wsUrl,
-            at: new Date().toISOString(),
-          });
-          ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
-          subscribeWatched(ws!);
-          subscribed = new Set(watchedMints());
-        });
-        ws.addEventListener("message", (message) => {
-          try {
-            const text =
-              typeof message.data === "string"
-                ? message.data
-                : String(message.data);
-            const parsed = JSON.parse(text) as Raw;
-            const txType =
-              typeof parsed.txType === "string"
-                ? parsed.txType
-                : typeof parsed.type === "string"
-                  ? parsed.type
-                  : "";
-            const isNew =
-              txType === "create" || parsed.name != null || parsed.uri != null;
-            if (isNew && parsed.mint) {
-              const token = normalizePumpNewToken(parsed, ++seq);
-              if (token) send("token", token);
-              return;
-            }
-            if (parsed.mint) {
-              const token = recordPumpTrade(parsed);
-              if (token) send("trade", token);
-            }
-          } catch (error) {
-            send("warning", {
-              error: error instanceof Error ? error.message : String(error),
-              at: new Date().toISOString(),
-            });
-          }
-        });
-        ws.addEventListener("error", () =>
-          send("status", { status: "error", at: new Date().toISOString() }),
-        );
-        ws.addEventListener("close", (event) => {
-          send("status", {
-            status: "closed",
-            code: event.code,
-            reason: event.reason || null,
-            at: new Date().toISOString(),
-          });
-          close();
-        });
+        stopSource =
+          source === "helius"
+            ? runHeliusStream({ request, controller, send, close })
+            : runPumpPortalStream({ request, controller, send, close });
       },
       cancel() {},
     });
