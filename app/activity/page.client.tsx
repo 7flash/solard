@@ -1,1 +1,2 @@
-export { default } from "../page.client";
+import mount from "../../src/web/client/pages/activity";
+export default mount;

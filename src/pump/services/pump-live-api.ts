@@ -81,6 +81,15 @@ class RpcRateLimitError extends Error {
   }
 }
 
+class RpcPendingConfirmationError extends Error {
+  constructor(
+    message: string,
+    readonly retryAfterMs = 750,
+  ) {
+    super(message);
+  }
+}
+
 function intEnv(name: string, fallback: number): number {
   const value = process.env[name]?.trim();
   if (!value) return fallback;
@@ -128,15 +137,23 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
 async function normalizeHeliusSignature(
   signature: string,
 ): Promise<ReturnType<typeof normalizePumpNewToken> | null> {
+  // Helius/Solana getTransaction does not support commitment below confirmed.
+  // Keep logsSubscribe at processed for fastest detection, then wait/retry here
+  // until the transaction is available at confirmed.
   const tx = await rpc<Raw | null>("getTransaction", [
     signature,
     {
       encoding: "json",
       maxSupportedTransactionVersion: 0,
-      commitment: "processed",
+      commitment: "confirmed",
     },
   ]);
-  if (!tx || (tx.meta as Raw | undefined)?.err) return null;
+  if (!tx)
+    throw new RpcPendingConfirmationError(
+      `RPC getTransaction not confirmed yet: ${signature}`,
+      750,
+    );
+  if ((tx.meta as Raw | undefined)?.err) return null;
   const raw = findPumpCreateInTransaction(tx, signature);
   return raw ? normalizePumpNewToken(raw) : null;
 }
@@ -326,7 +343,20 @@ function runHeliusStream(args: {
           at: new Date().toISOString(),
         });
     } catch (error) {
-      if (error instanceof RpcRateLimitError) {
+      if (error instanceof RpcPendingConfirmationError) {
+        queue.unshift(signature);
+        queued.add(signature);
+        args.send("status", {
+          status: "awaiting-confirmed-transaction",
+          source: "helius",
+          signature,
+          retryAfterMs: error.retryAfterMs,
+          queued: queue.length,
+          dropped,
+          at: new Date().toISOString(),
+        });
+        schedule(error.retryAfterMs);
+      } else if (error instanceof RpcRateLimitError) {
         rateLimitedUntil = Date.now() + error.retryAfterMs;
         queue.unshift(signature);
         queued.add(signature);
