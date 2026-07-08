@@ -305,13 +305,19 @@ function short(value: string | null | undefined, head = 6, tail = 6): string {
 }
 
 function solFromLamports(value: any): string {
-  const raw = typeof value === "bigint" ? value : BigInt(String(value ?? "0"));
-  const whole = raw / 1_000_000_000n;
-  const frac = (raw % 1_000_000_000n)
-    .toString()
-    .padStart(9, "0")
-    .replace(/0+$/, "");
-  return `${whole}${frac ? `.${frac}` : ""}`;
+  if (value == null || value === "" || value === "pending") return "refreshing";
+  try {
+    const raw =
+      typeof value === "bigint" ? value : BigInt(String(value ?? "0"));
+    const whole = raw / 1_000_000_000n;
+    const frac = (raw % 1_000_000_000n)
+      .toString()
+      .padStart(9, "0")
+      .replace(/0+$/, "");
+    return `${whole}${frac ? `.${frac}` : ""}`;
+  } catch {
+    return "refreshing";
+  }
 }
 
 function formatSol(value: number | null | undefined): string {
@@ -885,13 +891,15 @@ async function refreshOverview(): Promise<void> {
   if (rpcStatus) state.rpcStatus = rpcStatus;
 
   try {
-    state.overview = await api<Overview>("/api/overview");
+    // Fast path: local SQLite only. This makes wallets/groups/tokens appear instantly.
+    const fast = await api<Overview>("/api/overview?fast=1");
+    state.overview = fast;
+    state.error = null;
+    update();
   } catch (error) {
-    // The home screen must stay usable even when RPC/account enrichment is unavailable.
-    // Keep the last successful overview and surface the issue in the global status area.
     const message = error instanceof Error ? error.message : String(error);
-    state.error = `Overview unavailable: ${message}`;
-    if (!state.overview) {
+    state.error = `Local overview unavailable: ${message}`;
+    if (!state.overview)
       state.overview = {
         wallets: [],
         tokens: [],
@@ -899,7 +907,16 @@ async function refreshOverview(): Promise<void> {
         executions: [],
         balances: [],
       };
-    }
+  }
+
+  try {
+    // Slow path: RPC SOL balances. No token-account crawling on Home.
+    const full = await api<Overview>("/api/overview?balances=sol");
+    state.overview = full;
+    state.error = null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    state.error = `Balance refresh delayed: ${message}`;
   }
 
   const status = document.getElementById("connection-status");
@@ -1176,10 +1193,19 @@ function Stats() {
   );
 }
 
+function walletGroupBadges(row: AnyRow): any {
+  const groups = row.wallet?.groups ?? row.groupNames ?? [];
+  if (!Array.isArray(groups) || groups.length === 0)
+    return <span className="muted tiny">no groups</span>;
+  return groups.map((name: string) => (
+    <span className="group-chip">{name}</span>
+  ));
+}
+
 function walletHoldingsChips(tokens: AnyRow[] | undefined): any {
   const rows = tokens ?? [];
   if (!rows.length)
-    return <span className="muted tiny">no non-zero token holdings</span>;
+    return <span className="muted tiny">no token holdings loaded here</span>;
   return rows.slice(0, 12).map((token: AnyRow) => (
     <span
       className="holding"
@@ -1262,8 +1288,9 @@ function OverviewView() {
                 <tr>
                   <th>Name</th>
                   <th>Address</th>
+                  <th>Groups</th>
                   <th>SOL</th>
-                  <th>Non-zero holdings</th>
+                  <th>Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -1276,16 +1303,23 @@ function OverviewView() {
                     >
                       {short(row.wallet?.address)}
                     </td>
+                    <td>
+                      <div className="groups-inline">
+                        {walletGroupBadges(row)}
+                      </div>
+                    </td>
                     <td className="sol-cell">
-                      {solFromLamports(row.solLamports)} SOL
+                      {solFromLamports(row.solLamports)}
+                      {String(row.solLamports ?? "").match(/^\d+$/)
+                        ? " SOL"
+                        : ""}
                     </td>
                     <td>
-                      <div className="holdings">
-                        {walletHoldingsChips(row.visibleTokenBalances)}
-                      </div>
                       {row.balanceWarning ? (
-                        <div className="muted tiny">partial balance data</div>
-                      ) : null}
+                        <span className="pill warn">balance pending</span>
+                      ) : (
+                        <span className="pill ok">ok</span>
+                      )}
                     </td>
                   </tr>
                 ))}

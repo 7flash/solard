@@ -1017,3 +1017,41 @@ html, body { width: 100%; overflow-x: hidden; }
   .terminal-form-grid.compact-grid,
   .terminal-form-grid.buy-grid { grid-template-columns: 1fr; }
 }
+
+/* Solard stability polish: scoped pages, instant wallet rows, no portfolio clutter on Home */
+.clean-table.wallet-table { table-layout: fixed; width: 100%; }
+.clean-table.wallet-table th:nth-child(1), .clean-table.wallet-table td:nth-child(1) { width: 150px; }
+.clean-table.wallet-table th:nth-child(2), .clean-table.wallet-table td:nth-child(2) { width: 130px; }
+.clean-table.wallet-table th:nth-child(3), .clean-table.wallet-table td:nth-child(3) { width: auto; }
+.clean-table.wallet-table th:nth-child(4), .clean-table.wallet-table td:nth-child(4) { width: 140px; text-align: right; }
+.clean-table.wallet-table th:nth-child(5), .clean-table.wallet-table td:nth-child(5) { width: 120px; }
+.groups-inline { display: flex; gap: 5px; flex-wrap: wrap; min-width: 0; }
+.group-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  background: var(--black);
+  color: var(--green);
+  padding: 3px 6px;
+  font-size: 10px;
+  font-weight: 1000;
+  text-transform: uppercase;
+}
+.sol-cell { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.wallet-balance-scroll { max-height: 62vh; overflow: auto; border: 1px solid var(--line); margin-top: 10px; }
+.wallet-balance-scroll .clean-table { border: 0; }
+.home-columns { align-items: start; }
+.notice.row { align-items: end; flex-wrap: wrap; }
+.connection-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; overflow: hidden; }
+.connection-strip > * { min-width: 0; }
+.connection-strip .conn-wallet { min-width: 240px; }
+.connection-strip .conn-amount { min-width: 140px; }
+.connection-strip input, .connection-strip select { min-width: 0; width: 100%; }
+@media (max-width: 900px) {
+  .clean-table.wallet-table { min-width: 760px; }
+  .wallet-balance-scroll { max-height: 70vh; }
+}
