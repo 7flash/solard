@@ -45,6 +45,63 @@ type PumpCurveSnapshot = {
   marketCapSol: number | null;
 };
 
+type LiveCurveEntry = {
+  mint: string;
+  curve: string;
+  token: Raw;
+  firstSeenAtMs: number;
+  lastSeenAtMs: number;
+  lastSentAtMs: number;
+  lastMarketCapSol: number | null;
+};
+
+const LIVE_CURVES = new Map<string, LiveCurveEntry>();
+
+function rememberLiveCurve(token: Raw): void {
+  const mint = clean(token.mint);
+  const curve = clean(token.bondingCurveKey) ?? derivePumpBondingCurve(mint);
+  if (!mint || !curve || !publicKey(mint) || !publicKey(curve)) return;
+  const now = Date.now();
+  const existing = LIVE_CURVES.get(mint);
+  LIVE_CURVES.set(mint, {
+    mint,
+    curve,
+    token: {
+      ...(existing?.token ?? {}),
+      ...token,
+      mint,
+      bondingCurveKey: curve,
+    },
+    firstSeenAtMs: existing?.firstSeenAtMs ?? now,
+    lastSeenAtMs: now,
+    lastSentAtMs: existing?.lastSentAtMs ?? 0,
+    lastMarketCapSol:
+      existing?.lastMarketCapSol ??
+      (typeof token.marketCapSol === "number" &&
+      Number.isFinite(token.marketCapSol)
+        ? token.marketCapSol
+        : null),
+  });
+  const max = Math.max(
+    10,
+    intEnv(
+      "SOLARD_PUMP_LIVE_CURVE_MEMORY",
+      intEnv("SOLWAL_PUMP_LIVE_CURVE_MEMORY", 250),
+    ),
+  );
+  while (LIVE_CURVES.size > max) {
+    const oldest = [...LIVE_CURVES.entries()].sort(
+      (a, b) => a[1].lastSeenAtMs - b[1].lastSeenAtMs,
+    )[0];
+    if (!oldest) break;
+    LIVE_CURVES.delete(oldest[0]);
+  }
+}
+
+function resetLiveCurveSession(): void {
+  LIVE_CURVES.clear();
+}
+
 function readU64(buffer: Buffer, offset: number): bigint | null {
   if (offset + 8 > buffer.length) return null;
   return buffer.readBigUInt64LE(offset);
@@ -133,70 +190,113 @@ async function loadBondingCurveSnapshots(
   ];
   const out = new Map<string, PumpCurveSnapshot>();
   if (!keys.length) return out;
-  try {
-    const accountList = await rpc<Raw>("getMultipleAccounts", [
-      keys,
-      { encoding: "base64", commitment: "confirmed" },
-    ]);
-    const values = Array.isArray((accountList as Raw | undefined)?.value)
-      ? ((accountList as Raw).value as Raw[])
-      : [];
-    values.forEach((account, index) => {
-      const data = Array.isArray(account?.data)
-        ? (account.data as unknown[])[0]
-        : null;
-      const snapshot =
-        typeof data === "string" ? decodePumpBondingCurveSnapshot(data) : null;
-      if (snapshot) out.set(keys[index], snapshot);
-    });
-  } catch {
-    // batched curve refresh is best-effort; individual create enrichment still runs
+  const chunkSize = Math.max(
+    1,
+    Math.min(
+      25,
+      intEnv(
+        "SOLARD_PUMP_CURVE_RPC_CHUNK",
+        intEnv("SOLWAL_PUMP_CURVE_RPC_CHUNK", 20),
+      ),
+    ),
+  );
+  for (let offset = 0; offset < keys.length; offset += chunkSize) {
+    const chunk = keys.slice(offset, offset + chunkSize);
+    try {
+      const accountList = await rpc<Raw>("getMultipleAccounts", [
+        chunk,
+        { encoding: "base64", commitment: "confirmed" },
+      ]);
+      const values = Array.isArray((accountList as Raw | undefined)?.value)
+        ? ((accountList as Raw).value as Array<Raw | null>)
+        : [];
+      values.forEach((account, index) => {
+        const data = Array.isArray(account?.data)
+          ? (account.data as unknown[])[0]
+          : null;
+        const snapshot =
+          typeof data === "string"
+            ? decodePumpBondingCurveSnapshot(data)
+            : null;
+        if (snapshot) out.set(chunk[index], snapshot);
+      });
+    } catch {
+      // Curve refresh is best-effort. Do not throw through the SSE server.
+    }
+    if (offset + chunkSize < keys.length)
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          Math.max(25, intEnv("SOLARD_PUMP_CURVE_RPC_GAP_MS", 150)),
+        ),
+      );
   }
   return out;
 }
 
-async function refreshRecentCurveSnapshots(
+async function refreshLiveCurveSnapshots(
   send?: (event: string, data: unknown) => void,
 ): Promise<{ checked: number; updated: number }> {
+  if (
+    process.env.SOLARD_PUMP_CURVE_REFRESH === "0" ||
+    process.env.SOLWAL_PUMP_CURVE_REFRESH === "0"
+  )
+    return { checked: 0, updated: 0 };
+  const now = Date.now();
+  const maxAgeMs = Math.max(
+    60_000,
+    intEnv(
+      "SOLARD_PUMP_LIVE_CURVE_MAX_AGE_MS",
+      intEnv("SOLWAL_PUMP_LIVE_CURVE_MAX_AGE_MS", 45 * 60_000),
+    ),
+  );
   const limit = Math.max(
     1,
     intEnv(
-      "SOLARD_PUMP_CURVE_REFRESH_LIMIT",
-      intEnv("SOLWAL_PUMP_CURVE_REFRESH_LIMIT", 80),
+      "SOLARD_PUMP_LIVE_CURVE_REFRESH_LIMIT",
+      intEnv("SOLWAL_PUMP_LIVE_CURVE_REFRESH_LIMIT", 24),
     ),
   );
-  const rows = listPumpLiveState().newTokens.slice(0, limit);
-  const pairs = rows
-    .map((token: Raw) => ({
-      token,
-      mint: clean(token.mint),
-      curve:
-        clean(token.bondingCurveKey) ??
-        derivePumpBondingCurve(clean(token.mint)),
-    }))
-    .filter((pair) => pair.mint && pair.curve && publicKey(pair.curve));
+  const minSendGapMs = Math.max(
+    750,
+    intEnv(
+      "SOLARD_PUMP_CURVE_MIN_SEND_GAP_MS",
+      intEnv("SOLWAL_PUMP_CURVE_MIN_SEND_GAP_MS", 3500),
+    ),
+  );
+  const minDelta = Number(
+    process.env.SOLARD_PUMP_CURVE_MIN_DELTA_SOL ??
+      process.env.SOLWAL_PUMP_CURVE_MIN_DELTA_SOL ??
+      "0.000001",
+  );
+
+  for (const [mint, entry] of LIVE_CURVES) {
+    if (now - entry.lastSeenAtMs > maxAgeMs) LIVE_CURVES.delete(mint);
+  }
+
+  const entries = [...LIVE_CURVES.values()]
+    .sort((a, b) => b.lastSeenAtMs - a.lastSeenAtMs)
+    .slice(0, limit);
+  if (!entries.length) return { checked: 0, updated: 0 };
+
   const snapshots = await loadBondingCurveSnapshots(
-    pairs.map((pair) => pair.curve!),
+    entries.map((entry) => entry.curve),
   );
   let updated = 0;
-  for (const pair of pairs) {
-    const snapshot = snapshots.get(pair.curve!);
+  for (const entry of entries) {
+    const snapshot = snapshots.get(entry.curve);
     if (!snapshot || snapshot.marketCapSol == null) continue;
+    const changed =
+      entry.lastMarketCapSol == null ||
+      Math.abs(snapshot.marketCapSol - entry.lastMarketCapSol) >= minDelta;
+    const sendGapOk = now - entry.lastSentAtMs >= minSendGapMs;
+    entry.lastMarketCapSol = snapshot.marketCapSol;
+    if (!changed && !sendGapOk) continue;
+
     const next = recordPumpTrade({
-      ...(pair.token.raw && typeof pair.token.raw === "object"
-        ? (pair.token.raw as Raw)
-        : {}),
-      mint: pair.mint,
-      name: pair.token.name,
-      symbol: pair.token.symbol,
-      uri: pair.token.uri,
-      image: pair.token.image,
-      website: pair.token.website,
-      twitter: pair.token.twitter,
-      telegram: pair.token.telegram,
-      creator: pair.token.creator,
-      signature: pair.token.signature,
-      bondingCurveKey: pair.curve,
+      ...entry.token,
+      mint: entry.mint,
+      bondingCurveKey: entry.curve,
       bondingCurveSnapshot: snapshot,
       marketCapSol: snapshot.marketCapSol,
       priceSolPerToken: snapshot.priceSolPerToken,
@@ -205,10 +305,12 @@ async function refreshRecentCurveSnapshots(
     });
     if (next) {
       updated += 1;
+      entry.lastSentAtMs = now;
+      entry.token = { ...entry.token, ...next, bondingCurveKey: entry.curve };
       send?.("trade", { ...next, eventType: "trade" });
     }
   }
-  return { checked: pairs.length, updated };
+  return { checked: entries.length, updated };
 }
 
 function sse(event: string, data: unknown): Uint8Array {
@@ -284,14 +386,17 @@ function rawStringArray(value: unknown): string[] {
 }
 
 async function resolveConfirmedPumpMint(raw: Raw): Promise<string | null> {
+  const balanceMints = rawStringArray(raw.postTokenBalanceMints);
+  const indexedGuess = clean(raw.mint);
+  const accountCandidates = rawStringArray(raw.parserAccounts);
   const candidates = [
-    ...rawStringArray(raw.postTokenBalanceMints),
-    clean(raw.mint),
-    ...rawStringArray(raw.parserAccounts),
+    ...balanceMints,
+    indexedGuess,
+    ...accountCandidates,
   ].filter((item): item is string => !!item && !!publicKey(item));
   const unique = [...new Set(candidates)];
   if (!unique.length) return null;
-  // Prefer vanity pump suffixes, but only after confirming the account is an SPL mint.
+  // Prefer vanity pump suffixes, but only after confirming when possible.
   unique.sort(
     (a, b) => (/pump$/i.test(b) ? 1 : 0) - (/pump$/i.test(a) ? 1 : 0),
   );
@@ -307,12 +412,15 @@ async function resolveConfirmedPumpMint(raw: Raw): Promise<string | null> {
       if (isSplMintAccount(values[i] ?? null)) return unique[i];
     }
   } catch {
-    // If validation RPC itself is flaky, do not insert the unchecked account-index
-    // guess. Returning null is better than poisoning the DB with a curve/PDA that
-    // later breaks mcap and holder lookups.
-    return null;
+    // fall through to token-balance-only fallback below
   }
-  return null;
+  // A postTokenBalances mint comes from the runtime token balance table, not
+  // from a fragile account index. Accept it as a safe fallback if RPC account
+  // validation lags or is temporarily unavailable. Do NOT accept parserAccounts
+  // here; those can be curves/ATAs/PDAs.
+  const safeBalanceMint =
+    balanceMints.find((mint) => /pump$/i.test(mint)) ?? balanceMints[0];
+  return safeBalanceMint ?? null;
 }
 
 function derivePumpBondingCurve(
@@ -395,44 +503,51 @@ function retryAfterMs(response: Response, fallbackMs: number): number {
   return Number.isFinite(at) ? Math.max(250, at - Date.now()) : fallbackMs;
 }
 
+async function rawRpcFetch<T>(method: string, params: unknown[]): Promise<T> {
+  const response = await fetch(rpcHttpUrl(), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+  });
+  const text = await response.text();
+  let payload: { result?: T; error?: unknown } = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { error: text };
+  }
+  if (response.status === 429) {
+    const waitMs = retryAfterMs(
+      response,
+      intEnv("SOLWAL_HELIUS_429_BACKOFF_MS", 10_000),
+    );
+    throw new RpcRateLimitError(`RPC ${method} rate limited`, waitMs);
+  }
+  if (!response.ok || payload.error)
+    throw new Error(
+      `RPC ${method} failed: ${JSON.stringify(payload.error ?? response.status)}`,
+    );
+  return payload.result as T;
+}
+
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
-  const measured = await measureSolard(
-    `solard:pump-live:rpc:${method}`,
-    method,
-    async () => {
-      const response = await fetch(rpcHttpUrl(), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: Date.now(),
-          method,
-          params,
-        }),
-      });
-      const text = await response.text();
-      let payload: { result?: T; error?: unknown } = {};
-      try {
-        payload = text ? JSON.parse(text) : {};
-      } catch {
-        payload = { error: text };
-      }
-      if (response.status === 429) {
-        const waitMs = retryAfterMs(
-          response,
-          intEnv("SOLWAL_HELIUS_429_BACKOFF_MS", 10_000),
-        );
-        throw new RpcRateLimitError(`RPC ${method} rate limited`, waitMs);
-      }
-      if (!response.ok || payload.error)
-        throw new Error(
-          `RPC ${method} failed: ${JSON.stringify(payload.error ?? response.status)}`,
-        );
-      return payload.result as T;
-    },
-    (value) => ({ method, result: summarizeForMeasure(value) }),
-  );
-  return measured.value;
+  // Hot-loop RPC measurement is opt-in because Bun 1.3.x on Windows has been
+  // segfaulting under continuous SSE + WebSocket + fetch logging. We still use
+  // measure-fn when explicitly enabled, but the default terminal stream keeps
+  // the hot RPC path minimal and stable.
+  if (
+    process.env.SOLARD_MEASURE_HOT_RPC === "1" ||
+    process.env.SOLWAL_MEASURE_HOT_RPC === "1"
+  ) {
+    const measured = await measureSolard(
+      `solard:pump-live:rpc:${method}`,
+      method,
+      () => rawRpcFetch<T>(method, params),
+      (value) => ({ method, result: summarizeForMeasure(value) }),
+    );
+    return measured.value;
+  }
+  return rawRpcFetch<T>(method, params);
 }
 
 async function normalizeHeliusSignature(
@@ -488,6 +603,8 @@ function runPumpPortalStream(args: {
   controller: ReadableStreamDefaultController<Uint8Array>;
   send: (event: string, data: unknown) => void;
   close: () => void;
+  closeOnClose?: boolean;
+  sourceLabel?: string;
 }): () => void {
   const wsUrl =
     process.env.SOLWAL_PUMP_FEED_WS_URL?.trim() ||
@@ -496,6 +613,7 @@ function runPumpPortalStream(args: {
   let ws: WebSocket | null = null;
   let subscribed = new Set<string>();
   let seq = 0;
+  const sourceLabel = args.sourceLabel ?? "pumpportal";
   const watchSync = setInterval(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const keys = watchedMints().filter((mint) => !subscribed.has(mint));
@@ -504,7 +622,7 @@ function runPumpPortalStream(args: {
       for (const key of keys) subscribed.add(key);
       args.send("status", {
         status: "subscribed-token-trades",
-        source: "pumpportal",
+        source: sourceLabel,
         keys,
         at: new Date().toISOString(),
       });
@@ -512,7 +630,7 @@ function runPumpPortalStream(args: {
   }, 2_000);
   args.send("status", {
     status: "connecting",
-    source: "pumpportal",
+    source: sourceLabel,
     wsUrl,
     at: new Date().toISOString(),
   });
@@ -520,7 +638,7 @@ function runPumpPortalStream(args: {
   ws.addEventListener("open", () => {
     args.send("status", {
       status: "connected",
-      source: "pumpportal",
+      source: sourceLabel,
       wsUrl,
       at: new Date().toISOString(),
     });
@@ -543,16 +661,22 @@ function runPumpPortalStream(args: {
         txType === "create" || parsed.name != null || parsed.uri != null;
       if (isNew && parsed.mint) {
         const token = normalizePumpNewToken(parsed, ++seq);
-        if (token) args.send("token", token);
+        if (token) {
+          rememberLiveCurve(token as unknown as Raw);
+          args.send("token", token);
+        }
         return;
       }
       if (parsed.mint) {
         const token = recordPumpTrade(parsed);
-        if (token) args.send("trade", token);
+        if (token) {
+          rememberLiveCurve(token as unknown as Raw);
+          args.send("trade", token);
+        }
       }
     } catch (error) {
       args.send("warning", {
-        source: "pumpportal",
+        source: sourceLabel,
         error: error instanceof Error ? error.message : String(error),
         at: new Date().toISOString(),
       });
@@ -561,19 +685,19 @@ function runPumpPortalStream(args: {
   ws.addEventListener("error", () =>
     args.send("status", {
       status: "error",
-      source: "pumpportal",
+      source: sourceLabel,
       at: new Date().toISOString(),
     }),
   );
   ws.addEventListener("close", (event) => {
     args.send("status", {
       status: "closed",
-      source: "pumpportal",
+      source: sourceLabel,
       code: event.code,
       reason: event.reason || null,
       at: new Date().toISOString(),
     });
-    args.close();
+    if (args.closeOnClose !== false) args.close();
   });
   return () => {
     clearInterval(watchSync);
@@ -593,7 +717,11 @@ function runHeliusStream(args: {
   const maxQueue = Math.max(1, intEnv("SOLWAL_HELIUS_ENRICH_QUEUE_MAX", 300));
   const enrichPerSecond = Math.max(
     0.1,
-    intEnv("SOLWAL_HELIUS_ENRICH_PER_SECOND", 2),
+    Number(
+      process.env.SOLARD_HELIUS_ENRICH_PER_SECOND ??
+        process.env.SOLWAL_HELIUS_ENRICH_PER_SECOND ??
+        "1.5",
+    ),
   );
   const seenLimit = Math.max(
     maxQueue * 4,
@@ -603,6 +731,7 @@ function runHeliusStream(args: {
   const queued = new Set<string>();
   const seen: string[] = [];
   const seenSet = new Set<string>();
+  const pendingAttempts = new Map<string, number>();
   let ws: WebSocket | null = null;
   let closed = false;
   let processing = false;
@@ -610,6 +739,7 @@ function runHeliusStream(args: {
   let dropped = 0;
   let queueTimer: ReturnType<typeof setTimeout> | null = null;
   let statsTimer: ReturnType<typeof setInterval> | null = null;
+  let stopFallback: (() => void) | null = null;
 
   const markSeen = (signature: string): boolean => {
     if (seenSet.has(signature)) return false;
@@ -659,8 +789,11 @@ function runHeliusStream(args: {
     processing = true;
     try {
       const token = await normalizeHeliusSignature(signature);
-      if (token) args.send("token", token);
-      else
+      pendingAttempts.delete(signature);
+      if (token) {
+        rememberLiveCurve(token as unknown as Raw);
+        args.send("token", token);
+      } else
         args.send("status", {
           status: "parser-skip",
           source: "helius",
@@ -669,18 +802,40 @@ function runHeliusStream(args: {
         });
     } catch (error) {
       if (error instanceof RpcPendingConfirmationError) {
-        queue.unshift(signature);
-        queued.add(signature);
-        args.send("status", {
-          status: "awaiting-confirmed-transaction",
-          source: "helius",
-          signature,
-          retryAfterMs: error.retryAfterMs,
-          queued: queue.length,
-          dropped,
-          at: new Date().toISOString(),
-        });
-        schedule(error.retryAfterMs);
+        const attempts = (pendingAttempts.get(signature) ?? 0) + 1;
+        pendingAttempts.set(signature, attempts);
+        const maxPendingAttempts = Math.max(
+          1,
+          intEnv(
+            "SOLARD_HELIUS_PENDING_TX_ATTEMPTS",
+            intEnv("SOLWAL_HELIUS_PENDING_TX_ATTEMPTS", 8),
+          ),
+        );
+        if (attempts <= maxPendingAttempts) {
+          queue.unshift(signature);
+          queued.add(signature);
+          args.send("status", {
+            status: "awaiting-confirmed-transaction",
+            source: "helius",
+            signature,
+            attempt: attempts,
+            maxPendingAttempts,
+            retryAfterMs: error.retryAfterMs,
+            queued: queue.length,
+            dropped,
+            at: new Date().toISOString(),
+          });
+          schedule(error.retryAfterMs);
+        } else {
+          pendingAttempts.delete(signature);
+          args.send("status", {
+            status: "dropped-unconfirmed-transaction",
+            source: "helius",
+            signature,
+            attempts,
+            at: new Date().toISOString(),
+          });
+        }
       } else if (error instanceof RpcRateLimitError) {
         rateLimitedUntil = Date.now() + error.retryAfterMs;
         queue.unshift(signature);
@@ -738,6 +893,28 @@ function runHeliusStream(args: {
         params: [{ mentions: [PUMP_PROGRAM_ID] }, { commitment: "processed" }],
       }),
     );
+    // Helius logs are the low-latency source, but parser/enrichment can lag or
+    // skip when a tx is not confirmed yet. Keep the table alive with PumpPortal
+    // create/trade events by default, while Helius continues to enrich/validate.
+    // Disable with SOLARD_PUMPPORTAL_FALLBACK=0.
+    if (
+      process.env.SOLARD_PUMPPORTAL_FALLBACK !== "0" &&
+      process.env.SOLWAL_PUMPPORTAL_FALLBACK !== "0" &&
+      !stopFallback
+    ) {
+      stopFallback = runPumpPortalStream({
+        ...args,
+        close: () => {},
+        closeOnClose: false,
+        sourceLabel: "pumpportal-fallback",
+      });
+      args.send("status", {
+        status: "fallback-enabled",
+        source: "helius",
+        fallback: "pumpportal",
+        at: new Date().toISOString(),
+      });
+    }
   });
   ws.addEventListener("message", (message) => {
     try {
@@ -799,6 +976,9 @@ function runHeliusStream(args: {
     if (queueTimer) clearTimeout(queueTimer);
     if (statsTimer) clearInterval(statsTimer);
     try {
+      stopFallback?.();
+    } catch {}
+    try {
       ws?.close();
     } catch {}
   };
@@ -832,6 +1012,7 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
       url.searchParams.get("source") === "pumpportal" ? "pumpportal" : "helius"
     ) as Source;
     clearCurrentSessionWatchGroup();
+    resetLiveCurveSession();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         let closed = false;
@@ -863,14 +1044,15 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
           15_000,
         );
         const curveRefreshMs = Math.max(
-          1000,
+          5000,
           intEnv(
             "SOLARD_PUMP_CURVE_REFRESH_MS",
-            intEnv("SOLWAL_PUMP_CURVE_REFRESH_MS", 2500),
+            intEnv("SOLWAL_PUMP_CURVE_REFRESH_MS", 10000),
           ),
         );
         curveRefresh = setInterval(() => {
-          void refreshRecentCurveSnapshots(send)
+          if (LIVE_CURVES.size === 0) return;
+          void refreshLiveCurveSnapshots(send)
             .then((result) => {
               if (result.updated > 0)
                 send("status", {
@@ -889,7 +1071,6 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
               });
             });
         }, curveRefreshMs);
-        void refreshRecentCurveSnapshots(send).catch(() => undefined);
         request.signal.addEventListener("abort", close, { once: true });
         send("status", {
           status: "stream-open",
@@ -947,6 +1128,7 @@ export async function handlePumpLivePost(request: Request): Promise<Response> {
           );
         if (action === "clear-current-session")
           return clearCurrentSessionWatchGroup();
+        resetLiveCurveSession();
         throw new Error(`Unknown pump-live action: ${action || "(empty)"}`);
       },
       summarizeForMeasure,

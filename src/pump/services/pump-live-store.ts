@@ -571,7 +571,15 @@ const metadataQueue: Array<{ mint: string; uri: string }> = [];
 const metadataQueued = new Set<string>();
 
 function enqueueMetadataEnrichment(mint: string, uri: string): void {
-  if (process.env.SOLWAL_PUMP_METADATA_ENRICH === "0") return;
+  // Helius direct terminal stability: metadata/IPFS fetches are optional. On
+  // Windows/Bun, gateway TLS failures have caused noisy toasts and have made
+  // the live stream harder to debug. Keep social/image enrichment opt-in;
+  // PumpPortal rows still carry socials/images when available.
+  if (
+    process.env.SOLARD_PUMP_METADATA_ENRICH !== "1" &&
+    process.env.SOLWAL_PUMP_METADATA_ENRICH !== "1"
+  )
+    return;
   if (metadataQueued.has(mint)) return;
   const maxQueue = Math.max(1, intEnv("SOLWAL_PUMP_METADATA_QUEUE_MAX", 150));
   if (metadataQueue.length >= maxQueue) {

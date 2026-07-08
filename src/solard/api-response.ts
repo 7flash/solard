@@ -95,46 +95,45 @@ export function summarizeForMeasure(value: unknown, depth = 0): unknown {
   return String(value);
 }
 
-type RawMeasureScope = {
-  measure?:
-    | { assert?: <T>(label: string, fn: () => Promise<T>) => Promise<T> }
-    | ((
-        label: string,
-        fn: () => Promise<unknown>,
-      ) => Promise<unknown> | unknown);
-  measureSync?:
-    | { assert?: <T>(label: string, fn: () => T) => T }
-    | ((label: string, fn: () => unknown) => unknown);
-  resetCounter?: () => void;
-};
+type SolardMeasureScope = ReturnType<typeof createMeasure>;
 
-function safeScope(name: string): RawMeasureScope | null {
+type MeasureAction<T = unknown> =
+  | string
+  | {
+      label: string;
+      start?: () => unknown;
+      end?: (value: T) => unknown;
+      result?: (value: T) => unknown;
+      maxResultLength?: number;
+      meta?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+
+function safeScope(name: string): SolardMeasureScope | null {
   try {
     return createMeasure(name, {
       maxResultLength: Number(
         process.env.SOLARD_MEASURE_MAX_RESULT_LENGTH ?? "1600",
       ),
-    }) as RawMeasureScope;
+    }) as SolardMeasureScope;
   } catch {
     return null;
   }
 }
 
-async function assertAsync<T>(
-  scope: RawMeasureScope | null,
+function measureAction<T>(
   label: string,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const measure = scope?.measure;
-  if (
-    measure &&
-    typeof measure === "object" &&
-    typeof measure.assert === "function"
-  )
-    return await measure.assert(label, fn);
-  if (typeof measure === "function")
-    return await (measure(label, fn) as Promise<T> | T);
-  return await fn();
+  summarize: (value: T) => unknown,
+): MeasureAction<T> {
+  return {
+    label,
+    start: () => label,
+    end: summarize,
+    result: summarize,
+    maxResultLength: Number(
+      process.env.SOLARD_MEASURE_MAX_RESULT_LENGTH ?? "1600",
+    ),
+  };
 }
 
 export async function measureSolard<T>(
@@ -151,17 +150,13 @@ export async function measureSolard<T>(
 }> {
   const scope = safeScope(scopeName);
   const started = Date.now();
-  let value!: T;
-  let hasValue = false;
-  const summary = await assertAsync(scope, label, async () => {
-    value = await operation();
-    hasValue = true;
-    return summarize(value);
-  });
-  if (!hasValue)
-    throw new Error(
-      `Measured operation did not produce a value: ${scopeName}:${label}`,
-    );
+  const value = scope
+    ? ((await scope.measure(
+        measureAction(label, summarize),
+        async () => await operation(),
+      )) as T)
+    : await operation();
+  const summary = summarize(value);
   return {
     value,
     tookMs: Date.now() - started,

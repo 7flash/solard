@@ -1714,3 +1714,139 @@ html, body { width: 100%; overflow-x: hidden; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Solard compact route/layout recovery. Keep one vertical sidebar even in split-screen devtools. */
+input[type="checkbox"] {
+  width: 13px !important;
+  min-width: 13px !important;
+  height: 13px !important;
+  min-height: 13px !important;
+  padding: 0 !important;
+  margin: 0 6px 0 0;
+  accent-color: var(--green);
+  flex: 0 0 auto;
+}
+
+.page-shell {
+  grid-template-columns: 220px minmax(0, 1fr) !important;
+}
+.side-nav {
+  width: 220px;
+  min-width: 220px;
+  position: sticky !important;
+  top: 0 !important;
+  height: 100vh !important;
+  border-right: 2px solid var(--line-strong) !important;
+  border-bottom: 0 !important;
+}
+.nav-list {
+  grid-template-columns: 1fr !important;
+}
+.nav-list a {
+  border-right: 0 !important;
+}
+.main-console {
+  min-width: 0;
+  padding: 10px 14px 20px !important;
+}
+#app-root { min-width: 0; }
+
+/* Terminal page: dense, terminal-only controls. */
+.terminal-page-only {
+  gap: 6px !important;
+}
+.terminal-commandbar,
+.terminal-filterbar {
+  padding: 6px 8px !important;
+  gap: 6px !important;
+}
+.terminal-commandbar {
+  grid-template-columns: minmax(150px, .7fr) minmax(420px, 1fr) !important;
+}
+.terminal-title-compact h2 {
+  font-size: clamp(22px, 2.8vw, 38px) !important;
+}
+.terminal-title-compact .tiny {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-actions-compact {
+  justify-content: flex-end !important;
+  gap: 4px !important;
+}
+.terminal-actions-compact select,
+.terminal-actions-compact input,
+.terminal-filterbar select,
+.terminal-filterbar input {
+  min-height: 27px !important;
+  height: 27px !important;
+  padding: 4px 7px !important;
+  font-size: 11px !important;
+}
+.terminal-actions-compact select { max-width: 150px !important; }
+.terminal-actions-compact .micro-input { width: 58px !important; min-width: 58px !important; }
+.terminal-sim,
+.terminal-filterbar label {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 4px !important;
+  min-height: 27px !important;
+  height: 27px !important;
+  padding: 0 6px !important;
+  border: 1px solid var(--line) !important;
+  background: #070b10 !important;
+  color: var(--muted) !important;
+  font-size: 10px !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+}
+.terminal-filterbar {
+  grid-template-columns: minmax(150px, 1fr) 150px max-content max-content 58px !important;
+}
+.terminal-filterbar .danger.compact { height: 27px !important; padding: 4px 8px !important; }
+.terminal-grid-tight {
+  grid-template-columns: minmax(0, 1fr) 286px !important;
+  gap: 6px !important;
+}
+.terminal-table-wrap { max-height: calc(100vh - 112px) !important; }
+.terminal-tight-table { min-width: 640px !important; font-size: 11px !important; }
+.terminal-tight-table th,
+.terminal-tight-table td { padding: 4px 6px !important; }
+.terminal-tight-table th:nth-child(1),
+.terminal-tight-table td:nth-child(1) { width: 30px !important; }
+.terminal-tight-table th:nth-child(3),
+.terminal-tight-table td:nth-child(3) { width: 72px !important; }
+.terminal-tight-table th:nth-child(4),
+.terminal-tight-table td:nth-child(4) { width: 54px !important; }
+.terminal-tight-table th:nth-child(5),
+.terminal-tight-table td:nth-child(5) { width: 120px !important; }
+.terminal-token-cell img,
+.terminal-token-cell .img-placeholder { width: 24px !important; height: 24px !important; }
+.terminal-token-cell a { grid-template-columns: 24px minmax(0, 1fr) !important; gap: 6px !important; }
+.terminal-sma-inline b { padding: 1px 3px !important; font-size: 9px !important; }
+.terminal-hover-inspector { top: 6px !important; padding: 7px !important; max-height: calc(100vh - 24px) !important; }
+.terminal-inspector-token { grid-template-columns: 46px minmax(0,1fr) !important; gap: 7px !important; }
+.terminal-inspector-token img,
+.terminal-inspector-token .img-placeholder.large { width: 46px !important; height: 46px !important; }
+.terminal-inspector-token h3 { font-size: 22px !important; }
+.terminal-kv { grid-template-columns: 62px minmax(0, 1fr) !important; padding: 6px !important; gap: 4px 6px !important; font-size: 10px !important; }
+
+@media (max-width: 760px) {
+  .page-shell { grid-template-columns: 176px minmax(0, 1fr) !important; }
+  .side-nav { width: 176px; min-width: 176px; padding: 12px 8px !important; }
+  .brand-block h1 { font-size: 22px !important; }
+  .nav-list a { min-height: 34px !important; padding: 7px 6px !important; font-size: 11px !important; }
+  .main-console { padding: 8px !important; }
+  .terminal-commandbar,
+  .terminal-filterbar,
+  .terminal-grid-tight { grid-template-columns: 1fr !important; }
+  .terminal-actions-compact { justify-content: flex-start !important; }
+  .terminal-hover-inspector { position: static !important; max-height: none !important; }
+}
+@media (max-width: 520px) {
+  .page-shell { grid-template-columns: 1fr !important; }
+  .side-nav { width: 100%; min-width: 0; height: auto !important; position: static !important; border-right: 0 !important; border-bottom: 2px solid var(--line-strong) !important; }
+}

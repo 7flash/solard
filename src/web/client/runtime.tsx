@@ -247,6 +247,7 @@ export type State = {
   terminalInspectorKey: string | null;
   terminalInspectorFixed: boolean;
   terminalPinnedMints: string[];
+  terminalSessionStartedAtMs: number | null;
   tokenHolders: Record<string, TokenHolder[]>;
   tokenHolderErrors: Record<string, string>;
   tokenHoldersCheckedAt: Record<string, number>;
@@ -330,6 +331,7 @@ export const state: State = {
       return [];
     }
   })(),
+  terminalSessionStartedAtMs: null,
   tokenHolders: {},
   tokenHolderErrors: {},
   tokenHoldersCheckedAt: {},
@@ -340,11 +342,23 @@ export const state: State = {
 const runtimeMeasure = createClientMeasureScope("solard:web");
 const toastDedupedAt: Record<string, number> = {};
 
+function clientMeasureEnabled(): boolean {
+  try {
+    return (
+      localStorage.getItem("solard:measure") === "1" ||
+      localStorage.getItem("solwal:measure") === "1"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function measureClient<T>(
   label: string,
   fn: () => Promise<T> | T,
   summarize: (value: T) => unknown = summarizeForClient,
 ): Promise<T> {
+  if (!clientMeasureEnabled()) return await fn();
   return await runtimeMeasure.measure(
     `${state.measureScope}:${label}`,
     fn,
@@ -357,6 +371,7 @@ export function measureClientSync<T>(
   fn: () => T,
   summarize: (value: T) => unknown = summarizeForClient,
 ): T {
+  if (!clientMeasureEnabled()) return fn();
   return runtimeMeasure.measureSync(
     `${state.measureScope}:${label}`,
     fn,
@@ -365,6 +380,7 @@ export function measureClientSync<T>(
 }
 
 function measureEvent(label: string, summary?: unknown): void {
+  if (!clientMeasureEnabled()) return;
   runtimeMeasure.event(`${state.measureScope}:${label}`, summary);
 }
 
@@ -967,20 +983,74 @@ export async function signalAction(
   state.signals = action === "ingest" && result?.state ? result.state : result;
 }
 
+function rowTimeMs(row: PumpFeedRow): number {
+  const direct = [row.updatedAtMs, row.createdAtMs, row.lastTradeAtMs].find(
+    (value) => typeof value === "number" && Number.isFinite(value),
+  );
+  if (typeof direct === "number") return direct;
+  const parsed = row.receivedAt ? Date.parse(row.receivedAt) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function shouldHydrateTerminalRow(row: PumpFeedRow): boolean {
+  if (row.mint && state.terminalPinnedMints.includes(row.mint)) return true;
+  const started = state.terminalSessionStartedAtMs;
+  if (!started) return false;
+  // A live SSE event may hit the DB before this client receives the event block.
+  // Hydrate only very recent rows so the terminal does not turn into a stale DB dump.
+  return rowTimeMs(row) >= started - 15_000;
+}
+
+function currentSessionRows(
+  groups: TokenWatchGroup[] | undefined,
+): PumpFeedRow[] {
+  const group = (groups ?? []).find(
+    (item) =>
+      item.id === "current-session" ||
+      String(item.name ?? "").toLowerCase() === "current session",
+  );
+  return (group?.tokens ?? []) as unknown as PumpFeedRow[];
+}
+
 export async function refreshPumpLive(): Promise<void> {
+  const terminal = state.tab === "terminal";
+  const suffix =
+    terminal && state.terminalSessionStartedAtMs
+      ? `?terminal=1&sinceMs=${encodeURIComponent(String(state.terminalSessionStartedAtMs))}`
+      : "";
   const live = await api<{
     newTokens: PumpFeedRow[];
     watchGroups: TokenWatchGroup[];
-  }>("/api/pump-live");
-  // Terminal is a live feed, not a DB dump. Do not seed 500 stale cached rows
-  // into it; stream events and curve-poll updates populate the page. Watchlists
-  // can still use the same endpoint to load persisted token state.
-  if (state.tab !== "terminal") {
-    for (const row of live.newTokens ?? []) mergePumpToken(row);
-  }
+  }>(`/api/pump-live${suffix}`);
   state.watchGroups = live.watchGroups ?? state.watchGroups;
   if (!state.selectedWatchGroupId && state.watchGroups[0])
     state.selectedWatchGroupId = state.watchGroups[0].id;
+
+  if (terminal) {
+    const sessionMints = new Set(
+      currentSessionRows(state.watchGroups)
+        .map((row) => row.mint)
+        .filter(Boolean),
+    );
+    const rows = [
+      ...(live.newTokens ?? []),
+      ...currentSessionRows(state.watchGroups),
+    ];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const key = pumpRowKey(row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (
+        shouldHydrateTerminalRow(row) ||
+        (!!row.mint && sessionMints.has(row.mint))
+      )
+        mergePumpToken(row);
+    }
+    return;
+  }
+
+  for (const row of live.newTokens ?? []) mergePumpToken(row);
 }
 
 const SOLANA_PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -1292,9 +1362,22 @@ export function handleSseBlock(block: string): void {
     if (event === "token") mergePumpToken(payload as PumpFeedRow);
     else if (event === "trade") mergePumpToken(payload as PumpFeedRow);
     else if (event === "status") {
-      state.pumpFeedStatus = (payload.status ??
-        event) as State["pumpFeedStatus"];
-      if (payload.status === "error")
+      const status = String(payload.status ?? "");
+      if (
+        ["idle", "connecting", "connected", "error", "closed"].includes(status)
+      ) {
+        state.pumpFeedStatus = status as State["pumpFeedStatus"];
+      } else if (
+        status === "stream-open" ||
+        status === "helius-enrichment" ||
+        status === "curve-refresh" ||
+        status === "parser-skip" ||
+        status === "awaiting-confirmed-transaction"
+      ) {
+        if (state.pumpFeedAbort && state.pumpFeedStatus !== "error")
+          state.pumpFeedStatus = "connected";
+      }
+      if (status === "error")
         pushToast("error", "Pump feed", payload.error ?? "stream error", 6500);
       state.pumpFeedError = null;
       schedulePumpFeedUpdate();
@@ -1322,6 +1405,7 @@ export async function startPumpFeed(): Promise<void> {
   state.pumpFeedAbort = abort;
   state.pumpFeedStatus = "connecting";
   state.pumpFeedError = null;
+  state.terminalSessionStartedAtMs = Date.now();
   // Keep explicitly pinned rows, but clear stale cached DB rows so Terminal
   // behaves like a real-time feed instead of a historical dump.
   state.pumpFeed = state.pumpFeed.filter(
@@ -1375,6 +1459,7 @@ export function stopPumpFeed(): void {
   state.pumpFeedAbort?.abort();
   state.pumpFeedAbort = null;
   state.pumpFeedStatus = "closed";
+  state.terminalSessionStartedAtMs = null;
   update();
 }
 
@@ -1933,11 +2018,15 @@ export function mountPage(page: State["tab"], view: ConsolePage) {
     });
   });
 
-  if (page === "terminal")
+  if (
+    page === "terminal" &&
+    localStorage.getItem("solard:pump-auto-connect") === "1"
+  ) {
     void measureClient("terminal-start-feed", startPumpFeed, () => ({
       status: state.pumpFeedStatus,
       source: state.pumpFeedSource,
     }));
+  }
 
   const dataInterval = setInterval(
     () => {
