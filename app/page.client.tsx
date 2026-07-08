@@ -47,6 +47,15 @@ type PumpFeedRow = {
   initialBuy?: number | null;
   solAmount?: number | null;
   marketCapSol?: number | null;
+  priceSolPerToken?: number | null;
+  image?: string | null;
+  lastMarketCapSol?: number | null;
+  sma1m?: number | null;
+  sma5m?: number | null;
+  sma15m?: number | null;
+  sma60m?: number | null;
+  lastTradeAtMs?: number | null;
+  trades?: AnyRow[];
   raw?: AnyRow;
 };
 
@@ -62,10 +71,15 @@ type TokenWatchToken = {
   symbol?: string | null;
   creator?: string | null;
   uri?: string | null;
+  image?: string | null;
   signature?: string | null;
   addedAtMs: number;
   updatedAtMs: number;
   samples: TokenWatchSample[];
+  image?: string | null;
+  priceSolPerToken?: number | null;
+  lastTradeAtMs?: number | null;
+  trades?: AnyRow[];
   lastMarketCapSol: number | null;
   sma1m: number | null;
   sma5m: number | null;
@@ -175,6 +189,17 @@ function tokenUrl(mint: string | null | undefined): string {
   return mint ? `https://pump.fun/coin/${mint}` : "#";
 }
 
+function tokenImage(row: {
+  image?: string | null;
+  uri?: string | null;
+}): string | null {
+  const image = row.image || null;
+  if (!image) return null;
+  return image.startsWith("ipfs://")
+    ? `https://ipfs.io/ipfs/${image.slice(7)}`
+    : image;
+}
+
 function formatMcap(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
@@ -215,6 +240,23 @@ async function refreshWatchGroups(): Promise<void> {
   }
 }
 
+async function refreshPumpLive(): Promise<void> {
+  const live = await api<{
+    newTokens: PumpFeedRow[];
+    watchGroups: TokenWatchGroup[];
+  }>("/api/pump-live");
+  state.pumpFeed = [...(live.newTokens ?? []), ...state.pumpFeed]
+    .filter((row, index, arr) =>
+      row.mint
+        ? arr.findIndex((item) => item.mint === row.mint) === index
+        : index < 500,
+    )
+    .slice(0, 500);
+  state.watchGroups = live.watchGroups ?? state.watchGroups;
+  if (!state.selectedWatchGroupId && state.watchGroups[0])
+    state.selectedWatchGroupId = state.watchGroups[0].id;
+}
+
 async function createWatchGroup(name: string): Promise<void> {
   const created = await api<TokenWatchGroup>("/api/watch-groups", {
     method: "POST",
@@ -232,6 +274,7 @@ async function addWatchedToken(
     symbol?: string | null;
     creator?: string | null;
     uri?: string | null;
+    image?: string | null;
     signature?: string | null;
     marketCapSol?: number | null;
     source?: string;
@@ -272,6 +315,7 @@ async function starPumpFeedRow(
     symbol: row.symbol ?? null,
     creator: row.creator ?? null,
     uri: row.uri ?? null,
+    image: row.image ?? null,
     signature: row.signature ?? null,
     marketCapSol: row.marketCapSol ?? null,
     source: "pump-feed",
@@ -288,9 +332,35 @@ function schedulePumpFeedUpdate(): void {
   }, 120);
 }
 
-function appendPumpFeed(row: PumpFeedRow): void {
-  state.pumpFeed = [row, ...state.pumpFeed].slice(0, 350);
+function mergePumpToken(row: PumpFeedRow): void {
+  if (!row.mint) return appendPumpFeed(row);
+  const existingIndex = state.pumpFeed.findIndex(
+    (item) => item.mint === row.mint,
+  );
+  if (existingIndex >= 0) {
+    state.pumpFeed[existingIndex] = {
+      ...state.pumpFeed[existingIndex],
+      ...row,
+    };
+    state.pumpFeed = [
+      state.pumpFeed[existingIndex],
+      ...state.pumpFeed.filter((_item, index) => index !== existingIndex),
+    ].slice(0, 500);
+  } else {
+    state.pumpFeed = [row, ...state.pumpFeed].slice(0, 500);
+  }
+  for (const group of state.watchGroups) {
+    const tokenIndex = group.tokens.findIndex(
+      (token) => token.mint === row.mint,
+    );
+    if (tokenIndex >= 0)
+      group.tokens[tokenIndex] = { ...group.tokens[tokenIndex], ...row } as any;
+  }
   schedulePumpFeedUpdate();
+}
+
+function appendPumpFeed(row: PumpFeedRow): void {
+  mergePumpToken(row);
 }
 
 function handleSseBlock(block: string): void {
@@ -306,7 +376,8 @@ function handleSseBlock(block: string): void {
   const text = dataLines.join("\n");
   try {
     const payload = JSON.parse(text);
-    if (event === "token") appendPumpFeed(payload as PumpFeedRow);
+    if (event === "token") mergePumpToken(payload as PumpFeedRow);
+    else if (event === "trade") mergePumpToken(payload as PumpFeedRow);
     else if (event === "status") {
       state.pumpFeedStatus = (payload.status ??
         event) as State["pumpFeedStatus"];
@@ -330,7 +401,7 @@ async function startPumpFeed(): Promise<void> {
   state.pumpFeedError = null;
   update();
   try {
-    const response = await fetch("/api/pump-feed", {
+    const response = await fetch("/api/pump-live?stream=1", {
       headers: authHeaders(),
       signal: abort.signal,
     });
@@ -459,7 +530,25 @@ function OverviewView() {
                 <td>{row.wallet?.name ?? "—"}</td>
                 <td className="code">{short(row.wallet?.address)}</td>
                 <td>
-                  {row.error ? row.error : solFromLamports(row.solLamports)}
+                  {row.error ? (
+                    row.error
+                  ) : (
+                    <>
+                      <div>{solFromLamports(row.solLamports)}</div>
+                      <div className="holdings">
+                        {(row.visibleTokenBalances ?? [])
+                          .slice(0, 8)
+                          .map((token: AnyRow) => (
+                            <span className="holding">
+                              {token.symbol
+                                ? `$${token.symbol}`
+                                : short(token.mint, 3, 3)}{" "}
+                              {token.amountUi ?? token.amountRaw}
+                            </span>
+                          ))}
+                      </div>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}
@@ -1003,9 +1092,9 @@ function TerminalView() {
         <div>
           <h2>Pump.fun new-token terminal</h2>
           <p className="muted">
-            Live feed from PumpPortal WebSocket subscribeNewToken. Use it for
-            watch-only discovery; trading still requires an explicit
-            launch/trade action.
+            Backend streams PumpPortal new-token events, writes tokens/price
+            samples locally, and subscribes to watched-token trades for live
+            market-cap SMA updates.
           </p>
         </div>
         <div className="row">
@@ -1071,11 +1160,13 @@ function TerminalView() {
             <thead>
               <tr>
                 <th>Time</th>
+                <th></th>
                 <th>Token</th>
                 <th>Mint</th>
                 <th>Creator</th>
                 <th>Initial buy</th>
                 <th>MCap SOL</th>
+                <th>Last trade</th>
                 <th>Sig</th>
                 <th>Watch</th>
               </tr>
@@ -1086,7 +1177,20 @@ function TerminalView() {
                   <td className="code">
                     {row.receivedAt
                       ? new Date(row.receivedAt).toLocaleTimeString()
-                      : "—"}
+                      : row.lastTradeAtMs
+                        ? new Date(row.lastTradeAtMs).toLocaleTimeString()
+                        : "—"}
+                  </td>
+                  <td>
+                    {tokenImage(row) ? (
+                      <img
+                        className="token-img"
+                        src={tokenImage(row)!}
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="token-img placeholder" />
+                    )}
                   </td>
                   <td>
                     <div className="token-title">
@@ -1111,7 +1215,8 @@ function TerminalView() {
                   </td>
                   <td className="code">{short(row.creator)}</td>
                   <td>{formatSol(row.initialBuy ?? row.solAmount)}</td>
-                  <td>{formatSol(row.marketCapSol)}</td>
+                  <td>{formatSol(row.marketCapSol ?? row.lastMarketCapSol)}</td>
+                  <td>{row.lastTradeAtMs ? age(row.lastTradeAtMs) : "—"}</td>
                   <td className="code">{short(row.signature)}</td>
                   <td>
                     <button
@@ -1152,8 +1257,9 @@ function WatchlistsView() {
         <div>
           <h2>Watched token groups</h2>
           <p className="muted">
-            Star tokens from the Pump terminal into groups. The grid shows
-            market-cap SMA columns from captured feed/sampling points.
+            Star tokens from the Pump terminal into groups. The backend
+            subscribes to watched-token trades and updates live market-cap + SMA
+            columns.
           </p>
         </div>
         <form
@@ -1239,6 +1345,7 @@ function WatchlistsView() {
           <table>
             <thead>
               <tr>
+                <th></th>
                 <th>Token</th>
                 <th>Mint</th>
                 <th>Creator</th>
@@ -1247,14 +1354,25 @@ function WatchlistsView() {
                 <th>SMA 5m</th>
                 <th>SMA 15m</th>
                 <th>SMA 60m</th>
-                <th>Samples</th>
-                <th>Age</th>
+                <th>Trades</th>
+                <th>Last trade</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {tokenRows.map((token) => (
                 <tr>
+                  <td>
+                    {tokenImage(token) ? (
+                      <img
+                        className="token-img"
+                        src={tokenImage(token)!}
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="token-img placeholder" />
+                    )}
+                  </td>
                   <td>
                     <div className="token-title">
                       {token.symbol ? `$${token.symbol}` : "—"}
@@ -1278,8 +1396,10 @@ function WatchlistsView() {
                   <td>{formatMcap(token.sma5m)}</td>
                   <td>{formatMcap(token.sma15m)}</td>
                   <td>{formatMcap(token.sma60m)}</td>
-                  <td>{token.samples.length}</td>
-                  <td>{age(token.addedAtMs)}</td>
+                  <td>{token.trades?.length ?? token.samples.length}</td>
+                  <td>
+                    {token.lastTradeAtMs ? age(token.lastTradeAtMs) : "—"}
+                  </td>
                   <td>
                     <button
                       type="button"
@@ -1693,11 +1813,16 @@ export default function mount() {
   void runAction(async () => {
     await refreshOverview();
     await refreshJobs();
-    await refreshWatchGroups();
+    await refreshPumpLive();
   });
+  void startPumpFeed();
   const interval = setInterval(() => {
     if (state.tab === "jobs" || state.selectedJobId)
       void refreshJobs()
+        .then(update)
+        .catch(() => undefined);
+    if (state.tab === "watchlists" || state.tab === "terminal")
+      void refreshPumpLive()
         .then(update)
         .catch(() => undefined);
   }, 1500);

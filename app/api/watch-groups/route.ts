@@ -49,6 +49,7 @@ export async function POST(request: Request): Promise<Response> {
           symbol: typeof token.symbol === "string" ? token.symbol : null,
           creator: typeof token.creator === "string" ? token.creator : null,
           uri: typeof token.uri === "string" ? token.uri : null,
+          image: typeof token.image === "string" ? token.image : null,
           signature:
             typeof token.signature === "string" ? token.signature : null,
           marketCapSol:
