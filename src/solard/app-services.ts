@@ -1,5 +1,13 @@
 import { createTraderSowl, type Sowl } from "../index.js";
 import {
+  loadSolardOverview,
+  type SolardOverviewOptions,
+} from "./overview-service.js";
+import {
+  loadSolardPortfolio,
+  type SolardPortfolioOptions,
+} from "./portfolio-service.js";
+import {
   listTelegramSignals,
   upsertTelegramSignalSource,
   ingestTelegramSignal,
@@ -17,6 +25,16 @@ import {
 
 export type SolardAppServices = {
   sowl: Sowl;
+  overview: {
+    load(
+      options?: SolardOverviewOptions,
+    ): ReturnType<typeof loadSolardOverview>;
+  };
+  portfolio: {
+    load(
+      options?: SolardPortfolioOptions,
+    ): ReturnType<typeof loadSolardPortfolio>;
+  };
   pumpLive: {
     list(): ReturnType<typeof listPumpLiveState>;
     createGroup(name: string): ReturnType<typeof createTokenWatchGroup>;
@@ -49,7 +67,7 @@ export type SolardAppServices = {
 /**
  * Shared app service factory for CLI commands and web API routes.
  * Route/command handlers should be thin adapters over this object or over
- * service modules in src/pump, src/signals, src/launches, and src/tx.
+ * service modules in src/solard, src/pump, src/signals, src/launches, and src/tx.
  */
 export function createSolardAppServices(
   args: { rpcUrl?: string } = {},
@@ -57,6 +75,12 @@ export function createSolardAppServices(
   const sowl = createTraderSowl({ rpcUrl: args.rpcUrl });
   return {
     sowl,
+    overview: {
+      load: (options) => loadSolardOverview(sowl, options),
+    },
+    portfolio: {
+      load: (options) => loadSolardPortfolio(sowl, options),
+    },
     pumpLive: {
       list: () => listPumpLiveState(),
       createGroup: (name) => createTokenWatchGroup(name),

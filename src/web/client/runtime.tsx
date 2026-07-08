@@ -302,6 +302,18 @@ export function authHeaders(): HeadersInit {
   return state.token ? { "x-solwal-web-token": state.token } : {};
 }
 
+function unwrapApiPayload<T>(payload: any, status: number): T {
+  if (payload && typeof payload === "object") {
+    if (payload.ok === false)
+      throw new Error(payload.error ?? payload.message ?? `HTTP ${status}`);
+    if (Object.prototype.hasOwnProperty.call(payload, "value"))
+      return payload.value as T;
+    if (Object.prototype.hasOwnProperty.call(payload, "data"))
+      return payload.data as T;
+  }
+  return payload as T;
+}
+
 export async function api<T>(
   url: string,
   options: RequestInit = {},
@@ -314,10 +326,39 @@ export async function api<T>(
       ...(options.headers ?? {}),
     },
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false)
-    throw new Error(payload.error ?? `HTTP ${response.status}`);
-  return payload.value as T;
+  const text = await response.text();
+  let payload: any = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { ok: false, error: text || `HTTP ${response.status}` };
+  }
+  if (!response.ok)
+    throw new Error(
+      payload?.error ?? payload?.message ?? `HTTP ${response.status}`,
+    );
+  return unwrapApiPayload<T>(payload, response.status);
+}
+
+function emptyOverview(): Overview {
+  return { wallets: [], tokens: [], groups: [], executions: [], balances: [] };
+}
+
+function mergeOverview(
+  next: Overview,
+  options: { keepBalances?: boolean } = {},
+): void {
+  const previous = state.overview ?? emptyOverview();
+  state.overview = {
+    wallets: next.wallets ?? previous.wallets ?? [],
+    tokens: next.tokens ?? previous.tokens ?? [],
+    groups: next.groups ?? previous.groups ?? [],
+    executions: next.executions ?? previous.executions ?? [],
+    balances:
+      options.keepBalances && previous.balances?.length
+        ? previous.balances
+        : (next.balances ?? previous.balances ?? []),
+  };
 }
 
 export function short(
@@ -918,34 +959,36 @@ export async function refreshStatus(): Promise<void> {
   if (last) last.textContent = new Date().toLocaleTimeString();
 }
 
+export async function refreshLocalOverview(): Promise<void> {
+  const fast = await api<Overview>("/api/overview?fast=1");
+  mergeOverview(fast, { keepBalances: true });
+  state.error = null;
+  update();
+}
+
+export async function refreshSolBalances(): Promise<void> {
+  const full = await api<Overview>("/api/overview?balances=sol");
+  mergeOverview(full, { keepBalances: false });
+  state.error = null;
+  update();
+}
+
 export async function refreshOverview(): Promise<void> {
   const rpcStatus = await api<AnyRow>("/api/status").catch(() => null);
   if (rpcStatus) state.rpcStatus = rpcStatus;
 
   try {
     // Fast path: local SQLite only. This makes wallets/groups/tokens appear instantly.
-    const fast = await api<Overview>("/api/overview?fast=1");
-    state.overview = fast;
-    state.error = null;
-    update();
+    await refreshLocalOverview();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     state.error = `Local overview unavailable: ${message}`;
-    if (!state.overview)
-      state.overview = {
-        wallets: [],
-        tokens: [],
-        groups: [],
-        executions: [],
-        balances: [],
-      };
+    if (!state.overview) state.overview = emptyOverview();
   }
 
   try {
-    // Slow path: RPC SOL balances. No token-account crawling on Home.
-    const full = await api<Overview>("/api/overview?balances=sol");
-    state.overview = full;
-    state.error = null;
+    // Slow path: RPC SOL balances only. SPL holdings belong on Portfolio.
+    await refreshSolBalances();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     state.error = `Balance refresh delayed: ${message}`;
@@ -961,6 +1004,26 @@ export async function refreshOverview(): Promise<void> {
   if (last) last.textContent = new Date().toLocaleTimeString();
 }
 
+export async function refreshCurrentPage(): Promise<void> {
+  await refreshLocalOverview();
+  await refreshStatus().catch(() => undefined);
+  if (state.tab === "overview") {
+    await Promise.allSettled([refreshSolBalances(), refreshJobs()]);
+  } else if (state.tab === "wallets") {
+    await refreshSolBalances().catch(() => undefined);
+  } else if (state.tab === "terminal") {
+    await Promise.allSettled([refreshPumpLive(), refreshWatchGroups()]);
+  } else if (state.tab === "watchlists") {
+    await Promise.allSettled([refreshWatchGroups(), refreshPumpLive()]);
+  } else if (state.tab === "portfolio") {
+    await refreshPortfolio().catch(() => undefined);
+  } else if (state.tab === "signals") {
+    await refreshSignals().catch(() => undefined);
+  } else if (state.tab === "jobs") {
+    await refreshJobs().catch(() => undefined);
+  }
+}
+
 export async function refreshJobs(): Promise<void> {
   state.jobs = await api<AnyRow[]>("/api/jobs");
   if (state.selectedJobId)
@@ -971,13 +1034,15 @@ export async function refreshJobs(): Promise<void> {
 
 export async function runAction<T>(
   fn: () => Promise<T>,
+  options: { refreshAfter?: boolean } = {},
 ): Promise<T | undefined> {
   state.busy = true;
   state.error = null;
   update();
   try {
     const result = await fn();
-    await Promise.allSettled([refreshOverview(), refreshJobs()]);
+    if (options.refreshAfter !== false)
+      await refreshCurrentPage().catch(() => undefined);
     return result;
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
@@ -1328,9 +1393,11 @@ function ConsoleRuntime() {
         </label>
         <button
           className="secondary"
-          onClick={() => void runAction(refreshOverview)}
+          onClick={() =>
+            void runAction(refreshCurrentPage, { refreshAfter: false })
+          }
         >
-          Refresh
+          Refresh page
         </button>
         {state.busy ? <span className="pill">working…</span> : null}
         {state.error ? <span className="pill bad">{state.error}</span> : null}
@@ -1356,42 +1423,63 @@ export function mountPage(page: State["tab"], view: ConsolePage) {
   currentCleanup = null;
   state.tab = page;
   currentPageView = view;
+  update();
+
   void runAction(async () => {
-    await refreshOverview();
+    // Always load the local wallet/group/token index first. This is SQLite-only
+    // and keeps the default wallet dropdown populated on every page.
+    await refreshLocalOverview();
     await refreshStatus().catch(() => undefined);
-    await refreshJobs().catch(() => undefined);
-    if (page === "terminal" || page === "watchlists")
-      await refreshPumpLive().catch(() => undefined);
-    if (page === "portfolio") await refreshPortfolio().catch(() => undefined);
-    if (page === "signals") await refreshSignals().catch(() => undefined);
+
+    if (page === "overview")
+      await Promise.allSettled([refreshSolBalances(), refreshJobs()]);
+    else if (page === "wallets")
+      await refreshSolBalances().catch(() => undefined);
+    else if (page === "terminal")
+      await Promise.allSettled([refreshPumpLive(), refreshWatchGroups()]);
+    else if (page === "watchlists")
+      await Promise.allSettled([refreshWatchGroups(), refreshPumpLive()]);
+    else if (page === "portfolio")
+      await refreshPortfolio().catch(() => undefined);
+    else if (page === "signals") await refreshSignals().catch(() => undefined);
+    else if (page === "jobs") await refreshJobs().catch(() => undefined);
   });
+
   if (page === "terminal") void startPumpFeed();
-  const interval = setInterval(() => {
-    if (state.tab === "jobs" || state.selectedJobId)
-      void refreshJobs()
-        .then(update)
-        .catch(() => undefined);
-    if (state.tab === "watchlists" || state.tab === "terminal")
-      void refreshPumpLive()
-        .then(update)
-        .catch(() => undefined);
-    if (state.tab === "signals")
-      void refreshSignals()
-        .then(update)
-        .catch(() => undefined);
-    if (state.tab === "portfolio")
-      void refreshPortfolio()
-        .then(update)
-        .catch(() => undefined);
+
+  const dataInterval = setInterval(
+    () => {
+      if (state.tab === "jobs" || state.selectedJobId)
+        void refreshJobs()
+          .then(update)
+          .catch(() => undefined);
+      if (state.tab === "watchlists" || state.tab === "terminal")
+        void refreshPumpLive()
+          .then(update)
+          .catch(() => undefined);
+      if (state.tab === "signals")
+        void refreshSignals()
+          .then(update)
+          .catch(() => undefined);
+      if (state.tab === "portfolio")
+        void refreshPortfolio()
+          .then(update)
+          .catch(() => undefined);
+    },
+    state.tab === "terminal" ? 2500 : 5000,
+  );
+
+  const statusInterval = setInterval(() => {
     void refreshStatus()
       .then(update)
       .catch(() => undefined);
-  }, 1500);
+  }, 10_000);
+
   currentCleanup = () => {
-    clearInterval(interval);
+    clearInterval(dataInterval);
+    clearInterval(statusInterval);
     state.pumpFeedAbort?.abort();
     state.pumpFeedAbort = null;
   };
-  update();
   return currentCleanup;
 }
