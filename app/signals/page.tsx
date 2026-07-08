@@ -1,5 +1,7 @@
-import { PageHost } from "../page-host";
-
 export default function Page() {
-  return <PageHost page="signals" />;
+  return (
+    <section id="app-root" data-page="signals" className="client-root">
+      Loading signals…
+    </section>
+  );
 }

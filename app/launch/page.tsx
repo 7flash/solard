@@ -1,5 +1,7 @@
-import { PageHost } from "../page-host";
-
 export default function Page() {
-  return <PageHost page="launch" />;
+  return (
+    <section id="app-root" data-page="launch" className="client-root">
+      Loading launch…
+    </section>
+  );
 }

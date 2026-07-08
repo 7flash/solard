@@ -102,12 +102,18 @@ type MeasureAction<T = unknown> =
   | {
       label: string;
       start?: () => unknown;
-      end?: (value: T) => unknown;
+      /** measure-fn result mapper: trims/redacts the actual return value in logs. */
       result?: (value: T) => unknown;
       maxResultLength?: number;
       meta?: Record<string, unknown>;
       [key: string]: unknown;
     };
+
+export type MeasureSolardOptions<T> = {
+  summarize?: (value: T) => unknown;
+  onError?: (error: unknown) => T | null | Promise<T | null>;
+  meta?: Record<string, unknown>;
+};
 
 function safeScope(name: string): SolardMeasureScope | null {
   try {
@@ -124,15 +130,30 @@ function safeScope(name: string): SolardMeasureScope | null {
 function measureAction<T>(
   label: string,
   summarize: (value: T) => unknown,
+  meta?: Record<string, unknown>,
 ): MeasureAction<T> {
   return {
     label,
     start: () => label,
-    end: summarize,
     result: summarize,
     maxResultLength: Number(
       process.env.SOLARD_MEASURE_MAX_RESULT_LENGTH ?? "1600",
     ),
+    ...(meta ? { meta } : {}),
+  };
+}
+
+function normalizeMeasureOptions<T>(
+  summarizeOrOptions?: ((value: T) => unknown) | MeasureSolardOptions<T>,
+): Required<Pick<MeasureSolardOptions<T>, "summarize">> &
+  Pick<MeasureSolardOptions<T>, "onError" | "meta"> {
+  if (typeof summarizeOrOptions === "function") {
+    return { summarize: summarizeOrOptions };
+  }
+  return {
+    summarize: summarizeOrOptions?.summarize ?? summarizeForMeasure,
+    onError: summarizeOrOptions?.onError,
+    meta: summarizeOrOptions?.meta,
   };
 }
 
@@ -140,7 +161,7 @@ export async function measureSolard<T>(
   scopeName: string,
   label: string,
   operation: () => Promise<T> | T,
-  summarize: (value: T) => unknown = summarizeForMeasure,
+  summarizeOrOptions?: ((value: T) => unknown) | MeasureSolardOptions<T>,
 ): Promise<{
   value: T;
   tookMs: number;
@@ -148,15 +169,31 @@ export async function measureSolard<T>(
   scope: string;
   label: string;
 }> {
+  const options = normalizeMeasureOptions<T>(summarizeOrOptions);
   const scope = safeScope(scopeName);
   const started = Date.now();
-  const value = scope
-    ? ((await scope.measure(
-        measureAction(label, summarize),
-        async () => await operation(),
-      )) as T)
-    : await operation();
-  const summary = summarize(value);
+  let value: T | null;
+  if (scope) {
+    value = (await scope.measure(
+      measureAction(label, options.summarize, options.meta),
+      async () => await operation(),
+      async (error: unknown) => {
+        if (options.onError) return await options.onError(error);
+        throw error;
+      },
+    )) as T | null;
+  } else {
+    try {
+      value = await operation();
+    } catch (error) {
+      if (options.onError) value = await options.onError(error);
+      else throw error;
+    }
+  }
+
+  if (value === null) throw new Error(`${scopeName}:${label} returned null`);
+
+  const summary = options.summarize(value);
   return {
     value,
     tookMs: Date.now() - started,

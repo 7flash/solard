@@ -1,5 +1,7 @@
-import { PageHost } from "../page-host";
-
 export default function Page() {
-  return <PageHost page="wallets" />;
+  return (
+    <section id="app-root" data-page="wallets" className="client-root">
+      Loading wallets…
+    </section>
+  );
 }

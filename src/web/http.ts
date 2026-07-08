@@ -1,5 +1,4 @@
 import { createTraderSowl, type Sowl } from "../index.js";
-import { logSolardBootConfigOnce, resolveRpcUrl } from "../solard/config.js";
 import { measureSolard, summarizeForMeasure } from "../solard/api-response.js";
 
 export type JsonRecord = Record<string, unknown>;
@@ -124,13 +123,18 @@ export async function withSowl<T>(
       "withSowl",
       async () => {
         assertWebAuth(request);
-        logSolardBootConfigOnce();
         sowl = createTraderSowl({
-          rpcUrl: resolveRpcUrl().url ?? undefined,
+          rpcUrl: process.env.HELIUS_RPC_URL || process.env.RPC_ENDPOINT,
         });
         return await fn(sowl);
       },
-      summarizeForMeasure,
+      {
+        summarize: summarizeForMeasure,
+        meta: { route, method: request.method, requestId: id },
+        onError: (error) => {
+          throw error;
+        },
+      },
     );
     return jsonResponse({
       ok: true,

@@ -1,5 +1,7 @@
-import { PageHost } from "../page-host";
-
 export default function Page() {
-  return <PageHost page="portfolio" />;
+  return (
+    <section id="app-root" data-page="portfolio" className="client-root">
+      Loading portfolio…
+    </section>
+  );
 }

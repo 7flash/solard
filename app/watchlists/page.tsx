@@ -1,5 +1,7 @@
-import { PageHost } from "../page-host";
-
 export default function Page() {
-  return <PageHost page="watchlists" />;
+  return (
+    <section id="app-root" data-page="watchlists" className="client-root">
+      Loading watchlists…
+    </section>
+  );
 }

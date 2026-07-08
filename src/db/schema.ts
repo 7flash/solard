@@ -242,6 +242,25 @@ export const PumpPriceAggregateSchema = z.object({
   updatedAtMs: z.number(),
 });
 
+export const LaunchJobSchema = z.object({
+  jobId: z.string(),
+  kind: z.enum(["launch:pump"]).default("launch:pump"),
+  status: z.enum(["queued", "running", "succeeded", "failed"]),
+  inputJson: z.string(),
+  argvJson: z.string(),
+  resultJson: z.string().nullable().default(null),
+  error: z.string().nullable().default(null),
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
+export const LaunchJobLogSchema = z.object({
+  jobId: z.string(),
+  atMs: z.number(),
+  label: z.string(),
+  valueJson: z.string(),
+});
+
 export type WalletRow = z.infer<typeof WalletSchema> & { id: number };
 export type TokenRow = z.infer<typeof TokenSchema> & { id: number };
 export type ExecutionRow = z.infer<typeof ExecutionSchema> & { id: number };
@@ -276,6 +295,10 @@ export type PumpBalanceDeltaRow = z.infer<typeof PumpBalanceDeltaSchema> & {
 export type PumpPriceAggregateRow = z.infer<typeof PumpPriceAggregateSchema> & {
   id: number;
 };
+export type LaunchJobRow = z.infer<typeof LaunchJobSchema> & { id: number };
+export type LaunchJobLogRow = z.infer<typeof LaunchJobLogSchema> & {
+  id: number;
+};
 
 export type SowlDatabase = Database<{
   wallets: typeof WalletSchema;
@@ -299,4 +322,6 @@ export type SowlDatabase = Database<{
   pumpHoldersCurrent: typeof PumpHolderCurrentSchema;
   pumpBalanceDeltas: typeof PumpBalanceDeltaSchema;
   pumpPriceAggregates: typeof PumpPriceAggregateSchema;
+  launchJobs: typeof LaunchJobSchema;
+  launchJobLogs: typeof LaunchJobLogSchema;
 }>;

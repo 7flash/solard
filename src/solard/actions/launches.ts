@@ -4,6 +4,7 @@ import {
   type PumpTokenLaunchCliResult,
 } from "../../launches/pump/token-launch-cli.js";
 import { liveTradesEnabled } from "./context.js";
+import { measureSolard, summarizeForMeasure } from "../api-response.js";
 
 export type PumpLaunchInput = {
   creator: string;
@@ -207,7 +208,7 @@ function withLiveEnv<T>(live: boolean, fn: () => Promise<T>): Promise<T> {
   });
 }
 
-export async function launchPumpTokenAction(
+async function launchPumpTokenActionInner(
   input: PumpLaunchInput,
   options: PumpTokenLaunchCliOptions = {},
 ): Promise<PumpTokenLaunchCliResult> {
@@ -229,4 +230,27 @@ export async function launchPumpTokenAction(
       ...options,
     }),
   );
+}
+
+export async function launchPumpTokenAction(
+  input: PumpLaunchInput,
+  options: PumpTokenLaunchCliOptions = {},
+): Promise<PumpTokenLaunchCliResult> {
+  const measured = await measureSolard(
+    `solard:action:launch:pump:${input.live ? "live" : "dry-run"}`,
+    "launchPumpTokenAction",
+    async () => await launchPumpTokenActionInner(input, options),
+    {
+      summarize: summarizeForMeasure,
+      meta: {
+        creator: input.creator,
+        buyerGroup: input.buyerGroup ?? null,
+        live: Boolean(input.live),
+      },
+      onError: (error) => {
+        throw error;
+      },
+    },
+  );
+  return measured.value;
 }

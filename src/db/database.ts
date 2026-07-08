@@ -24,6 +24,8 @@ import {
   PumpHolderCurrentSchema,
   PumpBalanceDeltaSchema,
   PumpPriceAggregateSchema,
+  LaunchJobSchema,
+  LaunchJobLogSchema,
   type SowlDatabase,
 } from "./schema.js";
 
@@ -63,6 +65,8 @@ export function openDatabase(input?: string): SowlDatabase {
       pumpHoldersCurrent: PumpHolderCurrentSchema,
       pumpBalanceDeltas: PumpBalanceDeltaSchema,
       pumpPriceAggregates: PumpPriceAggregateSchema,
+      launchJobs: LaunchJobSchema,
+      launchJobLogs: LaunchJobLogSchema,
     },
     {
       timestamps: false,
@@ -87,6 +91,7 @@ export function openDatabase(input?: string): SowlDatabase {
         pumpHoldersCurrent: [["mint", "owner"]],
         pumpBalanceDeltas: [["signature", "owner", "mint"]],
         pumpPriceAggregates: [["mint", "intervalSeconds", "bucketStartMs"]],
+        launchJobs: [["jobId"]],
       },
       indexes: {
         wallets: ["name", "address", "isActive"],
@@ -104,6 +109,8 @@ export function openDatabase(input?: string): SowlDatabase {
         pumpHoldersCurrent: ["mint", "pctSupply", "balanceUi", "lastUpdatedMs"],
         pumpBalanceDeltas: ["mint", "owner", "createdAtMs"],
         pumpPriceAggregates: ["mint", "intervalSeconds", "bucketStartMs"],
+        launchJobs: ["jobId", "status", "updatedAtMs"],
+        launchJobLogs: ["jobId", "atMs", "label"],
       },
     },
   ) as SowlDatabase;

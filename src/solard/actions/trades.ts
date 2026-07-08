@@ -4,6 +4,7 @@ import type { SenderId } from "../../tx/types.js";
 import { addTokenToTradedGroup } from "../../pump/services/pump-live-store.js";
 import type { SolardActionContext } from "./context.js";
 import { assertLiveAllowed } from "./context.js";
+import { measureSolard, summarizeForMeasure } from "../api-response.js";
 
 export type TradeTargetInput = {
   wallet?: string | null;
@@ -111,7 +112,7 @@ function maybeRecordTradedToken(args: {
   });
 }
 
-export async function buyTokenAction(
+async function buyTokenActionInner(
   ctx: SolardActionContext,
   input: {
     token: string;
@@ -235,7 +236,7 @@ export async function buyTokenAction(
   return { mode: "live", action: "buy", target: targets, receipt, watchGroup };
 }
 
-export async function sellTokenAction(
+async function sellTokenActionInner(
   ctx: SolardActionContext,
   input: {
     token: string;
@@ -276,4 +277,50 @@ export async function sellTokenAction(
       ? await ctx.sowl.sell(token, targets.refs[0]!, options)
       : await ctx.sowl.sellMany(token, targets.refs, options);
   return { mode: "live", action: "sell", target: targets, receipt };
+}
+
+export async function buyTokenAction(
+  ctx: SolardActionContext,
+  input: Parameters<typeof buyTokenActionInner>[1],
+): Promise<Record<string, unknown>> {
+  const measured = await measureSolard(
+    `solard:action:trade:buy:${input.live ? "live" : "simulation"}`,
+    "buyTokenAction",
+    async () => await buyTokenActionInner(ctx, input),
+    {
+      summarize: summarizeForMeasure,
+      meta: {
+        token: input.token,
+        live: Boolean(input.live),
+        sender: input.sender ?? "rpc",
+      },
+      onError: (error) => {
+        throw error;
+      },
+    },
+  );
+  return measured.value;
+}
+
+export async function sellTokenAction(
+  ctx: SolardActionContext,
+  input: Parameters<typeof sellTokenActionInner>[1],
+): Promise<Record<string, unknown>> {
+  const measured = await measureSolard(
+    `solard:action:trade:sell:${input.live ? "live" : "simulation"}`,
+    "sellTokenAction",
+    async () => await sellTokenActionInner(ctx, input),
+    {
+      summarize: summarizeForMeasure,
+      meta: {
+        token: input.token,
+        live: Boolean(input.live),
+        sender: input.sender ?? "rpc",
+      },
+      onError: (error) => {
+        throw error;
+      },
+    },
+  );
+  return measured.value;
 }
