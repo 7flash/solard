@@ -19,7 +19,7 @@ export function terminalFeedRowToPumpRow(
   const anyRow = row as Record<string, any>;
   const now = Date.now();
   const updatedAtMs = n(anyRow.updatedAtMs) ?? n(anyRow.createdAtMs) ?? now;
-  const mcapUsd = n(anyRow.marketCapUsd) ?? n(anyRow.marketCapSol);
+  const mcapUsd = n(anyRow.marketCapUsd);
   const initialMcapUsd = n(anyRow.initialMarketCapUsd) ?? mcapUsd;
   const priceUsd = n(anyRow.priceUsd);
   const tradeCount = Math.max(
@@ -49,6 +49,10 @@ export function terminalFeedRowToPumpRow(
     name: s(anyRow.name),
     symbol: s(anyRow.symbol),
     uri: s(anyRow.uri),
+    website: s(anyRow.website),
+    twitter: s(anyRow.twitter),
+    telegram: s(anyRow.telegram),
+    description: s(anyRow.description),
     creator: s(anyRow.creator),
     signature: s(anyRow.signature),
     image: s(anyRow.image),

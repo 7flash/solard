@@ -100,6 +100,67 @@ function keyFor(
   return `${KIND}:${kind}:${sig ?? mint ?? "unknown"}:${sig ? "" : seq}`;
 }
 
+const METADATA_FETCH_TIMEOUT_MS = Math.max(
+  500,
+  Number(process.env.SOLARD_PUMP_METADATA_TIMEOUT_MS ?? "2500"),
+);
+const METADATA_MIN_INTERVAL_MS = Math.max(
+  0,
+  Number(process.env.SOLARD_PUMP_METADATA_INTERVAL_MS ?? "250"),
+);
+let lastMetadataFetchAtMs = 0;
+
+function ipfsGateway(value: string): string {
+  if (value.startsWith("ipfs://"))
+    return `https://ipfs.io/ipfs/${value.slice("ipfs://".length)}`;
+  return value;
+}
+
+function cleanText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+async function enrichFromMetadataUri(
+  tokenPatch: Record<string, any>,
+): Promise<Record<string, any>> {
+  if (process.env.SOLARD_PUMP_METADATA_ENRICH === "0") return tokenPatch;
+  if (tokenPatch.image || !tokenPatch.uri) return tokenPatch;
+  const elapsed = Date.now() - lastMetadataFetchAtMs;
+  if (elapsed < METADATA_MIN_INTERVAL_MS)
+    await sleep(METADATA_MIN_INTERVAL_MS - elapsed);
+  lastMetadataFetchAtMs = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), METADATA_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(ipfsGateway(String(tokenPatch.uri)), {
+      signal: controller.signal,
+      headers: { accept: "application/json" },
+    });
+    if (!res.ok) return tokenPatch;
+    const metadata = (await res.json()) as Record<string, unknown>;
+    return {
+      ...tokenPatch,
+      name: tokenPatch.name || cleanText(metadata.name),
+      symbol: tokenPatch.symbol || cleanText(metadata.symbol),
+      description: tokenPatch.description || cleanText(metadata.description),
+      image:
+        tokenPatch.image ||
+        (cleanText(metadata.image)
+          ? ipfsGateway(cleanText(metadata.image)!)
+          : null),
+      website: tokenPatch.website || cleanText(metadata.website),
+      twitter: tokenPatch.twitter || cleanText(metadata.twitter),
+      telegram: tokenPatch.telegram || cleanText(metadata.telegram),
+    };
+  } catch {
+    return tokenPatch;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function recordEvent(
   raw: RawPumpPortalEvent,
   seq: number,
@@ -110,7 +171,7 @@ async function recordEvent(
       start: () => "pumpportal record event",
       end: (result) => result,
       catch: (error) => {
-        recordWorkerError(NAME, error, { raw });
+        recordWorkerError(NAME, error, { raw: summarizeRaw(raw) });
         return "skip" as const;
       },
     },
@@ -122,8 +183,11 @@ async function recordEvent(
       const dedupeKey = keyFor(raw, kind, seq);
       if (!rememberIngestionKey(dedupeKey, KIND, now)) return "skip";
 
-      const tokenPatch = pumpPortalTokenPatch({ raw, source, solUsd, now });
+      let tokenPatch = pumpPortalTokenPatch({ raw, source, solUsd, now });
       if (!tokenPatch) return "skip";
+      tokenPatch = (await enrichFromMetadataUri(
+        tokenPatch as Record<string, any>,
+      )) as any;
 
       await dbWrite(`pumpportal_${kind}`, () => {
         upsertTerminalToken(tokenPatch);

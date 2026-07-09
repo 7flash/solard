@@ -26,6 +26,7 @@ import {
   tokenSocialLinks,
   refreshTokenHolders,
   isLikelySolanaPublicKey,
+  api,
 } from "../runtime";
 import type { AnyRow, PumpFeedRow, TokenHolder } from "../runtime";
 
@@ -111,22 +112,22 @@ function WorkerDiagnostics() {
         <button
           type="button"
           className="secondary compact"
+          title="Hard restart stream workers, clear stale client rows, then poll SQLite."
           onClick={() =>
             void runAction(async () => {
               await api("/api/workers/ensure", {
                 method: "POST",
                 body: JSON.stringify({
-                  action: "ensure",
-                  all: true,
+                  action: "restart",
+                  worker: "all",
                   telegram: true,
-                  restartStale: true,
                 }),
               });
-              await startPumpFeed();
+              await startPumpFeed({ hardRestart: true, clearRows: true });
             })
           }
         >
-          ensure + poll
+          restart + poll
         </button>
         <button
           type="button"
@@ -334,9 +335,14 @@ export function TerminalPage() {
           <button
             type="button"
             className="primary compact"
-            onClick={() => void startPumpFeed()}
+            onClick={() =>
+              void startPumpFeed({
+                hardRestart: state.pumpFeedStatus === "connected",
+                clearRows: true,
+              })
+            }
           >
-            {state.pumpFeedStatus === "connected" ? "reconnect" : "connect"}
+            {state.pumpFeedStatus === "connected" ? "restart" : "connect"}
           </button>
           <button
             type="button"

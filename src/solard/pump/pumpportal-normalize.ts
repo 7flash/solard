@@ -77,11 +77,16 @@ function readMarketCapSol(raw: RawPumpPortalEvent): number | null {
     num(raw.marketCapSol) ??
     num(raw.market_cap_sol) ??
     num(raw.mcapSol) ??
+    num(raw.usd_market_cap_sol) ??
+    num(raw.marketCap) ??
     num(snapshot.marketCapSol);
   if (mcap != null && mcap > 0) return mcap;
 
   const marketCapUsd =
-    num(raw.marketCapUsd) ?? num(raw.market_cap_usd) ?? num(raw.usdMarketCap);
+    num(raw.marketCapUsd) ??
+    num(raw.market_cap_usd) ??
+    num(raw.usdMarketCap) ??
+    num(raw.market_cap_usd_current);
   const solUsd = num(raw.solUsd) ?? num(raw.solPriceUsd);
   if (marketCapUsd != null && solUsd != null && solUsd > 0)
     return marketCapUsd / solUsd;
@@ -115,6 +120,11 @@ function readPriceSol(
     return solAmount / tokenAmount;
   }
   return null;
+}
+
+function social(raw: RawPumpPortalEvent, key: string): string | null {
+  const meta = nested(raw, "metadata");
+  return clean(raw[key]) ?? clean(meta[key]);
 }
 
 function image(raw: RawPumpPortalEvent): string | null {
@@ -157,6 +167,10 @@ export function pumpPortalTokenPatch(args: {
     name: clean(raw.name) ?? clean(raw.tokenName) ?? "",
     image: image(raw),
     uri: clean(raw.uri) ?? clean(raw.metadataUri),
+    description: social(raw, "description"),
+    website: social(raw, "website"),
+    twitter: social(raw, "twitter"),
+    telegram: social(raw, "telegram"),
     creator:
       clean(raw.traderPublicKey) ?? clean(raw.creator) ?? clean(raw.user),
     bondingCurveKey:
@@ -193,10 +207,18 @@ export function pumpPortalTradePatch(args: {
   if (!mint || !signature) return null;
   const now = args.now ?? Date.now();
   const tokenAmount = Math.abs(
-    num(raw.tokenAmount) ?? num(raw.tokens) ?? num(raw.tokenDeltaUi) ?? 0,
+    num(raw.tokenAmount) ??
+      num(raw.tokens) ??
+      num(raw.tokenDeltaUi) ??
+      num(raw.tokenAmountUi) ??
+      0,
   );
   const solAmount = Math.abs(
-    num(raw.solAmount) ?? num(raw.solDeltaUi) ?? num(raw.sol_amount) ?? 0,
+    num(raw.solAmount) ??
+      num(raw.solDeltaUi) ??
+      num(raw.sol_amount) ??
+      num(raw.solAmountUi) ??
+      0,
   );
   const priceSol = readPriceSol(raw, readMarketCapSol(raw));
   const priceUsd =

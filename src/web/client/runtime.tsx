@@ -540,6 +540,12 @@ export async function api<T>(
   );
 }
 
+try {
+  (globalThis as any).API = api;
+} catch {
+  // Compatibility for any stale inline terminal action still referencing API.
+}
+
 function emptyOverview(): Overview {
   return { wallets: [], tokens: [], groups: [], executions: [], balances: [] };
 }
@@ -1060,41 +1066,23 @@ function currentSessionRows(
 
 export async function refreshPumpLive(): Promise<void> {
   const terminal = state.tab === "terminal";
-  const pinnedParam = state.terminalPinnedMints.length
-    ? `&pinnedMints=${encodeURIComponent(state.terminalPinnedMints.join(","))}`
-    : "";
-  const suffix = terminal
-    ? `?terminal=1&sinceMs=${encodeURIComponent(String(state.terminalSessionStartedAtMs ?? Date.now()))}${pinnedParam}`
-    : "";
   const live = await api<{
     newTokens: PumpFeedRow[];
     watchGroups: TokenWatchGroup[];
-  }>(`/api/pump-live${suffix}`);
+  }>(terminal ? "/api/pump-live?limit=1&activeWindowMs=1" : "/api/pump-live");
   state.watchGroups = live.watchGroups ?? state.watchGroups;
   if (!state.selectedWatchGroupId && state.watchGroups[0])
     state.selectedWatchGroupId = state.watchGroups[0].id;
 
   if (terminal) {
-    const sessionMints = new Set(
-      currentSessionRows(state.watchGroups)
-        .map((row) => row.mint)
-        .filter(Boolean),
-    );
-    const rows = [
-      ...(live.newTokens ?? []),
-      ...currentSessionRows(state.watchGroups),
-    ];
-    const seen = new Set<string>();
-    for (const row of rows) {
-      const key = pumpRowKey(row);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (
-        shouldHydrateTerminalRow(row) ||
-        (!!row.mint && sessionMints.has(row.mint))
-      )
-        mergePumpToken(row);
-    }
+    // Terminal rows must come from the worker SQLite read model, not the legacy
+    // pump-live cache. Replacing the list prevents one-hour-old rows from
+    // sticking around when the live stream is actually empty/stalled.
+    await refreshTerminalFeedOnce({
+      ensure: false,
+      activeWindowMs: 5 * 60_000,
+      includeUnpriced: false,
+    });
     return;
   }
 
@@ -1401,6 +1389,63 @@ export function appendPumpFeed(row: PumpFeedRow): void {
   schedulePumpFeedUpdate();
 }
 
+export function replacePumpFeedFromRows(
+  rows: PumpFeedRow[],
+  options: { keepPinned?: boolean } = {},
+): void {
+  const next: PumpFeedRow[] = [];
+  const seen = new Set<string>();
+  const push = (row: PumpFeedRow) => {
+    const normalized = normalizeFeedRow(row);
+    const key =
+      normalized.mint || normalized.signature || pumpRowKey(normalized);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    next.push(normalized);
+  };
+  for (const row of rows ?? []) push(row);
+  if (options.keepPinned) {
+    for (const row of state.pumpFeed) {
+      if (row.mint && state.terminalPinnedMints.includes(row.mint)) push(row);
+    }
+  }
+  state.pumpFeed = next.slice(0, 500);
+  followLatestInTerminalInspector();
+  schedulePumpFeedUpdate();
+}
+
+async function refreshTerminalFeedOnce(
+  args: {
+    ensure?: boolean;
+    activeWindowMs?: number;
+    includeUnpriced?: boolean;
+  } = {},
+): Promise<void> {
+  const activeWindowMs = args.activeWindowMs ?? 5 * 60_000;
+  const payload = await measureClient(
+    "terminal fetch sqlite feed",
+    () =>
+      api<{
+        rows: PumpFeedRow[];
+        stats?: AnyRow;
+        health?: AnyRow;
+        debug?: AnyRow;
+      }>(
+        `/api/terminal/feed?ensure=${args.ensure ? "1" : "0"}&limit=300&activeWindowMs=${encodeURIComponent(String(activeWindowMs))}&includeUnpriced=${args.includeUnpriced ? "1" : "0"}&source=${encodeURIComponent(state.pumpFeedSource)}`,
+      ),
+    (value) => ({
+      rows: value.rows?.length ?? 0,
+      stats: value.stats,
+      health: summarizeTerminalHealth(value.health ?? null),
+      debug: value.debug,
+    }),
+  );
+  state.terminalLastPollAtMs = Date.now();
+  state.terminalLastRows = payload.rows?.length ?? 0;
+  if (payload.health) state.terminalHealth = payload.health;
+  replacePumpFeedFromRows(payload.rows ?? [], { keepPinned: true });
+}
+
 export function handleSseBlock(block: string): void {
   const lines = block.split("\n");
   let event = "message";
@@ -1473,7 +1518,9 @@ export async function refreshTerminalHealth(): Promise<void> {
   measureEvent("terminal health", summarizeTerminalHealth(health));
 }
 
-export async function startPumpFeed(): Promise<void> {
+export async function startPumpFeed(
+  options: { hardRestart?: boolean; clearRows?: boolean } = {},
+): Promise<void> {
   state.pumpFeedAbort?.abort();
   const abort = new AbortController();
   state.pumpFeedAbort = abort;
@@ -1481,9 +1528,12 @@ export async function startPumpFeed(): Promise<void> {
   state.pumpFeedError = null;
   state.terminalLastError = null;
   state.terminalSessionStartedAtMs = Date.now();
-  state.pumpFeed = state.pumpFeed.filter(
-    (row) => row.mint && state.terminalPinnedMints.includes(row.mint),
-  );
+  state.pumpFeed =
+    options.clearRows === false
+      ? state.pumpFeed.filter(
+          (row) => row.mint && state.terminalPinnedMints.includes(row.mint),
+        )
+      : [];
   followLatestInTerminalInspector();
   measureEvent("terminal connect", { source: state.pumpFeedSource });
   update();
@@ -1492,7 +1542,8 @@ export async function startPumpFeed(): Promise<void> {
     const ensure = await api<AnyRow>("/api/workers/ensure", {
       method: "POST",
       body: JSON.stringify({
-        action: "ensure",
+        action: options.hardRestart ? "restart" : "ensure",
+        worker: "all",
         all: true,
         telegram: true,
         restartStale: true,
@@ -1517,25 +1568,14 @@ export async function startPumpFeed(): Promise<void> {
   let intervalMs = 1000;
   while (!abort.signal.aborted) {
     try {
-      const payload = await measureClient(
-        "terminal poll sqlite feed",
-        () =>
-          api<{ rows: PumpFeedRow[]; stats?: AnyRow; health?: AnyRow }>(
-            `/api/terminal/feed?ensure=1&limit=300&activeWindowMs=${encodeURIComponent(String(20 * 60_000))}&includeUnpriced=0&source=${encodeURIComponent(state.pumpFeedSource)}`,
-          ),
-        (value) => ({
-          rows: value.rows?.length ?? 0,
-          stats: value.stats,
-          health: summarizeTerminalHealth(value.health ?? null),
-        }),
-      );
+      await refreshTerminalFeedOnce({
+        ensure: true,
+        activeWindowMs: 5 * 60_000,
+        includeUnpriced: false,
+      });
       state.pumpFeedStatus = "connected";
       state.pumpFeedError = null;
       state.terminalLastError = null;
-      state.terminalLastPollAtMs = Date.now();
-      state.terminalLastRows = payload.rows?.length ?? 0;
-      if (payload.health) state.terminalHealth = payload.health;
-      for (const row of payload.rows ?? []) mergePumpToken(row);
       measureEvent("terminal poll result", {
         rows: state.terminalLastRows,
         health: summarizeTerminalHealth(state.terminalHealth),

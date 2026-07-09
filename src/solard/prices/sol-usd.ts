@@ -1,32 +1,93 @@
 import { workerMeasure, summarizeForMeasure } from "../measure.js";
 
-let cached: { value: number | null; expiresAtMs: number; source: string } = {
+let cached: {
+  value: number | null;
+  expiresAtMs: number;
+  source: string;
+  error?: string | null;
+} = {
   value: null,
   expiresAtMs: 0,
   source: "none",
+  error: null,
 };
 
-function fromEnv(): number | null {
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+
+function finitePositive(value: unknown): number | null {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function fromEnv(): { value: number; source: string } | null {
   for (const name of ["SOLARD_SOL_USD", "SOL_USD", "SOLARD_SOL_USD_FALLBACK"]) {
-    const parsed = Number(process.env[name] ?? "");
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    const parsed = finitePositive(process.env[name]);
+    if (parsed != null) return { value: parsed, source: name };
   }
   return null;
 }
 
-async function fetchJupiterPrice(signal?: AbortSignal): Promise<number | null> {
-  const url =
-    process.env.SOLARD_SOL_USD_URL || "https://price.jup.ag/v6/price?ids=SOL";
+function parsePrice(payload: any): number | null {
+  return (
+    finitePositive(payload?.data?.SOL?.price) ??
+    finitePositive(payload?.data?.[SOL_MINT]?.price) ??
+    finitePositive(payload?.data?.[SOL_MINT]?.usdPrice) ??
+    finitePositive(payload?.SOL?.price) ??
+    finitePositive(payload?.[SOL_MINT]?.price) ??
+    finitePositive(payload?.[SOL_MINT]?.usdPrice) ??
+    finitePositive(payload?.price) ??
+    finitePositive(payload?.data?.amount) ??
+    finitePositive(payload?.data?.rates?.USD) ??
+    finitePositive(payload?.rates?.USD)
+  );
+}
+
+async function fetchJson(url: string, signal: AbortSignal): Promise<any> {
   const res = await fetch(url, {
     signal,
     headers: { accept: "application/json" },
   });
-  if (!res.ok) throw new Error(`SOL/USD quote failed: ${res.status}`);
-  const payload = (await res.json()) as any;
-  const direct = Number(
-    payload?.data?.SOL?.price ?? payload?.SOL?.price ?? payload?.price,
-  );
-  return Number.isFinite(direct) && direct > 0 ? direct : null;
+  if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+  return await res.json();
+}
+
+async function fetchSolUsd(
+  signal: AbortSignal,
+): Promise<{ value: number; source: string } | null> {
+  const configured = process.env.SOLARD_SOL_USD_URL?.trim();
+  const urls = configured
+    ? [configured]
+    : [
+        `https://lite-api.jup.ag/price/v3?ids=${SOL_MINT}`,
+        "https://price.jup.ag/v6/price?ids=SOL",
+        "https://api.coinbase.com/v2/exchange-rates?currency=SOL",
+      ];
+
+  let lastError: unknown = null;
+  for (const url of urls) {
+    try {
+      const payload = await fetchJson(url, signal);
+      const value = parsePrice(payload);
+      if (value != null)
+        return {
+          value,
+          source: url.includes("coinbase")
+            ? "coinbase"
+            : url.includes("jup")
+              ? "jupiter"
+              : "custom",
+        };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  return null;
 }
 
 export async function resolveSolUsd(
@@ -40,27 +101,34 @@ export async function resolveSolUsd(
   if (cached.value != null && cached.expiresAtMs > now) return cached.value;
 
   const env = fromEnv();
-  if (env != null && process.env.SOLARD_SOL_USD_FORCE_FETCH !== "1") {
-    cached = { value: env, expiresAtMs: now + maxAgeMs, source: "env" };
-    return env;
+  if (env && process.env.SOLARD_SOL_USD_FORCE_FETCH !== "1") {
+    cached = {
+      value: env.value,
+      expiresAtMs: now + maxAgeMs,
+      source: env.source,
+      error: null,
+    };
+    return env.value;
   }
 
   return await workerMeasure.measure(
     {
       start: () => "resolve SOL/USD",
       end: (result) => ({
-        result: summarizeForMeasure({ value: result, source: cached.source }),
+        result: summarizeForMeasure({
+          value: result,
+          source: cached.source,
+          error: cached.error ?? null,
+        }),
       }),
-      catch: () => {
+      catch: (error) => {
         const fallback =
-          env ??
-          (Number.isFinite(Number(process.env.SOLARD_SOL_USD_FALLBACK))
-            ? Number(process.env.SOLARD_SOL_USD_FALLBACK)
-            : null);
+          env?.value ?? finitePositive(process.env.SOLARD_SOL_USD_FALLBACK);
         cached = {
           value: fallback,
           expiresAtMs: Date.now() + Math.min(maxAgeMs, 10_000),
-          source: fallback == null ? "none" : "fallback",
+          source: fallback == null ? "none" : (env?.source ?? "fallback"),
+          error: error instanceof Error ? error.message : String(error),
         };
         return fallback;
       },
@@ -72,15 +140,16 @@ export async function resolveSolUsd(
         Math.max(
           500,
           input.timeoutMs ??
-            Number(process.env.SOLARD_SOL_USD_TIMEOUT_MS ?? "1500"),
+            Number(process.env.SOLARD_SOL_USD_TIMEOUT_MS ?? "2000"),
         ),
       );
       try {
-        const value = await fetchJupiterPrice(controller.signal);
+        const resolved = await fetchSolUsd(controller.signal);
         cached = {
-          value: value ?? env,
+          value: resolved?.value ?? env?.value ?? null,
           expiresAtMs: Date.now() + maxAgeMs,
-          source: value == null ? "env" : "jupiter",
+          source: resolved?.source ?? env?.source ?? "none",
+          error: null,
         };
         return cached.value;
       } finally {
