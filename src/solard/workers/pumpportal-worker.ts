@@ -22,7 +22,7 @@ import {
   type RawPumpPortalEvent,
 } from "../pump/pumpportal-normalize.js";
 
-const NAME = "solard-pumpportal";
+const NAME = "solard-pumpportal-live-v2";
 const KIND = "pumpportal-event";
 const PUMPPORTAL_API_KEY =
   process.env.SOLARD_PUMPPORTAL_API_KEY?.trim() ||

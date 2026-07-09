@@ -2,15 +2,34 @@ import {
   listProcessStatus,
   upsertProcessStatus,
 } from "../db/terminal-store.js";
+import { clearWorkerErrors } from "../db/terminal-ingestion.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
 
 export type SolardWorkerName =
+  | "solard-helius-live-v2"
+  | "solard-pumpportal-live-v2"
+  | "solard-reconciler"
+  | "solard-telegram-signals";
+
+export type LegacySolardWorkerName =
   | "solard-helius-live"
   | "solard-pumpportal"
   | "solard-pump-creates"
-  | "solard-pump-trades"
-  | "solard-reconciler"
-  | "solard-telegram-signals";
+  | "solard-pump-trades";
+
+const LEGACY_WORKERS: LegacySolardWorkerName[] = [
+  "solard-helius-live",
+  "solard-pumpportal",
+  "solard-pump-creates",
+  "solard-pump-trades",
+];
+
+const WORKER_ALIASES: Record<string, SolardWorkerName> = {
+  "solard-helius-live": "solard-helius-live-v2",
+  "solard-pumpportal": "solard-pumpportal-live-v2",
+  "solard-pump-creates": "solard-pumpportal-live-v2",
+  "solard-pump-trades": "solard-helius-live-v2",
+};
 
 export type WorkerSpec = {
   name: SolardWorkerName;
@@ -23,29 +42,17 @@ export type WorkerSpec = {
 const ROOT = process.cwd();
 
 export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
-  "solard-helius-live": {
-    name: "solard-helius-live",
+  "solard-helius-live-v2": {
+    name: "solard-helius-live-v2",
     kind: "stream",
     command: "bun run ./src/solard/workers/helius-live-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_HELIUS_STALE_MS ?? "15000"),
   },
-  "solard-pumpportal": {
-    name: "solard-pumpportal",
+  "solard-pumpportal-live-v2": {
+    name: "solard-pumpportal-live-v2",
     kind: "stream",
     command: "bun run ./src/solard/workers/pumpportal-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_PUMPPORTAL_STALE_MS ?? "15000"),
-  },
-  "solard-pump-creates": {
-    name: "solard-pump-creates",
-    kind: "stream",
-    command: "bun run ./src/solard/workers/pump-create-worker.ts",
-    staleAfterMs: Number(process.env.SOLARD_PUMP_CREATE_STALE_MS ?? "15000"),
-  },
-  "solard-pump-trades": {
-    name: "solard-pump-trades",
-    kind: "stream",
-    command: "bun run ./src/solard/workers/pump-trade-worker.ts",
-    staleAfterMs: Number(process.env.SOLARD_PUMP_TRADE_STALE_MS ?? "15000"),
   },
   "solard-reconciler": {
     name: "solard-reconciler",
@@ -82,19 +89,28 @@ export function coreWorkersForSource(
   const source = normalizeStreamSource(sourceInput);
   const streamWorkers: SolardWorkerName[] =
     source === "helius"
-      ? ["solard-helius-live"]
+      ? ["solard-helius-live-v2"]
       : source === "both"
-        ? ["solard-pumpportal", "solard-helius-live"]
-        : ["solard-pumpportal"];
+        ? ["solard-pumpportal-live-v2", "solard-helius-live-v2"]
+        : ["solard-pumpportal-live-v2"];
   return [...streamWorkers, "solard-reconciler"];
 }
 
 export const CORE_WORKERS: SolardWorkerName[] = coreWorkersForSource();
 
+export function normalizeWorkerName(
+  value: string | null | undefined,
+): SolardWorkerName | null {
+  if (!value) return null;
+  if (Object.prototype.hasOwnProperty.call(WORKER_SPECS, value))
+    return value as SolardWorkerName;
+  return WORKER_ALIASES[value] ?? null;
+}
+
 export function isSolardWorkerName(
   value: string | null | undefined,
 ): value is SolardWorkerName {
-  return !!value && Object.prototype.hasOwnProperty.call(WORKER_SPECS, value);
+  return !!normalizeWorkerName(value);
 }
 
 export function resolveWorkerNames(input?: {
@@ -104,10 +120,11 @@ export function resolveWorkerNames(input?: {
   source?: string | null;
 }): SolardWorkerName[] {
   if (input?.worker && input.worker !== "all") {
-    if (!isSolardWorkerName(input.worker)) {
+    const normalized = normalizeWorkerName(input.worker);
+    if (!normalized) {
       throw new Error(`Unknown worker: ${input.worker}`);
     }
-    return [input.worker];
+    return [normalized];
   }
   const names = coreWorkersForSource(input?.source);
   if (input?.telegram || process.env.SOLARD_TELEGRAM_SIGNALS === "1") {
@@ -231,6 +248,42 @@ export function listWorkerRuntimeStatus(
   );
 }
 
+function stopLegacyWorkersFor(name: SolardWorkerName): void {
+  const legacyToStop =
+    name === "solard-pumpportal-live-v2"
+      ? ["solard-pumpportal", "solard-pump-creates"]
+      : name === "solard-helius-live-v2"
+        ? ["solard-helius-live", "solard-pump-trades"]
+        : [];
+  for (const legacy of legacyToStop) {
+    const row = bgrunRowByName(legacy);
+    if (!row) continue;
+    const result = runBgrun(["--stop", legacy]);
+    upsertProcessStatus({
+      name: legacy,
+      kind: "stream",
+      status: result.exitCode === 0 ? "legacy-stopped" : "legacy-stop-failed",
+      data: { replacement: name, stdout: result.stdout, stderr: result.stderr },
+      error: result.exitCode === 0 ? null : result.stderr || result.stdout,
+    });
+  }
+}
+
+function stopAllLegacyWorkers(): void {
+  for (const legacy of LEGACY_WORKERS) {
+    const row = bgrunRowByName(legacy);
+    if (!row) continue;
+    const result = runBgrun(["--stop", legacy]);
+    upsertProcessStatus({
+      name: legacy,
+      kind: "stream",
+      status: result.exitCode === 0 ? "legacy-stopped" : "legacy-stop-failed",
+      data: { stdout: result.stdout, stderr: result.stderr },
+      error: result.exitCode === 0 ? null : result.stderr || result.stdout,
+    });
+  }
+}
+
 export async function ensureBgrunWorker(
   name: SolardWorkerName,
   restart = false,
@@ -252,21 +305,24 @@ export async function ensureBgrunWorker(
       },
     },
     async () => {
+      stopLegacyWorkersFor(name);
+      clearWorkerErrors([...LEGACY_WORKERS, name]);
       const exists = !!bgrunRowByName(name);
       const shouldStart = restart || !exists;
+      if (restart && exists) {
+        runBgrun(["--stop", name]);
+        await Bun.sleep(250);
+      }
       if (shouldStart) {
-        const args = exists
-          ? ["--restart", name]
-          : [
-              "--name",
-              name,
-              "--command",
-              spec.command,
-              "--directory",
-              ROOT,
-              "--force",
-            ];
-        const result = runBgrun(args);
+        const result = runBgrun([
+          "--name",
+          name,
+          "--command",
+          spec.command,
+          "--directory",
+          ROOT,
+          "--force",
+        ]);
         if (result.exitCode !== 0) {
           throw new Error(
             `bgrun ${name} failed: ${result.stderr || result.stdout || result.exitCode}`,
@@ -309,6 +365,7 @@ export async function ensureWorkerGroup(
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     async () => {
+      if (args.restart === true) stopAllLegacyWorkers();
       const before = listWorkerRuntimeStatus({
         telegram: args.telegram,
         source: args.source,
@@ -369,5 +426,7 @@ export function stopWorkerGroup(
     telegram: input.telegram,
     source: input.source,
   });
-  return { workers: workers.map((name) => stopBgrunWorker(name)) };
+  const stopped = workers.map((name) => stopBgrunWorker(name));
+  stopAllLegacyWorkers();
+  return { workers: stopped, legacyStopped: LEGACY_WORKERS };
 }

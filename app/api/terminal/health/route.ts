@@ -15,6 +15,8 @@ export function GET(request: Request): Promise<Response> {
             "15000",
         ),
         errors: Number(url.searchParams.get("errors") ?? "20"),
+        source: url.searchParams.get("source"),
+        allErrors: url.searchParams.get("allErrors") === "1",
       });
     },
   });

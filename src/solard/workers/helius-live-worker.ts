@@ -23,7 +23,7 @@ import {
   fetchUriMetadata,
 } from "../helius/token-metadata.js";
 
-const WORKER = "solard-helius-live";
+const WORKER = "solard-helius-live-v2";
 const POLL_MS = Math.max(
   500,
   Number(process.env.SOLARD_HELIUS_POLL_MS ?? "1500"),

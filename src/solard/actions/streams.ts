@@ -9,12 +9,12 @@ function sleep(ms: number): Promise<void> {
 
 function streamWorkerForSource(
   source?: string | null,
-): "solard-helius-live" | "solard-pump-trades" {
+): "solard-helius-live-v2" | "solard-pumpportal-live-v2" {
   return String(source ?? process.env.SOLARD_STREAM_SOURCE ?? "")
     .toLowerCase()
     .includes("helius")
-    ? "solard-helius-live"
-    : "solard-pump-trades";
+    ? "solard-helius-live-v2"
+    : "solard-pumpportal-live-v2";
 }
 
 export async function followTradesAction(

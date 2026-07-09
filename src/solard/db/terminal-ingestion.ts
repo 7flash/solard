@@ -178,3 +178,30 @@ export function terminalIngestionStats(): Record<string, unknown> {
     }),
   );
 }
+
+export function clearWorkerErrors(workers?: string[] | null): number {
+  initTerminalIngestionTables();
+  if (!workers || workers.length === 0) {
+    const count = Number(
+      terminalDb.raw<{ count: number }>(
+        "SELECT COUNT(*) as count FROM terminalWorkerErrors",
+      )[0]?.count ?? 0,
+    );
+    terminalDb.exec("DELETE FROM terminalWorkerErrors");
+    return count;
+  }
+  let count = 0;
+  for (const worker of workers) {
+    count += Number(
+      terminalDb.raw<{ count: number }>(
+        "SELECT COUNT(*) as count FROM terminalWorkerErrors WHERE worker = ?",
+        worker,
+      )[0]?.count ?? 0,
+    );
+    terminalDb.exec(
+      "DELETE FROM terminalWorkerErrors WHERE worker = ?",
+      worker,
+    );
+  }
+  return count;
+}

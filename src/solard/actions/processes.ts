@@ -2,6 +2,7 @@ import {
   ensureBgrunWorker,
   ensureWorkerGroup,
   isSolardWorkerName,
+  normalizeWorkerName,
   listBgrunProcesses,
   listWorkerRuntimeStatus,
   resolveWorkerNames,
@@ -48,9 +49,9 @@ export async function ensureProcessesAction(
     },
     async () => {
       if (input.worker && input.worker !== "all") {
-        if (!isSolardWorkerName(input.worker))
-          throw new Error(`Unknown worker: ${input.worker}`);
-        return await ensureBgrunWorker(input.worker, input.restart === true);
+        const worker = normalizeWorkerName(input.worker);
+        if (!worker) throw new Error(`Unknown worker: ${input.worker}`);
+        return await ensureBgrunWorker(worker, input.restart === true);
       }
       return await ensureWorkerGroup({
         telegram: input.telegram,
@@ -76,9 +77,9 @@ export async function restartProcessesAction(
     },
     async () => {
       if (input.worker && input.worker !== "all") {
-        if (!isSolardWorkerName(input.worker))
-          throw new Error(`Unknown worker: ${input.worker}`);
-        return await ensureBgrunWorker(input.worker, true);
+        const worker = normalizeWorkerName(input.worker);
+        if (!worker) throw new Error(`Unknown worker: ${input.worker}`);
+        return await ensureBgrunWorker(worker, true);
       }
       return await ensureWorkerGroup({
         telegram: input.telegram,
@@ -104,9 +105,9 @@ export function stopProcessAction(
           telegram: input.telegram,
           source: input.source,
         });
-      if (!isSolardWorkerName(worker))
-        throw new Error(`Unknown worker: ${worker}`);
-      return stopBgrunWorker(worker as SolardWorkerName);
+      const normalized = normalizeWorkerName(worker);
+      if (!normalized) throw new Error(`Unknown worker: ${worker}`);
+      return stopBgrunWorker(normalized);
     },
   );
 }

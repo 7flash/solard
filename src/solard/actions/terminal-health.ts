@@ -3,6 +3,7 @@ import {
   terminalStoreStats,
   terminalDb,
 } from "../db/terminal-store.js";
+import { resolveWorkerNames } from "../processes/bgrun.js";
 import {
   listWorkerErrors,
   terminalIngestionStats,
@@ -11,7 +12,12 @@ import { solUsdCacheState } from "../prices/sol-usd.js";
 import { cliMeasure, summarizeForMeasure } from "../measure.js";
 
 export function terminalHealthAction(
-  input: { staleMs?: number; errors?: number } = {},
+  input: {
+    staleMs?: number;
+    errors?: number;
+    source?: string | null;
+    allErrors?: boolean;
+  } = {},
 ): Record<string, unknown> {
   return cliMeasure.measureSync(
     {
@@ -29,6 +35,10 @@ export function terminalHealthAction(
         ageMs: now - Number(row.heartbeatAtMs || 0),
         stale: now - Number(row.heartbeatAtMs || 0) > staleMs,
       }));
+      const currentWorkers = resolveWorkerNames({
+        source: input.source,
+        telegram: process.env.SOLARD_TELEGRAM_SIGNALS === "1",
+      });
       const latest = {
         token:
           terminalDb.raw<any>(
@@ -59,7 +69,17 @@ export function terminalHealthAction(
         solUsd: solUsdCacheState(),
         processes,
         latest,
-        errors: listWorkerErrors(null, input.errors ?? 20),
+        errors: input.allErrors
+          ? listWorkerErrors(null, input.errors ?? 20)
+          : currentWorkers.flatMap((worker) =>
+              listWorkerErrors(
+                worker,
+                Math.max(
+                  1,
+                  Math.ceil((input.errors ?? 20) / currentWorkers.length),
+                ),
+              ),
+            ),
       };
     },
   );
