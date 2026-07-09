@@ -1,9 +1,7 @@
-import {
-  listProcessStatus,
-  upsertProcessStatus,
-} from "../db/terminal-store.js";
+import { listProcessStatus, upsertProcessStatus } from "../db/terminal-store.js";
 import { clearWorkerErrors } from "../db/terminal-ingestion.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
+import { getBgrunSdk, normalizeBgrunProcess, safeGetBgrunSdkSync } from "./bgrun-sdk.js";
 
 export type SolardWorkerName =
   | "solard-helius-logs-v1"
@@ -61,7 +59,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     kind: "stream",
     command: "bun run ./src/solard/workers/helius-live-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_HELIUS_STALE_MS ?? "15000"),
-    buildId: "helius-live-v7-alt-safe-parser",
+    buildId: "helius-live-v6-logs-primary-fallback",
   },
   "solard-helius-laserstream-v1": {
     name: "solard-helius-laserstream-v1",
@@ -88,47 +86,31 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     name: "solard-telegram-signals",
     kind: "signals",
     command: "bun run ./src/solard/workers/telegram-signal-worker.ts",
-    staleAfterMs: Number(
-      process.env.SOLARD_TELEGRAM_SIGNALS_STALE_MS ?? "45000",
-    ),
+    staleAfterMs: Number(process.env.SOLARD_TELEGRAM_SIGNALS_STALE_MS ?? "45000"),
     buildId: "telegram-signals-v2",
   },
 };
 
 export type SolardStreamSource = "pumpportal" | "helius" | "helius-ws" | "both";
 
-export function normalizeStreamSource(
-  value?: string | null,
-): SolardStreamSource {
-  const source = String(
-    value || process.env.SOLARD_STREAM_SOURCE || "helius",
-  ).toLowerCase();
+export function normalizeStreamSource(value?: string | null): SolardStreamSource {
+  const source = String(value || process.env.SOLARD_STREAM_SOURCE || "helius").toLowerCase();
   if (source.includes("both")) return "both";
   if (source.includes("laser") || source.includes("ws")) return "helius-ws";
   if (source.includes("helius")) return "helius";
   return "pumpportal";
 }
 
-export function coreWorkersForSource(
-  sourceInput?: string | null,
-): SolardWorkerName[] {
+export function coreWorkersForSource(sourceInput?: string | null): SolardWorkerName[] {
   const source = normalizeStreamSource(sourceInput);
-  const mode = String(
-    process.env.SOLARD_HELIUS_MODE ?? "logs+poll",
-  ).toLowerCase();
+  const mode = String(process.env.SOLARD_HELIUS_MODE ?? "logs+poll").toLowerCase();
   const heliusWorkers: SolardWorkerName[] =
     mode === "poll"
       ? ["solard-helius-live-v2"]
-      : mode === "laserstream" ||
-          mode === "ws" ||
-          process.env.SOLARD_HELIUS_TRANSPORT === "ws"
+      : mode === "laserstream" || mode === "ws" || process.env.SOLARD_HELIUS_TRANSPORT === "ws"
         ? ["solard-helius-laserstream-v1"]
         : mode === "all"
-          ? [
-              "solard-helius-logs-v1",
-              "solard-helius-live-v2",
-              "solard-helius-laserstream-v1",
-            ]
+          ? ["solard-helius-logs-v1", "solard-helius-live-v2", "solard-helius-laserstream-v1"]
           : ["solard-helius-logs-v1", "solard-helius-live-v2"];
   const streamWorkers: SolardWorkerName[] =
     source === "helius"
@@ -143,18 +125,13 @@ export function coreWorkersForSource(
 
 export const CORE_WORKERS: SolardWorkerName[] = coreWorkersForSource();
 
-export function normalizeWorkerName(
-  value: string | null | undefined,
-): SolardWorkerName | null {
+export function normalizeWorkerName(value: string | null | undefined): SolardWorkerName | null {
   if (!value) return null;
-  if (Object.prototype.hasOwnProperty.call(WORKER_SPECS, value))
-    return value as SolardWorkerName;
+  if (Object.prototype.hasOwnProperty.call(WORKER_SPECS, value)) return value as SolardWorkerName;
   return WORKER_ALIASES[value] ?? null;
 }
 
-export function isSolardWorkerName(
-  value: string | null | undefined,
-): value is SolardWorkerName {
+export function isSolardWorkerName(value: string | null | undefined): value is SolardWorkerName {
   return !!normalizeWorkerName(value);
 }
 
@@ -166,61 +143,42 @@ export function resolveWorkerNames(input?: {
 }): SolardWorkerName[] {
   if (input?.worker && input.worker !== "all") {
     const normalized = normalizeWorkerName(input.worker);
-    if (!normalized) {
-      throw new Error(`Unknown worker: ${input.worker}`);
-    }
+    if (!normalized) throw new Error(`Unknown worker: ${input.worker}`);
     return [normalized];
   }
   const names = coreWorkersForSource(input?.source);
-  if (input?.telegram || process.env.SOLARD_TELEGRAM_SIGNALS === "1") {
-    names.push("solard-telegram-signals");
-  }
+  if (input?.telegram || process.env.SOLARD_TELEGRAM_SIGNALS === "1") names.push("solard-telegram-signals");
   return names;
 }
 
-function decode(stdout: Uint8Array | null | undefined): string {
-  return stdout ? new TextDecoder().decode(stdout).trim() : "";
-}
-
-function runBgrun(args: string[]): {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-} {
-  const proc = Bun.spawnSync({
-    cmd: ["bun", "x", "bgrun", ...args],
-    cwd: ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env },
-  });
+function workerEnv(name: SolardWorkerName): Record<string, string> {
+  const spec = WORKER_SPECS[name];
   return {
-    exitCode: proc.exitCode,
-    stdout: decode(proc.stdout),
-    stderr: decode(proc.stderr),
+    ...process.env,
+    SOLARD_WORKER_NAME: name,
+    SOLARD_WORKER_SUPERVISOR: "bgrun-sdk",
+    SOLARD_EXPECTED_BUILD_ID: spec.buildId,
+    BGR_PARENT_NAME: process.env.BGR_PROCESS_NAME || "solard",
   };
 }
 
 export function listBgrunProcesses(): Array<Record<string, unknown>> {
   return processMeasure.measureSync(
     {
-      start: () => "bgrun list",
+      start: () => "bgrun sdk list",
       end: (rows) => ({ rows: Array.isArray(rows) ? rows.length : 0 }),
-      catch: () => [],
+      catch: (error) => [{ name: "bgrun-sdk-error", error: error instanceof Error ? error.message : String(error) }],
     },
     () => {
-      const result = runBgrun(["--json"]);
-      if (result.exitCode !== 0) return [];
-      const parsed = JSON.parse(result.stdout || "[]");
-      return Array.isArray(parsed) ? parsed : [];
+      const bgrun = safeGetBgrunSdkSync();
+      if (!bgrun) return [];
+      return bgrun.getAllProcesses().map(normalizeBgrunProcess);
     },
   );
 }
 
 function bgrunRowByName(name: string): Record<string, unknown> | null {
-  return (
-    listBgrunProcesses().find((row) => String(row.name ?? "") === name) ?? null
-  );
+  return listBgrunProcesses().find((row) => String(row.name ?? "") === name) ?? null;
 }
 
 export type WorkerRuntimeStatus = {
@@ -240,62 +198,35 @@ export type WorkerRuntimeStatus = {
   data: Record<string, unknown>;
 };
 
-export function listWorkerRuntimeStatus(
-  input: { telegram?: boolean; source?: string | null } = {},
-): WorkerRuntimeStatus[] {
+export function listWorkerRuntimeStatus(input: { telegram?: boolean; source?: string | null } = {}): WorkerRuntimeStatus[] {
   return processMeasure.measureSync(
     {
       start: () => "worker runtime status",
-      end: (rows) => ({
-        rows: rows.length,
-        stale: rows.filter((row) => row.stale).length,
-      }),
+      end: (rows) => ({ rows: rows.length, stale: rows.filter((row) => row.stale).length }),
     },
     () => {
       const now = Date.now();
-      const processRows = new Map(
-        listProcessStatus().map((row) => [row.name, row]),
-      );
-      const bgrunRows = new Map(
-        listBgrunProcesses().map((row) => [String(row.name ?? ""), row]),
-      );
-      return resolveWorkerNames({
-        telegram: input.telegram,
-        source: input.source,
-      }).map((name) => {
+      const processRows = new Map(listProcessStatus().map((row) => [row.name, row]));
+      const bgrunRows = new Map(listBgrunProcesses().map((row) => [String(row.name ?? ""), row]));
+      return resolveWorkerNames({ telegram: input.telegram, source: input.source }).map((name) => {
         const spec = WORKER_SPECS[name];
         const row = processRows.get(name) as
-          | {
-              name: string;
-              kind: string;
-              status: string;
-              heartbeatAtMs: number;
-              error: string | null;
-              data?: Record<string, unknown>;
-            }
+          | { name: string; kind: string; status: string; heartbeatAtMs: number; error: string | null; data?: Record<string, unknown> }
           | undefined;
         const heartbeatAtMs = Number(row?.heartbeatAtMs ?? 0);
-        const ageMs =
-          heartbeatAtMs > 0 ? now - heartbeatAtMs : Number.POSITIVE_INFINITY;
+        const ageMs = heartbeatAtMs > 0 ? now - heartbeatAtMs : Number.POSITIVE_INFINITY;
         const bgrun = bgrunRows.get(name) ?? null;
         const data = row?.data ?? {};
-        const actualBuildId =
-          typeof (data as any).buildId === "string"
-            ? String((data as any).buildId)
-            : null;
+        const actualBuildId = typeof (data as any).buildId === "string" ? String((data as any).buildId) : null;
         const buildMismatch = !!heartbeatAtMs && actualBuildId !== spec.buildId;
-        const supervisor =
-          typeof (data as any).supervisor === "string"
-            ? String((data as any).supervisor)
-            : null;
         const stopped = String(row?.status ?? "").includes("stopped");
-        const serverManaged =
-          supervisor === "server" && !stopped && !!heartbeatAtMs;
+        const supervisor = typeof (data as any).supervisor === "string" ? String((data as any).supervisor) : null;
+        const sdkManaged = supervisor === "bgrun-sdk" && !stopped && !!heartbeatAtMs;
         return {
           name,
           kind: spec.kind,
           command: spec.command,
-          managed: !!bgrun || serverManaged,
+          managed: !!bgrun || sdkManaged,
           bgrun,
           status: row?.status ?? (bgrun ? "starting" : "missing"),
           heartbeatAtMs,
@@ -312,48 +243,48 @@ export function listWorkerRuntimeStatus(
   );
 }
 
-function stopLegacyWorkersFor(name: SolardWorkerName): void {
+async function terminateByName(name: string): Promise<boolean> {
+  const bgrun = await getBgrunSdk();
+  const proc = bgrun.getProcess(name);
+  if (!proc || typeof proc.pid !== "number") return false;
+  await bgrun.terminateProcess(proc.pid, true);
+  await bgrun.removeProcessByName(name);
+  return true;
+}
+
+async function stopLegacyWorkersFor(name: SolardWorkerName): Promise<void> {
   const legacyToStop =
     name === "solard-pumpportal-live-v2"
       ? ["solard-pumpportal", "solard-pump-creates"]
-      : name === "solard-helius-logs-v1" ||
-          name === "solard-helius-live-v2" ||
-          name === "solard-helius-laserstream-v1"
+      : name === "solard-helius-logs-v1" || name === "solard-helius-live-v2" || name === "solard-helius-laserstream-v1"
         ? ["solard-helius-live", "solard-pump-trades"]
         : [];
   for (const legacy of legacyToStop) {
-    const row = bgrunRowByName(legacy);
-    if (!row) continue;
-    const result = runBgrun(["--stop", legacy]);
+    const stopped = await terminateByName(legacy);
+    if (!stopped) continue;
     upsertProcessStatus({
       name: legacy,
       kind: "stream",
-      status: result.exitCode === 0 ? "legacy-stopped" : "legacy-stop-failed",
-      data: { replacement: name, stdout: result.stdout, stderr: result.stderr },
-      error: result.exitCode === 0 ? null : result.stderr || result.stdout,
+      status: "legacy-stopped",
+      data: { replacement: name, supervisor: "bgrun-sdk" },
     });
   }
 }
 
-function stopAllLegacyWorkers(): void {
+async function stopAllLegacyWorkers(): Promise<void> {
   for (const legacy of LEGACY_WORKERS) {
-    const row = bgrunRowByName(legacy);
-    if (!row) continue;
-    const result = runBgrun(["--stop", legacy]);
+    const stopped = await terminateByName(legacy);
+    if (!stopped) continue;
     upsertProcessStatus({
       name: legacy,
       kind: "stream",
-      status: result.exitCode === 0 ? "legacy-stopped" : "legacy-stop-failed",
-      data: { stdout: result.stdout, stderr: result.stderr },
-      error: result.exitCode === 0 ? null : result.stderr || result.stdout,
+      status: "legacy-stopped",
+      data: { supervisor: "bgrun-sdk" },
     });
   }
 }
 
-export async function ensureBgrunWorker(
-  name: SolardWorkerName,
-  restart = false,
-): Promise<Record<string, unknown>> {
+export async function ensureBgrunWorker(name: SolardWorkerName, restart = false): Promise<Record<string, unknown>> {
   const spec = WORKER_SPECS[name];
   return await processMeasure.measure(
     {
@@ -365,82 +296,73 @@ export async function ensureBgrunWorker(
           kind: spec.kind,
           status: "error",
           error,
-          data: { command: spec.command, phase: "ensure" },
+          data: { command: spec.command, phase: "ensure", supervisor: "bgrun-sdk" },
         });
         throw error;
       },
     },
     async () => {
-      stopLegacyWorkersFor(name);
+      await stopLegacyWorkersFor(name);
       clearWorkerErrors([...LEGACY_WORKERS, name]);
-      const exists = !!bgrunRowByName(name);
+
+      const bgrun = await getBgrunSdk();
+      const existing = bgrun.getProcess(name);
       const runtime = listWorkerRuntimeStatus({
-        source: name.includes("helius")
-          ? "helius"
-          : name.includes("pumpportal")
-            ? "pumpportal"
-            : "both",
+        source: name.includes("helius") ? "helius" : name.includes("pumpportal") ? "pumpportal" : "both",
         telegram: name.includes("telegram"),
       }).find((row) => row.name === name);
       const buildMismatch = runtime?.buildMismatch === true;
-      const shouldStart = restart || buildMismatch || !exists;
-      if ((restart || buildMismatch) && exists) {
-        runBgrun(["--stop", name]);
+      const shouldRestart = restart || buildMismatch;
+      const shouldStart = shouldRestart || !existing;
+
+      if (existing && shouldRestart && typeof existing.pid === "number") {
+        await bgrun.terminateProcess(existing.pid, true);
+        await bgrun.removeProcessByName(name);
         await Bun.sleep(250);
       }
+
       if (shouldStart) {
-        const result = runBgrun([
-          "--name",
+        await bgrun.handleRun({
+          action: "run",
           name,
-          "--command",
-          spec.command,
-          "--directory",
-          ROOT,
-          "--force",
-        ]);
-        if (result.exitCode !== 0) {
-          throw new Error(
-            `bgrun ${name} failed: ${result.stderr || result.stdout || result.exitCode}`,
-          );
-        }
+          command: spec.command,
+          directory: ROOT,
+          env: workerEnv(name),
+          force: true,
+          remoteName: "",
+        });
       }
+
       upsertProcessStatus({
         name,
         kind: spec.kind,
-        status:
-          exists && !restart
-            ? "already-running"
-            : restart
-              ? "restarted"
-              : "started",
+        status: existing && !shouldRestart ? "already-running" : shouldRestart ? "restarted" : "started",
         data: {
           command: spec.command,
           restart,
           buildMismatch,
           buildId: spec.buildId,
-          supervisor: "bgrun",
+          supervisor: "bgrun-sdk",
+          parent: process.env.BGR_PROCESS_NAME || "solard",
         },
       });
+
       return {
         name,
         kind: spec.kind,
         running: true,
-        restarted: restart || buildMismatch,
+        restarted: shouldRestart,
         buildMismatch,
         buildId: spec.buildId,
         command: spec.command,
+        supervisor: "bgrun-sdk",
       };
     },
   );
 }
 
 export async function ensureWorkerGroup(
-  args: {
-    telegram?: boolean;
-    restart?: boolean;
-    restartStale?: boolean;
-    source?: string | null;
-  } = {},
+  args: { telegram?: boolean; restart?: boolean; restartStale?: boolean; source?: string | null } = {},
 ): Promise<Record<string, unknown>> {
   return await processMeasure.measure(
     {
@@ -448,27 +370,17 @@ export async function ensureWorkerGroup(
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     async () => {
-      if (args.restart === true) stopAllLegacyWorkers();
-      const before = listWorkerRuntimeStatus({
-        telegram: args.telegram,
-        source: args.source,
-      });
+      if (args.restart === true) await stopAllLegacyWorkers();
+      const before = listWorkerRuntimeStatus({ telegram: args.telegram, source: args.source });
       const results = [];
       for (const status of before) {
-        const restart =
-          args.restart === true ||
-          (args.restartStale === true && status.stale && status.managed);
+        const restart = args.restart === true || (args.restartStale === true && status.stale && status.managed);
         results.push(await ensureBgrunWorker(status.name, restart));
-        await Bun.sleep(350);
+        await Bun.sleep(250);
       }
-      const after = listWorkerRuntimeStatus({
-        telegram: args.telegram,
-        source: args.source,
-      });
+      const after = listWorkerRuntimeStatus({ telegram: args.telegram, source: args.source });
       return {
-        ready: after.every(
-          (row) => row.managed && !row.error && !row.buildMismatch,
-        ),
+        ready: after.every((row) => row.managed && !row.error && !row.buildMismatch),
         stale: after.filter((row) => row.stale).map((row) => row.name),
         workers: results,
         status: after,
@@ -477,41 +389,30 @@ export async function ensureWorkerGroup(
   );
 }
 
-export function stopBgrunWorker(
-  name: SolardWorkerName,
-): Record<string, unknown> {
-  return processMeasure.measureSync(
+export async function stopBgrunWorker(name: SolardWorkerName): Promise<Record<string, unknown>> {
+  return await processMeasure.measure(
     {
       start: () => `stop ${name}`,
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
-    () => {
-      const result = runBgrun(["--stop", name]);
+    async () => {
+      const spec = WORKER_SPECS[name];
+      const stopped = await terminateByName(name);
       upsertProcessStatus({
         name,
-        kind: WORKER_SPECS[name].kind,
-        status: result.exitCode === 0 ? "stopped" : "stop-failed",
-        data: { stdout: result.stdout, supervisor: "bgrun" },
-        error: result.exitCode === 0 ? null : result.stderr,
+        kind: spec.kind,
+        status: stopped ? "stopped" : "missing",
+        data: { supervisor: "bgrun-sdk", command: spec.command, buildId: spec.buildId },
       });
-      return {
-        name,
-        exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
-      };
+      return { name, stopped, supervisor: "bgrun-sdk" };
     },
   );
 }
 
-export function stopWorkerGroup(
-  input: { telegram?: boolean; source?: string | null } = {},
-): Record<string, unknown> {
-  const workers = resolveWorkerNames({
-    telegram: input.telegram,
-    source: input.source,
-  });
-  const stopped = workers.map((name) => stopBgrunWorker(name));
-  stopAllLegacyWorkers();
-  return { workers: stopped, legacyStopped: LEGACY_WORKERS };
+export async function stopWorkerGroup(input: { telegram?: boolean; source?: string | null } = {}): Promise<Record<string, unknown>> {
+  const workers = resolveWorkerNames({ telegram: input.telegram, source: input.source });
+  const stopped = [];
+  for (const name of workers) stopped.push(await stopBgrunWorker(name));
+  await stopAllLegacyWorkers();
+  return { workers: stopped, legacyStopped: LEGACY_WORKERS, supervisor: "bgrun-sdk" };
 }
