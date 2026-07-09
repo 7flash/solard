@@ -85,6 +85,17 @@ function hex(buf: Buffer): string {
 function asBase58(value: unknown): string {
   if (typeof value === "string") return value;
   if (value instanceof PublicKey) return value.toBase58();
+  if (value && typeof (value as { pubkey?: unknown }).pubkey === "string")
+    return String((value as { pubkey: string }).pubkey);
+  if (value && typeof (value as { publicKey?: unknown }).publicKey === "string")
+    return String((value as { publicKey: string }).publicKey);
+  if (value && (value as { pubkey?: unknown }).pubkey instanceof PublicKey)
+    return (value as { pubkey: PublicKey }).pubkey.toBase58();
+  if (
+    value &&
+    (value as { publicKey?: unknown }).publicKey instanceof PublicKey
+  )
+    return (value as { publicKey: PublicKey }).publicKey.toBase58();
   if (
     value &&
     typeof (value as { toBase58?: unknown }).toBase58 === "function"
@@ -92,8 +103,13 @@ function asBase58(value: unknown): string {
     return (value as { toBase58: () => string }).toBase58();
   }
   if (value instanceof Uint8Array) return bs58.encode(Buffer.from(value));
-  if (value && typeof (value as { toString?: unknown }).toString === "function")
-    return String((value as { toString: () => string }).toString());
+  if (
+    value &&
+    typeof (value as { toString?: unknown }).toString === "function"
+  ) {
+    const text = String((value as { toString: () => string }).toString());
+    return text === "[object Object]" ? "" : text;
+  }
   return "";
 }
 
@@ -103,35 +119,80 @@ function getSignature(tx: any, fallback = ""): string {
   );
 }
 
-function getAccountKeys(tx: any): string[] {
-  const message = tx?.transaction?.message;
-  if (!message) return [];
-  if (typeof message.getAccountKeys === "function") {
-    const keys = message.getAccountKeys();
-    const accountKeys = Array.from(keys.accountKeys ?? []).map(asBase58);
-    if (accountKeys.length) return accountKeys;
-    const staticKeys = Array.from(keys.staticAccountKeys ?? []).map(asBase58);
-    const loadedWritable = Array.from(
-      keys.accountKeysFromLookups?.writable ?? [],
-    ).map(asBase58);
-    const loadedReadonly = Array.from(
-      keys.accountKeysFromLookups?.readonly ?? [],
-    ).map(asBase58);
-    return [...staticKeys, ...loadedWritable, ...loadedReadonly];
-  }
-  const keys = Array.from(
-    message.accountKeys ?? message.staticAccountKeys ?? [],
-  ).map(asBase58);
-  const loadedWritable = Array.from(
+function loadedAddressLookups(
+  tx: any,
+): { writable: unknown[]; readonly: unknown[] } | undefined {
+  const writable = Array.from(
     tx?.meta?.loadedAddresses?.writable ??
       tx?.meta?.loadedWritableAddresses ??
       [],
-  ).map(asBase58);
-  const loadedReadonly = Array.from(
+  );
+  const readonly = Array.from(
     tx?.meta?.loadedAddresses?.readonly ??
       tx?.meta?.loadedReadonlyAddresses ??
       [],
-  ).map(asBase58);
+  );
+  return writable.length || readonly.length
+    ? { writable, readonly }
+    : undefined;
+}
+
+function flattenResolvedKeys(keys: any): string[] {
+  const accountKeys = Array.from(keys?.accountKeys ?? [])
+    .map(asBase58)
+    .filter(Boolean);
+  if (accountKeys.length) return accountKeys;
+  const staticKeys = Array.from(keys?.staticAccountKeys ?? [])
+    .map(asBase58)
+    .filter(Boolean);
+  const loadedWritable = Array.from(
+    keys?.accountKeysFromLookups?.writable ?? [],
+  )
+    .map(asBase58)
+    .filter(Boolean);
+  const loadedReadonly = Array.from(
+    keys?.accountKeysFromLookups?.readonly ?? [],
+  )
+    .map(asBase58)
+    .filter(Boolean);
+  return [...staticKeys, ...loadedWritable, ...loadedReadonly];
+}
+
+function getAccountKeys(tx: any): string[] {
+  const message = tx?.transaction?.message;
+  if (!message) return [];
+
+  const lookups = loadedAddressLookups(tx);
+  if (typeof message.getAccountKeys === "function") {
+    if (lookups) {
+      try {
+        const resolved = flattenResolvedKeys(
+          message.getAccountKeys({ accountKeysFromLookups: lookups }),
+        );
+        if (resolved.length) return resolved;
+      } catch {
+        // Fall through to static/json fallback. Some RPC responses omit ALT lookups even with maxSupportedTransactionVersion.
+      }
+    }
+    try {
+      const resolved = flattenResolvedKeys(message.getAccountKeys());
+      if (resolved.length) return resolved;
+    } catch {
+      // Versioned messages throw "address table lookups were not resolved" when called without lookup addresses.
+    }
+  }
+
+  const keys = Array.from(
+    message.accountKeys ?? message.staticAccountKeys ?? [],
+  )
+    .map(asBase58)
+    .filter(Boolean);
+  const loadedWritable = Array.from(lookups?.writable ?? [])
+    .map(asBase58)
+    .filter(Boolean);
+  const loadedReadonly = Array.from(lookups?.readonly ?? [])
+    .map(asBase58)
+    .filter(Boolean);
   return [...keys, ...loadedWritable, ...loadedReadonly];
 }
 
@@ -261,7 +322,9 @@ function readBool(
   return { value: buf[offset] !== 0, offset: offset + 1 };
 }
 
-function parseCreateInstructionData(buf: Buffer): {
+function parseCreateInstructionData(
+  buf: Buffer,
+): {
   name: string;
   symbol: string;
   uri: string | null;
@@ -287,7 +350,9 @@ function parseCreateInstructionData(buf: Buffer): {
   };
 }
 
-function parsePumpEvent(buf: Buffer): {
+function parsePumpEvent(
+  buf: Buffer,
+): {
   name: "CreateEvent" | "TradeEvent" | "CompleteEvent";
   data: Record<string, unknown>;
 } | null {

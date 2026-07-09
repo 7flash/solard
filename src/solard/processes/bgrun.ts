@@ -61,7 +61,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     kind: "stream",
     command: "bun run ./src/solard/workers/helius-live-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_HELIUS_STALE_MS ?? "15000"),
-    buildId: "helius-live-v6-logs-primary-fallback",
+    buildId: "helius-live-v7-alt-safe-parser",
   },
   "solard-helius-laserstream-v1": {
     name: "solard-helius-laserstream-v1",
