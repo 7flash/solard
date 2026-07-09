@@ -1,4 +1,9 @@
-import { PublicKey, SystemProgram, type Connection } from "@solana/web3.js";
+import {
+  PublicKey,
+  SystemProgram,
+  type Connection,
+  type Keypair,
+} from "@solana/web3.js";
 
 import { rawAmount, SOL_ASSET } from "../../core/amounts.js";
 import type { WalletRef } from "../../core/refs.js";
@@ -23,6 +28,8 @@ export type TokenMetadata = {
   name: string;
   symbol: string;
   uri: string;
+  cashback?: boolean;
+  mayhemMode?: boolean;
 };
 
 export type BuyerAllocation = {
@@ -798,6 +805,9 @@ export async function preparePumpTokenLaunch(args: {
   priorityMicroLamports: number;
   buyerPriorityMicroLamports: number;
   senderPolicy: LaunchSenderPolicy;
+  mint?: Keypair;
+  cashback?: boolean;
+  mayhemMode?: boolean;
 }): Promise<PumpTokenLaunchPlan> {
   const deployment = await args.sowl.prepareTokenDeployment(
     "pump",
@@ -807,8 +817,9 @@ export async function preparePumpTokenLaunch(args: {
       symbol: args.token.symbol,
       uri: args.token.uri,
       creator: args.sowl.signer(args.creatorWallet).publicKey,
-      mayhemMode: false,
-      cashback: false,
+      mint: args.mint,
+      mayhemMode: args.mayhemMode ?? args.token.mayhemMode ?? false,
+      cashback: args.cashback ?? args.token.cashback ?? false,
     },
   );
 

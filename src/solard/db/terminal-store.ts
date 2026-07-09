@@ -121,9 +121,10 @@ export type TelegramSignal = z.infer<typeof TelegramSignalSchema>;
 export const terminalDb = new Database(
   SOLARD_DB_PATH,
   {
-    terminalTokensLive: TerminalTokenSchema,
-    terminalTradesLive: TerminalTradeSchema,
-    terminalIndicatorsLive: TerminalIndicatorSchema,
+    // The live terminal tables are created below with explicit SQL.
+    // sqlite-zod-orm reserves some `id` shapes for row identity on older schemas;
+    // letting it create terminalTradesLive caused TEXT trade ids to be inserted into
+    // INTEGER id columns and produced SQLite `datatype mismatch` under live Helius.
     processStatus: ProcessStatusSchema,
     workerCursors: WorkerCursorSchema,
     telegramSignals: TelegramSignalSchema,
@@ -133,9 +134,6 @@ export const terminalDb = new Database(
     softDeletes: false,
     reactive: false,
     unique: {
-      terminalTokensLive: [["mint"]],
-      terminalTradesLive: [["id"]],
-      terminalIndicatorsLive: [["mint", "intervalSec"]],
       processStatus: [["name"]],
       workerCursors: [["key"]],
       telegramSignals: [["id"]],
@@ -150,6 +148,154 @@ function addColumnIfMissing(table: string, column: string, ddl: string): void {
   if (!rows.some((row) => row.name === column)) terminalDb.exec(ddl);
 }
 
+type PragmaColumn = { name: string; type?: string | null; pk?: number | null };
+
+function tableColumns(table: string): PragmaColumn[] {
+  return terminalDb.raw<PragmaColumn>(`PRAGMA table_info(${table})`);
+}
+
+function columnType(cols: PragmaColumn[], name: string): string {
+  return String(
+    cols.find((col) => col.name === name)?.type ?? "",
+  ).toUpperCase();
+}
+
+function isTextColumn(cols: PragmaColumn[], name: string): boolean {
+  return columnType(cols, name).includes("TEXT");
+}
+
+function safeBackupName(table: string): string {
+  return `${table}_bad_${Date.now()}`;
+}
+
+function recreateIncompatibleTable(
+  table: string,
+  ddl: string,
+  isCompatible: (columns: PragmaColumn[]) => boolean,
+): void {
+  const columns = tableColumns(table);
+  if (!columns.length) {
+    terminalDb.exec(ddl);
+    return;
+  }
+  if (isCompatible(columns)) return;
+  const backup = safeBackupName(table);
+  terminalDb.exec(`ALTER TABLE ${table} RENAME TO ${backup}`);
+  terminalDb.exec(ddl);
+  upsertProcessStatus({
+    name: "solard-db-schema",
+    kind: "db",
+    status: "migrated",
+    data: { table, backup, reason: "incompatible live table schema" },
+  });
+}
+
+function ensureTerminalLiveTables(): void {
+  recreateIncompatibleTable(
+    "terminalTokensLive",
+    `CREATE TABLE IF NOT EXISTS terminalTokensLive (
+      mint TEXT PRIMARY KEY,
+      symbol TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL DEFAULT '',
+      image TEXT,
+      uri TEXT,
+      description TEXT,
+      website TEXT,
+      twitter TEXT,
+      telegram TEXT,
+      creator TEXT,
+      bondingCurveKey TEXT,
+      source TEXT NOT NULL DEFAULT 'unknown',
+      phase TEXT NOT NULL DEFAULT 'unknown',
+      isMayhemMode INTEGER NOT NULL DEFAULT 0,
+      quoteAsset TEXT,
+      quoteMint TEXT,
+      supplyUi REAL NOT NULL DEFAULT 1000000000,
+      priceSol REAL,
+      priceUsd REAL,
+      marketCapSol REAL,
+      marketCapUsd REAL,
+      initialMarketCapUsd REAL,
+      lastSlot INTEGER NOT NULL DEFAULT 0,
+      signature TEXT,
+      createdAtMs INTEGER NOT NULL DEFAULT 0,
+      updatedAtMs INTEGER NOT NULL DEFAULT 0
+    )`,
+    (cols) => isTextColumn(cols, "mint"),
+  );
+
+  recreateIncompatibleTable(
+    "terminalTradesLive",
+    `CREATE TABLE IF NOT EXISTS terminalTradesLive (
+      id TEXT PRIMARY KEY,
+      mint TEXT NOT NULL,
+      signature TEXT NOT NULL,
+      slot INTEGER NOT NULL DEFAULT 0,
+      owner TEXT,
+      side TEXT NOT NULL DEFAULT 'unknown',
+      tokenDeltaUi REAL NOT NULL DEFAULT 0,
+      solDeltaUi REAL NOT NULL DEFAULT 0,
+      priceSol REAL,
+      priceUsd REAL,
+      marketCapUsd REAL,
+      confidence TEXT NOT NULL DEFAULT 'processed',
+      source TEXT NOT NULL DEFAULT 'unknown',
+      rawJson TEXT NOT NULL DEFAULT '{}',
+      createdAtMs INTEGER NOT NULL DEFAULT 0,
+      updatedAtMs INTEGER NOT NULL DEFAULT 0
+    )`,
+    (cols) =>
+      isTextColumn(cols, "id") &&
+      isTextColumn(cols, "mint") &&
+      isTextColumn(cols, "signature"),
+  );
+
+  recreateIncompatibleTable(
+    "terminalIndicatorsLive",
+    `CREATE TABLE IF NOT EXISTS terminalIndicatorsLive (
+      id TEXT NOT NULL,
+      mint TEXT NOT NULL,
+      intervalSec INTEGER NOT NULL,
+      smaPriceUsd REAL,
+      smaMarketCapUsd REAL,
+      vwmaPriceUsd REAL,
+      medianPriceUsd REAL,
+      tradeCount INTEGER NOT NULL DEFAULT 0,
+      volumeSol REAL NOT NULL DEFAULT 0,
+      updatedAtMs INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (mint, intervalSec)
+    )`,
+    (cols) => isTextColumn(cols, "id") && isTextColumn(cols, "mint"),
+  );
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  const n = typeof value === "bigint" ? Number(value) : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function nullableFiniteNumber(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = typeof value === "bigint" ? Number(value) : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function finiteInteger(value: unknown, fallback = 0): number {
+  const n = Math.trunc(finiteNumber(value, fallback));
+  return Number.isSafeInteger(n) ? n : fallback;
+}
+
+function nullableText(value: unknown): string | null {
+  if (value == null) return null;
+  const text = String(value);
+  return text.length ? text : null;
+}
+
+function requiredText(value: unknown, fallback = ""): string {
+  const text = nullableText(value);
+  return text ?? fallback;
+}
+
 export function initTerminalStore(): void {
   if (initialized) return;
   initialized = true;
@@ -162,6 +308,7 @@ export function initTerminalStore(): void {
       terminalDb.exec("PRAGMA journal_mode=WAL");
       terminalDb.exec("PRAGMA synchronous=NORMAL");
       terminalDb.exec("PRAGMA busy_timeout=5000");
+      ensureTerminalLiveTables();
       addColumnIfMissing(
         "terminalTokensLive",
         "isMayhemMode",
@@ -361,40 +508,59 @@ export function upsertTerminalToken(
     input.mint,
   )[0];
   const row: TerminalToken = {
-    mint: input.mint,
-    symbol: input.symbol ?? existing?.symbol ?? "",
-    name: input.name ?? existing?.name ?? "",
-    image: input.image ?? existing?.image ?? null,
-    uri: input.uri ?? existing?.uri ?? null,
-    description:
-      (input as any).description ?? (existing as any)?.description ?? null,
-    website: (input as any).website ?? (existing as any)?.website ?? null,
-    twitter: (input as any).twitter ?? (existing as any)?.twitter ?? null,
-    telegram: (input as any).telegram ?? (existing as any)?.telegram ?? null,
-    creator: input.creator ?? existing?.creator ?? null,
-    bondingCurveKey: input.bondingCurveKey ?? existing?.bondingCurveKey ?? null,
-    source: input.source ?? existing?.source ?? "unknown",
-    phase: input.phase ?? existing?.phase ?? "pump",
-    isMayhemMode: Number(
-      (input as any).isMayhemMode ?? (existing as any)?.isMayhemMode ?? 0,
+    mint: requiredText(input.mint),
+    symbol: requiredText(input.symbol ?? existing?.symbol, ""),
+    name: requiredText(input.name ?? existing?.name, ""),
+    image: nullableText(input.image ?? existing?.image),
+    uri: nullableText(input.uri ?? existing?.uri),
+    description: nullableText(
+      (input as any).description ?? (existing as any)?.description,
     ),
-    quoteAsset:
-      (input as any).quoteAsset ?? (existing as any)?.quoteAsset ?? null,
-    quoteMint: (input as any).quoteMint ?? (existing as any)?.quoteMint ?? null,
-    supplyUi: input.supplyUi ?? existing?.supplyUi ?? 1_000_000_000,
-    priceSol: input.priceSol ?? existing?.priceSol ?? null,
-    priceUsd: input.priceUsd ?? existing?.priceUsd ?? null,
-    marketCapSol: input.marketCapSol ?? existing?.marketCapSol ?? null,
-    marketCapUsd: input.marketCapUsd ?? existing?.marketCapUsd ?? null,
-    initialMarketCapUsd:
+    website: nullableText((input as any).website ?? (existing as any)?.website),
+    twitter: nullableText((input as any).twitter ?? (existing as any)?.twitter),
+    telegram: nullableText(
+      (input as any).telegram ?? (existing as any)?.telegram,
+    ),
+    creator: nullableText(input.creator ?? existing?.creator),
+    bondingCurveKey: nullableText(
+      input.bondingCurveKey ?? existing?.bondingCurveKey,
+    ),
+    source: requiredText(input.source ?? existing?.source, "unknown"),
+    phase: (input.phase ?? existing?.phase ?? "pump") as TerminalToken["phase"],
+    isMayhemMode: finiteInteger(
+      (input as any).isMayhemMode ?? (existing as any)?.isMayhemMode ?? 0,
+      0,
+    ),
+    quoteAsset: nullableText(
+      (input as any).quoteAsset ?? (existing as any)?.quoteAsset,
+    ),
+    quoteMint: nullableText(
+      (input as any).quoteMint ?? (existing as any)?.quoteMint,
+    ),
+    supplyUi: finiteNumber(
+      input.supplyUi ?? existing?.supplyUi ?? 1_000_000_000,
+      1_000_000_000,
+    ),
+    priceSol: nullableFiniteNumber(input.priceSol ?? existing?.priceSol),
+    priceUsd: nullableFiniteNumber(input.priceUsd ?? existing?.priceUsd),
+    marketCapSol: nullableFiniteNumber(
+      input.marketCapSol ?? existing?.marketCapSol,
+    ),
+    marketCapUsd: nullableFiniteNumber(
+      input.marketCapUsd ?? existing?.marketCapUsd,
+    ),
+    initialMarketCapUsd: nullableFiniteNumber(
       existing?.initialMarketCapUsd ??
-      input.initialMarketCapUsd ??
-      input.marketCapUsd ??
-      null,
-    lastSlot: input.lastSlot ?? existing?.lastSlot ?? 0,
-    signature: input.signature ?? existing?.signature ?? null,
-    createdAtMs: existing?.createdAtMs ?? input.createdAtMs ?? now,
-    updatedAtMs: input.updatedAtMs ?? now,
+        input.initialMarketCapUsd ??
+        input.marketCapUsd,
+    ),
+    lastSlot: finiteInteger(input.lastSlot ?? existing?.lastSlot ?? 0, 0),
+    signature: nullableText(input.signature ?? existing?.signature),
+    createdAtMs: finiteInteger(
+      existing?.createdAtMs ?? input.createdAtMs ?? now,
+      now,
+    ),
+    updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
   terminalDb.exec(
     `INSERT INTO terminalTokensLive (mint, symbol, name, image, uri, description, website, twitter, telegram, creator, bondingCurveKey, source, phase, isMayhemMode, quoteAsset, quoteMint, supplyUi, priceSol, priceUsd, marketCapSol, marketCapUsd, initialMarketCapUsd, lastSlot, signature, createdAtMs, updatedAtMs)
@@ -462,23 +628,32 @@ export function insertTerminalTrade(
   },
 ): TerminalTrade {
   const now = Date.now();
+  const side =
+    input.side === "buy" || input.side === "sell" ? input.side : "unknown";
+  const parsedConfidence = ConfidenceSchema.safeParse(input.confidence);
+  const confidenceValue: TerminalConfidence = parsedConfidence.success
+    ? parsedConfidence.data
+    : "processed";
   const row: TerminalTrade = {
-    id: input.id,
-    mint: input.mint,
-    signature: input.signature,
-    slot: input.slot ?? 0,
-    owner: input.owner ?? null,
-    side: input.side ?? "unknown",
-    tokenDeltaUi: input.tokenDeltaUi ?? 0,
-    solDeltaUi: input.solDeltaUi ?? 0,
-    priceSol: input.priceSol ?? null,
-    priceUsd: input.priceUsd ?? null,
-    marketCapUsd: input.marketCapUsd ?? null,
-    confidence: input.confidence ?? "processed",
-    source: input.source ?? "unknown",
-    rawJson: input.rawJson ?? "{}",
-    createdAtMs: input.createdAtMs ?? now,
-    updatedAtMs: input.updatedAtMs ?? now,
+    id: requiredText(input.id),
+    mint: requiredText(input.mint),
+    signature: requiredText(input.signature),
+    slot: finiteInteger(input.slot ?? 0, 0),
+    owner: nullableText(input.owner),
+    side,
+    tokenDeltaUi: finiteNumber(input.tokenDeltaUi ?? 0, 0),
+    solDeltaUi: finiteNumber(input.solDeltaUi ?? 0, 0),
+    priceSol: nullableFiniteNumber(input.priceSol),
+    priceUsd: nullableFiniteNumber(input.priceUsd),
+    marketCapUsd: nullableFiniteNumber(input.marketCapUsd),
+    confidence: confidenceValue,
+    source: requiredText(input.source, "unknown"),
+    rawJson:
+      typeof input.rawJson === "string"
+        ? input.rawJson
+        : json(input.rawJson ?? {}),
+    createdAtMs: finiteInteger(input.createdAtMs ?? now, now),
+    updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
   terminalDb.exec(
     `INSERT INTO terminalTradesLive (id, mint, signature, slot, owner, side, tokenDeltaUi, solDeltaUi, priceSol, priceUsd, marketCapUsd, confidence, source, rawJson, createdAtMs, updatedAtMs)

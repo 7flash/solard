@@ -24,6 +24,14 @@ export type PumpLaunchInput = {
   telegram?: string | null;
   video?: string | null;
   showName?: boolean | null;
+  cashback?: boolean | null;
+  mayhemMode?: boolean | null;
+  mintSuffix?: string | null;
+  vanitySuffix?: string | null;
+  pumpSuffix?: boolean | null;
+  vanityMaxAttempts?: number | null;
+  vanityTimeoutMs?: number | null;
+  vanityReportEvery?: number | null;
   creatorBuySol?: string | null;
   creatorBuyLamports?: string | null;
   creatorReserveSol?: string | null;
@@ -83,6 +91,18 @@ export function pumpLaunchArgsFromInput(input: PumpLaunchInput): string[] {
   pushArg(argv, "telegram", input.telegram);
   pushArg(argv, "video", input.video);
   if (input.showName === false) pushArg(argv, "hide-name", true);
+  if (input.cashback) pushArg(argv, "cashback", true);
+  if (input.mayhemMode) pushArg(argv, "mayhem", true);
+  if (input.pumpSuffix)
+    pushArg(
+      argv,
+      "mint-suffix",
+      input.mintSuffix ?? input.vanitySuffix ?? "pump",
+    );
+  else pushArg(argv, "mint-suffix", input.mintSuffix ?? input.vanitySuffix);
+  pushArg(argv, "vanity-max-attempts", input.vanityMaxAttempts);
+  pushArg(argv, "vanity-timeout-ms", input.vanityTimeoutMs);
+  pushArg(argv, "vanity-report-every", input.vanityReportEvery);
   pushArg(argv, "creator-buy-sol", input.creatorBuySol);
   pushArg(argv, "creator-buy-lamports", input.creatorBuyLamports);
   pushArg(argv, "creator-reserve-sol", input.creatorReserveSol);
@@ -164,6 +184,14 @@ export function pumpLaunchInputFromRecord(
     telegram: stringValue("telegram"),
     video: stringValue("video"),
     showName: boolValue("showName", true),
+    cashback: boolValue("cashback", boolValue("cashbackEnabled", false)),
+    mayhemMode: boolValue("mayhemMode", boolValue("mayhem", false)),
+    mintSuffix: stringValue("mintSuffix") ?? stringValue("vanitySuffix"),
+    vanitySuffix: stringValue("vanitySuffix"),
+    pumpSuffix: boolValue("pumpSuffix", boolValue("vanitySuffixPump", false)),
+    vanityMaxAttempts: numberValue("vanityMaxAttempts"),
+    vanityTimeoutMs: numberValue("vanityTimeoutMs"),
+    vanityReportEvery: numberValue("vanityReportEvery"),
     creatorBuySol: stringValue("creatorBuySol"),
     creatorBuyLamports: stringValue("creatorBuyLamports"),
     creatorReserveSol: stringValue("creatorReserveSol"),

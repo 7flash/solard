@@ -436,6 +436,20 @@ export function LaunchPage() {
           )?.checked
             ? "true"
             : "false";
+        body.cashback = event.currentTarget.querySelector<HTMLInputElement>(
+          "[name=cashback]",
+        )?.checked
+          ? "true"
+          : "false";
+        body.vanitySuffixPump =
+          event.currentTarget.querySelector<HTMLInputElement>(
+            "[name=vanitySuffixPump]",
+          )?.checked
+            ? "true"
+            : "false";
+        if (body.vanitySuffixPump === "true" && !body.mintSuffix) {
+          body.mintSuffix = "pump";
+        }
         const explicitBuyPlan = buyPlanPayload();
         if (explicitBuyPlan.length > 0) body.buyPlan = explicitBuyPlan;
         void runAction(async () => {
@@ -465,6 +479,14 @@ export function LaunchPage() {
           <label className="toggle-card">
             <span>Skip sim</span>
             <input type="checkbox" name="skipSimulation" defaultChecked />
+          </label>
+          <label className="toggle-card">
+            <span>Cashback</span>
+            <input type="checkbox" name="cashback" defaultChecked />
+          </label>
+          <label className="toggle-card">
+            <span>Mint ends pump</span>
+            <input type="checkbox" name="vanitySuffixPump" defaultChecked />
           </label>
           <button type="submit" className="primary-large">
             Start launch job
@@ -573,6 +595,23 @@ export function LaunchPage() {
               <option value="after-deploy-confirmed">After confirmed</option>
             </select>
           </label>
+          <label className="field">
+            <span>Mint suffix</span>
+            <input name="mintSuffix" defaultValue="pump" />
+          </label>
+          <label className="field">
+            <span>Vanity attempts</span>
+            <input name="vanityMaxAttempts" defaultValue="25000000" />
+          </label>
+          <label className="field full">
+            <span>Vanity timeout ms</span>
+            <input name="vanityTimeoutMs" defaultValue="0" />
+          </label>
+          <p className="muted tiny full">
+            Exact pump suffix means the mint keypair is generated locally before
+            launch. The expected search is about 11.3M attempts for a
+            four-character base58 suffix.
+          </p>
         </div>
       </div>
 

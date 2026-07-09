@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+import type { Keypair } from "@solana/web3.js";
 import { sol } from "../../core/amounts.js";
 import {
   uploadPumpMetadata,
@@ -27,6 +28,7 @@ import {
   type TokenMetadata,
   type TraderSubmitMode,
 } from "./token-launch.js";
+import { generateMintKeypairWithSuffix } from "./vanity-mint.js";
 
 export type Flags = Map<string, string[]>;
 
@@ -67,7 +69,11 @@ export type PumpTokenLaunchCliResult = {
     metadataUri: string;
     mint: string;
     feeMode: "creator-fees";
-    cashback: false;
+    cashback: boolean;
+    mayhemMode: boolean;
+    vanityMintSuffix?: string | null;
+    vanityMintAttempts?: number | null;
+    vanityMintElapsedMs?: number | null;
   };
   result: PumpTokenLaunchResult;
 };
@@ -678,6 +684,9 @@ export async function preparePumpTokenLaunchFromFlags(args: {
   creator: string;
   env?: PumpLaunchEnvironment;
   options?: PumpTokenLaunchCliOptions;
+  mint?: Keypair;
+  cashback?: boolean;
+  mayhemMode?: boolean;
 }): Promise<PumpTokenLaunchPlan> {
   const options = args.options ?? {};
   const group = first(args.flags, "buyer-group");
@@ -740,7 +749,24 @@ export async function preparePumpTokenLaunchFromFlags(args: {
       options.defaultBuyerPriorityMicroLamports ?? 1_500_000,
     ),
     senderPolicy: env.policy,
+    mint: args.mint,
+    cashback: args.cashback ?? args.token.cashback ?? false,
+    mayhemMode: args.mayhemMode ?? args.token.mayhemMode ?? false,
   });
+}
+
+function vanitySuffixFromFlags(flags: Flags): string | null {
+  const explicit = first(flags, "mint-suffix") ?? first(flags, "vanity-suffix");
+  if (explicit && explicit !== "true") return explicit.trim();
+  if (enabled(flags, "pump-suffix", "SOLARD_LAUNCH_PUMP_SUFFIX")) return "pump";
+  return null;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 export async function runPumpTokenLaunchFromArgs(
@@ -783,6 +809,53 @@ export async function runPumpTokenLaunchFromArgs(
   );
 
   const { uri, uploaded } = await resolveMetadataUri(flags, input);
+  const cashback = enabled(flags, "cashback", "SOLARD_LAUNCH_CASHBACK");
+  const mayhemMode = enabled(flags, "mayhem", "SOLARD_LAUNCH_MAYHEM");
+  const vanityMintSuffix = vanitySuffixFromFlags(flags);
+  let vanityMint: Keypair | undefined;
+  let vanityMintAttempts: number | null = null;
+  let vanityMintElapsedMs: number | null = null;
+
+  if (vanityMintSuffix) {
+    const maxAttempts = numberFlag(
+      flags,
+      "vanity-max-attempts",
+      envNumber("SOLARD_VANITY_MINT_MAX_ATTEMPTS", 25_000_000),
+    );
+    const timeoutMs = numberFlag(
+      flags,
+      "vanity-timeout-ms",
+      envNumber("SOLARD_VANITY_MINT_TIMEOUT_MS", 0),
+    );
+    const reportEvery = numberFlag(
+      flags,
+      "vanity-report-every",
+      envNumber("SOLARD_VANITY_MINT_REPORT_EVERY", 1_000_000),
+    );
+    report("vanity mint start", {
+      suffix: vanityMintSuffix,
+      maxAttempts,
+      timeoutMs,
+      reportEvery,
+    });
+    const found = await generateMintKeypairWithSuffix({
+      suffix: vanityMintSuffix,
+      maxAttempts,
+      timeoutMs,
+      reportEvery,
+      onProgress: (progress) => report("vanity mint progress", progress),
+    });
+    vanityMint = found.mint;
+    vanityMintAttempts = found.attempts;
+    vanityMintElapsedMs = found.elapsedMs;
+    report("vanity mint found", {
+      mint: found.mint.publicKey.toBase58(),
+      suffix: vanityMintSuffix,
+      attempts: found.attempts,
+      elapsedMs: found.elapsedMs,
+    });
+  }
+
   const sowl = createTraderSowl({ rpcUrl: env.rpcUrl });
   installPumpLaunchSenders(sowl, env);
 
@@ -793,6 +866,8 @@ export async function runPumpTokenLaunchFromArgs(
       name: input.name,
       symbol: input.symbol,
       uri,
+      cashback,
+      mayhemMode,
     };
     const deploymentPriorityMicroLamports = numberFlag(
       flags,
@@ -818,6 +893,9 @@ export async function runPumpTokenLaunchFromArgs(
       creator,
       env,
       options,
+      mint: vanityMint,
+      cashback,
+      mayhemMode,
     });
     const mint = prepared.deployment.mint.publicKey.toBase58();
 
@@ -847,7 +925,11 @@ export async function runPumpTokenLaunchFromArgs(
           }
         : null,
       feeMode: "creator-fees",
-      cashback: false,
+      cashback,
+      mayhemMode,
+      vanityMintSuffix,
+      vanityMintAttempts,
+      vanityMintElapsedMs,
       creatorBuyLamports: optionalSol(
         flags,
         "creator-buy-sol",
@@ -917,7 +999,11 @@ export async function runPumpTokenLaunchFromArgs(
         metadataUri: uri,
         mint,
         feeMode: "creator-fees",
-        cashback: false,
+        cashback,
+        mayhemMode,
+        vanityMintSuffix,
+        vanityMintAttempts,
+        vanityMintElapsedMs,
       },
       result,
     };
