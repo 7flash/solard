@@ -1,8 +1,8 @@
-import { processMeasure, summarizeForMeasure } from "../measure.js";
 import {
   listProcessStatus,
   upsertProcessStatus,
 } from "../db/terminal-store.js";
+import { processMeasure, summarizeForMeasure } from "../measure.js";
 
 export type SolardWorkerName =
   | "solard-pump-creates"
@@ -12,8 +12,9 @@ export type SolardWorkerName =
 
 export type WorkerSpec = {
   name: SolardWorkerName;
-  kind: string;
+  kind: "stream" | "reconciler" | "signals";
   command: string;
+  staleAfterMs: number;
   env?: Record<string, string>;
 };
 
@@ -24,23 +25,59 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     name: "solard-pump-creates",
     kind: "stream",
     command: "bun run ./src/solard/workers/pump-create-worker.ts",
+    staleAfterMs: Number(process.env.SOLARD_PUMP_CREATE_STALE_MS ?? "15000"),
   },
   "solard-pump-trades": {
     name: "solard-pump-trades",
     kind: "stream",
     command: "bun run ./src/solard/workers/pump-trade-worker.ts",
+    staleAfterMs: Number(process.env.SOLARD_PUMP_TRADE_STALE_MS ?? "15000"),
   },
   "solard-reconciler": {
     name: "solard-reconciler",
     kind: "reconciler",
     command: "bun run ./src/solard/workers/reconciler-worker.ts",
+    staleAfterMs: Number(process.env.SOLARD_RECONCILER_STALE_MS ?? "30000"),
   },
   "solard-telegram-signals": {
     name: "solard-telegram-signals",
     kind: "signals",
     command: "bun run ./src/solard/workers/telegram-signal-worker.ts",
+    staleAfterMs: Number(
+      process.env.SOLARD_TELEGRAM_SIGNALS_STALE_MS ?? "45000",
+    ),
   },
 };
+
+export const CORE_WORKERS: SolardWorkerName[] = [
+  "solard-pump-creates",
+  "solard-pump-trades",
+  "solard-reconciler",
+];
+
+export function isSolardWorkerName(
+  value: string | null | undefined,
+): value is SolardWorkerName {
+  return !!value && Object.prototype.hasOwnProperty.call(WORKER_SPECS, value);
+}
+
+export function resolveWorkerNames(input?: {
+  worker?: string | null;
+  all?: boolean;
+  telegram?: boolean;
+}): SolardWorkerName[] {
+  if (input?.worker && input.worker !== "all") {
+    if (!isSolardWorkerName(input.worker)) {
+      throw new Error(`Unknown worker: ${input.worker}`);
+    }
+    return [input.worker];
+  }
+  const names = [...CORE_WORKERS];
+  if (input?.telegram || process.env.SOLARD_TELEGRAM_SIGNALS === "1") {
+    names.push("solard-telegram-signals");
+  }
+  return names;
+}
 
 function decode(stdout: Uint8Array | null | undefined): string {
   return stdout ? new TextDecoder().decode(stdout).trim() : "";
@@ -69,17 +106,87 @@ export function listBgrunProcesses(): Array<Record<string, unknown>> {
   return processMeasure.measureSync(
     {
       start: () => "bgrun list",
-      end: (rows) => ({ result: summarizeForMeasure(rows) }),
+      end: (rows) => ({ rows: Array.isArray(rows) ? rows.length : 0 }),
+      catch: () => [],
     },
     () => {
       const result = runBgrun(["--json"]);
       if (result.exitCode !== 0) return [];
-      try {
-        const parsed = JSON.parse(result.stdout);
-        return Array.isArray(parsed) ? parsed : [];
-      } catch {
-        return [];
-      }
+      const parsed = JSON.parse(result.stdout || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    },
+  );
+}
+
+function bgrunRowByName(name: string): Record<string, unknown> | null {
+  return (
+    listBgrunProcesses().find((row) => String(row.name ?? "") === name) ?? null
+  );
+}
+
+export type WorkerRuntimeStatus = {
+  name: SolardWorkerName;
+  kind: WorkerSpec["kind"];
+  command: string;
+  managed: boolean;
+  bgrun: Record<string, unknown> | null;
+  status: string;
+  heartbeatAtMs: number;
+  ageMs: number;
+  stale: boolean;
+  error: string | null;
+  data: Record<string, unknown>;
+};
+
+export function listWorkerRuntimeStatus(
+  input: { telegram?: boolean } = {},
+): WorkerRuntimeStatus[] {
+  return processMeasure.measureSync(
+    {
+      start: () => "worker runtime status",
+      end: (rows) => ({
+        rows: rows.length,
+        stale: rows.filter((row) => row.stale).length,
+      }),
+    },
+    () => {
+      const now = Date.now();
+      const processRows = new Map(
+        listProcessStatus().map((row) => [row.name, row]),
+      );
+      const bgrunRows = new Map(
+        listBgrunProcesses().map((row) => [String(row.name ?? ""), row]),
+      );
+      return resolveWorkerNames({ telegram: input.telegram }).map((name) => {
+        const spec = WORKER_SPECS[name];
+        const row = processRows.get(name) as
+          | {
+              name: string;
+              kind: string;
+              status: string;
+              heartbeatAtMs: number;
+              error: string | null;
+              data?: Record<string, unknown>;
+            }
+          | undefined;
+        const heartbeatAtMs = Number(row?.heartbeatAtMs ?? 0);
+        const ageMs =
+          heartbeatAtMs > 0 ? now - heartbeatAtMs : Number.POSITIVE_INFINITY;
+        const bgrun = bgrunRows.get(name) ?? null;
+        return {
+          name,
+          kind: spec.kind,
+          command: spec.command,
+          managed: !!bgrun,
+          bgrun,
+          status: row?.status ?? (bgrun ? "starting" : "missing"),
+          heartbeatAtMs,
+          ageMs,
+          stale: !heartbeatAtMs || ageMs > spec.staleAfterMs,
+          error: row?.error ?? null,
+          data: row?.data ?? {},
+        };
+      });
     },
   );
 }
@@ -105,24 +212,20 @@ export async function ensureBgrunWorker(
       },
     },
     async () => {
-      const rows = listBgrunProcesses();
-      const exists = rows.some((row) => String(row.name ?? "") === name);
-      const args =
-        restart && exists
+      const exists = !!bgrunRowByName(name);
+      const shouldStart = restart || !exists;
+      if (shouldStart) {
+        const args = exists
           ? ["--restart", name]
-          : exists
-            ? []
-            : [
-                "--name",
-                name,
-                "--command",
-                spec.command,
-                "--directory",
-                ROOT,
-                "--force",
-              ];
-
-      if (args.length > 0) {
+          : [
+              "--name",
+              name,
+              "--command",
+              spec.command,
+              "--directory",
+              ROOT,
+              "--force",
+            ];
         const result = runBgrun(args);
         if (result.exitCode !== 0) {
           throw new Error(
@@ -130,14 +233,17 @@ export async function ensureBgrunWorker(
           );
         }
       }
-
       upsertProcessStatus({
         name,
         kind: spec.kind,
-        status: exists && !restart ? "already-running" : "started",
-        data: { command: spec.command, restart },
+        status:
+          exists && !restart
+            ? "already-running"
+            : restart
+              ? "restarted"
+              : "started",
+        data: { command: spec.command, restart, supervisor: "bgrun" },
       });
-
       return {
         name,
         kind: spec.kind,
@@ -150,22 +256,32 @@ export async function ensureBgrunWorker(
 }
 
 export async function ensureWorkerGroup(
-  args: { telegram?: boolean; restart?: boolean } = {},
+  args: { telegram?: boolean; restart?: boolean; restartStale?: boolean } = {},
 ): Promise<Record<string, unknown>> {
-  const workers: SolardWorkerName[] = [
-    "solard-pump-creates",
-    "solard-pump-trades",
-    "solard-reconciler",
-  ];
-  if (args.telegram || process.env.SOLARD_TELEGRAM_SIGNALS === "1") {
-    workers.push("solard-telegram-signals");
-  }
-  const results = [];
-  for (const name of workers) {
-    results.push(await ensureBgrunWorker(name, args.restart === true));
-    await Bun.sleep(350);
-  }
-  return { workers: results, processStatus: listProcessStatus() };
+  return await processMeasure.measure(
+    {
+      start: () => "ensure worker group",
+      end: (result) => ({ result: summarizeForMeasure(result) }),
+    },
+    async () => {
+      const before = listWorkerRuntimeStatus({ telegram: args.telegram });
+      const results = [];
+      for (const status of before) {
+        const restart =
+          args.restart === true ||
+          (args.restartStale === true && status.stale && status.managed);
+        results.push(await ensureBgrunWorker(status.name, restart));
+        await Bun.sleep(350);
+      }
+      const after = listWorkerRuntimeStatus({ telegram: args.telegram });
+      return {
+        ready: after.every((row) => row.managed && !row.error),
+        stale: after.filter((row) => row.stale).map((row) => row.name),
+        workers: results,
+        status: after,
+      };
+    },
+  );
 }
 
 export function stopBgrunWorker(
@@ -174,7 +290,7 @@ export function stopBgrunWorker(
   return processMeasure.measureSync(
     {
       start: () => `stop ${name}`,
-      end: (result) => ({ result }),
+      end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     () => {
       const result = runBgrun(["--stop", name]);
@@ -182,7 +298,7 @@ export function stopBgrunWorker(
         name,
         kind: WORKER_SPECS[name].kind,
         status: result.exitCode === 0 ? "stopped" : "stop-failed",
-        data: { stdout: result.stdout },
+        data: { stdout: result.stdout, supervisor: "bgrun" },
         error: result.exitCode === 0 ? null : result.stderr,
       });
       return {
@@ -193,4 +309,11 @@ export function stopBgrunWorker(
       };
     },
   );
+}
+
+export function stopWorkerGroup(
+  input: { telegram?: boolean } = {},
+): Record<string, unknown> {
+  const workers = resolveWorkerNames({ telegram: input.telegram });
+  return { workers: workers.map((name) => stopBgrunWorker(name)) };
 }

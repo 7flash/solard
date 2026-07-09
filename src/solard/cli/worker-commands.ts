@@ -6,12 +6,14 @@ import { followTradesAction } from "../actions/streams.js";
 import {
   ensureProcessesAction,
   listProcessesAction,
+  restartProcessesAction,
   stopProcessAction,
 } from "../actions/processes.js";
 import {
   listTelegramSignals,
   terminalStoreStats,
 } from "../db/terminal-store.js";
+import { formatProcessRow } from "../terminal/presenter.js";
 
 export type ParsedCli = {
   values: string[];
@@ -52,6 +54,24 @@ function emit(value: unknown): void {
   process.stdout.write(`${typeof value === "string" ? value : json(value)}\n`);
 }
 
+function workerArg(
+  extra: string | undefined,
+  flags: Map<string, string>,
+): string | null {
+  return extra ?? flags.get("worker") ?? flags.get("name") ?? null;
+}
+
+function printProcessTable(result: Record<string, unknown>): void {
+  const workers = Array.isArray(result.workers)
+    ? (result.workers as any[])
+    : [];
+  if (workers.length === 0) {
+    emit(result);
+    return;
+  }
+  for (const row of workers) emit(formatProcessRow(row));
+}
+
 export async function maybeRunWorkerCliCommand(
   parsed: ParsedCli,
 ): Promise<boolean> {
@@ -60,7 +80,10 @@ export async function maybeRunWorkerCliCommand(
   const asJson = bool(flags, "json", false);
 
   if (cmd === "terminal" && sub === "feed") {
-    if (bool(flags, "once", false) || asJson) {
+    if (
+      bool(flags, "once", false) ||
+      (asJson && !bool(flags, "follow", false))
+    ) {
       const snapshot = await terminalFeedSnapshotAction({
         limit: int(flags, "limit", 250),
         sinceMs: int(flags, "since-ms", 0),
@@ -79,6 +102,7 @@ export async function maybeRunWorkerCliCommand(
       once: false,
       json: asJson,
       telegram: bool(flags, "telegram", false),
+      restartStale: !bool(flags, "no-restart-stale", false),
     });
     return true;
   }
@@ -90,29 +114,80 @@ export async function maybeRunWorkerCliCommand(
       once: bool(flags, "once", false),
       json: asJson,
       mint: flags.get("mint") ?? null,
+      restart: bool(flags, "restart", false),
     });
     return true;
   }
 
   if (cmd === "workers" || cmd === "processes") {
-    if (sub === "stop") {
-      emit(stopProcessAction(extra ?? flags.get("worker") ?? ""));
+    if (sub === "list" || sub === "status" || !sub) {
+      const result = listProcessesAction({
+        telegram: bool(flags, "telegram", false),
+      });
+      if (asJson) emit(result);
+      else printProcessTable(result);
       return true;
     }
-    if (sub === "ensure" || sub === "start" || !sub) {
+    if (sub === "ensure" || sub === "start" || sub === "up") {
       const result = await ensureProcessesAction({
-        worker: extra ?? flags.get("worker") ?? null,
-        all: !extra && !flags.get("worker"),
+        worker: workerArg(extra, flags),
+        all: !workerArg(extra, flags),
         telegram: bool(flags, "telegram", false),
         restart: bool(flags, "restart", false),
+        restartStale: !bool(flags, "no-restart-stale", false),
       });
       emit(result);
       return true;
     }
-    if (sub === "list" || sub === "status") {
-      emit(listProcessesAction());
+    if (sub === "restart") {
+      const result = await restartProcessesAction({
+        worker: workerArg(extra, flags) ?? "all",
+        telegram: bool(flags, "telegram", false),
+      });
+      emit(result);
       return true;
     }
+    if (sub === "stop" || sub === "down") {
+      emit(
+        stopProcessAction(workerArg(extra, flags) ?? "all", {
+          telegram: bool(flags, "telegram", false),
+        }),
+      );
+      return true;
+    }
+  }
+
+  if (
+    cmd === "dev" &&
+    ["up", "start", "restart", "stop", "down", "status"].includes(sub ?? "")
+  ) {
+    if (sub === "stop" || sub === "down") {
+      emit(
+        stopProcessAction("all", { telegram: bool(flags, "telegram", true) }),
+      );
+      return true;
+    }
+    if (sub === "status") {
+      const result = listProcessesAction({
+        telegram: bool(flags, "telegram", true),
+      });
+      if (asJson) emit(result);
+      else printProcessTable(result);
+      return true;
+    }
+    const result =
+      sub === "restart"
+        ? await restartProcessesAction({
+            worker: "all",
+            telegram: bool(flags, "telegram", true),
+          })
+        : await ensureProcessesAction({
+            worker: "all",
+            telegram: bool(flags, "telegram", true),
+            restartStale: true,
+          });
+    emit(result);
+    return true;
   }
 
   if (cmd === "signals" && sub === "telegram") {

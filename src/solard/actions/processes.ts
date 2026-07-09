@@ -1,22 +1,31 @@
 import {
   ensureBgrunWorker,
   ensureWorkerGroup,
+  isSolardWorkerName,
   listBgrunProcesses,
+  listWorkerRuntimeStatus,
+  resolveWorkerNames,
   stopBgrunWorker,
+  stopWorkerGroup,
   type SolardWorkerName,
 } from "../processes/bgrun.js";
-import { listProcessStatus, terminalStoreStats } from "../db/terminal-store.js";
+import { terminalStoreStats } from "../db/terminal-store.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
 
-export function listProcessesAction(): Record<string, unknown> {
+export function listProcessesAction(
+  input: { telegram?: boolean } = {},
+): Record<string, unknown> {
   return processMeasure.measureSync(
     {
       start: () => "list processes",
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     () => ({
+      ready: listWorkerRuntimeStatus(input).every(
+        (row) => row.managed && !row.stale && !row.error,
+      ),
+      workers: listWorkerRuntimeStatus(input),
       bgrun: listBgrunProcesses(),
-      status: listProcessStatus(),
       store: terminalStoreStats(),
     }),
   );
@@ -28,6 +37,7 @@ export async function ensureProcessesAction(
     all?: boolean;
     telegram?: boolean;
     restart?: boolean;
+    restartStale?: boolean;
   } = {},
 ): Promise<Record<string, unknown>> {
   return await processMeasure.measure(
@@ -37,19 +47,70 @@ export async function ensureProcessesAction(
     },
     async () => {
       if (input.worker && input.worker !== "all") {
-        return await ensureBgrunWorker(
-          input.worker as SolardWorkerName,
-          input.restart === true,
-        );
+        if (!isSolardWorkerName(input.worker))
+          throw new Error(`Unknown worker: ${input.worker}`);
+        return await ensureBgrunWorker(input.worker, input.restart === true);
       }
       return await ensureWorkerGroup({
         telegram: input.telegram,
         restart: input.restart,
+        restartStale: input.restartStale,
       });
     },
   );
 }
 
-export function stopProcessAction(worker: string): Record<string, unknown> {
-  return stopBgrunWorker(worker as SolardWorkerName);
+export async function restartProcessesAction(
+  input: {
+    worker?: string | null;
+    telegram?: boolean;
+  } = {},
+): Promise<Record<string, unknown>> {
+  return await processMeasure.measure(
+    {
+      start: () => "restart processes",
+      end: (result) => ({ result: summarizeForMeasure(result) }),
+    },
+    async () => {
+      if (input.worker && input.worker !== "all") {
+        if (!isSolardWorkerName(input.worker))
+          throw new Error(`Unknown worker: ${input.worker}`);
+        return await ensureBgrunWorker(input.worker, true);
+      }
+      return await ensureWorkerGroup({
+        telegram: input.telegram,
+        restart: true,
+      });
+    },
+  );
+}
+
+export function stopProcessAction(
+  worker: string,
+  input: { telegram?: boolean } = {},
+): Record<string, unknown> {
+  return processMeasure.measureSync(
+    {
+      start: () => `stop process ${worker || "all"}`,
+      end: (result) => ({ result: summarizeForMeasure(result) }),
+    },
+    () => {
+      if (!worker || worker === "all")
+        return stopWorkerGroup({ telegram: input.telegram });
+      if (!isSolardWorkerName(worker))
+        throw new Error(`Unknown worker: ${worker}`);
+      return stopBgrunWorker(worker as SolardWorkerName);
+    },
+  );
+}
+
+export function resolveProcessesAction(
+  input: { worker?: string | null; telegram?: boolean } = {},
+): Record<string, unknown> {
+  return {
+    workers: resolveWorkerNames({
+      worker: input.worker,
+      telegram: input.telegram,
+    }),
+  };
 }
