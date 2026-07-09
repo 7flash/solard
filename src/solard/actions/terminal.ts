@@ -1,327 +1,117 @@
-import { setTimeout as delay } from "node:timers/promises";
+import { ensureWorkerGroup } from "../processes/bgrun.js";
 import {
-  getPumpFeedDbStats,
-  listObservedPumpHolders,
-  listPumpTerminalFeedRows,
-  type PumpTerminalFeedRow,
-} from "../feed/feed-repo.js";
-import { measureSolard, summarizeForMeasure } from "../api-response.js";
-import { ensurePumpStreamProcess } from "../processes/pump-stream-process.js";
-import { resolveSolUsdPrice } from "../market/sol-usd.js";
+  listTerminalFeed,
+  terminalStoreStats,
+  type TerminalFeedRow,
+} from "../db/terminal-store.js";
+import { cliMeasure, summarizeForMeasure } from "../measure.js";
 
-export type TerminalFeedInput = {
-  sinceMs?: number | string | null;
-  pinnedMints?: string[] | string | null;
-  limit?: number | string | null;
-};
-
-export type TerminalHolderInput = {
-  mint: string;
-  limit?: number | string | null;
-};
-
-export type TerminalFeedFollowInput = TerminalFeedInput & {
-  source?: "helius" | "pumpportal" | string | null;
-  resetSession?: boolean | string | null;
-  pollMs?: number | string | null;
-  signal?: AbortSignal | null;
-  onRows?: (rows: PumpTerminalFeedRow[]) => void | Promise<void>;
-  onStatus?: (status: unknown) => void | Promise<void>;
-};
-
-export type TerminalTradeFollowInput = TerminalFeedFollowInput & {
-  onTradeRows?: (rows: PumpTerminalFeedRow[]) => void | Promise<void>;
-};
-
-function numberInput(
-  value: number | string | null | undefined,
-  fallback: number,
-): number {
-  const parsed = Number(value ?? fallback);
-  return Number.isFinite(parsed) ? parsed : fallback;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function listInput(value: string[] | string | null | undefined): string[] {
-  if (Array.isArray(value))
-    return value.map((item) => item.trim()).filter(Boolean);
-  return String(value ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+function compactUsd(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: Math.abs(Number(value)) >= 1000 ? "compact" : "standard",
+    maximumFractionDigits: Math.abs(Number(value)) >= 1000 ? 1 : 2,
+  }).format(Number(value));
 }
 
-function feedSummary(rows: PumpTerminalFeedRow[]) {
-  return {
-    count: rows.length,
-    newestUpdatedAtMs: rows[0]?.updatedAtMs ?? null,
-    sample: rows.slice(0, 2).map((row) => ({
-      mint: row.mint,
-      symbol: row.symbol,
-      marketCapUsd: row.marketCapUsd ?? row.lastMarketCapUsd ?? null,
-      marketCapSol: row.marketCapSol ?? row.lastMarketCapSol ?? null,
-      sma1mUsd: row.sma1mUsd,
-      sma1m: row.sma1m,
-      sma5m: row.sma5m,
-      sma15m: row.sma15m,
-      updatedAtMs: row.updatedAtMs,
-    })),
-  };
+function short(value: string | null | undefined, left = 6, right = 4): string {
+  if (!value) return "—";
+  return value.length <= left + right + 1
+    ? value
+    : `${value.slice(0, left)}…${value.slice(-right)}`;
 }
 
-export async function listTerminalFeedAction(input: TerminalFeedInput = {}) {
-  const limit = Math.max(
-    1,
-    Math.min(500, Math.trunc(numberInput(input.limit, 250))),
+function renderRow(row: TerminalFeedRow): string {
+  const kind = row.kind === "signal" ? "[SIGNAL]" : "[PUMP]";
+  const symbol = row.symbol ? `$${row.symbol}` : "$?";
+  const mcap = compactUsd(row.marketCapUsd);
+  const sma1 = compactUsd(row.sma1m);
+  const sma5 = compactUsd(row.sma5m);
+  const sma15 = compactUsd(row.sma15m);
+  const ageSec = Math.max(
+    0,
+    Math.round(
+      (Date.now() - Number(row.updatedAtMs || row.createdAtMs || Date.now())) /
+        1000,
+    ),
   );
-  const sinceMs = numberInput(input.sinceMs, 0);
-  const pinnedMints = listInput(input.pinnedMints);
-  const solUsdPrice = await resolveSolUsdPrice().catch(() => null);
-  const measured = await measureSolard(
-    "solard:action:terminal:feed",
-    "listTerminalFeedAction",
-    () =>
-      listPumpTerminalFeedRows({ sinceMs, pinnedMints, limit, solUsdPrice }),
+  return `${kind}\t${symbol}\t${short(row.mint, 6, 6)}\tmcap=${mcap}\tsma1=${sma1}\tsma5=${sma5}\tsma15=${sma15}\ttrades=${row.tradeCount ?? 0}\tage=${ageSec}s`;
+}
+
+export async function terminalFeedSnapshotAction(
+  input: { limit?: number; sinceMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  return await cliMeasure.measure(
     {
-      result: feedSummary,
-      onError: summarizeForMeasure,
-      meta: { sinceMs, pinnedCount: pinnedMints.length, limit, solUsdPrice },
+      start: () => "terminal feed snapshot",
+      end: (result) => ({ result: summarizeForMeasure(result) }),
+    },
+    async () => {
+      const rows = listTerminalFeed({
+        limit: input.limit ?? 250,
+        sinceMs: input.sinceMs ?? 0,
+      });
+      return { rows, stats: terminalStoreStats() };
     },
   );
-  return measured.value;
-}
-
-export async function getTerminalFeedStatsAction() {
-  const measured = await measureSolard(
-    "solard:action:terminal:stats",
-    "getTerminalFeedStatsAction",
-    () => getPumpFeedDbStats(),
-    {
-      result: summarizeForMeasure,
-      onError: summarizeForMeasure,
-    },
-  );
-  return measured.value;
-}
-
-export async function listTerminalHoldersAction(input: TerminalHolderInput) {
-  const mint = input.mint?.trim();
-  if (!mint) throw new Error("mint is required");
-  const limit = Math.max(
-    1,
-    Math.min(50, Math.trunc(numberInput(input.limit, 12))),
-  );
-  const measured = await measureSolard(
-    `solard:action:terminal:holders:${mint.slice(0, 8)}`,
-    "listTerminalHoldersAction",
-    () => listObservedPumpHolders(mint, limit),
-    {
-      result: (rows) => ({
-        count: rows.length,
-        mint,
-        sample: rows.slice(0, 2),
-      }),
-      onError: summarizeForMeasure,
-      meta: { mint, limit },
-    },
-  );
-  return measured.value;
-}
-
-function boolInput(
-  value: boolean | string | null | undefined,
-  fallback: boolean,
-): boolean {
-  if (value == null || value === "") return fallback;
-  if (typeof value === "boolean") return value;
-  return (
-    value !== "0" &&
-    value.toLowerCase() !== "false" &&
-    value.toLowerCase() !== "no"
-  );
-}
-
-function rowKey(row: PumpTerminalFeedRow): string {
-  return [row.mint ?? "", row.signature ?? "", row.updatedAtMs ?? ""].join(":");
-}
-
-async function startTerminalWorker(
-  input: TerminalFeedFollowInput,
-): Promise<unknown> {
-  const source = input.source === "pumpportal" ? "pumpportal" : "helius";
-  const resetSession = boolInput(input.resetSession, true);
-  return await measureSolard(
-    "solard:action:terminal:feed",
-    "ensurePumpStreamChildProcess",
-    () => ensurePumpStreamProcess({ source, resetSession }),
-    {
-      result: summarizeForMeasure,
-      onError: summarizeForMeasure,
-      meta: { source, resetSession },
-    },
-  ).then((measured) => measured.value);
 }
 
 export async function followTerminalFeedAction(
-  input: TerminalFeedFollowInput = {},
-): Promise<void> {
-  const limit = Math.max(
-    1,
-    Math.min(500, Math.trunc(numberInput(input.limit, 250))),
-  );
-  const pollMs = Math.max(
-    250,
-    Math.min(30_000, Math.trunc(numberInput(input.pollMs, 1_500))),
-  );
-  const pinnedMints = listInput(input.pinnedMints);
-  const startedAtMs = numberInput(input.sinceMs, Date.now());
-  const seen = new Set<string>();
-  let sinceMs = startedAtMs;
-
-  const status = await startTerminalWorker(input);
-  await input.onStatus?.(status);
-
-  while (!input.signal?.aborted) {
-    try {
-      const solUsdPrice = await resolveSolUsdPrice().catch(() => null);
-      const rows = listPumpTerminalFeedRows({
-        sinceMs,
-        pinnedMints,
-        limit,
-        solUsdPrice,
-      });
-      const fresh = rows
-        .filter((row) => {
-          const updatedAtMs = Number(row.updatedAtMs ?? row.createdAtMs ?? 0);
-          if (!Number.isFinite(updatedAtMs) || updatedAtMs < sinceMs - 15_000)
-            return false;
-          const key = rowKey(row);
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        })
-        .sort(
-          (a, b) => Number(a.updatedAtMs ?? 0) - Number(b.updatedAtMs ?? 0),
-        );
-      if (fresh.length) {
-        const newest = Math.max(
-          ...fresh.map((row) =>
-            Number(row.updatedAtMs ?? row.createdAtMs ?? sinceMs),
-          ),
-        );
-        if (Number.isFinite(newest)) sinceMs = Math.max(sinceMs, newest);
-        await input.onRows?.(fresh);
+  input: {
+    pollMs?: number;
+    limit?: number;
+    once?: boolean;
+    json?: boolean;
+    ensureWorkers?: boolean;
+    telegram?: boolean;
+    emit?: (line: string) => void;
+  } = {},
+): Promise<Record<string, unknown>> {
+  const emit =
+    input.emit ?? ((line: string) => process.stdout.write(`${line}\n`));
+  return await cliMeasure.measure(
+    {
+      start: () => "terminal feed follow",
+      end: (result) => ({ result: summarizeForMeasure(result) }),
+    },
+    async () => {
+      if (input.ensureWorkers !== false) {
+        await ensureWorkerGroup({ telegram: input.telegram === true });
       }
-    } catch (error) {
-      await measureSolard(
-        "solard:action:terminal:feed",
-        "followTerminalFeedPollError",
-        () => {
-          throw error;
-        },
-        {
-          result: summarizeForMeasure,
-          onError: summarizeForMeasure,
-          meta: { sinceMs, pinnedCount: pinnedMints.length, limit },
-        },
-      ).catch(() => undefined);
-      await input.onStatus?.({
-        status: "poll-error",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    try {
-      await delay(pollMs, undefined, { signal: input.signal ?? undefined });
-    } catch {
-      break;
-    }
-  }
-}
-
-export async function followTerminalTradesAction(
-  input: TerminalTradeFollowInput = {},
-): Promise<void> {
-  const limit = Math.max(
-    1,
-    Math.min(500, Math.trunc(numberInput(input.limit, 250))),
-  );
-  const pollMs = Math.max(
-    250,
-    Math.min(30_000, Math.trunc(numberInput(input.pollMs, 1_000))),
-  );
-  const pinnedMints = listInput(input.pinnedMints);
-  let sinceMs = numberInput(input.sinceMs, Date.now());
-  const seen = new Set<string>();
-
-  const status = await startTerminalWorker(input);
-  await input.onStatus?.(status);
-
-  while (!input.signal?.aborted) {
-    try {
-      const solUsdPrice = await resolveSolUsdPrice().catch(() => null);
-      const rows = listPumpTerminalFeedRows({
-        sinceMs,
-        pinnedMints,
-        limit,
-        solUsdPrice,
-      });
-      const changed = rows
-        .filter((row) => {
-          const t = Math.max(
-            Number(row.updatedAtMs ?? 0),
-            Number(row.lastTradeAtMs ?? 0),
+      const pollMs = Math.max(
+        250,
+        input.pollMs ?? Number(process.env.SOLARD_TERMINAL_POLL_MS ?? "1000"),
+      );
+      let lastSeen = 0;
+      let printed = 0;
+      emit(
+        `🦉 terminal feed listening source=sqlite workers=background poll=${pollMs}ms`,
+      );
+      while (true) {
+        const rows = listTerminalFeed({
+          limit: input.limit ?? 250,
+          sinceMs: lastSeen,
+        });
+        for (const row of [...rows].reverse()) {
+          const mark = Math.max(
+            Number(row.updatedAtMs || 0),
+            Number(row.createdAtMs || 0),
           );
-          if (!Number.isFinite(t) || t < sinceMs - 5_000) return false;
-          const lastTrade = Array.isArray(row.trades) ? row.trades[0] : null;
-          const key = [
-            row.mint,
-            row.updatedAtMs,
-            row.lastTradeAtMs,
-            lastTrade?.signature ?? "",
-            lastTrade?.marketCapSol ?? "",
-          ].join(":");
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        })
-        .sort(
-          (a, b) =>
-            Math.max(Number(a.updatedAtMs ?? 0), Number(a.lastTradeAtMs ?? 0)) -
-            Math.max(Number(b.updatedAtMs ?? 0), Number(b.lastTradeAtMs ?? 0)),
-        );
-      if (changed.length) {
-        const newest = Math.max(
-          ...changed.map((row) =>
-            Math.max(
-              Number(row.updatedAtMs ?? 0),
-              Number(row.lastTradeAtMs ?? 0),
-            ),
-          ),
-        );
-        if (Number.isFinite(newest)) sinceMs = Math.max(sinceMs, newest);
-        await (input.onTradeRows ?? input.onRows)?.(changed);
+          if (mark <= lastSeen) continue;
+          lastSeen = Math.max(lastSeen, mark);
+          printed++;
+          emit(input.json ? JSON.stringify(row) : renderRow(row));
+        }
+        if (input.once) break;
+        await sleep(pollMs);
       }
-    } catch (error) {
-      await measureSolard(
-        "solard:action:stream:trades",
-        "followTerminalTradesPollError",
-        () => {
-          throw error;
-        },
-        {
-          result: summarizeForMeasure,
-          onError: summarizeForMeasure,
-          meta: { sinceMs, pinnedCount: pinnedMints.length, limit },
-        },
-      ).catch(() => undefined);
-      await input.onStatus?.({
-        status: "poll-error",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    try {
-      await delay(pollMs, undefined, { signal: input.signal ?? undefined });
-    } catch {
-      break;
-    }
-  }
+      return { printed, lastSeen, stats: terminalStoreStats() };
+    },
+  );
 }

@@ -1,16 +1,30 @@
+import { createMeasure } from "measure-fn";
+
+const ui = createMeasure("sowl:ui");
+
 function render(value: unknown): string {
-  return typeof value === "string" ? value : String(value);
+  if (typeof value === "string") return value.replace(/\n$/, "");
+  return JSON.stringify(
+    value,
+    (_, item) => (typeof item === "bigint" ? item.toString() : item),
+    2,
+  );
 }
 
 /**
- * User-facing CLI output goes directly to stdout.
- * Do not wrap stdout/stderr in measure-fn: long-running streams need clean,
- * pipeable output and measure-fn is for scoped instrumentation, not UI text.
+ * User-facing CLI output must be real stdout. measure-fn is for operation
+ * scopes, not for every printed terminal row. Set SOLARD_MEASURE_UI=1 only
+ * when debugging the UI/output channel itself.
  */
 export function emit(value: unknown): void {
-  const text = render(value);
-  if (typeof Bun !== "undefined" && Bun.stdout) Bun.stdout.write(text);
-  else process.stdout.write(text);
+  const rendered = render(value);
+  if (process.env.SOLARD_MEASURE_UI === "1") {
+    ui.measureSync(
+      { start: () => "output", end: (result) => result },
+      () => rendered,
+    );
+  }
+  process.stdout.write(`${rendered}\n`);
 }
 
 export function emitError(error: unknown): void {
@@ -18,7 +32,8 @@ export function emitError(error: unknown): void {
     error instanceof Error
       ? (error.stack ?? `${error.name}: ${error.message}`)
       : String(error);
-  const text = rendered.endsWith("\n") ? rendered : `${rendered}\n`;
-  if (typeof Bun !== "undefined" && Bun.stderr) Bun.stderr.write(text);
-  else process.stderr.write(text);
+  if (process.env.SOLARD_MEASURE_UI === "1") {
+    ui.measureSync("error", () => rendered);
+  }
+  process.stderr.write(`${rendered}\n`);
 }
