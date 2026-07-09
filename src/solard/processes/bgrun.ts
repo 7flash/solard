@@ -284,11 +284,18 @@ export function listWorkerRuntimeStatus(
             ? String((data as any).buildId)
             : null;
         const buildMismatch = !!heartbeatAtMs && actualBuildId !== spec.buildId;
+        const supervisor =
+          typeof (data as any).supervisor === "string"
+            ? String((data as any).supervisor)
+            : null;
+        const stopped = String(row?.status ?? "").includes("stopped");
+        const serverManaged =
+          supervisor === "server" && !stopped && !!heartbeatAtMs;
         return {
           name,
           kind: spec.kind,
           command: spec.command,
-          managed: !!bgrun,
+          managed: !!bgrun || serverManaged,
           bgrun,
           status: row?.status ?? (bgrun ? "starting" : "missing"),
           heartbeatAtMs,

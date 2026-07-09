@@ -1,9 +1,9 @@
 import { serve } from "tradjs";
+import { normalizeStreamSource } from "./src/solard/processes/bgrun.js";
 import {
-  ensureWorkerGroup,
-  normalizeStreamSource,
-  stopWorkerGroup,
-} from "./src/solard/processes/bgrun.js";
+  startServerWorkerSupervisor,
+  type ServerWorkerSupervisor,
+} from "./src/solard/processes/server-supervisor.js";
 
 const ownsWorkers =
   process.env.SOLARD_SERVER_WORKERS !== "0" &&
@@ -17,6 +17,7 @@ const telegram = process.env.SOLARD_TELEGRAM_SIGNALS === "1";
 let stopping = false;
 let exitCode = 0;
 let serverHandle: unknown;
+let workerSupervisor: ServerWorkerSupervisor | null = null;
 
 function summarizeError(error: unknown): string {
   return error instanceof Error
@@ -24,13 +25,21 @@ function summarizeError(error: unknown): string {
     : String(error);
 }
 
-async function startWorkers(): Promise<void> {
+function startWorkers(): void {
   if (!ownsWorkers) return;
   try {
-    await ensureWorkerGroup({ source, telegram, restartStale: true });
+    workerSupervisor = startServerWorkerSupervisor({
+      source,
+      telegram,
+      restartOnExit: true,
+      stopDetachedBgrun: true,
+    });
+    console.error(
+      `[solard:server] worker supervisor started (${workerSupervisor.names.join(", ")})`,
+    );
   } catch (error) {
     console.error(
-      "[solard:server] worker startup failed",
+      "[solard:server] worker supervisor failed",
       summarizeError(error),
     );
   }
@@ -41,7 +50,7 @@ async function stopWorkers(reason: string): Promise<void> {
   stopping = true;
   try {
     console.error(`[solard:server] stopping workers (${reason})`);
-    await stopWorkerGroup({ source: "both", telegram: true });
+    await workerSupervisor?.stop(reason);
   } catch (error) {
     console.error(
       "[solard:server] worker shutdown failed",
@@ -74,23 +83,14 @@ function waitForShutdown(): Promise<string> {
   });
 }
 
-// Do not await worker startup before the web server comes up. bgrun status calls
-// can take seconds on Windows, and the UI should load while streams warm up.
-const workerStartup = startWorkers();
-
 try {
+  startWorkers();
   serverHandle = await serve();
   await waitForShutdown();
 } catch (error) {
   exitCode = 1;
   console.error("[solard:server] fatal", summarizeError(error));
 } finally {
-  await workerStartup.catch((error) => {
-    console.error(
-      "[solard:server] worker startup failed",
-      summarizeError(error),
-    );
-  });
   stopServerHandle();
   await stopWorkers(exitCode === 0 ? "shutdown" : "error");
   process.exit(exitCode);

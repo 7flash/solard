@@ -256,12 +256,20 @@ export function upsertProcessStatus(input: {
   error?: unknown;
   heartbeatAtMs?: number;
 }): void {
+  const existing = terminalDb.raw<Pick<ProcessStatus, "dataJson">>(
+    "SELECT dataJson FROM processStatus WHERE name = ? LIMIT 1",
+    input.name,
+  )[0];
+  const mergedData = {
+    ...parseJson(existing?.dataJson ?? "{}", {}),
+    ...(input.data ?? {}),
+  };
   const row: ProcessStatus = {
     name: input.name,
     kind: input.kind,
     status: input.status,
     heartbeatAtMs: input.heartbeatAtMs ?? Date.now(),
-    dataJson: json(input.data ?? {}),
+    dataJson: json(mergedData),
     error:
       input.error == null
         ? null
