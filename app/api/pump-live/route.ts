@@ -32,10 +32,18 @@ export function GET(request: Request): Promise<Response> {
     fn: async () => {
       assertWebAuth(request);
       const url = new URL(request.url);
+      const source = (() => {
+        const text = String(url.searchParams.get("source") ?? "").toLowerCase();
+        if (text.includes("helius")) return "helius";
+        if (text.includes("both")) return "both";
+        if (text.includes("pump")) return "pumpportal";
+        return undefined;
+      })();
       if (url.searchParams.get("ensure") === "1") {
         await ensureProcessesAction({
           all: true,
           telegram: url.searchParams.get("telegram") === "1",
+          source,
           restartStale: true,
         });
       }
@@ -47,7 +55,9 @@ export function GET(request: Request): Promise<Response> {
             process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ??
             "300000",
         ),
-        includeUnpriced: url.searchParams.get("includeUnpriced") === "1",
+        includeUnpriced:
+          url.searchParams.get("includeUnpriced") === "1" ||
+          source === "helius",
       });
       return {
         newTokens: terminalFeedRowsToPumpRows(rawTokens),
@@ -56,6 +66,7 @@ export function GET(request: Request): Promise<Response> {
         watchedMints: [],
         db: terminalStoreStats(),
         health: terminalHealthAction({ errors: 8 }),
+        source,
       };
     },
   });
@@ -75,6 +86,13 @@ export async function POST(request: Request): Promise<Response> {
     fn: async () => {
       assertWebAuth(request);
       const action = String(body.action ?? "ensure-workers");
+      const source = (() => {
+        const text = String((body as any).source ?? "").toLowerCase();
+        if (text.includes("helius")) return "helius";
+        if (text.includes("both")) return "both";
+        if (text.includes("pump")) return "pumpportal";
+        return undefined;
+      })();
       if (action === "stop") {
         return {
           status: "ignored",
@@ -86,6 +104,7 @@ export async function POST(request: Request): Promise<Response> {
         worker: typeof body.worker === "string" ? body.worker : null,
         all: true,
         telegram: body.telegram === true,
+        source,
         restart: body.restart === true,
         restartStale: body.restartStale !== false,
       });

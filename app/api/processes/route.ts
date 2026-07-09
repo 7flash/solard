@@ -7,9 +7,14 @@ import {
 } from "../../../src/solard/actions/processes.js";
 import { withMeasuredApi } from "../../../src/solard/api-response.js";
 
-function param(url: URL, name: string): string | null {
-  const value = url.searchParams.get(name);
-  return value && value.trim() ? value.trim() : null;
+function sourceFrom(
+  value: unknown,
+): "helius" | "pumpportal" | "both" | undefined {
+  const text = typeof value === "string" ? value.toLowerCase() : "";
+  if (text.includes("helius")) return "helius";
+  if (text.includes("both")) return "both";
+  if (text.includes("pump")) return "pumpportal";
+  return undefined;
 }
 
 export function GET(request: Request): Promise<Response> {
@@ -17,14 +22,22 @@ export function GET(request: Request): Promise<Response> {
     request,
     route: "/api/processes",
     method: "GET",
-    label: "list processes",
+    label: "list",
     summarize: (value: any) => ({
       ready: value?.ready,
-      workers: value?.workers?.length ?? 0,
+      workers: value?.workers?.length,
+      source: value?.source,
     }),
-    fn: () => {
+    fn: async () => {
       const url = new URL(request.url);
-      return listProcessesAction({ telegram: param(url, "telegram") !== "0" });
+      const source = sourceFrom(url.searchParams.get("source"));
+      return {
+        source,
+        ...listProcessesAction({
+          telegram: url.searchParams.get("telegram") !== "0",
+          source,
+        }),
+      };
     },
   });
 }
@@ -47,16 +60,19 @@ export async function POST(request: Request): Promise<Response> {
       const action = String(body.action ?? "ensure");
       const worker = typeof body.worker === "string" ? body.worker : null;
       const telegram = body.telegram !== false;
+      const source = sourceFrom(body.source);
       if (action === "stop")
-        return stopProcessAction(worker ?? "all", { telegram });
+        return stopProcessAction(worker ?? "all", { telegram, source });
       if (action === "restart")
         return await restartProcessesAction({
           worker: worker ?? "all",
           telegram,
+          source,
         });
       return await ensureProcessesAction({
         worker: worker ?? "all",
         telegram,
+        source,
         restart: body.restart === true,
         restartStale: body.restartStale !== false,
       });

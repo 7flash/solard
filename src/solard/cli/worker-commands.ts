@@ -61,6 +61,18 @@ function workerArg(
   return extra ?? flags.get("worker") ?? flags.get("name") ?? null;
 }
 
+function sourceArg(
+  flags: Map<string, string>,
+): "helius" | "pumpportal" | "both" | undefined {
+  const text = String(
+    flags.get("source") ?? flags.get("provider") ?? "",
+  ).toLowerCase();
+  if (text.includes("helius")) return "helius";
+  if (text.includes("both")) return "both";
+  if (text.includes("pump")) return "pumpportal";
+  return undefined;
+}
+
 function printProcessTable(result: Record<string, unknown>): void {
   const workers = Array.isArray(result.workers)
     ? (result.workers as any[])
@@ -87,6 +99,7 @@ export async function maybeRunWorkerCliCommand(
       const snapshot = await terminalFeedSnapshotAction({
         limit: int(flags, "limit", 250),
         sinceMs: int(flags, "since-ms", 0),
+        source: sourceArg(flags),
       });
       if (asJson) emit(snapshot);
       else
@@ -103,6 +116,7 @@ export async function maybeRunWorkerCliCommand(
       json: asJson,
       telegram: bool(flags, "telegram", false),
       restartStale: !bool(flags, "no-restart-stale", false),
+      source: sourceArg(flags),
     });
     return true;
   }
@@ -115,6 +129,7 @@ export async function maybeRunWorkerCliCommand(
       json: asJson,
       mint: flags.get("mint") ?? null,
       restart: bool(flags, "restart", false),
+      source: sourceArg(flags),
     });
     return true;
   }
@@ -123,6 +138,7 @@ export async function maybeRunWorkerCliCommand(
     if (sub === "list" || sub === "status" || !sub) {
       const result = listProcessesAction({
         telegram: bool(flags, "telegram", false),
+        source: sourceArg(flags),
       });
       if (asJson) emit(result);
       else printProcessTable(result);
@@ -133,6 +149,7 @@ export async function maybeRunWorkerCliCommand(
         worker: workerArg(extra, flags),
         all: !workerArg(extra, flags),
         telegram: bool(flags, "telegram", false),
+        source: sourceArg(flags),
         restart: bool(flags, "restart", false),
         restartStale: !bool(flags, "no-restart-stale", false),
       });
@@ -143,6 +160,7 @@ export async function maybeRunWorkerCliCommand(
       const result = await restartProcessesAction({
         worker: workerArg(extra, flags) ?? "all",
         telegram: bool(flags, "telegram", false),
+        source: sourceArg(flags),
       });
       emit(result);
       return true;
@@ -151,6 +169,7 @@ export async function maybeRunWorkerCliCommand(
       emit(
         stopProcessAction(workerArg(extra, flags) ?? "all", {
           telegram: bool(flags, "telegram", false),
+          source: sourceArg(flags),
         }),
       );
       return true;
@@ -163,13 +182,17 @@ export async function maybeRunWorkerCliCommand(
   ) {
     if (sub === "stop" || sub === "down") {
       emit(
-        stopProcessAction("all", { telegram: bool(flags, "telegram", true) }),
+        stopProcessAction("all", {
+          telegram: bool(flags, "telegram", true),
+          source: sourceArg(flags),
+        }),
       );
       return true;
     }
     if (sub === "status") {
       const result = listProcessesAction({
         telegram: bool(flags, "telegram", true),
+        source: sourceArg(flags),
       });
       if (asJson) emit(result);
       else printProcessTable(result);
@@ -180,10 +203,12 @@ export async function maybeRunWorkerCliCommand(
         ? await restartProcessesAction({
             worker: "all",
             telegram: bool(flags, "telegram", true),
+            source: sourceArg(flags),
           })
         : await ensureProcessesAction({
             worker: "all",
             telegram: bool(flags, "telegram", true),
+            source: sourceArg(flags),
             restartStale: true,
           });
     emit(result);

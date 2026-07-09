@@ -13,7 +13,7 @@ import { terminalStoreStats } from "../db/terminal-store.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
 
 export function listProcessesAction(
-  input: { telegram?: boolean } = {},
+  input: { telegram?: boolean; source?: string | null } = {},
 ): Record<string, unknown> {
   return processMeasure.measureSync(
     {
@@ -36,6 +36,7 @@ export async function ensureProcessesAction(
     worker?: string | null;
     all?: boolean;
     telegram?: boolean;
+    source?: string | null;
     restart?: boolean;
     restartStale?: boolean;
   } = {},
@@ -53,6 +54,7 @@ export async function ensureProcessesAction(
       }
       return await ensureWorkerGroup({
         telegram: input.telegram,
+        source: input.source,
         restart: input.restart,
         restartStale: input.restartStale,
       });
@@ -64,6 +66,7 @@ export async function restartProcessesAction(
   input: {
     worker?: string | null;
     telegram?: boolean;
+    source?: string | null;
   } = {},
 ): Promise<Record<string, unknown>> {
   return await processMeasure.measure(
@@ -79,6 +82,7 @@ export async function restartProcessesAction(
       }
       return await ensureWorkerGroup({
         telegram: input.telegram,
+        source: input.source,
         restart: true,
       });
     },
@@ -87,7 +91,7 @@ export async function restartProcessesAction(
 
 export function stopProcessAction(
   worker: string,
-  input: { telegram?: boolean } = {},
+  input: { telegram?: boolean; source?: string | null } = {},
 ): Record<string, unknown> {
   return processMeasure.measureSync(
     {
@@ -96,7 +100,10 @@ export function stopProcessAction(
     },
     () => {
       if (!worker || worker === "all")
-        return stopWorkerGroup({ telegram: input.telegram });
+        return stopWorkerGroup({
+          telegram: input.telegram,
+          source: input.source,
+        });
       if (!isSolardWorkerName(worker))
         throw new Error(`Unknown worker: ${worker}`);
       return stopBgrunWorker(worker as SolardWorkerName);
@@ -105,12 +112,17 @@ export function stopProcessAction(
 }
 
 export function resolveProcessesAction(
-  input: { worker?: string | null; telegram?: boolean } = {},
+  input: {
+    worker?: string | null;
+    telegram?: boolean;
+    source?: string | null;
+  } = {},
 ): Record<string, unknown> {
   return {
     workers: resolveWorkerNames({
       worker: input.worker,
       telegram: input.telegram,
+      source: input.source,
     }),
   };
 }

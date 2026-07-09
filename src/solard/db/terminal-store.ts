@@ -575,6 +575,8 @@ export function listTerminalFeed(
          WHERE updatedAtMs >= ?
            AND (
              source LIKE 'telegram%'
+             OR source LIKE 'helius%'
+             OR source LIKE 'pumpportal%'
              OR marketCapUsd IS NOT NULL
              OR priceUsd IS NOT NULL
              OR image IS NOT NULL
@@ -786,6 +788,9 @@ export function terminalStoreStats(): Record<string, unknown> {
         terminalDb.raw<{ latest: number }>(
           "SELECT MAX(updatedAtMs) as latest FROM terminalTokensLive",
         )[0]?.latest ?? null,
+      bySource: terminalDb.raw<{ source: string; count: number }>(
+        "SELECT source, COUNT(*) as count FROM terminalTokensLive GROUP BY source ORDER BY count DESC LIMIT 10",
+      ),
     }),
   );
 }

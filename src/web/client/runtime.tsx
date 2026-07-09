@@ -1069,7 +1069,11 @@ export async function refreshPumpLive(): Promise<void> {
   const live = await api<{
     newTokens: PumpFeedRow[];
     watchGroups: TokenWatchGroup[];
-  }>(terminal ? "/api/pump-live?limit=1&activeWindowMs=1" : "/api/pump-live");
+  }>(
+    terminal
+      ? `/api/pump-live?limit=1&activeWindowMs=1&source=${encodeURIComponent(state.pumpFeedSource)}`
+      : `/api/pump-live?source=${encodeURIComponent(state.pumpFeedSource)}`,
+  );
   state.watchGroups = live.watchGroups ?? state.watchGroups;
   if (!state.selectedWatchGroupId && state.watchGroups[0])
     state.selectedWatchGroupId = state.watchGroups[0].id;
@@ -1547,6 +1551,7 @@ export async function startPumpFeed(
         all: true,
         telegram: true,
         restartStale: true,
+        source: state.pumpFeedSource,
       }),
     });
     measureEvent("terminal workers ensure", ensure);

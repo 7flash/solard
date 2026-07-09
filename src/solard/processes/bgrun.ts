@@ -5,6 +5,7 @@ import {
 import { processMeasure, summarizeForMeasure } from "../measure.js";
 
 export type SolardWorkerName =
+  | "solard-helius-live"
   | "solard-pumpportal"
   | "solard-pump-creates"
   | "solard-pump-trades"
@@ -22,6 +23,12 @@ export type WorkerSpec = {
 const ROOT = process.cwd();
 
 export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
+  "solard-helius-live": {
+    name: "solard-helius-live",
+    kind: "stream",
+    command: "bun run ./src/solard/workers/helius-live-worker.ts",
+    staleAfterMs: Number(process.env.SOLARD_HELIUS_STALE_MS ?? "15000"),
+  },
   "solard-pumpportal": {
     name: "solard-pumpportal",
     kind: "stream",
@@ -56,12 +63,33 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
   },
 };
 
-export const CORE_WORKERS: SolardWorkerName[] = [
-  "solard-pumpportal",
-  "solard-pump-creates",
-  "solard-pump-trades",
-  "solard-reconciler",
-];
+export type SolardStreamSource = "pumpportal" | "helius" | "both";
+
+export function normalizeStreamSource(
+  value?: string | null,
+): SolardStreamSource {
+  const source = String(
+    value || process.env.SOLARD_STREAM_SOURCE || "pumpportal",
+  ).toLowerCase();
+  if (source.includes("helius")) return "helius";
+  if (source.includes("both")) return "both";
+  return "pumpportal";
+}
+
+export function coreWorkersForSource(
+  sourceInput?: string | null,
+): SolardWorkerName[] {
+  const source = normalizeStreamSource(sourceInput);
+  const streamWorkers: SolardWorkerName[] =
+    source === "helius"
+      ? ["solard-helius-live"]
+      : source === "both"
+        ? ["solard-pumpportal", "solard-helius-live"]
+        : ["solard-pumpportal"];
+  return [...streamWorkers, "solard-reconciler"];
+}
+
+export const CORE_WORKERS: SolardWorkerName[] = coreWorkersForSource();
 
 export function isSolardWorkerName(
   value: string | null | undefined,
@@ -73,6 +101,7 @@ export function resolveWorkerNames(input?: {
   worker?: string | null;
   all?: boolean;
   telegram?: boolean;
+  source?: string | null;
 }): SolardWorkerName[] {
   if (input?.worker && input.worker !== "all") {
     if (!isSolardWorkerName(input.worker)) {
@@ -80,7 +109,7 @@ export function resolveWorkerNames(input?: {
     }
     return [input.worker];
   }
-  const names = [...CORE_WORKERS];
+  const names = coreWorkersForSource(input?.source);
   if (input?.telegram || process.env.SOLARD_TELEGRAM_SIGNALS === "1") {
     names.push("solard-telegram-signals");
   }
@@ -147,7 +176,7 @@ export type WorkerRuntimeStatus = {
 };
 
 export function listWorkerRuntimeStatus(
-  input: { telegram?: boolean } = {},
+  input: { telegram?: boolean; source?: string | null } = {},
 ): WorkerRuntimeStatus[] {
   return processMeasure.measureSync(
     {
@@ -165,7 +194,10 @@ export function listWorkerRuntimeStatus(
       const bgrunRows = new Map(
         listBgrunProcesses().map((row) => [String(row.name ?? ""), row]),
       );
-      return resolveWorkerNames({ telegram: input.telegram }).map((name) => {
+      return resolveWorkerNames({
+        telegram: input.telegram,
+        source: input.source,
+      }).map((name) => {
         const spec = WORKER_SPECS[name];
         const row = processRows.get(name) as
           | {
@@ -264,7 +296,12 @@ export async function ensureBgrunWorker(
 }
 
 export async function ensureWorkerGroup(
-  args: { telegram?: boolean; restart?: boolean; restartStale?: boolean } = {},
+  args: {
+    telegram?: boolean;
+    restart?: boolean;
+    restartStale?: boolean;
+    source?: string | null;
+  } = {},
 ): Promise<Record<string, unknown>> {
   return await processMeasure.measure(
     {
@@ -272,7 +309,10 @@ export async function ensureWorkerGroup(
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     async () => {
-      const before = listWorkerRuntimeStatus({ telegram: args.telegram });
+      const before = listWorkerRuntimeStatus({
+        telegram: args.telegram,
+        source: args.source,
+      });
       const results = [];
       for (const status of before) {
         const restart =
@@ -281,7 +321,10 @@ export async function ensureWorkerGroup(
         results.push(await ensureBgrunWorker(status.name, restart));
         await Bun.sleep(350);
       }
-      const after = listWorkerRuntimeStatus({ telegram: args.telegram });
+      const after = listWorkerRuntimeStatus({
+        telegram: args.telegram,
+        source: args.source,
+      });
       return {
         ready: after.every((row) => row.managed && !row.error),
         stale: after.filter((row) => row.stale).map((row) => row.name),
@@ -320,8 +363,11 @@ export function stopBgrunWorker(
 }
 
 export function stopWorkerGroup(
-  input: { telegram?: boolean } = {},
+  input: { telegram?: boolean; source?: string | null } = {},
 ): Record<string, unknown> {
-  const workers = resolveWorkerNames({ telegram: input.telegram });
+  const workers = resolveWorkerNames({
+    telegram: input.telegram,
+    source: input.source,
+  });
   return { workers: workers.map((name) => stopBgrunWorker(name)) };
 }

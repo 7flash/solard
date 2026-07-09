@@ -121,6 +121,7 @@ function WorkerDiagnostics() {
                   action: "restart",
                   worker: "all",
                   telegram: true,
+                  source: state.pumpFeedSource,
                 }),
               });
               await startPumpFeed({ hardRestart: true, clearRows: true });

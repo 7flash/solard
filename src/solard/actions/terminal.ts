@@ -11,7 +11,11 @@ function sleep(ms: number): Promise<void> {
 }
 
 export async function terminalFeedSnapshotAction(
-  input: { limit?: number; sinceMs?: number } = {},
+  input: {
+    limit?: number;
+    sinceMs?: number;
+    source?: string | null;
+  } = {},
 ): Promise<Record<string, unknown>> {
   return await cliMeasure.measure(
     {
@@ -22,8 +26,13 @@ export async function terminalFeedSnapshotAction(
       const rows = listTerminalFeed({
         limit: input.limit ?? 250,
         sinceMs: input.sinceMs ?? 0,
+        includeUnpriced: String(input.source ?? "").includes("helius"),
       });
-      return { rows, stats: terminalStoreStats() };
+      return {
+        source: input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "default",
+        rows,
+        stats: terminalStoreStats(),
+      };
     },
   );
 }
@@ -37,6 +46,7 @@ export async function followTerminalFeedAction(
     ensureWorkers?: boolean;
     telegram?: boolean;
     restartStale?: boolean;
+    source?: string | null;
     emit?: (line: string) => void;
   } = {},
 ): Promise<Record<string, unknown>> {
@@ -52,6 +62,7 @@ export async function followTerminalFeedAction(
       if (input.ensureWorkers !== false) {
         ensureResult = await ensureWorkerGroup({
           telegram: input.telegram === true,
+          source: input.source,
           restartStale: input.restartStale !== false,
         });
       }
@@ -65,13 +76,14 @@ export async function followTerminalFeedAction(
         ? (ensureResult.status as any[])
         : undefined;
       emit(
-        `🦉 terminal feed listening source=sqlite ${formatProcessSummary(status)} poll=${pollMs}ms`,
+        `🦉 terminal feed listening source=${input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "default"} store=sqlite ${formatProcessSummary(status)} poll=${pollMs}ms`,
       );
       while (true) {
         const now = Date.now();
         const rows = listTerminalFeed({
           limit: input.limit ?? 250,
           sinceMs: lastSeen,
+          includeUnpriced: String(input.source ?? "").includes("helius"),
         });
         for (const row of [...rows].reverse()) {
           const mark = Math.max(
@@ -88,7 +100,12 @@ export async function followTerminalFeedAction(
         if (input.once) break;
         await sleep(pollMs);
       }
-      return { printed, lastSeen, stats: terminalStoreStats() };
+      return {
+        printed,
+        lastSeen,
+        source: input.source ?? null,
+        stats: terminalStoreStats(),
+      };
     },
   );
 }

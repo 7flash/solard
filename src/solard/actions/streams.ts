@@ -7,6 +7,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function streamWorkerForSource(
+  source?: string | null,
+): "solard-helius-live" | "solard-pump-trades" {
+  return String(source ?? process.env.SOLARD_STREAM_SOURCE ?? "")
+    .toLowerCase()
+    .includes("helius")
+    ? "solard-helius-live"
+    : "solard-pump-trades";
+}
+
 export async function followTradesAction(
   input: {
     pollMs?: number;
@@ -16,6 +26,7 @@ export async function followTradesAction(
     mint?: string | null;
     ensureWorker?: boolean;
     restart?: boolean;
+    source?: string | null;
     emit?: (line: string) => void;
   } = {},
 ): Promise<Record<string, unknown>> {
@@ -27,8 +38,9 @@ export async function followTradesAction(
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     async () => {
+      const worker = streamWorkerForSource(input.source);
       if (input.ensureWorker !== false)
-        await ensureBgrunWorker("solard-pump-trades", input.restart === true);
+        await ensureBgrunWorker(worker, input.restart === true);
       const pollMs = Math.max(
         250,
         input.pollMs ??
@@ -37,7 +49,7 @@ export async function followTradesAction(
       let lastSeen = 0;
       let printed = 0;
       emit(
-        `🦉 trade stream watching source=sqlite worker=solard-pump-trades poll=${pollMs}ms`,
+        `🦉 trade stream watching source=${input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "default"} store=sqlite worker=${worker} poll=${pollMs}ms`,
       );
       while (true) {
         const rows = listTerminalTrades({
@@ -55,7 +67,7 @@ export async function followTradesAction(
         if (input.once) break;
         await sleep(pollMs);
       }
-      return { printed, lastSeen };
+      return { printed, lastSeen, source: input.source ?? null, worker };
     },
   );
 }
