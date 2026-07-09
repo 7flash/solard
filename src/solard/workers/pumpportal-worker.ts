@@ -23,6 +23,7 @@ import {
 } from "../pump/pumpportal-normalize.js";
 
 const NAME = "solard-pumpportal-live-v2";
+const BUILD_ID = "pumpportal-live-v3-source-filter-probe";
 const KIND = "pumpportal-event";
 const PUMPPORTAL_API_KEY =
   process.env.SOLARD_PUMPPORTAL_API_KEY?.trim() ||
@@ -221,6 +222,7 @@ async function runOnce(): Promise<void> {
         status: ws?.readyState === WebSocket.OPEN ? "ok" : "connecting",
         data: {
           wsUrl: redactUrl(WS_URL),
+          buildId: BUILD_ID,
           creates,
           trades,
           skipped,
@@ -253,6 +255,7 @@ async function runOnce(): Promise<void> {
         status: "ok",
         data: {
           phase: "connected",
+          buildId: BUILD_ID,
           wsUrl: redactUrl(WS_URL),
           hasApiKey: !!PUMPPORTAL_API_KEY,
           tradeSubscription: PUMPPORTAL_API_KEY
@@ -297,6 +300,7 @@ async function runOnce(): Promise<void> {
             status: "ok",
             data: {
               phase: "message",
+              buildId: BUILD_ID,
               creates,
               trades,
               skipped,

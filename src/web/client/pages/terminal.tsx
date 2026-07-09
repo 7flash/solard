@@ -27,6 +27,7 @@ import {
   refreshTokenHolders,
   isLikelySolanaPublicKey,
   api,
+  runTerminalProbe,
 } from "../runtime";
 import type { AnyRow, PumpFeedRow, TokenHolder } from "../runtime";
 
@@ -72,11 +73,12 @@ function healthSummary() {
     ? (health!.errors as AnyRow[])
     : [];
   const stale = processes.filter((row) => row.stale).length;
-  return { health, store, processes, errors, stale };
+  const probe = state.terminalProbe as AnyRow | null;
+  return { health, store, processes, errors, stale, probe };
 }
 
 function WorkerDiagnostics() {
-  const { health, store, processes, errors, stale } = healthSummary();
+  const { health, store, processes, errors, stale, probe } = healthSummary();
   const ok = health?.ok === true && stale === 0;
   return (
     <section className={`terminal-diagnostics ${ok ? "ok" : "warn"}`}>
@@ -101,13 +103,24 @@ function WorkerDiagnostics() {
             title={proc.error ?? JSON.stringify(proc.data ?? {})}
           >
             {String(proc.name ?? "worker").replace(/^solard-/, "")}:
-            {proc.stale ? "stale" : proc.status}
+            {proc.buildMismatch
+              ? "build-mismatch"
+              : proc.stale
+                ? "stale"
+                : proc.status}
           </span>
         ))}
         {!processes.length ? (
           <span className="bad">no worker heartbeat yet</span>
         ) : null}
       </div>
+      {probe ? (
+        <div className={`terminal-probe-result ${probe.ok ? "ok" : "bad"}`}>
+          probe {String(probe.source ?? "?")} rows=
+          {Array.isArray(probe.rows) ? probe.rows.length : "?"} injected=
+          {probe.injected ? "yes" : "no"}
+        </div>
+      ) : null}
       <div className="terminal-diagnostic-actions">
         <button
           type="button"
@@ -122,6 +135,7 @@ function WorkerDiagnostics() {
                   worker: "all",
                   telegram: true,
                   source: state.pumpFeedSource,
+                  clearLive: true,
                 }),
               });
               await startPumpFeed({ hardRestart: true, clearRows: true });
@@ -143,6 +157,22 @@ function WorkerDiagnostics() {
           }
         >
           health
+        </button>
+        <button
+          type="button"
+          className="secondary compact"
+          title="Probe workers + DB without adding fake data."
+          onClick={() => void runAction(() => runTerminalProbe(false))}
+        >
+          probe
+        </button>
+        <button
+          type="button"
+          className="secondary compact"
+          title="Insert one synthetic probe row to prove the frontend reads SQLite."
+          onClick={() => void runAction(() => runTerminalProbe(true))}
+        >
+          inject test
         </button>
       </div>
       {errors.length ? (
@@ -313,8 +343,12 @@ export function TerminalPage() {
           />
           <h2>Pump</h2>
           <span className="muted tiny">
-            {state.pumpFeedSource === "helius" ? "Helius" : "PumpPortal"} ·{" "}
-            {state.pumpFeedStatus} · {rows.length}/{state.pumpFeed.length} ·{" "}
+            {state.pumpFeedSource === "both"
+              ? "Both"
+              : state.pumpFeedSource === "helius"
+                ? "Helius"
+                : "PumpPortal"}{" "}
+            · {state.pumpFeedStatus} · {rows.length}/{state.pumpFeed.length} ·{" "}
             {state.terminalPinnedMints.length} pinned
           </span>
         </div>
@@ -332,6 +366,7 @@ export function TerminalPage() {
           >
             <option value="pumpportal">PumpPortal live</option>
             <option value="helius">Helius fallback</option>
+            <option value="both">Both</option>
           </select>
           <button
             type="button"

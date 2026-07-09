@@ -229,7 +229,7 @@ export type State = {
     | "sma5m-desc"
     | "sma15m-desc"
     | "trades-desc";
-  pumpFeedSource: "helius" | "pumpportal";
+  pumpFeedSource: "helius" | "pumpportal" | "both";
   terminalDefaultWallet: string;
   terminalDefaultBuySol: string;
   terminalDefaultSender: "helius-fast" | "helius-rpc" | "rpc";
@@ -268,6 +268,7 @@ export type State = {
   terminalHealth: AnyRow | null;
   terminalLastPollAtMs: number | null;
   terminalLastRows: number;
+  terminalProbe: AnyRow | null;
   terminalLastError: string | null;
   tokenHolders: Record<string, TokenHolder[]>;
   tokenHolderErrors: Record<string, string>;
@@ -356,6 +357,7 @@ export const state: State = {
   terminalHealth: null,
   terminalLastPollAtMs: null,
   terminalLastRows: 0,
+  terminalProbe: null,
   terminalLastError: null,
   tokenHolders: {},
   tokenHolderErrors: {},
@@ -1324,6 +1326,9 @@ function normalizeFeedRow(
     change != null && initial != null && initial > 0
       ? (change / initial) * 100
       : null;
+  // Keep this as a local with the exact old name so stale/generated render paths
+  // that used object shorthand do not throw ReferenceError.
+  const initialMarketCapUsd = initial;
   const avg = (ms: number): number | null => {
     const vals = mergedSamples
       .filter((sample) => sample.capturedAtMs >= now - ms)
@@ -1343,7 +1348,7 @@ function normalizeFeedRow(
     marketCapUsd: mcap,
     lastMarketCapSol: mcap,
     initialMarketCapSol: initial,
-    initialMarketCapUsd: initial,
+    initialMarketCapUsd,
     marketCapChangeSol: row.marketCapChangeSol ?? change,
     marketCapChangePct: row.marketCapChangePct ?? pct,
     samples: mergedSamples,
@@ -1522,6 +1527,34 @@ export async function refreshTerminalHealth(): Promise<void> {
   measureEvent("terminal health", summarizeTerminalHealth(health));
 }
 
+export async function runTerminalProbe(inject = false): Promise<void> {
+  const result = await api<AnyRow>("/api/terminal/probe", {
+    method: "POST",
+    body: JSON.stringify({
+      source: state.pumpFeedSource,
+      inject,
+      ensure: true,
+      restartStale: true,
+    }),
+  });
+  state.terminalProbe = result;
+  state.terminalHealth = {
+    ...(state.terminalHealth ?? {}),
+    processes: result.workers,
+    errors: result.errors,
+    store: result.stats,
+  };
+  if (Array.isArray(result.rows))
+    replacePumpFeedFromRows(result.rows as PumpFeedRow[], { keepPinned: true });
+  measureEvent("terminal probe", {
+    ok: result.ok,
+    source: result.source,
+    rows: result.rows?.length,
+    injected: result.injected,
+  });
+  update();
+}
+
 export async function startPumpFeed(
   options: { hardRestart?: boolean; clearRows?: boolean } = {},
 ): Promise<void> {
@@ -1552,6 +1585,7 @@ export async function startPumpFeed(
         telegram: true,
         restartStale: true,
         source: state.pumpFeedSource,
+        clearLive: options.hardRestart === true,
       }),
     });
     measureEvent("terminal workers ensure", ensure);
@@ -1576,7 +1610,7 @@ export async function startPumpFeed(
       await refreshTerminalFeedOnce({
         ensure: true,
         activeWindowMs: 5 * 60_000,
-        includeUnpriced: false,
+        includeUnpriced: state.pumpFeedSource === "helius",
       });
       state.pumpFeedStatus = "connected";
       state.pumpFeedError = null;

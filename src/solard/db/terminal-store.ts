@@ -287,6 +287,34 @@ export function setCursor(key: string, value: string): void {
   );
 }
 
+export function clearTerminalLiveData(
+  input: { source?: string | null; keepSignals?: boolean } = {},
+): Record<string, unknown> {
+  const source = String(input.source ?? "").toLowerCase();
+  const matchPump = source.includes("pump");
+  const matchHelius = source.includes("helius");
+  const clearAll =
+    !source || source.includes("both") || (!matchPump && !matchHelius);
+  const tokenWhere = clearAll
+    ? "1=1"
+    : matchHelius
+      ? "LOWER(source) LIKE '%helius%'"
+      : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump'";
+  const tradeWhere = clearAll
+    ? "1=1"
+    : matchHelius
+      ? "LOWER(source) LIKE '%helius%'"
+      : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump'";
+  const before = terminalStoreStats();
+  terminalDb.exec(
+    `DELETE FROM terminalIndicatorsLive WHERE mint IN (SELECT mint FROM terminalTokensLive WHERE ${tokenWhere})`,
+  );
+  terminalDb.exec(`DELETE FROM terminalTradesLive WHERE ${tradeWhere}`);
+  terminalDb.exec(`DELETE FROM terminalTokensLive WHERE ${tokenWhere}`);
+  const after = terminalStoreStats();
+  return { source: source || "all", before, after };
+}
+
 export function upsertTerminalToken(
   input: Partial<TerminalToken> & { mint: string },
 ): TerminalToken {
@@ -546,6 +574,7 @@ export function listTerminalFeed(
     sinceMs?: number;
     activeWindowMs?: number;
     includeUnpriced?: boolean;
+    source?: string | null;
   } = {},
 ): TerminalFeedRow[] {
   const limit = Math.max(1, Math.min(args.limit ?? 250, 1000));
@@ -561,29 +590,26 @@ export function listTerminalFeed(
   const includeUnpriced =
     args.includeUnpriced === true ||
     process.env.SOLARD_TERMINAL_INCLUDE_UNPRICED === "1";
-  const tokens = includeUnpriced
-    ? terminalDb.raw<TerminalToken>(
-        `SELECT * FROM terminalTokensLive
-         WHERE updatedAtMs >= ?
-         ORDER BY updatedAtMs DESC
-         LIMIT ?`,
-        minUpdatedAt,
-        limit,
-      )
-    : terminalDb.raw<TerminalToken>(
-        `SELECT * FROM terminalTokensLive
-         WHERE updatedAtMs >= ?
-           AND (
-             source LIKE 'telegram%'
-             OR marketCapUsd IS NOT NULL
-             OR priceUsd IS NOT NULL
-             OR image IS NOT NULL
-           )
-         ORDER BY updatedAtMs DESC
-         LIMIT ?`,
-        minUpdatedAt,
-        limit,
-      );
+  const source = String(args.source ?? "").toLowerCase();
+  const sourceClause =
+    source.includes("both") || !source
+      ? "1=1"
+      : source.includes("helius")
+        ? "LOWER(source) LIKE '%helius%' OR LOWER(source) LIKE 'telegram%'"
+        : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump' OR LOWER(source) LIKE 'telegram%'";
+  const priceClause = includeUnpriced
+    ? "1=1"
+    : "(source LIKE 'telegram%' OR marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL OR image IS NOT NULL)";
+  const tokens = terminalDb.raw<TerminalToken>(
+    `SELECT * FROM terminalTokensLive
+     WHERE updatedAtMs >= ?
+       AND ${sourceClause}
+       AND ${priceClause}
+     ORDER BY updatedAtMs DESC
+     LIMIT ?`,
+    minUpdatedAt,
+    limit,
+  );
   return tokens.map((token) => {
     const indicators = terminalDb.raw<TerminalIndicator>(
       "SELECT * FROM terminalIndicatorsLive WHERE mint = ?",
@@ -608,14 +634,26 @@ export function listTerminalFeed(
 }
 
 export function listTerminalTrades(
-  args: { limit?: number; sinceMs?: number; mint?: string | null } = {},
+  args: {
+    limit?: number;
+    sinceMs?: number;
+    mint?: string | null;
+    source?: string | null;
+  } = {},
 ): TerminalTrade[] {
   const limit = Math.max(1, Math.min(args.limit ?? 250, 1000));
   const since = args.sinceMs ?? 0;
+  const source = String(args.source ?? "").toLowerCase();
+  const sourceClause =
+    source.includes("both") || !source
+      ? "1=1"
+      : source.includes("helius")
+        ? "LOWER(source) LIKE '%helius%'"
+        : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump'";
   if (args.mint) {
     return terminalDb.raw<TerminalTrade>(
       `SELECT * FROM terminalTradesLive
-       WHERE mint = ? AND createdAtMs >= ?
+       WHERE mint = ? AND createdAtMs >= ? AND ${sourceClause}
        ORDER BY createdAtMs DESC
        LIMIT ?`,
       args.mint,
@@ -625,7 +663,7 @@ export function listTerminalTrades(
   }
   return terminalDb.raw<TerminalTrade>(
     `SELECT * FROM terminalTradesLive
-     WHERE createdAtMs >= ?
+     WHERE createdAtMs >= ? AND ${sourceClause}
      ORDER BY createdAtMs DESC
      LIMIT ?`,
     since,
@@ -656,6 +694,51 @@ export function updateTradeConfidence(
     Date.now(),
     signature,
   );
+}
+
+export function insertTerminalProbeRow(
+  input: { source?: string | null; now?: number } = {},
+): Record<string, unknown> {
+  const now = input.now ?? Date.now();
+  const sourceText = String(input.source ?? "pumpportal")
+    .toLowerCase()
+    .includes("helius")
+    ? "helius-probe"
+    : "pumpportal-probe";
+  const mint = sourceText.includes("helius")
+    ? "So11111111111111111111111111111111111111112"
+    : "11111111111111111111111111111111";
+  const marketCapUsd = sourceText.includes("helius") ? 43210 : 32100;
+  const token = upsertTerminalToken({
+    mint,
+    symbol: sourceText.includes("helius") ? "H-PROBE" : "P-PROBE",
+    name: sourceText.includes("helius")
+      ? "Helius probe row"
+      : "PumpPortal probe row",
+    source: sourceText,
+    phase: "pump",
+    priceUsd: marketCapUsd / 1_000_000_000,
+    marketCapUsd,
+    initialMarketCapUsd: marketCapUsd,
+    signature: `probe-${sourceText}-${now}`,
+    createdAtMs: now,
+    updatedAtMs: now,
+  });
+  const trade = insertTerminalTrade({
+    id: `probe:${sourceText}:${now}`,
+    mint,
+    signature: `probe-${sourceText}-${now}`,
+    source: sourceText,
+    side: "buy",
+    solDeltaUi: 0.01,
+    tokenDeltaUi: 1,
+    priceUsd: token.priceUsd,
+    marketCapUsd,
+    createdAtMs: now,
+    updatedAtMs: now,
+  });
+  recomputeTerminalIndicators(mint, now);
+  return { token, trade };
 }
 
 export function upsertTelegramSignal(input: {
@@ -786,6 +869,22 @@ export function terminalStoreStats(): Record<string, unknown> {
         terminalDb.raw<{ latest: number }>(
           "SELECT MAX(updatedAtMs) as latest FROM terminalTokensLive",
         )[0]?.latest ?? null,
+      bySource: terminalDb.raw<{
+        source: string;
+        tokens: number;
+        priced: number;
+        images: number;
+        latest: number | null;
+      }>(
+        `SELECT source, COUNT(*) as tokens,
+                SUM(CASE WHEN marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL THEN 1 ELSE 0 END) as priced,
+                SUM(CASE WHEN image IS NOT NULL AND image != '' THEN 1 ELSE 0 END) as images,
+                MAX(updatedAtMs) as latest
+         FROM terminalTokensLive
+         GROUP BY source
+         ORDER BY latest DESC
+         LIMIT 20`,
+      ),
     }),
   );
 }

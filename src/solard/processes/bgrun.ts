@@ -36,6 +36,7 @@ export type WorkerSpec = {
   kind: "stream" | "reconciler" | "signals";
   command: string;
   staleAfterMs: number;
+  buildId: string;
   env?: Record<string, string>;
 };
 
@@ -47,18 +48,21 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     kind: "stream",
     command: "bun run ./src/solard/workers/helius-live-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_HELIUS_STALE_MS ?? "15000"),
+    buildId: "helius-live-v4-pump-parser",
   },
   "solard-pumpportal-live-v2": {
     name: "solard-pumpportal-live-v2",
     kind: "stream",
     command: "bun run ./src/solard/workers/pumpportal-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_PUMPPORTAL_STALE_MS ?? "15000"),
+    buildId: "pumpportal-live-v3-source-filter-probe",
   },
   "solard-reconciler": {
     name: "solard-reconciler",
     kind: "reconciler",
     command: "bun run ./src/solard/workers/reconciler-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_RECONCILER_STALE_MS ?? "30000"),
+    buildId: "reconciler-v2",
   },
   "solard-telegram-signals": {
     name: "solard-telegram-signals",
@@ -67,6 +71,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     staleAfterMs: Number(
       process.env.SOLARD_TELEGRAM_SIGNALS_STALE_MS ?? "45000",
     ),
+    buildId: "telegram-signals-v2",
   },
 };
 
@@ -188,6 +193,9 @@ export type WorkerRuntimeStatus = {
   heartbeatAtMs: number;
   ageMs: number;
   stale: boolean;
+  buildMismatch: boolean;
+  expectedBuildId: string;
+  actualBuildId: string | null;
   error: string | null;
   data: Record<string, unknown>;
 };
@@ -230,6 +238,12 @@ export function listWorkerRuntimeStatus(
         const ageMs =
           heartbeatAtMs > 0 ? now - heartbeatAtMs : Number.POSITIVE_INFINITY;
         const bgrun = bgrunRows.get(name) ?? null;
+        const data = row?.data ?? {};
+        const actualBuildId =
+          typeof (data as any).buildId === "string"
+            ? String((data as any).buildId)
+            : null;
+        const buildMismatch = !!heartbeatAtMs && actualBuildId !== spec.buildId;
         return {
           name,
           kind: spec.kind,
@@ -239,9 +253,12 @@ export function listWorkerRuntimeStatus(
           status: row?.status ?? (bgrun ? "starting" : "missing"),
           heartbeatAtMs,
           ageMs,
-          stale: !heartbeatAtMs || ageMs > spec.staleAfterMs,
+          stale: !heartbeatAtMs || ageMs > spec.staleAfterMs || buildMismatch,
+          buildMismatch,
+          expectedBuildId: spec.buildId,
+          actualBuildId,
           error: row?.error ?? null,
-          data: row?.data ?? {},
+          data,
         };
       });
     },
@@ -308,8 +325,17 @@ export async function ensureBgrunWorker(
       stopLegacyWorkersFor(name);
       clearWorkerErrors([...LEGACY_WORKERS, name]);
       const exists = !!bgrunRowByName(name);
-      const shouldStart = restart || !exists;
-      if (restart && exists) {
+      const runtime = listWorkerRuntimeStatus({
+        source: name.includes("helius")
+          ? "helius"
+          : name.includes("pumpportal")
+            ? "pumpportal"
+            : "both",
+        telegram: name.includes("telegram"),
+      }).find((row) => row.name === name);
+      const buildMismatch = runtime?.buildMismatch === true;
+      const shouldStart = restart || buildMismatch || !exists;
+      if ((restart || buildMismatch) && exists) {
         runBgrun(["--stop", name]);
         await Bun.sleep(250);
       }
@@ -338,13 +364,21 @@ export async function ensureBgrunWorker(
             : restart
               ? "restarted"
               : "started",
-        data: { command: spec.command, restart, supervisor: "bgrun" },
+        data: {
+          command: spec.command,
+          restart,
+          buildMismatch,
+          buildId: spec.buildId,
+          supervisor: "bgrun",
+        },
       });
       return {
         name,
         kind: spec.kind,
         running: true,
-        restarted: restart,
+        restarted: restart || buildMismatch,
+        buildMismatch,
+        buildId: spec.buildId,
         command: spec.command,
       };
     },
@@ -383,7 +417,9 @@ export async function ensureWorkerGroup(
         source: args.source,
       });
       return {
-        ready: after.every((row) => row.managed && !row.error),
+        ready: after.every(
+          (row) => row.managed && !row.error && !row.buildMismatch,
+        ),
         stale: after.filter((row) => row.stale).map((row) => row.name),
         workers: results,
         status: after,

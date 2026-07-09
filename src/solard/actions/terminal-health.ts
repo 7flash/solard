@@ -1,9 +1,8 @@
+import { terminalStoreStats, terminalDb } from "../db/terminal-store.js";
 import {
-  listProcessStatus,
-  terminalStoreStats,
-  terminalDb,
-} from "../db/terminal-store.js";
-import { resolveWorkerNames } from "../processes/bgrun.js";
+  listWorkerRuntimeStatus,
+  resolveWorkerNames,
+} from "../processes/bgrun.js";
 import {
   listWorkerErrors,
   terminalIngestionStats,
@@ -30,15 +29,17 @@ export function terminalHealthAction(
         input.staleMs ?? Number(process.env.SOLARD_WORKER_STALE_MS ?? "15000"),
       );
       const now = Date.now();
-      const processes = listProcessStatus().map((row) => ({
-        ...row,
-        ageMs: now - Number(row.heartbeatAtMs || 0),
-        stale: now - Number(row.heartbeatAtMs || 0) > staleMs,
-      }));
       const currentWorkers = resolveWorkerNames({
         source: input.source,
         telegram: process.env.SOLARD_TELEGRAM_SIGNALS === "1",
       });
+      const processes = listWorkerRuntimeStatus({
+        source: input.source,
+        telegram: process.env.SOLARD_TELEGRAM_SIGNALS === "1",
+      }).map((row) => ({
+        ...row,
+        stale: row.stale || row.ageMs > staleMs,
+      }));
       const latest = {
         token:
           terminalDb.raw<any>(
@@ -62,7 +63,13 @@ export function terminalHealthAction(
           )[0] ?? null,
       };
       return {
-        ok: processes.every((row) => !row.stale && row.status !== "fatal"),
+        ok: processes.every(
+          (row) =>
+            row.managed &&
+            !row.stale &&
+            !row.buildMismatch &&
+            row.status !== "fatal",
+        ),
         staleMs,
         store: terminalStoreStats(),
         ingestion: terminalIngestionStats(),

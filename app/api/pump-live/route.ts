@@ -34,8 +34,8 @@ export function GET(request: Request): Promise<Response> {
       const url = new URL(request.url);
       const source = (() => {
         const text = String(url.searchParams.get("source") ?? "").toLowerCase();
-        if (text.includes("helius")) return "helius";
         if (text.includes("both")) return "both";
+        if (text.includes("helius")) return "helius";
         if (text.includes("pump")) return "pumpportal";
         return undefined;
       })();
@@ -58,6 +58,7 @@ export function GET(request: Request): Promise<Response> {
         includeUnpriced:
           url.searchParams.get("includeUnpriced") === "1" ||
           source === "helius",
+        source,
       });
       return {
         newTokens: terminalFeedRowsToPumpRows(rawTokens),
@@ -88,8 +89,8 @@ export async function POST(request: Request): Promise<Response> {
       const action = String(body.action ?? "ensure-workers");
       const source = (() => {
         const text = String((body as any).source ?? "").toLowerCase();
-        if (text.includes("helius")) return "helius";
         if (text.includes("both")) return "both";
+        if (text.includes("helius")) return "helius";
         if (text.includes("pump")) return "pumpportal";
         return undefined;
       })();

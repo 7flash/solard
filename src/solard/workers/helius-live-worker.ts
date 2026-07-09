@@ -24,6 +24,7 @@ import {
 } from "../helius/token-metadata.js";
 
 const WORKER = "solard-helius-live-v2";
+const BUILD_ID = "helius-live-v4-pump-parser";
 const POLL_MS = Math.max(
   500,
   Number(process.env.SOLARD_HELIUS_POLL_MS ?? "1500"),
@@ -213,6 +214,7 @@ async function processSignature(
         signature: signature.slice(0, 8),
         creates: parsed.creates.length,
         trades: parsed.trades.length,
+        completes: parsed.completes?.length ?? 0,
         ...applied,
       };
     },
@@ -281,6 +283,7 @@ async function main() {
     status: "starting",
     data: {
       source: "helius",
+      buildId: BUILD_ID,
       mode: "http-poll",
       url: redactedUrl(url),
       pollMs: POLL_MS,
@@ -302,6 +305,7 @@ async function main() {
             error,
             data: {
               source: "helius",
+              buildId: BUILD_ID,
               mode: "http-poll",
               url: redactedUrl(url),
             },
@@ -317,6 +321,7 @@ async function main() {
           status: "ok",
           data: {
             source: "helius",
+            buildId: BUILD_ID,
             mode: "http-poll",
             url: redactedUrl(url),
             ...result,
@@ -334,7 +339,7 @@ process.on("SIGINT", () => {
     name: WORKER,
     kind: "stream",
     status: "stopped",
-    data: { reason: "SIGINT" },
+    data: { reason: "SIGINT", buildId: BUILD_ID },
   });
   process.exit(0);
 });
@@ -343,7 +348,7 @@ process.on("SIGTERM", () => {
     name: WORKER,
     kind: "stream",
     status: "stopped",
-    data: { reason: "SIGTERM" },
+    data: { reason: "SIGTERM", buildId: BUILD_ID },
   });
   process.exit(0);
 });
@@ -354,7 +359,7 @@ main().catch((error) => {
     kind: "stream",
     status: "fatal",
     error,
-    data: { source: "helius" },
+    data: { source: "helius", buildId: BUILD_ID },
   });
   throw error;
 });

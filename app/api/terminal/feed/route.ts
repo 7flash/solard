@@ -12,8 +12,8 @@ function sourceFrom(
   value: string | null,
 ): "helius" | "pumpportal" | "both" | undefined {
   const text = String(value ?? "").toLowerCase();
-  if (text.includes("helius")) return "helius";
   if (text.includes("both")) return "both";
+  if (text.includes("helius")) return "helius";
   if (text.includes("pump")) return "pumpportal";
   return undefined;
 }
@@ -54,6 +54,7 @@ export function GET(request: Request): Promise<Response> {
         includeUnpriced:
           url.searchParams.get("includeUnpriced") === "1" ||
           (source === "helius" && url.searchParams.get("pricedOnly") !== "1"),
+        source,
       });
       const rows = terminalFeedRowsToPumpRows(rawRows);
       const stats = terminalStoreStats();

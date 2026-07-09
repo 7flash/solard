@@ -11,8 +11,8 @@ function sourceFrom(
   value: unknown,
 ): "helius" | "pumpportal" | "both" | undefined {
   const text = typeof value === "string" ? value.toLowerCase() : "";
-  if (text.includes("helius")) return "helius";
   if (text.includes("both")) return "both";
+  if (text.includes("helius")) return "helius";
   if (text.includes("pump")) return "pumpportal";
   return undefined;
 }

@@ -5,11 +5,12 @@ import {
   stopProcessAction,
 } from "../../../../src/solard/actions/processes.js";
 import { withMeasuredApi } from "../../../../src/solard/api-response.js";
+import { clearTerminalLiveData } from "../../../../src/solard/db/terminal-store.js";
 
 function sourceFrom(value: unknown): "helius" | "pumpportal" | "both" | null {
   const text = typeof value === "string" ? value.toLowerCase() : "";
-  if (text.includes("helius")) return "helius";
   if (text.includes("both")) return "both";
+  if (text.includes("helius")) return "helius";
   if (text.includes("pump")) return "pumpportal";
   return null;
 }
@@ -39,12 +40,17 @@ export async function POST(request: Request): Promise<Response> {
       const telegram = body.telegram !== false;
       if (action === "stop")
         return stopProcessAction(worker ?? "all", { telegram, source });
-      if (action === "restart")
-        return await restartProcessesAction({
+      if (action === "clear-live") return clearTerminalLiveData({ source });
+      if (action === "restart") {
+        const cleared =
+          body.clearLive === true ? clearTerminalLiveData({ source }) : null;
+        const restarted = await restartProcessesAction({
           worker: worker ?? "all",
           telegram,
           source,
         });
+        return { cleared, restarted };
+      }
       return await ensureProcessesAction({
         worker: worker ?? "all",
         telegram,

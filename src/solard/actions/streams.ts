@@ -10,9 +10,10 @@ function sleep(ms: number): Promise<void> {
 function streamWorkerForSource(
   source?: string | null,
 ): "solard-helius-live-v2" | "solard-pumpportal-live-v2" {
-  return String(source ?? process.env.SOLARD_STREAM_SOURCE ?? "")
-    .toLowerCase()
-    .includes("helius")
+  const text = String(
+    source ?? process.env.SOLARD_STREAM_SOURCE ?? "pumpportal",
+  ).toLowerCase();
+  return text.includes("helius")
     ? "solard-helius-live-v2"
     : "solard-pumpportal-live-v2";
 }
@@ -56,6 +57,7 @@ export async function followTradesAction(
           limit: input.limit ?? 250,
           sinceMs: lastSeen,
           mint: input.mint ?? null,
+          source: input.source,
         });
         for (const row of [...rows].reverse()) {
           const mark = Number(row.createdAtMs || row.updatedAtMs || 0);

@@ -27,6 +27,7 @@ export async function terminalFeedSnapshotAction(
         limit: input.limit ?? 250,
         sinceMs: input.sinceMs ?? 0,
         includeUnpriced: String(input.source ?? "").includes("helius"),
+        source: input.source,
       });
       return {
         source: input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "default",
@@ -84,6 +85,7 @@ export async function followTerminalFeedAction(
           limit: input.limit ?? 250,
           sinceMs: lastSeen,
           includeUnpriced: String(input.source ?? "").includes("helius"),
+          source: input.source,
         });
         for (const row of [...rows].reverse()) {
           const mark = Math.max(
