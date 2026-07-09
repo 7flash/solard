@@ -1,12 +1,8 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import {
-  dbWrite,
   getCursor,
-  insertTerminalTrade,
-  recomputeTerminalIndicators,
   setCursor,
   upsertProcessStatus,
-  upsertTerminalToken,
 } from "../db/terminal-store.js";
 import {
   workerMeasure,
@@ -18,13 +14,10 @@ import {
   PUMPFUN_PROGRAM_ID,
   parsePumpTransaction,
 } from "../helius/pump-transaction.js";
-import {
-  fetchHeliusAssetMetadata,
-  fetchUriMetadata,
-} from "../helius/token-metadata.js";
+import { applyParsedPumpTransaction } from "../helius/apply-pump-parsed.js";
 
 const WORKER = "solard-helius-live-v2";
-const BUILD_ID = "helius-live-v4-pump-parser";
+const BUILD_ID = "helius-live-v5-shared-parser";
 const POLL_MS = Math.max(
   500,
   Number(process.env.SOLARD_HELIUS_POLL_MS ?? "1500"),
@@ -83,102 +76,6 @@ function trimSeen(seen: Set<string>): void {
   for (const sig of recent) seen.add(sig);
 }
 
-function formatRaw(value: unknown): string {
-  return JSON.stringify(value, (_, item) =>
-    typeof item === "bigint" ? item.toString() : item,
-  );
-}
-
-async function applyParsed(args: {
-  parsed: ReturnType<typeof parsePumpTransaction>;
-  signature: string;
-  solUsd: number | null;
-}): Promise<{ tokens: number; trades: number; imaged: number }> {
-  let tokens = 0;
-  let trades = 0;
-  let imaged = 0;
-
-  for (const create of args.parsed.creates) {
-    const [uriMeta, assetMeta] = await Promise.all([
-      fetchUriMetadata(create.uri),
-      fetchHeliusAssetMetadata(create.mint),
-    ]);
-    const merged = { ...assetMeta, ...uriMeta };
-    await dbWrite("helius_upsert_create", () =>
-      upsertTerminalToken({
-        mint: create.mint,
-        symbol: merged.symbol ?? create.symbol ?? "",
-        name: merged.name ?? create.name ?? create.symbol ?? create.mint,
-        image: merged.image ?? null,
-        uri: create.uri,
-        description: merged.description ?? null,
-        website: merged.website ?? null,
-        twitter: merged.twitter ?? null,
-        telegram: merged.telegram ?? null,
-        creator: create.creator,
-        bondingCurveKey: create.bondingCurveKey,
-        source: "helius-create",
-        phase: "pump",
-        supplyUi: 1_000_000_000,
-        lastSlot: create.slot,
-        signature: create.signature,
-        updatedAtMs: Date.now(),
-      }),
-    );
-    if (merged.image) imaged++;
-    tokens++;
-  }
-
-  for (const trade of args.parsed.trades) {
-    const marketCapSol =
-      trade.priceSol != null ? trade.priceSol * 1_000_000_000 : null;
-    await dbWrite("helius_insert_trade", () =>
-      insertTerminalTrade({
-        id: trade.id,
-        mint: trade.mint,
-        signature: trade.signature,
-        slot: trade.slot,
-        owner: trade.owner,
-        side: trade.side,
-        tokenDeltaUi: trade.tokenDeltaUi,
-        solDeltaUi: trade.solDeltaUi,
-        priceSol: trade.priceSol,
-        priceUsd: trade.priceUsd,
-        marketCapUsd: trade.marketCapUsd,
-        confidence:
-          COMMITMENT === "finalized"
-            ? "finalized"
-            : COMMITMENT === "confirmed"
-              ? "confirmed"
-              : "processed",
-        source: "helius-trade",
-        rawJson: formatRaw(trade.raw),
-        createdAtMs: trade.createdAtMs,
-        updatedAtMs: Date.now(),
-      }),
-    );
-    await dbWrite("helius_upsert_trade_token", () =>
-      upsertTerminalToken({
-        mint: trade.mint,
-        source: "helius-trade",
-        priceSol: trade.priceSol ?? undefined,
-        priceUsd: trade.priceUsd ?? undefined,
-        marketCapSol: marketCapSol ?? undefined,
-        marketCapUsd: trade.marketCapUsd ?? undefined,
-        lastSlot: trade.slot,
-        signature: trade.signature,
-        updatedAtMs: Date.now(),
-      }),
-    );
-    await dbWrite("helius_indicators", () =>
-      recomputeTerminalIndicators(trade.mint),
-    );
-    trades++;
-  }
-
-  return { tokens, trades, imaged };
-}
-
 async function processSignature(
   connection: Connection,
   signature: string,
@@ -209,7 +106,17 @@ async function processSignature(
         solUsd,
         now: Date.now(),
       });
-      const applied = await applyParsed({ parsed, signature, solUsd });
+      const applied = await applyParsedPumpTransaction({
+        parsed,
+        source: "helius-poll",
+        confidence:
+          COMMITMENT === "finalized"
+            ? "finalized"
+            : COMMITMENT === "confirmed"
+              ? "confirmed"
+              : "processed",
+        solUsd,
+      });
       return {
         signature: signature.slice(0, 8),
         creates: parsed.creates.length,
@@ -241,6 +148,7 @@ async function tick(connection: Connection, seen: Set<string>) {
   let tokens = 0;
   let trades = 0;
   let imaged = 0;
+  let completes = 0;
   let errors = 0;
   for (const row of fresh.reverse()) {
     seen.add(row.signature);
@@ -257,6 +165,7 @@ async function tick(connection: Connection, seen: Set<string>) {
     tokens += Number((result as any).tokens ?? 0);
     trades += Number((result as any).trades ?? 0);
     imaged += Number((result as any).imaged ?? 0);
+    completes += Number((result as any).completes ?? 0);
   }
   trimSeen(seen);
   saveSeen(seen);
@@ -266,6 +175,7 @@ async function tick(connection: Connection, seen: Set<string>) {
     tokens,
     trades,
     imaged,
+    completes,
     errors,
     solUsd,
     newest: signatures[0]?.signature ?? null,

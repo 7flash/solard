@@ -7,6 +7,7 @@ import { processMeasure, summarizeForMeasure } from "../measure.js";
 
 export type SolardWorkerName =
   | "solard-helius-live-v2"
+  | "solard-helius-laserstream-v1"
   | "solard-pumpportal-live-v2"
   | "solard-reconciler"
   | "solard-telegram-signals";
@@ -26,6 +27,8 @@ const LEGACY_WORKERS: LegacySolardWorkerName[] = [
 
 const WORKER_ALIASES: Record<string, SolardWorkerName> = {
   "solard-helius-live": "solard-helius-live-v2",
+  "solard-helius-laserstream": "solard-helius-laserstream-v1",
+  "solard-helius-ws": "solard-helius-laserstream-v1",
   "solard-pumpportal": "solard-pumpportal-live-v2",
   "solard-pump-creates": "solard-pumpportal-live-v2",
   "solard-pump-trades": "solard-helius-live-v2",
@@ -48,7 +51,14 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     kind: "stream",
     command: "bun run ./src/solard/workers/helius-live-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_HELIUS_STALE_MS ?? "15000"),
-    buildId: "helius-live-v4-pump-parser",
+    buildId: "helius-live-v5-shared-parser",
+  },
+  "solard-helius-laserstream-v1": {
+    name: "solard-helius-laserstream-v1",
+    kind: "stream",
+    command: "bun run ./src/solard/workers/helius-laserstream-worker.ts",
+    staleAfterMs: Number(process.env.SOLARD_HELIUS_WS_STALE_MS ?? "12000"),
+    buildId: "helius-laserstream-v1-transaction-subscribe",
   },
   "solard-pumpportal-live-v2": {
     name: "solard-pumpportal-live-v2",
@@ -75,7 +85,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
   },
 };
 
-export type SolardStreamSource = "pumpportal" | "helius" | "both";
+export type SolardStreamSource = "pumpportal" | "helius" | "helius-ws" | "both";
 
 export function normalizeStreamSource(
   value?: string | null,
@@ -83,8 +93,9 @@ export function normalizeStreamSource(
   const source = String(
     value || process.env.SOLARD_STREAM_SOURCE || "pumpportal",
   ).toLowerCase();
-  if (source.includes("helius")) return "helius";
   if (source.includes("both")) return "both";
+  if (source.includes("laser") || source.includes("ws")) return "helius-ws";
+  if (source.includes("helius")) return "helius";
   return "pumpportal";
 }
 
@@ -92,12 +103,21 @@ export function coreWorkersForSource(
   sourceInput?: string | null,
 ): SolardWorkerName[] {
   const source = normalizeStreamSource(sourceInput);
+  const heliusWorkers: SolardWorkerName[] =
+    process.env.SOLARD_HELIUS_MODE === "poll"
+      ? ["solard-helius-live-v2"]
+      : process.env.SOLARD_HELIUS_MODE === "laserstream" ||
+          process.env.SOLARD_HELIUS_TRANSPORT === "ws"
+        ? ["solard-helius-laserstream-v1"]
+        : ["solard-helius-live-v2", "solard-helius-laserstream-v1"];
   const streamWorkers: SolardWorkerName[] =
     source === "helius"
-      ? ["solard-helius-live-v2"]
-      : source === "both"
-        ? ["solard-pumpportal-live-v2", "solard-helius-live-v2"]
-        : ["solard-pumpportal-live-v2"];
+      ? heliusWorkers
+      : source === "helius-ws"
+        ? ["solard-helius-laserstream-v1"]
+        : source === "both"
+          ? ["solard-pumpportal-live-v2", ...heliusWorkers]
+          : ["solard-pumpportal-live-v2"];
   return [...streamWorkers, "solard-reconciler"];
 }
 
@@ -269,7 +289,8 @@ function stopLegacyWorkersFor(name: SolardWorkerName): void {
   const legacyToStop =
     name === "solard-pumpportal-live-v2"
       ? ["solard-pumpportal", "solard-pump-creates"]
-      : name === "solard-helius-live-v2"
+      : name === "solard-helius-live-v2" ||
+          name === "solard-helius-laserstream-v1"
         ? ["solard-helius-live", "solard-pump-trades"]
         : [];
   for (const legacy of legacyToStop) {
