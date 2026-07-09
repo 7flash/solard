@@ -1,5 +1,5 @@
 import { processMeasure, summarizeForMeasure } from "../measure.js";
-import { getBgrunSdk, normalizeBgrunProcess, type BgrunProcess } from "./bgrun-sdk.js";
+import bgrun, { normalizeBgrunProcess, type BgrunProcess } from "./bgrun-sdk.js";
 import {
   listWorkerRuntimeStatus,
   resolveWorkerNames,
@@ -64,7 +64,6 @@ async function isAlive(row: Record<string, unknown> | null): Promise<boolean> {
   const pid = Number(row.pid ?? 0);
   const command = String(row.command ?? "");
   if (!pid) return false;
-  const bgrun = await getBgrunSdk();
   return await bgrun.isProcessRunning(pid, command);
 }
 
@@ -77,7 +76,6 @@ export async function listBgrunLifecycleTree(
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     async () => {
-      const bgrun = await getBgrunSdk();
       const parent = parentName(input.parent);
       const parentRow = asProcessRow(bgrun.getProcess(parent));
       const parentAlive = await isAlive(parentRow);
@@ -185,7 +183,6 @@ export async function stopBgrunLifecycleParent(parent?: string | null): Promise<
     },
     async () => {
       const name = parentName(parent);
-      const bgrun = await getBgrunSdk();
       const before = await listBgrunLifecycleTree({ parent: name, source: "both", telegram: true });
       await bgrun.handleStop(name);
       await Bun.sleep(500);

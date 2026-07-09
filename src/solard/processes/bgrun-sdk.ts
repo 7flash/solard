@@ -1,4 +1,4 @@
-import { createRequire } from "node:module";
+import bgrun from "bgrun";
 
 export type BgrunProcess = {
   name?: string;
@@ -30,11 +30,10 @@ export type BgrunSdk = {
   isProcessRunning: (pid: number, command?: string) => Promise<boolean> | boolean;
 };
 
-let cachedSdk: BgrunSdk | null = null;
-let cachedAsyncSdk: Promise<BgrunSdk> | null = null;
+export const bgrunSdk = bgrun as BgrunSdk;
+export default bgrunSdk;
 
-function unwrapBgrunModule(mod: unknown): BgrunSdk {
-  const value = ((mod as { default?: unknown })?.default ?? mod) as Partial<BgrunSdk>;
+export function assertBgrunSdk(value: Partial<BgrunSdk> = bgrunSdk): BgrunSdk {
   const missing = [
     "handleRun",
     "handleStop",
@@ -47,44 +46,17 @@ function unwrapBgrunModule(mod: unknown): BgrunSdk {
   if (missing.length) {
     throw new Error(
       `bgrun SDK is missing required Solard lifecycle exports: ${missing.join(", ")}. ` +
-        "Update bgrun to the build that exports handleStop/getManagedChildProcesses.",
+        "Update bgrun to the Solard SDK finalization build.",
     );
   }
 
   return value as BgrunSdk;
 }
 
-export function getBgrunSdkSync(): BgrunSdk {
-  if (cachedSdk) return cachedSdk;
-  const require = createRequire(import.meta.url);
-  cachedSdk = unwrapBgrunModule(require("bgrun"));
-  return cachedSdk;
-}
-
-export async function getBgrunSdk(): Promise<BgrunSdk> {
-  if (cachedSdk) return cachedSdk;
-  if (!cachedAsyncSdk) {
-    cachedAsyncSdk = import("bgrun").then((mod) => {
-      cachedSdk = unwrapBgrunModule(mod);
-      return cachedSdk;
-    });
-  }
-  return await cachedAsyncSdk;
-}
-
-export function safeGetBgrunSdkSync(): BgrunSdk | null {
-  try {
-    return getBgrunSdkSync();
-  } catch {
-    return null;
-  }
-}
-
 export async function stopBgrunProcessByName(name: string): Promise<boolean> {
-  const bgrun = await getBgrunSdk();
-  const existing = bgrun.getProcess(name);
+  const existing = bgrunSdk.getProcess(name);
   if (!existing) return false;
-  await bgrun.handleStop(name);
+  await bgrunSdk.handleStop(name);
   return true;
 }
 

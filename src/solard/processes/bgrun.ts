@@ -1,7 +1,7 @@
 import { listProcessStatus, upsertProcessStatus } from "../db/terminal-store.js";
 import { clearWorkerErrors } from "../db/terminal-ingestion.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
-import { getBgrunSdk, normalizeBgrunProcess, safeGetBgrunSdkSync, stopBgrunProcessByName } from "./bgrun-sdk.js";
+import bgrun, { normalizeBgrunProcess, stopBgrunProcessByName } from "./bgrun-sdk.js";
 
 export type SolardWorkerName =
   | "solard-helius-logs-v1"
@@ -176,8 +176,6 @@ export function listManagedBgrunChildren(parentName = process.env.BGR_PROCESS_NA
       catch: (error) => [{ name: "bgrun-sdk-error", error: error instanceof Error ? error.message : String(error) }],
     },
     () => {
-      const bgrun = safeGetBgrunSdkSync();
-      if (!bgrun) return [];
       return bgrun.getManagedChildProcesses(parentName).map(normalizeBgrunProcess);
     },
   );
@@ -191,8 +189,6 @@ export function listBgrunProcesses(): Array<Record<string, unknown>> {
       catch: (error) => [{ name: "bgrun-sdk-error", error: error instanceof Error ? error.message : String(error) }],
     },
     () => {
-      const bgrun = safeGetBgrunSdkSync();
-      if (!bgrun) return [];
       return bgrun.getAllProcesses().map(normalizeBgrunProcess);
     },
   );
@@ -321,7 +317,6 @@ export async function ensureBgrunWorker(name: SolardWorkerName, restart = false)
       await stopLegacyWorkersFor(name);
       clearWorkerErrors([...LEGACY_WORKERS, name]);
 
-      const bgrun = await getBgrunSdk();
       const existing = bgrun.getProcess(name);
       const runtime = listWorkerRuntimeStatus({
         source: name.includes("helius") ? "helius" : name.includes("pumpportal") ? "pumpportal" : "both",

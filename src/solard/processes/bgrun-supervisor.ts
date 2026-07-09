@@ -1,6 +1,6 @@
 import { upsertProcessStatus } from "../db/terminal-store.js";
 import { createMeasure, summarizeForMeasure } from "../measure.js";
-import { getBgrunSdk } from "./bgrun-sdk.js";
+import bgrun from "./bgrun-sdk.js";
 import {
   resolveWorkerNames,
   WORKER_SPECS,
@@ -48,7 +48,6 @@ function envForWorker(name: SolardWorkerName): Record<string, string> {
 }
 
 async function ensureBgrunSdkWorker(name: SolardWorkerName, restart = false): Promise<void> {
-  const bgrun = await getBgrunSdk();
   const spec = WORKER_SPECS[name];
   const existing = bgrun.getProcess(name);
 
@@ -108,8 +107,7 @@ export async function startBgrunWorkerSupervisor(
   return {
     names,
     running: async () => {
-      const bgrun = await getBgrunSdk();
-      const rows = [];
+          const rows = [];
       for (const name of names) {
         const proc = bgrun.getProcess(name);
         if (!proc || typeof proc.pid !== "number") {
@@ -128,8 +126,7 @@ export async function startBgrunWorkerSupervisor(
           end: () => ({ reason, stopped: names.length, parent: parentName() }),
         },
         async () => {
-          const bgrun = await getBgrunSdk();
-          for (const name of names.toReversed()) {
+                  for (const name of names.toReversed()) {
             const spec = WORKER_SPECS[name];
             const proc = bgrun.getProcess(name);
             upsertProcessStatus({
