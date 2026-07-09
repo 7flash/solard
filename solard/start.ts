@@ -34,6 +34,11 @@ function openUrl(url: string): void {
   }).unref();
 }
 
+/**
+ * Starts the Solard console through server.ts, not through a parallel tradjs
+ * process. This keeps the CLI start path and `bun run server.ts` on the same
+ * lifecycle: server.ts owns worker startup and worker shutdown.
+ */
 export async function startSolardConsole(
   options: SolardStartOptions = {},
 ): Promise<number> {
@@ -64,7 +69,6 @@ export async function startSolardConsole(
       SOLWAL_HOST: host,
       SOLWAL_PORT: port,
       SOLARD_SERVER_WORKERS: process.env.SOLARD_SERVER_WORKERS ?? "1",
-      SOLARD_STREAM_SOURCE: process.env.SOLARD_STREAM_SOURCE ?? "helius",
     },
   });
 

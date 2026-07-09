@@ -1,5 +1,9 @@
 import { createTraderSowl, type Sowl } from "../index.js";
-import { measureSolard, summarizeForMeasure } from "../solard/api-response.js";
+import {
+  createMeasure,
+  summarizeError,
+  summarizeForMeasure,
+} from "../solard/measure.js";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -49,8 +53,9 @@ export async function readJson<T extends JsonRecord = JsonRecord>(
 
 export function requireString(body: JsonRecord, key: string): string {
   const value = body[key];
-  if (typeof value !== "string" || !value.trim())
+  if (typeof value !== "string" || !value.trim()) {
     throw new Error(`Missing ${key}`);
+  }
   return value.trim();
 }
 
@@ -70,8 +75,9 @@ export function numberValue(
   const value = body[key];
   if (value == null || value === "") return fallback;
   const parsed = Number(value);
-  if (!Number.isFinite(parsed))
+  if (!Number.isFinite(parsed)) {
     throw new Error(`Invalid ${key}: ${String(value)}`);
+  }
   return parsed;
 }
 
@@ -110,53 +116,169 @@ function routeMeta(
   return { route: url.pathname, method: request.method, ...extra };
 }
 
+type Summarizer<T> = (value: T) => unknown;
+
+export type MeasuredApiOptions<T = unknown> = {
+  meta?: Record<string, unknown>;
+  status?: number;
+  budget?: number;
+  result?: Summarizer<T>;
+  summarize?: Summarizer<T>;
+  end?: Summarizer<T>;
+};
+
+type MeasuredApiObjectArgs<T> = {
+  request: Request;
+  route?: string;
+  method?: string;
+  label?: string;
+  budget?: number;
+  summarize?: Summarizer<T>;
+  result?: Summarizer<T>;
+  end?: Summarizer<T>;
+  status?: number;
+  meta?: Record<string, unknown>;
+  fn: () => Promise<T> | T;
+};
+
+function isObjectApiArgs<T>(value: unknown): value is MeasuredApiObjectArgs<T> {
+  return (
+    !!value && typeof value === "object" && "request" in value && "fn" in value
+  );
+}
+
+function normalizeApiArgs<T>(
+  arg1: Request | MeasuredApiObjectArgs<T>,
+  label?: string,
+  fn?: () => Promise<T> | T,
+  options: MeasuredApiOptions<T> = {},
+): {
+  request: Request;
+  route: string;
+  method: string;
+  label: string;
+  status: number;
+  budget?: number;
+  summarize: Summarizer<T>;
+  meta: Record<string, unknown>;
+  fn: () => Promise<T> | T;
+} {
+  if (isObjectApiArgs<T>(arg1)) {
+    const request = arg1.request;
+    const url = new URL(request.url);
+    const route = arg1.route ?? url.pathname;
+    const method = arg1.method ?? request.method;
+    const summarize =
+      arg1.summarize ?? arg1.result ?? arg1.end ?? summarizeForMeasure;
+    return {
+      request,
+      route,
+      method,
+      label: arg1.label ?? "handle",
+      status: arg1.status ?? 200,
+      budget: arg1.budget,
+      summarize,
+      meta: { route, method, ...(arg1.meta ?? {}) },
+      fn: arg1.fn,
+    };
+  }
+
+  if (!fn) throw new Error("withMeasuredApi requires a handler function");
+  const request = arg1;
+  const url = new URL(request.url);
+  const route = url.pathname;
+  const method = request.method;
+  const summarize =
+    options.summarize ?? options.result ?? options.end ?? summarizeForMeasure;
+  return {
+    request,
+    route,
+    method,
+    label: label ?? "handle",
+    status: options.status ?? 200,
+    budget: options.budget,
+    summarize,
+    meta: { route, method, ...(options.meta ?? {}) },
+    fn,
+  };
+}
+
+export async function withMeasuredApi<T>(
+  arg1: Request | MeasuredApiObjectArgs<T>,
+  label?: string,
+  fn?: () => Promise<T> | T,
+  options: MeasuredApiOptions<T> = {},
+): Promise<Response> {
+  const args = normalizeApiArgs<T>(arg1, label, fn, options);
+  const id = requestId();
+  const scope = `solard:api:${args.method}:${args.route}`;
+  const meter = createMeasure(scope);
+  const startedAt = Date.now();
+  const meta = { ...args.meta, requestId: id, scope };
+
+  return await meter.measure(
+    {
+      start: () => `${args.label} ${id}`,
+      end: (res: Response) => ({ status: res.status, ok: res.ok }),
+      catch: (error: unknown) => {
+        const status =
+          typeof (error as { status?: unknown }).status === "number"
+            ? (error as { status: number }).status
+            : 500;
+        return errorResponse(error, status, {
+          ...meta,
+          label: args.label,
+          summary: summarizeError(error),
+        });
+      },
+    },
+    async () => {
+      assertWebAuth(args.request);
+      const value = await meter.measure(
+        {
+          start: () => `${args.label}:action`,
+          end: (result: T) => ({ result: args.summarize(result) }),
+          ...(typeof args.budget === "number" ? { budget: args.budget } : {}),
+        },
+        args.fn,
+      );
+      return jsonResponse(
+        {
+          ok: true,
+          value,
+          meta: {
+            ...meta,
+            label: args.label,
+            tookMs: Date.now() - startedAt,
+            summary: args.summarize(value),
+          },
+        },
+        { status: args.status },
+      );
+    },
+  );
+}
+
 export async function withSowl<T>(
   request: Request,
   fn: (sowl: Sowl) => Promise<T> | T,
 ): Promise<Response> {
   let sowl: Sowl | null = null;
-  const id = requestId();
   const url = new URL(request.url);
   const route = url.pathname;
-  const scope = `solard:api:${request.method}:${route}`;
-  try {
-    const measured = await measureSolard(
-      scope,
-      "withSowl",
-      async () => {
-        assertWebAuth(request);
-        sowl = createTraderSowl({
-          rpcUrl: process.env.HELIUS_RPC_URL || process.env.RPC_ENDPOINT,
-        });
-        return await fn(sowl);
-      },
-      {
-        summarize: summarizeForMeasure,
-      },
-    );
-    return jsonResponse({
-      ok: true,
-      value: measured.value,
-      meta: {
-        route,
-        method: request.method,
-        requestId: id,
-        scope: measured.scope,
-        tookMs: measured.tookMs,
-        summary: measured.summary,
-      },
-    });
-  } catch (error) {
-    return errorResponse(
-      error,
-      typeof (error as { status?: unknown }).status === "number"
-        ? (error as { status: number }).status
-        : 500,
-      routeMeta(request, { requestId: id, scope }),
-    );
-  } finally {
+  return await withMeasuredApi(
+    request,
+    "withSowl",
+    async () => {
+      sowl = createTraderSowl({
+        rpcUrl: process.env.HELIUS_RPC_URL || process.env.RPC_ENDPOINT,
+      });
+      return await fn(sowl);
+    },
+    { meta: routeMeta(request, { route }), result: summarizeForMeasure },
+  ).finally(() => {
     sowl?.close();
-  }
+  });
 }
 
 export function compactWallet(row: {
