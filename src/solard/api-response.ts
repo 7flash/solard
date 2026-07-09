@@ -143,10 +143,20 @@ function maxResultLength(input?: number): number {
     : DEFAULT_MAX_RESULT_LENGTH;
 }
 
+function quietMeasure(): boolean {
+  return (
+    process.env.SOLARD_MEASURE_QUIET === "1" ||
+    process.env.SOLWAL_MEASURE_QUIET === "1" ||
+    process.env.SOLARD_MEASURE === "0" ||
+    process.env.SOLWAL_MEASURE === "0"
+  );
+}
+
 function safeScope(
   name: string,
   maxLength?: number,
 ): SolardMeasureScope | null {
+  if (quietMeasure()) return null;
   try {
     return createMeasure(name, {
       maxResultLength: maxResultLength(maxLength),

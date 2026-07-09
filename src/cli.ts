@@ -21,6 +21,7 @@ import {
   listSmaAggregatesAction,
   listTerminalFeedAction,
   followTerminalFeedAction,
+  followTerminalTradesAction,
   getTerminalFeedStatsAction,
   listTerminalHoldersAction,
   listTokensAction,
@@ -112,6 +113,7 @@ Trading
 Market data
   solard sma [mint] [--interval-seconds 60] [--latest] [--limit 100] [--json]
   solard terminal feed [--follow|--once] [--source helius|pumpportal] [--since-ms <ms>] [--pinned-mints <csv>] [--limit 250] [--json]
+  solard stream trades [--source helius|pumpportal] [--mint <mint>|--pinned-mints <csv>] [--poll-ms 1000] [--json]
   solard terminal holders <mint> [--limit 12] [--json]
   solard terminal stats [--json]
 
@@ -255,6 +257,10 @@ function pumpInputFromCli(values: string[], flags: Flags): PumpLaunchInput {
 
 export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   const { command, values, flags } = parseCliArgs(argv);
+  if (!has(flags, "measure") && process.env.SOLARD_MEASURE_CLI !== "1") {
+    process.env.SOLARD_MEASURE_QUIET = process.env.SOLARD_MEASURE_QUIET ?? "1";
+    process.env.SOLWAL_MEASURE_QUIET = process.env.SOLWAL_MEASURE_QUIET ?? "1";
+  }
   if (!command || command === "help" || command === "--help") {
     emit(help());
     return 0;
@@ -337,6 +343,63 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
 
+  if (command === "stream") {
+    const subcommand = values[0];
+    if (subcommand !== "trades")
+      throw new Error(
+        "Usage: solard stream trades [--source helius|pumpportal] [--mint <mint>|--pinned-mints <csv>] [--json]",
+      );
+    const abort = new AbortController();
+    const stop = () => abort.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    const mint = flag(flags, "mint");
+    const pinnedMints =
+      flag(flags, "pinned-mints") ?? (mint ? mint : values.slice(1).join(","));
+    if (!jsonMode(flags))
+      emit(
+        `${OWL} stream trades source=${flag(flags, "source") ?? "helius"} poll=${numberFlag(flags, "poll-ms", 1000)}ms\n`,
+      );
+    const usd = (value: unknown) =>
+      typeof value === "number" && Number.isFinite(value)
+        ? "$" +
+          (value >= 1000
+            ? Math.round(value).toLocaleString("en-US")
+            : value.toFixed(2))
+        : "-";
+    await followTerminalTradesAction({
+      sinceMs: flag(flags, "since-ms"),
+      pinnedMints,
+      limit: numberFlag(flags, "limit", 250),
+      source: flag(flags, "source"),
+      resetSession: !has(flags, "no-reset"),
+      pollMs: numberFlag(flags, "poll-ms", 1000),
+      signal: abort.signal,
+      onStatus: (status) => {
+        if (has(flags, "verbose")) {
+          if (jsonMode(flags))
+            emit(toJson({ event: "status", value: status }) + "\n");
+          else if ((status as any)?.status)
+            emit(
+              `${OWL} stream ${(status as any).status} ${(status as any).source ?? ""}\n`,
+            );
+        }
+      },
+      onTradeRows: (rows) => {
+        for (const row of rows as any[]) {
+          const last = Array.isArray(row.trades) ? row.trades[0] : null;
+          if (jsonMode(flags))
+            emit(toJson({ event: "trade", value: row }) + "\n");
+          else
+            emit(
+              `${row.symbol ? "$" + row.symbol : "-"}\t${row.mint}\tmcap=${usd(row.marketCapUsd ?? row.lastMarketCapUsd)}\tΔ=${usd(row.marketCapChangeUsd)}\ttype=${last?.txType ?? row.eventType ?? "update"}\tsig=${last?.signature ?? row.signature ?? "-"}\n`,
+            );
+        }
+      },
+    });
+    return 0;
+  }
+
   if (command === "terminal" || command === "feed") {
     const subcommand = command === "feed" ? "feed" : values[0];
     if (subcommand === "feed") {
@@ -344,8 +407,15 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       const pinnedMints = flag(flags, "pinned-mints") ?? offsetValues.join(",");
       const shouldFollow =
         has(flags, "follow") || (!has(flags, "once") && !jsonMode(flags));
+      const usd = (value: unknown) =>
+        typeof value === "number" && Number.isFinite(value)
+          ? "$" +
+            (value >= 1000
+              ? Math.round(value).toLocaleString("en-US")
+              : value.toFixed(2))
+          : "-";
       const formatRow = (row: any) =>
-        `${row.symbol ? "$" + row.symbol : "-"}	${row.mint}	mcap=${row.marketCapSol ?? row.lastMarketCapSol ?? "-"}	sma1=${row.sma1m ?? "-"}	sma5=${row.sma5m ?? "-"}	sma15=${row.sma15m ?? "-"}`;
+        `${row.symbol ? "$" + row.symbol : "-"}	${row.mint}	mcap=${usd(row.marketCapUsd ?? row.lastMarketCapUsd)}	sma1=${usd(row.sma1mUsd)}	sma5=${usd(row.sma5mUsd)}	sma15=${usd(row.sma15mUsd)}`;
       if (!shouldFollow) {
         const result = await listTerminalFeedAction({
           sinceMs: flag(flags, "since-ms"),
@@ -378,12 +448,14 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         pollMs: numberFlag(flags, "poll-ms", 1500),
         signal: abort.signal,
         onStatus: (status) => {
-          if (jsonMode(flags))
-            emit(toJson({ event: "status", value: status }) + "\n");
-          else if ((status as any)?.status)
-            emit(
-              `${OWL} feed ${(status as any).status} ${(status as any).source ?? ""}\n`,
-            );
+          if (has(flags, "verbose")) {
+            if (jsonMode(flags))
+              emit(toJson({ event: "status", value: status }) + "\n");
+            else if ((status as any)?.status)
+              emit(
+                `${OWL} feed ${(status as any).status} ${(status as any).source ?? ""}\n`,
+              );
+          }
         },
         onRows: (rows) => {
           for (const row of rows as any[]) {

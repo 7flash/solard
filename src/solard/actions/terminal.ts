@@ -7,6 +7,7 @@ import {
 } from "../feed/feed-repo.js";
 import { measureSolard, summarizeForMeasure } from "../api-response.js";
 import { handlePumpLivePost } from "../../pump/services/pump-live-api.js";
+import { resolveSolUsdPrice } from "../market/sol-usd.js";
 
 export type TerminalFeedInput = {
   sinceMs?: number | string | null;
@@ -26,6 +27,10 @@ export type TerminalFeedFollowInput = TerminalFeedInput & {
   signal?: AbortSignal | null;
   onRows?: (rows: PumpTerminalFeedRow[]) => void | Promise<void>;
   onStatus?: (status: unknown) => void | Promise<void>;
+};
+
+export type TerminalTradeFollowInput = TerminalFeedFollowInput & {
+  onTradeRows?: (rows: PumpTerminalFeedRow[]) => void | Promise<void>;
 };
 
 function numberInput(
@@ -52,7 +57,9 @@ function feedSummary(rows: PumpTerminalFeedRow[]) {
     sample: rows.slice(0, 2).map((row) => ({
       mint: row.mint,
       symbol: row.symbol,
+      marketCapUsd: row.marketCapUsd ?? row.lastMarketCapUsd ?? null,
       marketCapSol: row.marketCapSol ?? row.lastMarketCapSol ?? null,
+      sma1mUsd: row.sma1mUsd,
       sma1m: row.sma1m,
       sma5m: row.sma5m,
       sma15m: row.sma15m,
@@ -68,14 +75,16 @@ export async function listTerminalFeedAction(input: TerminalFeedInput = {}) {
   );
   const sinceMs = numberInput(input.sinceMs, 0);
   const pinnedMints = listInput(input.pinnedMints);
+  const solUsdPrice = await resolveSolUsdPrice().catch(() => null);
   const measured = await measureSolard(
     "solard:action:terminal:feed",
     "listTerminalFeedAction",
-    () => listPumpTerminalFeedRows({ sinceMs, pinnedMints, limit }),
+    () =>
+      listPumpTerminalFeedRows({ sinceMs, pinnedMints, limit, solUsdPrice }),
     {
       result: feedSummary,
       onError: summarizeForMeasure,
-      meta: { sinceMs, pinnedCount: pinnedMints.length, limit },
+      meta: { sinceMs, pinnedCount: pinnedMints.length, limit, solUsdPrice },
     },
   );
   return measured.value;
@@ -195,7 +204,13 @@ export async function followTerminalFeedAction(
 
   while (!input.signal?.aborted) {
     try {
-      const rows = listPumpTerminalFeedRows({ sinceMs, pinnedMints, limit });
+      const solUsdPrice = await resolveSolUsdPrice().catch(() => null);
+      const rows = listPumpTerminalFeedRows({
+        sinceMs,
+        pinnedMints,
+        limit,
+        solUsdPrice,
+      });
       const fresh = rows
         .filter((row) => {
           const updatedAtMs = Number(row.updatedAtMs ?? row.createdAtMs ?? 0);
@@ -222,6 +237,95 @@ export async function followTerminalFeedAction(
       await measureSolard(
         "solard:action:terminal:feed",
         "followTerminalFeedPollError",
+        () => {
+          throw error;
+        },
+        {
+          result: summarizeForMeasure,
+          onError: summarizeForMeasure,
+          meta: { sinceMs, pinnedCount: pinnedMints.length, limit },
+        },
+      ).catch(() => undefined);
+      await input.onStatus?.({
+        status: "poll-error",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    try {
+      await delay(pollMs, undefined, { signal: input.signal ?? undefined });
+    } catch {
+      break;
+    }
+  }
+}
+
+export async function followTerminalTradesAction(
+  input: TerminalTradeFollowInput = {},
+): Promise<void> {
+  const limit = Math.max(
+    1,
+    Math.min(500, Math.trunc(numberInput(input.limit, 250))),
+  );
+  const pollMs = Math.max(
+    250,
+    Math.min(30_000, Math.trunc(numberInput(input.pollMs, 1_000))),
+  );
+  const pinnedMints = listInput(input.pinnedMints);
+  let sinceMs = numberInput(input.sinceMs, Date.now());
+  const seen = new Set<string>();
+
+  const status = await startTerminalWorker(input);
+  await input.onStatus?.(status);
+
+  while (!input.signal?.aborted) {
+    try {
+      const solUsdPrice = await resolveSolUsdPrice().catch(() => null);
+      const rows = listPumpTerminalFeedRows({
+        sinceMs,
+        pinnedMints,
+        limit,
+        solUsdPrice,
+      });
+      const changed = rows
+        .filter((row) => {
+          const t = Math.max(
+            Number(row.updatedAtMs ?? 0),
+            Number(row.lastTradeAtMs ?? 0),
+          );
+          if (!Number.isFinite(t) || t < sinceMs - 5_000) return false;
+          const lastTrade = Array.isArray(row.trades) ? row.trades[0] : null;
+          const key = [
+            row.mint,
+            row.updatedAtMs,
+            row.lastTradeAtMs,
+            lastTrade?.signature ?? "",
+            lastTrade?.marketCapSol ?? "",
+          ].join(":");
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .sort(
+          (a, b) =>
+            Math.max(Number(a.updatedAtMs ?? 0), Number(a.lastTradeAtMs ?? 0)) -
+            Math.max(Number(b.updatedAtMs ?? 0), Number(b.lastTradeAtMs ?? 0)),
+        );
+      if (changed.length) {
+        const newest = Math.max(
+          ...changed.map((row) =>
+            Math.max(
+              Number(row.updatedAtMs ?? 0),
+              Number(row.lastTradeAtMs ?? 0),
+            ),
+          ),
+        );
+        if (Number.isFinite(newest)) sinceMs = Math.max(sinceMs, newest);
+        await (input.onTradeRows ?? input.onRows)?.(changed);
+      }
+    } catch (error) {
+      await measureSolard(
+        "solard:action:stream:trades",
+        "followTerminalTradesPollError",
         () => {
           throw error;
         },
