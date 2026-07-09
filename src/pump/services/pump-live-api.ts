@@ -26,6 +26,11 @@ import {
 } from "../../solard/feed/feed-repo.js";
 import { resolveSolUsdPrice } from "../../solard/market/sol-usd.js";
 import {
+  ensurePumpStreamProcess,
+  getPumpStreamProcessStatus,
+  stopPumpStreamProcess,
+} from "../../solard/processes/pump-stream-process.js";
+import {
   PUMP_PROGRAM_ID,
   findPumpCreateInTransaction,
 } from "../parsers/pump-create.js";
@@ -1047,7 +1052,7 @@ function emitPumpWorker(event: string, data: unknown): void {
   }
 }
 
-function stopPumpFeedWorker(): void {
+export function stopPumpFeedWorker(): void {
   if (pumpWorkerCurveTimer) clearInterval(pumpWorkerCurveTimer);
   pumpWorkerCurveTimer = null;
   try {
@@ -1062,7 +1067,7 @@ function stopPumpFeedWorker(): void {
   });
 }
 
-function startPumpFeedWorker(
+export function startPumpFeedWorker(
   args: { source: Source; resetSession?: boolean } = { source: "helius" },
 ): void {
   if (args.resetSession) {
@@ -1194,6 +1199,18 @@ function subscribePumpFeedWorker(listener: PumpWorkerListener): () => void {
     if (event.atMs >= cutoff) listener(event.event, event.data);
   return () => {
     pumpWorkerListeners.delete(listener);
+  };
+}
+
+export function getPumpFeedWorkerStatus() {
+  return {
+    status: pumpWorkerStatus,
+    source: pumpWorkerSource,
+    startedAtMs: pumpWorkerStartedAtMs || null,
+    listeners: pumpWorkerListeners.size,
+    lastError: pumpWorkerLastError,
+    recentEvents: pumpWorkerRecent.length,
+    db: getPumpFeedDbStats(),
   };
 }
 
@@ -1361,12 +1378,8 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
         value: {
           ...(measured.value as Raw),
           worker: {
-            status: pumpWorkerStatus,
-            source: pumpWorkerSource,
-            startedAtMs: pumpWorkerStartedAtMs || null,
-            listeners: pumpWorkerListeners.size,
-            lastError: pumpWorkerLastError,
-            db: getPumpFeedDbStats(),
+            ...getPumpFeedWorkerStatus(),
+            childProcess: getPumpStreamProcessStatus(),
           },
         },
         meta: {
@@ -1465,19 +1478,25 @@ export async function handlePumpLivePost(request: Request): Promise<Response> {
           return listPumpLiveState();
         }
         if (action === "start-worker" || action === "connect-session") {
-          startPumpFeedWorker({
-            source: body.source === "pumpportal" ? "pumpportal" : "helius",
-            resetSession: body.resetSession !== false,
-          });
-          return {
-            status: pumpWorkerStatus,
-            source: pumpWorkerSource,
-            startedAtMs: pumpWorkerStartedAtMs,
-          };
+          const source = body.source === "pumpportal" ? "pumpportal" : "helius";
+          const resetSession = body.resetSession !== false;
+          if (process.env.SOLARD_PUMP_STREAM_WORKER === "1") {
+            startPumpFeedWorker({ source, resetSession });
+            return getPumpFeedWorkerStatus();
+          }
+          return ensurePumpStreamProcess({ source, resetSession });
         }
         if (action === "stop-worker") {
-          stopPumpFeedWorker();
-          return { status: pumpWorkerStatus, source: pumpWorkerSource };
+          if (process.env.SOLARD_PUMP_STREAM_WORKER === "1") {
+            stopPumpFeedWorker();
+            return getPumpFeedWorkerStatus();
+          }
+          return stopPumpStreamProcess();
+        }
+        if (action === "worker-status") {
+          return process.env.SOLARD_PUMP_STREAM_WORKER === "1"
+            ? getPumpFeedWorkerStatus()
+            : getPumpStreamProcessStatus();
         }
         resetLiveCurveSession();
         throw new Error(`Unknown pump-live action: ${action || "(empty)"}`);

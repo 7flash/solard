@@ -37,6 +37,10 @@ import {
   addWatchGroupTokenAction,
   type PumpLaunchInput,
 } from "./solard/actions/index.js";
+import {
+  listenTelegramSignals,
+  pollTelegramSignalsOnce,
+} from "./solard/signals/telegram-poller.js";
 
 const OWL = "🦉";
 
@@ -116,6 +120,8 @@ Market data
   solard stream trades [--source helius|pumpportal] [--mint <mint>|--pinned-mints <csv>] [--poll-ms 1000] [--json]
   solard terminal holders <mint> [--limit 12] [--json]
   solard terminal stats [--json]
+  solard signals telegram listen [--poll-ms 1000] [--json] [--verbose]
+  solard signals telegram once [--json]
 
 Jobs
   solard jobs [--status queued|running|succeeded|failed] [--limit 100] [--json]
@@ -340,6 +346,47 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       (job) =>
         `${OWL} job ${job.status} ${job.id} ${job.input?.alias ?? job.input?.name ?? job.kind}\n`,
     );
+    return 0;
+  }
+
+  if (command === "signals") {
+    if (values[0] !== "telegram")
+      throw new Error("Usage: solard signals telegram listen|once [--json]");
+    const mode = values[1] ?? "listen";
+    if (mode === "once") {
+      const result = await pollTelegramSignalsOnce({
+        timeoutSeconds: numberFlag(flags, "timeout", 0),
+      });
+      writeResult(
+        result,
+        flags,
+        (row) =>
+          `${OWL} telegram signals updates=${row.updates} ingested=${row.ingested} offset=${row.offset}\n`,
+      );
+      return 0;
+    }
+    if (mode !== "listen")
+      throw new Error("Usage: solard signals telegram listen|once [--json]");
+    const abort = new AbortController();
+    const stop = () => abort.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    if (!jsonMode(flags))
+      emit(
+        `${OWL} telegram signals listening poll=${numberFlag(flags, "poll-ms", 1000)}ms\n`,
+      );
+    await listenTelegramSignals({
+      pollMs: numberFlag(flags, "poll-ms", 1000),
+      signal: abort.signal,
+      onStatus: (status) => {
+        if (jsonMode(flags))
+          emit(toJson({ event: "telegram-signals", value: status }) + "\n");
+        else if (has(flags, "verbose"))
+          emit(
+            `${OWL} telegram ${(status as any)?.status ?? "status"} ingested=${(status as any)?.ingested ?? 0}\n`,
+          );
+      },
+    });
     return 0;
   }
 

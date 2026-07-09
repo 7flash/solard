@@ -1,4 +1,3 @@
-
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 
@@ -48,7 +47,10 @@ function clean(value: string | undefined | null): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function metadataJson(input: PumpCoinMetadataInput, imageUri: string): PumpCoinMetadataJson {
+function metadataJson(
+  input: PumpCoinMetadataInput,
+  imageUri: string,
+): PumpCoinMetadataJson {
   return {
     name: input.name.trim(),
     symbol: input.symbol.trim(),
@@ -65,7 +67,9 @@ function metadataJson(input: PumpCoinMetadataInput, imageUri: string): PumpCoinM
 
 function fileFromPath(path: string): File {
   const bytes = readFileSync(path);
-  return new File([bytes], basename(path), { type: "application/octet-stream" });
+  return new File([bytes], basename(path), {
+    type: "application/octet-stream",
+  });
 }
 
 function uriFromPayload(payload: any): string | null {
@@ -78,7 +82,8 @@ function uriFromPayload(payload: any): string | null {
     payload?.IpfsHash ? `ipfs://${payload.IpfsHash}` : null,
   ];
   for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+    if (typeof candidate === "string" && candidate.trim())
+      return candidate.trim();
   }
   return null;
 }
@@ -96,7 +101,10 @@ export async function uploadPumpMetadataWithPumpFrontend(
   form.set("file", fileFromPath(input.imagePath));
   form.set("name", input.name);
   form.set("symbol", input.symbol);
-  form.set("description", clean(input.description) ?? `${input.name} (${input.symbol})`);
+  form.set(
+    "description",
+    clean(input.description) ?? `${input.name} (${input.symbol})`,
+  );
   if (clean(input.twitter)) form.set("twitter", clean(input.twitter)!);
   if (clean(input.telegram)) form.set("telegram", clean(input.telegram)!);
   if (clean(input.website)) form.set("website", clean(input.website)!);
@@ -108,12 +116,16 @@ export async function uploadPumpMetadataWithPumpFrontend(
     text: await response.text().catch(() => ""),
   }));
   if (!response.ok) {
-    throw new Error(`Pump metadata upload failed (${response.status}): ${JSON.stringify(raw)}`);
+    throw new Error(
+      `Pump metadata upload failed (${response.status}): ${JSON.stringify(raw)}`,
+    );
   }
 
   const metadataUri = uriFromPayload(raw);
   if (!metadataUri) {
-    throw new Error(`Pump metadata upload did not return a metadata URI: ${JSON.stringify(raw)}`);
+    throw new Error(
+      `Pump metadata upload did not return a metadata URI: ${JSON.stringify(raw)}`,
+    );
   }
 
   return {
@@ -129,7 +141,8 @@ export async function uploadPumpMetadataWithPinata(
   options: UploadPumpMetadataOptions = {},
 ): Promise<UploadedPumpCoinMetadata> {
   const jwt = clean(process.env.PINATA_JWT);
-  if (!jwt) throw new Error("PINATA_JWT is required for pinata metadata uploads.");
+  if (!jwt)
+    throw new Error("PINATA_JWT is required for pinata metadata uploads.");
 
   const endpoint =
     clean(options.endpoint) ||
@@ -147,7 +160,9 @@ export async function uploadPumpMetadataWithPinata(
     text: await imageResponse.text().catch(() => ""),
   }));
   if (!imageResponse.ok || typeof imageRaw?.IpfsHash !== "string") {
-    throw new Error(`Pinata image upload failed (${imageResponse.status}): ${JSON.stringify(imageRaw)}`);
+    throw new Error(
+      `Pinata image upload failed (${imageResponse.status}): ${JSON.stringify(imageRaw)}`,
+    );
   }
 
   const imageUri = `ipfs://${imageRaw.IpfsHash}`;
@@ -155,9 +170,13 @@ export async function uploadPumpMetadataWithPinata(
   const jsonForm = new FormData();
   jsonForm.set(
     "file",
-    new File([JSON.stringify(json, null, 2)], `${input.symbol || "metadata"}.json`, {
-      type: "application/json",
-    }),
+    new File(
+      [JSON.stringify(json, null, 2)],
+      `${input.symbol || "metadata"}.json`,
+      {
+        type: "application/json",
+      },
+    ),
   );
   const jsonResponse = await fetch(endpoint, {
     method: "POST",
@@ -168,7 +187,9 @@ export async function uploadPumpMetadataWithPinata(
     text: await jsonResponse.text().catch(() => ""),
   }));
   if (!jsonResponse.ok || typeof jsonRaw?.IpfsHash !== "string") {
-    throw new Error(`Pinata metadata upload failed (${jsonResponse.status}): ${JSON.stringify(jsonRaw)}`);
+    throw new Error(
+      `Pinata metadata upload failed (${jsonResponse.status}): ${JSON.stringify(jsonRaw)}`,
+    );
   }
 
   return {
@@ -191,7 +212,8 @@ export async function uploadPumpMetadata(
     "pump-frontend";
 
   try {
-    if (provider === "pinata") return await uploadPumpMetadataWithPinata(input, options);
+    if (provider === "pinata")
+      return await uploadPumpMetadataWithPinata(input, options);
     return await uploadPumpMetadataWithPumpFrontend(input, options);
   } catch (error) {
     if (options.fallback && options.fallback !== provider) {

@@ -1,4 +1,6 @@
 import type { Sowl } from "../sdk/sowl.js";
+import { addTokenToWatchGroup } from "../pump/services/pump-live-store.js";
+import { recordPumpFeedObservation } from "../solard/feed/feed-repo.js";
 
 export type SignalDirection = "buy" | "sell" | "watch" | "unknown";
 export type SignalSourceKind = "telegram" | "manual";
@@ -207,11 +209,12 @@ export function ingestTelegramSignal(
   state.signals.unshift(signal);
 
   for (const mint of signal.mints) {
+    const symbol = signal.symbols[0] ?? null;
     try {
       sowl.tokens.upsert({
         mint,
-        name: signal.symbols[0] ?? null,
-        symbol: signal.symbols[0] ?? null,
+        name: symbol,
+        symbol,
         metadataJson: JSON.stringify({
           source: "telegram-signal",
           signalId: signal.id,
@@ -221,6 +224,39 @@ export function ingestTelegramSignal(
       });
     } catch {
       // Token upsert is best-effort; malformed addresses should not break signal capture.
+    }
+    try {
+      addTokenToWatchGroup({
+        groupId: "telegram-signals",
+        mint,
+        name: symbol,
+        symbol,
+        source: "telegram-signal",
+      });
+      recordPumpFeedObservation({
+        eventType: "metadata",
+        source: "telegram-signal",
+        token: {
+          mint,
+          name: symbol,
+          symbol,
+          signature: signal.id,
+          createdAtMs: signal.receivedAtMs,
+          updatedAtMs: signal.receivedAtMs,
+        },
+        raw: {
+          signalId: signal.id,
+          sourceId: signal.sourceId,
+          sourceName: signal.sourceName,
+          direction: signal.direction,
+          confidence: signal.confidence,
+          amountSol: signal.amountSol,
+          urls: signal.urls,
+          text: signal.text.slice(0, 1000),
+        },
+      });
+    } catch {
+      // Terminal projection is best-effort; signal capture remains authoritative.
     }
   }
 

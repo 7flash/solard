@@ -6,7 +6,7 @@ import {
   type PumpTerminalFeedRow,
 } from "../feed/feed-repo.js";
 import { measureSolard, summarizeForMeasure } from "../api-response.js";
-import { handlePumpLivePost } from "../../pump/services/pump-live-api.js";
+import { ensurePumpStreamProcess } from "../processes/pump-stream-process.js";
 import { resolveSolUsdPrice } from "../market/sol-usd.js";
 
 export type TerminalFeedInput = {
@@ -151,30 +151,8 @@ async function startTerminalWorker(
   const resetSession = boolInput(input.resetSession, true);
   return await measureSolard(
     "solard:action:terminal:feed",
-    "startTerminalFeedWorker",
-    async () => {
-      const headers = new Headers({ "content-type": "application/json" });
-      const token = process.env.SOLWAL_WEB_TOKEN?.trim();
-      if (token) headers.set("x-solwal-web-token", token);
-      const response = await handlePumpLivePost(
-        new Request("http://solard.local/api/pump-live", {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            action: "start-worker",
-            source,
-            resetSession,
-          }),
-        }),
-      );
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || payload?.ok === false) {
-        throw new Error(
-          payload?.error ?? `start-worker failed: HTTP ${response.status}`,
-        );
-      }
-      return payload?.value ?? payload;
-    },
+    "ensurePumpStreamChildProcess",
+    () => ensurePumpStreamProcess({ source, resetSession }),
     {
       result: summarizeForMeasure,
       onError: summarizeForMeasure,
