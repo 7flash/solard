@@ -1,30 +1,34 @@
 #!/usr/bin/env bun
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection } from "@solana/web3.js";
 import {
   dbWrite,
-  getCursor,
   recomputeTerminalIndicators,
-  setCursor,
   upsertProcessStatus,
   upsertTerminalToken,
 } from "../db/terminal-store.js";
 import {
-  workerMeasure,
-  measureRetry,
-  summarizeForMeasure,
-} from "../measure.js";
-import { PUMP_PROGRAM_ID } from "../pump/parse-terminal-tx.js";
+  pruneIngestionKeys,
+  recordWorkerError,
+  rememberIngestionKey,
+} from "../db/terminal-ingestion.js";
+import { workerMeasure, summarizeForMeasure } from "../measure.js";
+import {
+  pollLatestPumpSignatures,
+  pollLimit,
+} from "../pump/pump-program-poll.js";
 import { findPumpCreateInTransaction } from "../../pump/parsers/pump-create.js";
 import { resolvedHeliusRpcUrl } from "../../chain/helius-history.js";
 
 const NAME = "solard-pump-creates";
+const KIND = "pump-create-signature";
 const POLL_MS = Math.max(
   500,
-  Number(process.env.SOLARD_PUMP_CREATE_POLL_MS ?? "1500"),
+  Number(process.env.SOLARD_PUMP_CREATE_POLL_MS ?? "1200"),
 );
-const LIMIT = Math.max(
-  1,
-  Math.min(Number(process.env.SOLARD_PUMP_CREATE_BATCH ?? "30"), 100),
+const LIMIT = pollLimit("SOLARD_PUMP_CREATE_BATCH", 60, 100);
+const RETAIN_SEEN_MS = Math.max(
+  60_000,
+  Number(process.env.SOLARD_TERMINAL_SEEN_RETAIN_MS ?? "3600000"),
 );
 
 function rpcUrl(): string {
@@ -49,9 +53,10 @@ async function runTick(
 ): Promise<Record<string, unknown>> {
   return await workerMeasure.measure(
     {
-      start: () => "pump creates poll",
+      start: () => "pump creates live poll",
       end: (result) => ({ result: summarizeForMeasure(result) }),
       catch: (error) => {
+        recordWorkerError(NAME, error);
         upsertProcessStatus({
           name: NAME,
           kind: "stream",
@@ -62,71 +67,109 @@ async function runTick(
       },
     },
     async () => {
-      const cursor = getCursor(`${NAME}:before`) || undefined;
-      const signatures = await measureRetry(
-        "pump creates getSignaturesForAddress",
-        { attempts: 4, delay: 150, backoff: 2 },
-        () =>
-          connection.getSignaturesForAddress(new PublicKey(PUMP_PROGRAM_ID), {
-            limit: LIMIT,
-            before: cursor,
-          }),
-      );
-      if (!signatures.length) return { checked: 0, creates: 0, cursor };
-
-      let creates = 0;
-      const ordered = [...signatures].reverse();
-      for (const sig of ordered) {
-        const tx = await connection
-          .getParsedTransaction(sig.signature, {
-            commitment: "confirmed",
-            maxSupportedTransactionVersion: 0,
-          })
-          .catch(() => null);
-        if (!tx) continue;
-        const found = findPumpCreateInTransaction(
-          tx as any,
-          sig.signature,
-        ) as Record<string, unknown> | null;
-        if (!found?.mint) continue;
-        const mint = str(found.mint);
-        if (!mint) continue;
-        await dbWrite("record_pump_create", () => {
-          upsertTerminalToken({
-            mint,
-            symbol: str(found.symbol) ?? "",
-            name: str(found.name) ?? "",
-            uri: str(found.uri),
-            creator: str(found.creator) ?? str(found.traderPublicKey),
-            bondingCurveKey: str(found.bondingCurveKey),
-            source: "helius-create-poll",
-            phase: "pump",
-            signature: sig.signature,
-            lastSlot: Number((tx as any).slot ?? sig.slot ?? 0),
-            createdAtMs: Date.now(),
-            updatedAtMs: Date.now(),
-          });
-          recomputeTerminalIndicators(mint);
+      const batch = await pollLatestPumpSignatures({
+        connection,
+        workerName: NAME,
+        kind: KIND,
+        limit: LIMIT,
+      });
+      if (!batch.signatures.length) {
+        const pruned = pruneIngestionKeys(KIND, RETAIN_SEEN_MS);
+        upsertProcessStatus({
+          name: NAME,
+          kind: "stream",
+          status: "ok",
+          data: {
+            checked: 0,
+            creates: 0,
+            skippedSeen: batch.skippedSeen,
+            newest: batch.newestSignature,
+            pruned,
+            pollMs: POLL_MS,
+          },
         });
-        creates++;
+        return {
+          checked: 0,
+          creates: 0,
+          skippedSeen: batch.skippedSeen,
+          newest: batch.newestSignature,
+          pruned,
+        };
       }
 
-      setCursor(`${NAME}:before`, signatures[0]!.signature);
+      let creates = 0;
+      let checked = 0;
+      for (const sig of batch.signatures) {
+        checked++;
+        try {
+          const tx = await connection
+            .getParsedTransaction(sig.signature, {
+              commitment: "confirmed",
+              maxSupportedTransactionVersion: 0,
+            })
+            .catch(() => null);
+          if (!tx) {
+            // Mark the signature as checked so the worker doesn't get pinned by unavailable txs.
+            rememberIngestionKey(`${KIND}:${sig.signature}`, KIND);
+            continue;
+          }
+          const found = findPumpCreateInTransaction(
+            tx as any,
+            sig.signature,
+          ) as Record<string, unknown> | null;
+          if (!found?.mint) {
+            rememberIngestionKey(`${KIND}:${sig.signature}`, KIND);
+            continue;
+          }
+          const mint = str(found.mint);
+          if (!mint) {
+            rememberIngestionKey(`${KIND}:${sig.signature}`, KIND);
+            continue;
+          }
+          await dbWrite("record_pump_create", () => {
+            upsertTerminalToken({
+              mint,
+              symbol: str(found.symbol) ?? "",
+              name: str(found.name) ?? "",
+              uri: str(found.uri),
+              creator: str(found.creator) ?? str(found.traderPublicKey),
+              bondingCurveKey: str(found.bondingCurveKey),
+              source: "helius-create-poll",
+              phase: "pump",
+              signature: sig.signature,
+              lastSlot: Number((tx as any).slot ?? sig.slot ?? 0),
+              createdAtMs: Date.now(),
+              updatedAtMs: Date.now(),
+            });
+            recomputeTerminalIndicators(mint);
+            rememberIngestionKey(`${KIND}:${sig.signature}`, KIND);
+          });
+          creates++;
+        } catch (error) {
+          recordWorkerError(NAME, error, { signature: sig.signature });
+        }
+      }
+
       upsertProcessStatus({
         name: NAME,
         kind: "stream",
         status: "ok",
         data: {
-          checked: signatures.length,
+          checked,
           creates,
+          fresh: batch.freshCount,
+          skippedSeen: batch.skippedSeen,
+          newest: batch.newestSignature,
+          previousNewest: batch.previousNewestSignature,
           pollMs: POLL_MS,
-          cursor: signatures[0]!.signature,
         },
       });
       return {
-        checked: signatures.length,
+        checked,
         creates,
-        cursor: signatures[0]!.signature,
+        fresh: batch.freshCount,
+        skippedSeen: batch.skippedSeen,
+        newest: batch.newestSignature,
       };
     },
   );
@@ -138,12 +181,13 @@ async function main(): Promise<void> {
     name: NAME,
     kind: "stream",
     status: "starting",
-    data: { pollMs: POLL_MS },
+    data: { pollMs: POLL_MS, mode: "latest-head-poll" },
   });
   while (true) {
     try {
       await runTick(connection);
     } catch (error) {
+      recordWorkerError(NAME, error);
       upsertProcessStatus({
         name: NAME,
         kind: "stream",
@@ -157,6 +201,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
+  recordWorkerError(NAME, error);
   upsertProcessStatus({ name: NAME, kind: "stream", status: "fatal", error });
   throw error;
 });
