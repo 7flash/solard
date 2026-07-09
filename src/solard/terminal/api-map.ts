@@ -13,6 +13,17 @@ function s(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function b(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (["1", "true", "yes", "mayhem"].includes(text)) return true;
+    if (["0", "false", "no", "standard"].includes(text)) return false;
+  }
+  return null;
+}
+
 export function terminalFeedRowToPumpRow(
   row: TerminalFeedRow | Record<string, unknown>,
 ) {
@@ -37,6 +48,7 @@ export function terminalFeedRowToPumpRow(
       id: `${s(anyRow.mint) ?? "mint"}:trade-count:${index}`,
     }),
   );
+  const isMayhemMode = b(anyRow.isMayhemMode) ?? b(anyRow.mayhemMode) ?? false;
 
   return {
     seq: updatedAtMs,
@@ -59,13 +71,10 @@ export function terminalFeedRowToPumpRow(
     bondingCurveKey: s(anyRow.bondingCurveKey),
     marketCapUsd: mcapUsd,
     priceUsd,
-    // Runtime historically names these fields *Sol*. In the worker pipeline they
-    // are terminal display market-cap units, i.e. USD. Keep aliases so older
-    // components sort/render without blank cells.
     marketCapSol: mcapUsd,
     lastMarketCapSol: mcapUsd,
     initialMarketCapSol: initialMcapUsd,
-    initialMarketCapUsd,
+    initialMarketCapUsd: initialMcapUsd,
     marketCapChangeSol:
       mcapUsd != null && initialMcapUsd != null
         ? mcapUsd - initialMcapUsd
@@ -81,6 +90,9 @@ export function terminalFeedRowToPumpRow(
     lastTradeAtMs: tradeCount > 0 ? updatedAtMs : null,
     tradeCount,
     trades,
+    isMayhemMode,
+    quoteAsset: s(anyRow.quoteAsset),
+    quoteMint: s(anyRow.quoteMint),
     signalText: s(anyRow.signalText),
     signalSource: s(anyRow.signalSource),
     raw: anyRow,

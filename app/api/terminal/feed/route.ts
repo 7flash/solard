@@ -55,6 +55,8 @@ export function GET(request: Request): Promise<Response> {
           url.searchParams.get("includeUnpriced") === "1" ||
           (source === "helius" && url.searchParams.get("pricedOnly") !== "1"),
         source,
+        hideMayhem: url.searchParams.get("hideMayhem") === "1",
+        hideUsdc: url.searchParams.get("hideUsdc") === "1",
       });
       const rows = terminalFeedRowsToPumpRows(rawRows);
       const stats = terminalStoreStats();
@@ -73,6 +75,8 @@ export function GET(request: Request): Promise<Response> {
               "300000",
           ),
           includeUnpriced: url.searchParams.get("includeUnpriced") === "1",
+          hideMayhem: url.searchParams.get("hideMayhem") === "1",
+          hideUsdc: url.searchParams.get("hideUsdc") === "1",
           returnedRows: rows.length,
           rawRows: rawRows.length,
           stats,

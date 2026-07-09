@@ -15,6 +15,7 @@ import { workerMeasure, summarizeForMeasure } from "../measure.js";
 import { resolveSolUsd } from "../prices/sol-usd.js";
 import {
   isPumpPortalCreate,
+  isPumpPortalTrade,
   pumpPortalMint,
   pumpPortalSignature,
   pumpPortalTokenPatch,
@@ -23,7 +24,7 @@ import {
 } from "../pump/pumpportal-normalize.js";
 
 const NAME = "solard-pumpportal-live-v2";
-const BUILD_ID = "pumpportal-live-v3-source-filter-probe";
+const BUILD_ID = "pumpportal-live-v4-trades-mayhem";
 const KIND = "pumpportal-event";
 const PUMPPORTAL_API_KEY =
   process.env.SOLARD_PUMPPORTAL_API_KEY?.trim() ||
@@ -232,9 +233,7 @@ async function runOnce(): Promise<void> {
           lastTradeAtMs,
           lastEventAgeMs: lastEventAtMs ? Date.now() - lastEventAtMs : null,
           hasApiKey: !!PUMPPORTAL_API_KEY,
-          tradeSubscription: PUMPPORTAL_API_KEY
-            ? "enabled"
-            : "disabled-missing-api-key",
+          tradeSubscription: "public-attempt",
           lastRaw,
         },
       });
@@ -258,9 +257,7 @@ async function runOnce(): Promise<void> {
           buildId: BUILD_ID,
           wsUrl: redactUrl(WS_URL),
           hasApiKey: !!PUMPPORTAL_API_KEY,
-          tradeSubscription: PUMPPORTAL_API_KEY
-            ? "enabled"
-            : "disabled-missing-api-key",
+          tradeSubscription: "public-attempt",
         },
       });
       send(ws, { method: "subscribeNewToken" });
@@ -284,9 +281,7 @@ async function runOnce(): Promise<void> {
             if (mint && !watched.includes(mint)) {
               watched.unshift(mint);
               while (watched.length > MAX_WATCHED) watched.pop();
-              if (PUMPPORTAL_API_KEY) {
-                send(ws, { method: "subscribeTokenTrade", keys: [mint] });
-              }
+              send(ws, { method: "subscribeTokenTrade", keys: [mint] });
             }
           } else if (result === "trade") {
             trades++;
@@ -310,9 +305,7 @@ async function runOnce(): Promise<void> {
               lastTradeAtMs,
               lastEventAgeMs: 0,
               hasApiKey: !!PUMPPORTAL_API_KEY,
-              tradeSubscription: PUMPPORTAL_API_KEY
-                ? "enabled"
-                : "disabled-missing-api-key",
+              tradeSubscription: "public-attempt",
               lastRaw,
             },
           });

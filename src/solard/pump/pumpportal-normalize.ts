@@ -13,10 +13,17 @@ function clean(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+function lower(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
+}
+
 function num(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return Number(value);
   if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
+    const parsed = Number(value.replace(/,/g, ""));
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
@@ -24,10 +31,11 @@ function num(value: unknown): number | null {
 
 function bool(value: unknown): boolean | null {
   if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
   if (typeof value === "string") {
     const v = value.toLowerCase();
-    if (["1", "true", "yes"].includes(v)) return true;
-    if (["0", "false", "no"].includes(v)) return false;
+    if (["1", "true", "yes", "mayhem"].includes(v)) return true;
+    if (["0", "false", "no", "standard"].includes(v)) return false;
   }
   return null;
 }
@@ -47,18 +55,55 @@ function nested(raw: RawPumpPortalEvent, key: string): Record<string, unknown> {
     : {};
 }
 
+export function pumpPortalTxType(
+  raw: RawPumpPortalEvent,
+): "create" | "buy" | "sell" | "trade" | "complete" | "unknown" {
+  const text =
+    [raw.txType, raw.type, raw.eventType, raw.action, raw.kind]
+      .map(lower)
+      .find(Boolean) ?? "";
+  if (
+    text.includes("create") ||
+    text.includes("newtoken") ||
+    text.includes("launch")
+  )
+    return "create";
+  if (text.includes("buy")) return "buy";
+  if (text.includes("sell")) return "sell";
+  if (text.includes("trade")) return "trade";
+  if (
+    text.includes("complete") ||
+    text.includes("migrate") ||
+    text.includes("graduat")
+  )
+    return "complete";
+  if (
+    num(raw.solAmount) != null ||
+    num(raw.tokenAmount) != null ||
+    num(raw.vSolInBondingCurve) != null
+  )
+    return "trade";
+  if (clean(raw.uri) || clean(raw.name) || clean(raw.symbol)) return "create";
+  return "unknown";
+}
+
 export function isPumpPortalCreate(raw: RawPumpPortalEvent): boolean {
-  const txType = clean(raw.txType) ?? clean(raw.type) ?? clean(raw.eventType);
+  return pumpPortalTxType(raw) === "create";
+}
+
+export function isPumpPortalTrade(raw: RawPumpPortalEvent): boolean {
+  const type = pumpPortalTxType(raw);
   return (
-    txType === "create" ||
-    !!clean(raw.uri) ||
-    !!clean(raw.name) ||
-    !!clean(raw.symbol)
+    type === "buy" || type === "sell" || type === "trade" || type === "complete"
   );
 }
 
 export function pumpPortalMint(raw: RawPumpPortalEvent): string | null {
-  const mint = clean(raw.mint) ?? clean(raw.tokenMint) ?? clean(raw.ca);
+  const mint =
+    clean(raw.mint) ??
+    clean(raw.tokenMint) ??
+    clean(raw.ca) ??
+    clean(raw.address);
   return mint && validPublicKey(mint) ? mint : null;
 }
 
@@ -67,7 +112,8 @@ export function pumpPortalSignature(raw: RawPumpPortalEvent): string | null {
     clean(raw.signature) ??
     clean(raw.txSignature) ??
     clean(raw.transactionSignature) ??
-    clean(raw.sig)
+    clean(raw.sig) ??
+    clean(raw.hash)
   );
 }
 
@@ -78,18 +124,25 @@ function readMarketCapSol(raw: RawPumpPortalEvent): number | null {
     num(raw.market_cap_sol) ??
     num(raw.mcapSol) ??
     num(raw.usd_market_cap_sol) ??
-    num(raw.marketCap) ??
     num(snapshot.marketCapSol);
   if (mcap != null && mcap > 0) return mcap;
 
+  const directMarketCap = num(raw.marketCap);
+  const solUsd = num(raw.solUsd) ?? num(raw.solPriceUsd);
   const marketCapUsd =
     num(raw.marketCapUsd) ??
     num(raw.market_cap_usd) ??
     num(raw.usdMarketCap) ??
     num(raw.market_cap_usd_current);
-  const solUsd = num(raw.solUsd) ?? num(raw.solPriceUsd);
   if (marketCapUsd != null && solUsd != null && solUsd > 0)
     return marketCapUsd / solUsd;
+  // PumpPortal's public stream has historically used marketCap as SOL. If the
+  // value is huge, treat it as USD only when SOL/USD is present.
+  if (directMarketCap != null && directMarketCap > 0) {
+    if (directMarketCap > 1_000_000 && solUsd && solUsd > 0)
+      return directMarketCap / solUsd;
+    return directMarketCap;
+  }
   return null;
 }
 
@@ -108,16 +161,23 @@ function readPriceSol(
     return marketCapSol / DEFAULT_PUMP_SUPPLY_UI;
 
   const tokenAmount =
-    num(raw.tokenAmount) ?? num(raw.tokens) ?? num(raw.tokenDeltaUi);
+    num(raw.tokenAmount) ??
+    num(raw.tokens) ??
+    num(raw.tokenDeltaUi) ??
+    num(raw.tokenAmountUi);
   const solAmount =
-    num(raw.solAmount) ?? num(raw.solDeltaUi) ?? num(raw.sol_amount);
+    num(raw.solAmount) ??
+    num(raw.solDeltaUi) ??
+    num(raw.sol_amount) ??
+    num(raw.solAmountUi);
   if (
     tokenAmount != null &&
     tokenAmount > 0 &&
     solAmount != null &&
     solAmount > 0
   ) {
-    return solAmount / tokenAmount;
+    const sol = solAmount > 10_000 ? solAmount / LAMPORTS_PER_SOL : solAmount;
+    return sol / tokenAmount;
   }
   return null;
 }
@@ -135,6 +195,43 @@ function image(raw: RawPumpPortalEvent): string | null {
     ipfsGateway(clean(raw.image_uri)) ??
     ipfsGateway(clean(meta.image)) ??
     ipfsGateway(clean(meta.imageUrl))
+  );
+}
+
+function mayhem(raw: RawPumpPortalEvent): boolean {
+  const meta = nested(raw, "metadata");
+  const values = [
+    raw.isMayhemMode,
+    raw.mayhemMode,
+    raw.mayhem,
+    raw.isMayhem,
+    raw.mode,
+    raw.launchMode,
+    raw.curveType,
+    raw.poolType,
+    meta.isMayhemMode,
+    meta.mayhem,
+    meta.launchMode,
+  ];
+  return values.some(
+    (value) => bool(value) === true || lower(value).includes("mayhem"),
+  );
+}
+
+function quoteAsset(raw: RawPumpPortalEvent): string | null {
+  return (
+    clean(raw.quoteAsset) ??
+    clean(raw.quoteSymbol) ??
+    clean(raw.quoteCurrency) ??
+    clean(raw.pairQuoteSymbol)
+  );
+}
+
+function quoteMint(raw: RawPumpPortalEvent): string | null {
+  return (
+    clean(raw.quoteMint) ??
+    clean(raw.quoteTokenMint) ??
+    clean(raw.pairQuoteMint)
   );
 }
 
@@ -159,7 +256,11 @@ export function pumpPortalTokenPatch(args: {
     (marketCapSol != null && args.solUsd != null
       ? marketCapSol * args.solUsd
       : null) ??
-    (priceUsd != null ? priceUsd * DEFAULT_PUMP_SUPPLY_UI : null);
+    (priceUsd != null
+      ? priceUsd *
+        (num(raw.supplyUi) ?? num(raw.totalSupply) ?? DEFAULT_PUMP_SUPPLY_UI)
+      : null);
+  const type = pumpPortalTxType(raw);
 
   return {
     mint,
@@ -178,17 +279,21 @@ export function pumpPortalTokenPatch(args: {
       clean(raw.bondingCurve) ??
       clean(raw.bonding_curve),
     source: args.source,
-    phase: bool(raw.complete) === true ? "migrated" : "pump",
+    phase:
+      bool(raw.complete) === true || type === "complete" ? "migrated" : "pump",
+    isMayhemMode: mayhem(raw) ? 1 : 0,
+    quoteAsset: quoteAsset(raw),
+    quoteMint: quoteMint(raw),
     supplyUi:
       num(raw.supplyUi) ?? num(raw.totalSupply) ?? DEFAULT_PUMP_SUPPLY_UI,
     priceSol,
     priceUsd,
     marketCapSol,
     marketCapUsd,
-    initialMarketCapUsd: marketCapUsd,
+    initialMarketCapUsd: type === "create" ? marketCapUsd : null,
     signature: pumpPortalSignature(raw),
     lastSlot: num(raw.slot) ?? 0,
-    createdAtMs: now,
+    createdAtMs: type === "create" ? now : undefined,
     updatedAtMs: now,
   };
 }
@@ -204,7 +309,9 @@ export function pumpPortalTradePatch(args: {
   const raw = args.raw;
   const mint = pumpPortalMint(raw);
   const signature = pumpPortalSignature(raw);
+  const txType = pumpPortalTxType(raw);
   if (!mint || !signature) return null;
+  if (!["buy", "sell", "trade", "complete"].includes(txType)) return null;
   const now = args.now ?? Date.now();
   const tokenAmount = Math.abs(
     num(raw.tokenAmount) ??
@@ -213,13 +320,14 @@ export function pumpPortalTradePatch(args: {
       num(raw.tokenAmountUi) ??
       0,
   );
-  const solAmount = Math.abs(
+  const rawSol = Math.abs(
     num(raw.solAmount) ??
       num(raw.solDeltaUi) ??
       num(raw.sol_amount) ??
       num(raw.solAmountUi) ??
       0,
   );
+  const solAmount = rawSol > 10_000 ? rawSol / LAMPORTS_PER_SOL : rawSol;
   const priceSol = readPriceSol(raw, readMarketCapSol(raw));
   const priceUsd =
     priceSol != null && args.solUsd != null ? priceSol * args.solUsd : null;
@@ -229,22 +337,22 @@ export function pumpPortalTradePatch(args: {
   const marketCapUsd =
     num(raw.marketCapUsd) ??
     num(raw.market_cap_usd) ??
+    num(raw.usdMarketCap) ??
     (marketCapSol != null && args.solUsd != null
       ? marketCapSol * args.solUsd
       : null) ??
     (priceUsd != null ? priceUsd * DEFAULT_PUMP_SUPPLY_UI : null);
-  const txType = clean(raw.txType) ?? clean(raw.type) ?? "unknown";
   const side = txType === "buy" || txType === "sell" ? txType : "unknown";
 
   return {
-    id: `${signature}:${mint}:${clean(raw.traderPublicKey) ?? clean(raw.user) ?? "pumpportal"}`,
+    id: `${signature}:${mint}:${clean(raw.traderPublicKey) ?? clean(raw.user) ?? side}`,
     mint,
     signature,
     slot: num(raw.slot) ?? 0,
     owner: clean(raw.traderPublicKey) ?? clean(raw.user),
     side,
     tokenDeltaUi: tokenAmount,
-    solDeltaUi: solAmount > 10_000 ? solAmount / LAMPORTS_PER_SOL : solAmount,
+    solDeltaUi: solAmount,
     priceSol,
     priceUsd,
     marketCapUsd,

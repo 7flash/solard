@@ -36,6 +36,9 @@ export const TerminalTokenSchema = z.object({
   bondingCurveKey: z.string().nullable().default(null),
   source: z.string().default("unknown"),
   phase: z.enum(["pump", "migrated", "unknown"]).default("unknown"),
+  isMayhemMode: z.number().default(0),
+  quoteAsset: z.string().nullable().default(null),
+  quoteMint: z.string().nullable().default(null),
   supplyUi: z.number().default(1_000_000_000),
   priceSol: z.number().nullable().default(null),
   priceUsd: z.number().nullable().default(null),
@@ -142,6 +145,11 @@ export const terminalDb = new Database(
 
 let initialized = false;
 
+function addColumnIfMissing(table: string, column: string, ddl: string): void {
+  const rows = terminalDb.raw<{ name: string }>(`PRAGMA table_info(${table})`);
+  if (!rows.some((row) => row.name === column)) terminalDb.exec(ddl);
+}
+
 export function initTerminalStore(): void {
   if (initialized) return;
   initialized = true;
@@ -154,6 +162,21 @@ export function initTerminalStore(): void {
       terminalDb.exec("PRAGMA journal_mode=WAL");
       terminalDb.exec("PRAGMA synchronous=NORMAL");
       terminalDb.exec("PRAGMA busy_timeout=5000");
+      addColumnIfMissing(
+        "terminalTokensLive",
+        "isMayhemMode",
+        "ALTER TABLE terminalTokensLive ADD COLUMN isMayhemMode INTEGER DEFAULT 0",
+      );
+      addColumnIfMissing(
+        "terminalTokensLive",
+        "quoteAsset",
+        "ALTER TABLE terminalTokensLive ADD COLUMN quoteAsset TEXT",
+      );
+      addColumnIfMissing(
+        "terminalTokensLive",
+        "quoteMint",
+        "ALTER TABLE terminalTokensLive ADD COLUMN quoteMint TEXT",
+      );
       terminalDb.exec(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_terminal_tokens_live_mint ON terminalTokensLive(mint)",
       );
@@ -162,6 +185,12 @@ export function initTerminalStore(): void {
       );
       terminalDb.exec(
         "CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_mcap ON terminalTokensLive(marketCapUsd DESC)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_source ON terminalTokensLive(source)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_mayhem ON terminalTokensLive(isMayhemMode)",
       );
       terminalDb.exec(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_terminal_trades_live_id ON terminalTradesLive(id)",
@@ -338,6 +367,12 @@ export function upsertTerminalToken(
     bondingCurveKey: input.bondingCurveKey ?? existing?.bondingCurveKey ?? null,
     source: input.source ?? existing?.source ?? "unknown",
     phase: input.phase ?? existing?.phase ?? "pump",
+    isMayhemMode: Number(
+      (input as any).isMayhemMode ?? (existing as any)?.isMayhemMode ?? 0,
+    ),
+    quoteAsset:
+      (input as any).quoteAsset ?? (existing as any)?.quoteAsset ?? null,
+    quoteMint: (input as any).quoteMint ?? (existing as any)?.quoteMint ?? null,
     supplyUi: input.supplyUi ?? existing?.supplyUi ?? 1_000_000_000,
     priceSol: input.priceSol ?? existing?.priceSol ?? null,
     priceUsd: input.priceUsd ?? existing?.priceUsd ?? null,
@@ -354,8 +389,8 @@ export function upsertTerminalToken(
     updatedAtMs: input.updatedAtMs ?? now,
   };
   terminalDb.exec(
-    `INSERT INTO terminalTokensLive (mint, symbol, name, image, uri, description, website, twitter, telegram, creator, bondingCurveKey, source, phase, supplyUi, priceSol, priceUsd, marketCapSol, marketCapUsd, initialMarketCapUsd, lastSlot, signature, createdAtMs, updatedAtMs)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO terminalTokensLive (mint, symbol, name, image, uri, description, website, twitter, telegram, creator, bondingCurveKey, source, phase, isMayhemMode, quoteAsset, quoteMint, supplyUi, priceSol, priceUsd, marketCapSol, marketCapUsd, initialMarketCapUsd, lastSlot, signature, createdAtMs, updatedAtMs)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(mint) DO UPDATE SET
        symbol=excluded.symbol,
        name=excluded.name,
@@ -369,6 +404,9 @@ export function upsertTerminalToken(
        bondingCurveKey=excluded.bondingCurveKey,
        source=excluded.source,
        phase=excluded.phase,
+       isMayhemMode=MAX(COALESCE(terminalTokensLive.isMayhemMode, 0), COALESCE(excluded.isMayhemMode, 0)),
+       quoteAsset=COALESCE(excluded.quoteAsset, terminalTokensLive.quoteAsset),
+       quoteMint=COALESCE(excluded.quoteMint, terminalTokensLive.quoteMint),
        supplyUi=excluded.supplyUi,
        priceSol=COALESCE(excluded.priceSol, terminalTokensLive.priceSol),
        priceUsd=COALESCE(excluded.priceUsd, terminalTokensLive.priceUsd),
@@ -391,6 +429,9 @@ export function upsertTerminalToken(
     row.bondingCurveKey,
     row.source,
     row.phase,
+    (row as any).isMayhemMode,
+    (row as any).quoteAsset,
+    (row as any).quoteMint,
     row.supplyUi,
     row.priceSol,
     row.priceUsd,
@@ -575,6 +616,8 @@ export function listTerminalFeed(
     activeWindowMs?: number;
     includeUnpriced?: boolean;
     source?: string | null;
+    hideMayhem?: boolean;
+    hideUsdc?: boolean;
   } = {},
 ): TerminalFeedRow[] {
   const limit = Math.max(1, Math.min(args.limit ?? 250, 1000));
@@ -600,11 +643,19 @@ export function listTerminalFeed(
   const priceClause = includeUnpriced
     ? "1=1"
     : "(source LIKE 'telegram%' OR marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL OR image IS NOT NULL)";
+  const mayhemClause = args.hideMayhem
+    ? "COALESCE(isMayhemMode, 0) = 0"
+    : "1=1";
+  const usdcClause = args.hideUsdc
+    ? "LOWER(COALESCE(quoteAsset, '')) != 'usdc' AND LOWER(COALESCE(quoteMint, '')) NOT LIKE '%epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v%'"
+    : "1=1";
   const tokens = terminalDb.raw<TerminalToken>(
     `SELECT * FROM terminalTokensLive
      WHERE updatedAtMs >= ?
        AND ${sourceClause}
        AND ${priceClause}
+       AND ${mayhemClause}
+       AND ${usdcClause}
      ORDER BY updatedAtMs DESC
      LIMIT ?`,
     minUpdatedAt,
@@ -615,7 +666,11 @@ export function listTerminalFeed(
       "SELECT * FROM terminalIndicatorsLive WHERE mint = ?",
       token.mint,
     );
-    const byInterval = new Map(indicators.map((row) => [row.intervalSec, row]));
+    const byInterval = new Map<number, TerminalIndicator>(
+      indicators.map(
+        (row) => [row.intervalSec, row] as [number, TerminalIndicator],
+      ),
+    );
     const tradeCount =
       terminalDb.raw<{ count: number }>(
         "SELECT COUNT(*) as count FROM terminalTradesLive WHERE mint = ?",

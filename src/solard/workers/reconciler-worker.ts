@@ -13,6 +13,7 @@ import {
 import { resolvedHeliusRpcUrl } from "../../chain/helius-history.js";
 
 const NAME = "solard-reconciler";
+const BUILD_ID = "reconciler-v3-build-heartbeat";
 const POLL_MS = Math.max(
   1000,
   Number(process.env.SOLARD_RECONCILER_POLL_MS ?? "2500"),
@@ -52,13 +53,22 @@ async function tick(connection: Connection): Promise<Record<string, unknown>> {
           kind: "reconciler",
           status: "error",
           error,
+          data: { buildId: BUILD_ID },
         });
         throw error;
       },
     },
     async () => {
       const sigs = pendingTradeSignatures(100);
-      if (!sigs.length) return { checked: 0, updated: 0 };
+      if (!sigs.length) {
+        upsertProcessStatus({
+          name: NAME,
+          kind: "reconciler",
+          status: "ok",
+          data: { checked: 0, updated: 0, pollMs: POLL_MS, buildId: BUILD_ID },
+        });
+        return { checked: 0, updated: 0 };
+      }
       const statuses = await measureRetry(
         "reconciler getSignatureStatuses",
         { attempts: 4, delay: 150, backoff: 2 },
@@ -78,7 +88,12 @@ async function tick(connection: Connection): Promise<Record<string, unknown>> {
         name: NAME,
         kind: "reconciler",
         status: "ok",
-        data: { checked: sigs.length, updated, pollMs: POLL_MS },
+        data: {
+          checked: sigs.length,
+          updated,
+          pollMs: POLL_MS,
+          buildId: BUILD_ID,
+        },
       });
       return { checked: sigs.length, updated };
     },
@@ -91,7 +106,7 @@ async function main(): Promise<void> {
     name: NAME,
     kind: "reconciler",
     status: "starting",
-    data: { pollMs: POLL_MS },
+    data: { pollMs: POLL_MS, buildId: BUILD_ID },
   });
   while (true) {
     try {
@@ -102,6 +117,7 @@ async function main(): Promise<void> {
         kind: "reconciler",
         status: "error",
         error,
+        data: { buildId: BUILD_ID },
       });
       await sleep(Math.max(POLL_MS, 3000));
     }
@@ -109,12 +125,32 @@ async function main(): Promise<void> {
   }
 }
 
+process.on("SIGINT", () => {
+  upsertProcessStatus({
+    name: NAME,
+    kind: "reconciler",
+    status: "stopped",
+    data: { reason: "SIGINT", buildId: BUILD_ID },
+  });
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  upsertProcessStatus({
+    name: NAME,
+    kind: "reconciler",
+    status: "stopped",
+    data: { reason: "SIGTERM", buildId: BUILD_ID },
+  });
+  process.exit(0);
+});
+
 main().catch((error) => {
   upsertProcessStatus({
     name: NAME,
     kind: "reconciler",
     status: "fatal",
     error,
+    data: { buildId: BUILD_ID },
   });
   throw error;
 });

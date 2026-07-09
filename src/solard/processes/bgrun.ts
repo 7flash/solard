@@ -65,14 +65,14 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     kind: "stream",
     command: "bun run ./src/solard/workers/pumpportal-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_PUMPPORTAL_STALE_MS ?? "15000"),
-    buildId: "pumpportal-live-v3-source-filter-probe",
+    buildId: "pumpportal-live-v4-trades-mayhem",
   },
   "solard-reconciler": {
     name: "solard-reconciler",
     kind: "reconciler",
     command: "bun run ./src/solard/workers/reconciler-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_RECONCILER_STALE_MS ?? "30000"),
-    buildId: "reconciler-v2",
+    buildId: "reconciler-v3-build-heartbeat",
   },
   "solard-telegram-signals": {
     name: "solard-telegram-signals",

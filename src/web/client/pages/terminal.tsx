@@ -10,8 +10,6 @@ import {
   passesBadgeFilters,
   formatMcap,
   latestMcap,
-  mcapChangePct,
-  formatPct,
   sortFeedRows,
   age,
   selectedWatchGroup,
@@ -55,6 +53,23 @@ function chooseInspector(rows: PumpFeedRow[]): PumpFeedRow | null {
 }
 
 let holderHoverTimer: ReturnType<typeof setTimeout> | null = null;
+const holderAutoLoadedAt: Record<string, number> = {};
+
+function autoLoadHolders(row: PumpFeedRow | null): void {
+  const mint = row?.mint ?? null;
+  if (!mint || !isLikelySolanaPublicKey(mint)) return;
+  if (
+    state.tokenHolders[mint]?.length ||
+    state.tokenHoldersLoadingMint === mint
+  )
+    return;
+  const last = holderAutoLoadedAt[mint] ?? 0;
+  if (Date.now() - last < 30_000) return;
+  holderAutoLoadedAt[mint] = Date.now();
+  void refreshTokenHolders(mint)
+    .then(update)
+    .catch(() => undefined);
+}
 
 function tradeCount(row: PumpFeedRow | null | undefined): number {
   if (!row) return 0;
@@ -191,10 +206,6 @@ function inspectRow(row: PumpFeedRow): void {
   fixTerminalInspector(row);
   if (holderHoverTimer) clearTimeout(holderHoverTimer);
   if (!isLikelySolanaPublicKey(row.mint)) return;
-  // Only auto-load holders once the row has a confirmed curve/mcap snapshot.
-  // Bad parser rows and stale cache entries otherwise hammer RPC with
-  // “not a Token mint” lookups on every hover. Manual Refresh remains available.
-  if (latestMcap(row) == null) return;
   const key = pumpRowKey(row);
   const mint = row.mint!;
   holderHoverTimer = setTimeout(() => {
@@ -240,7 +251,7 @@ function HolderList({ mint }: { mint?: string | null }) {
   if (!holders.length)
     return (
       <p className="muted tiny">
-        hover keeps inspector here; click refresh holders.
+        loading holders automatically; click refresh if RPC is slow.
       </p>
     );
   const maxPct = Math.max(
@@ -261,6 +272,9 @@ function HolderList({ mint }: { mint?: string | null }) {
             <span>#{index + 1}</span>
             <b>{holder.uiAmount ?? holder.amount ?? "—"}</b>
             <code>{short(holder.owner ?? holder.tokenAccount, 4, 4)}</code>
+            <span className="holder-pct">
+              {pct > 0 ? `${pct.toFixed(pct >= 1 ? 2 : 4)}%` : "—"}
+            </span>
             <em title={`${pct.toFixed(4)}% supply`}>
               <i
                 style={{
@@ -332,7 +346,7 @@ export function TerminalPage() {
   const rows = sortPinnedFirst(sortFeedRows(filteredRows));
   const inspector = chooseInspector(rows);
   const currentMcap = latestMcap(inspector ?? {});
-  const currentDeltaPct = mcapChangePct(inspector ?? {});
+  autoLoadHolders(inspector);
 
   return (
     <div className="terminal-page-only">
@@ -472,7 +486,6 @@ export function TerminalPage() {
           <option value="newest">newest</option>
           <option value="mcap-desc">mcap ↓</option>
           <option value="mcap-asc">mcap ↑</option>
-          <option value="mcap-change-pct-desc">Δ% ↓</option>
           <option value="sma1m-desc">SMA 1m ↓</option>
           <option value="sma5m-desc">SMA 5m ↓</option>
           <option value="sma15m-desc">SMA 15m ↓</option>
@@ -529,7 +542,6 @@ export function TerminalPage() {
                 <th></th>
                 <th>token</th>
                 <th>mcap $</th>
-                <th>Δ%</th>
                 <th>SMA 1/5/15</th>
                 <th>trd</th>
                 <th>age</th>
@@ -578,18 +590,6 @@ export function TerminalPage() {
                       </a>
                     </td>
                     <td className="num-cell">{formatMcap(latestMcap(row))}</td>
-                    <td
-                      className={
-                        mcapChangePct(row) != null && mcapChangePct(row)! > 0
-                          ? "gain"
-                          : mcapChangePct(row) != null &&
-                              mcapChangePct(row)! < 0
-                            ? "loss"
-                            : ""
-                      }
-                    >
-                      {formatPct(mcapChangePct(row))}
-                    </td>
                     <td>
                       <SmaInline row={row} />
                     </td>
@@ -686,18 +686,6 @@ export function TerminalPage() {
               <div className="terminal-kv">
                 <span>MCap</span>
                 <b>{formatMcap(currentMcap)}</b>
-                <span>Δ %</span>
-                <b
-                  className={
-                    currentDeltaPct != null && currentDeltaPct > 0
-                      ? "gain"
-                      : currentDeltaPct != null && currentDeltaPct < 0
-                        ? "loss"
-                        : ""
-                  }
-                >
-                  {formatPct(currentDeltaPct)}
-                </b>
                 <span>SMA 1m</span>
                 <b>{formatMcap(inspector.sma1m)}</b>
                 <span>SMA 5m</span>

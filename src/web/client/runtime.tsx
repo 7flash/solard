@@ -81,7 +81,7 @@ export type PumpFeedRow = {
   sma15m?: number | null;
   sma60m?: number | null;
   lastTradeAtMs?: number | null;
-  isMayhemMode?: boolean | null;
+  isMayhemMode?: boolean | number | string | null;
   quoteAsset?: string | null;
   quoteMint?: string | null;
   trades?: AnyRow[];
@@ -137,7 +137,7 @@ export type TokenWatchToken = {
   initialMarketCapUsd?: number | null;
   marketCapChangeSol?: number | null;
   marketCapChangePct?: number | null;
-  isMayhemMode?: boolean | null;
+  isMayhemMode?: boolean | number | string | null;
   quoteAsset?: string | null;
   quoteMint?: string | null;
   trades?: AnyRow[];
@@ -619,10 +619,18 @@ export function tokenImage(row: {
 }
 
 export function isMayhemToken(row: {
-  isMayhemMode?: boolean | null;
+  isMayhemMode?: boolean | number | string | null;
   raw?: AnyRow;
 }): boolean {
-  if (row.isMayhemMode === true) return true;
+  const direct = String(row.isMayhemMode ?? "").toLowerCase();
+  if (
+    row.isMayhemMode === true ||
+    row.isMayhemMode === 1 ||
+    direct === "true" ||
+    direct === "1" ||
+    direct.includes("mayhem")
+  )
+    return true;
   const raw = row.raw ?? {};
   return [
     "isMayhemMode",
@@ -632,12 +640,18 @@ export function isMayhemToken(row: {
     "mode",
     "launchMode",
     "curveType",
-  ].some(
-    (key) =>
-      String(raw[key] ?? "")
-        .toLowerCase()
-        .includes("mayhem") || raw[key] === true,
-  );
+    "poolType",
+  ].some((key) => {
+    const value = raw[key];
+    const text = String(value ?? "").toLowerCase();
+    return (
+      value === true ||
+      value === 1 ||
+      text === "true" ||
+      text === "1" ||
+      text.includes("mayhem")
+    );
+  });
 }
 
 export function isUsdcToken(row: {
@@ -663,7 +677,7 @@ export function isUsdcToken(row: {
 }
 
 export function passesBadgeFilters(row: {
-  isMayhemMode?: boolean | null;
+  isMayhemMode?: boolean | number | string | null;
   quoteAsset?: string | null;
   quoteMint?: string | null;
   raw?: AnyRow;
@@ -762,7 +776,7 @@ export function tokenSocialLinks(row: {
 }
 
 export function TokenBadges(row: {
-  isMayhemMode?: boolean | null;
+  isMayhemMode?: boolean | number | string | null;
   quoteAsset?: string | null;
   quoteMint?: string | null;
   raw?: AnyRow;
@@ -1167,7 +1181,7 @@ export async function addWatchedToken(
     marketCapSol?: number | null;
     marketCapUsd?: number | null;
     priceUsd?: number | null;
-    isMayhemMode?: boolean | null;
+    isMayhemMode?: boolean | number | string | null;
     quoteAsset?: string | null;
     quoteMint?: string | null;
     source?: string | null;
@@ -1326,9 +1340,6 @@ function normalizeFeedRow(
     change != null && initial != null && initial > 0
       ? (change / initial) * 100
       : null;
-  // Keep this as a local with the exact old name so stale/generated render paths
-  // that used object shorthand do not throw ReferenceError.
-  const initialMarketCapUsd = initial;
   const avg = (ms: number): number | null => {
     const vals = mergedSamples
       .filter((sample) => sample.capturedAtMs >= now - ms)
@@ -1348,7 +1359,7 @@ function normalizeFeedRow(
     marketCapUsd: mcap,
     lastMarketCapSol: mcap,
     initialMarketCapSol: initial,
-    initialMarketCapUsd,
+    initialMarketCapUsd: initial,
     marketCapChangeSol: row.marketCapChangeSol ?? change,
     marketCapChangePct: row.marketCapChangePct ?? pct,
     samples: mergedSamples,
@@ -1440,7 +1451,7 @@ async function refreshTerminalFeedOnce(
         health?: AnyRow;
         debug?: AnyRow;
       }>(
-        `/api/terminal/feed?ensure=${args.ensure ? "1" : "0"}&limit=300&activeWindowMs=${encodeURIComponent(String(activeWindowMs))}&includeUnpriced=${args.includeUnpriced ? "1" : "0"}&source=${encodeURIComponent(state.pumpFeedSource)}`,
+        `/api/terminal/feed?ensure=${args.ensure ? "1" : "0"}&limit=300&activeWindowMs=${encodeURIComponent(String(activeWindowMs))}&includeUnpriced=${args.includeUnpriced ? "1" : "0"}&source=${encodeURIComponent(state.pumpFeedSource)}&hideMayhem=${state.hideMayhem ? "1" : "0"}&hideUsdc=${state.hideUsdc ? "1" : "0"}`,
       ),
     (value) => ({
       rows: value.rows?.length ?? 0,
