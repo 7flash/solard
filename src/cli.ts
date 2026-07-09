@@ -20,6 +20,7 @@ import {
   listJobsAction,
   listSmaAggregatesAction,
   listTerminalFeedAction,
+  followTerminalFeedAction,
   getTerminalFeedStatsAction,
   listTerminalHoldersAction,
   listTokensAction,
@@ -110,7 +111,7 @@ Trading
 
 Market data
   solard sma [mint] [--interval-seconds 60] [--latest] [--limit 100] [--json]
-  solard terminal feed [--since-ms <ms>] [--pinned-mints <csv>] [--limit 250] [--json]
+  solard terminal feed [--follow|--once] [--source helius|pumpportal] [--since-ms <ms>] [--pinned-mints <csv>] [--limit 250] [--json]
   solard terminal holders <mint> [--limit 12] [--json]
   solard terminal stats [--json]
 
@@ -340,22 +341,58 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     const subcommand = command === "feed" ? "feed" : values[0];
     if (subcommand === "feed") {
       const offsetValues = command === "feed" ? values : values.slice(1);
-      const result = await listTerminalFeedAction({
+      const pinnedMints = flag(flags, "pinned-mints") ?? offsetValues.join(",");
+      const shouldFollow =
+        has(flags, "follow") || (!has(flags, "once") && !jsonMode(flags));
+      const formatRow = (row: any) =>
+        `${row.symbol ? "$" + row.symbol : "-"}	${row.mint}	mcap=${row.marketCapSol ?? row.lastMarketCapSol ?? "-"}	sma1=${row.sma1m ?? "-"}	sma5=${row.sma5m ?? "-"}	sma15=${row.sma15m ?? "-"}`;
+      if (!shouldFollow) {
+        const result = await listTerminalFeedAction({
+          sinceMs: flag(flags, "since-ms"),
+          pinnedMints,
+          limit: numberFlag(flags, "limit", 250),
+        });
+        writeResult(
+          result,
+          flags,
+          (rows) => rows.map((row: any) => formatRow(row)).join("\n") + "\n",
+        );
+        return 0;
+      }
+
+      const abort = new AbortController();
+      const stop = () => abort.abort();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      if (!jsonMode(flags)) {
+        emit(
+          `${OWL} terminal feed listening source=${flag(flags, "source") ?? "helius"} poll=${numberFlag(flags, "poll-ms", 1500)}ms\n`,
+        );
+      }
+      await followTerminalFeedAction({
         sinceMs: flag(flags, "since-ms"),
-        pinnedMints: flag(flags, "pinned-mints") ?? offsetValues.join(","),
+        pinnedMints,
         limit: numberFlag(flags, "limit", 250),
+        source: flag(flags, "source"),
+        resetSession: !has(flags, "no-reset"),
+        pollMs: numberFlag(flags, "poll-ms", 1500),
+        signal: abort.signal,
+        onStatus: (status) => {
+          if (jsonMode(flags))
+            emit(toJson({ event: "status", value: status }) + "\n");
+          else if ((status as any)?.status)
+            emit(
+              `${OWL} feed ${(status as any).status} ${(status as any).source ?? ""}\n`,
+            );
+        },
+        onRows: (rows) => {
+          for (const row of rows as any[]) {
+            if (jsonMode(flags))
+              emit(toJson({ event: "token", value: row }) + "\n");
+            else emit(formatRow(row) + "\n");
+          }
+        },
       });
-      writeResult(
-        result,
-        flags,
-        (rows) =>
-          rows
-            .map(
-              (row: any) =>
-                `${row.symbol ? "$" + row.symbol : "-"}	${row.mint}	mcap=${row.marketCapSol ?? row.lastMarketCapSol ?? "-"}	sma1=${row.sma1m ?? "-"}	sma5=${row.sma5m ?? "-"}	sma15=${row.sma15m ?? "-"}`,
-            )
-            .join("\n") + "\n",
-      );
       return 0;
     }
     if (subcommand === "holders") {

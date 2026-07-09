@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import {
   getPumpFeedDbStats,
   listObservedPumpHolders,
@@ -5,6 +6,7 @@ import {
   type PumpTerminalFeedRow,
 } from "../feed/feed-repo.js";
 import { measureSolard, summarizeForMeasure } from "../api-response.js";
+import { handlePumpLivePost } from "../../pump/services/pump-live-api.js";
 
 export type TerminalFeedInput = {
   sinceMs?: number | string | null;
@@ -15,6 +17,15 @@ export type TerminalFeedInput = {
 export type TerminalHolderInput = {
   mint: string;
   limit?: number | string | null;
+};
+
+export type TerminalFeedFollowInput = TerminalFeedInput & {
+  source?: "helius" | "pumpportal" | string | null;
+  resetSession?: boolean | string | null;
+  pollMs?: number | string | null;
+  signal?: AbortSignal | null;
+  onRows?: (rows: PumpTerminalFeedRow[]) => void | Promise<void>;
+  onStatus?: (status: unknown) => void | Promise<void>;
 };
 
 function numberInput(
@@ -105,4 +116,130 @@ export async function listTerminalHoldersAction(input: TerminalHolderInput) {
     },
   );
   return measured.value;
+}
+
+function boolInput(
+  value: boolean | string | null | undefined,
+  fallback: boolean,
+): boolean {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return (
+    value !== "0" &&
+    value.toLowerCase() !== "false" &&
+    value.toLowerCase() !== "no"
+  );
+}
+
+function rowKey(row: PumpTerminalFeedRow): string {
+  return [row.mint ?? "", row.signature ?? "", row.updatedAtMs ?? ""].join(":");
+}
+
+async function startTerminalWorker(
+  input: TerminalFeedFollowInput,
+): Promise<unknown> {
+  const source = input.source === "pumpportal" ? "pumpportal" : "helius";
+  const resetSession = boolInput(input.resetSession, true);
+  return await measureSolard(
+    "solard:action:terminal:feed",
+    "startTerminalFeedWorker",
+    async () => {
+      const headers = new Headers({ "content-type": "application/json" });
+      const token = process.env.SOLWAL_WEB_TOKEN?.trim();
+      if (token) headers.set("x-solwal-web-token", token);
+      const response = await handlePumpLivePost(
+        new Request("http://solard.local/api/pump-live", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            action: "start-worker",
+            source,
+            resetSession,
+          }),
+        }),
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(
+          payload?.error ?? `start-worker failed: HTTP ${response.status}`,
+        );
+      }
+      return payload?.value ?? payload;
+    },
+    {
+      result: summarizeForMeasure,
+      onError: summarizeForMeasure,
+      meta: { source, resetSession },
+    },
+  ).then((measured) => measured.value);
+}
+
+export async function followTerminalFeedAction(
+  input: TerminalFeedFollowInput = {},
+): Promise<void> {
+  const limit = Math.max(
+    1,
+    Math.min(500, Math.trunc(numberInput(input.limit, 250))),
+  );
+  const pollMs = Math.max(
+    250,
+    Math.min(30_000, Math.trunc(numberInput(input.pollMs, 1_500))),
+  );
+  const pinnedMints = listInput(input.pinnedMints);
+  const startedAtMs = numberInput(input.sinceMs, Date.now());
+  const seen = new Set<string>();
+  let sinceMs = startedAtMs;
+
+  const status = await startTerminalWorker(input);
+  await input.onStatus?.(status);
+
+  while (!input.signal?.aborted) {
+    try {
+      const rows = listPumpTerminalFeedRows({ sinceMs, pinnedMints, limit });
+      const fresh = rows
+        .filter((row) => {
+          const updatedAtMs = Number(row.updatedAtMs ?? row.createdAtMs ?? 0);
+          if (!Number.isFinite(updatedAtMs) || updatedAtMs < sinceMs - 15_000)
+            return false;
+          const key = rowKey(row);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .sort(
+          (a, b) => Number(a.updatedAtMs ?? 0) - Number(b.updatedAtMs ?? 0),
+        );
+      if (fresh.length) {
+        const newest = Math.max(
+          ...fresh.map((row) =>
+            Number(row.updatedAtMs ?? row.createdAtMs ?? sinceMs),
+          ),
+        );
+        if (Number.isFinite(newest)) sinceMs = Math.max(sinceMs, newest);
+        await input.onRows?.(fresh);
+      }
+    } catch (error) {
+      await measureSolard(
+        "solard:action:terminal:feed",
+        "followTerminalFeedPollError",
+        () => {
+          throw error;
+        },
+        {
+          result: summarizeForMeasure,
+          onError: summarizeForMeasure,
+          meta: { sinceMs, pinnedCount: pinnedMints.length, limit },
+        },
+      ).catch(() => undefined);
+      await input.onStatus?.({
+        status: "poll-error",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    try {
+      await delay(pollMs, undefined, { signal: input.signal ?? undefined });
+    } catch {
+      break;
+    }
+  }
 }
