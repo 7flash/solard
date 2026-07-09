@@ -1,4 +1,4 @@
-import { errorResponse, jsonResponse } from "../../../src/web/http.js";
+import { readJson } from "../../../src/web/http.js";
 import {
   ensureProcessesAction,
   listProcessesAction,
@@ -13,51 +13,53 @@ function param(url: URL, name: string): string | null {
 }
 
 export function GET(request: Request): Promise<Response> {
-  return withMeasuredApi(request, "GET:/api/processes", async () => {
-    const url = new URL(request.url);
-    return jsonResponse({
-      ok: true,
-      value: listProcessesAction({ telegram: param(url, "telegram") !== "0" }),
-    });
+  return withMeasuredApi({
+    request,
+    route: "/api/processes",
+    method: "GET",
+    label: "list processes",
+    summarize: (value: any) => ({
+      ready: value?.ready,
+      workers: value?.workers?.length ?? 0,
+    }),
+    fn: () => {
+      const url = new URL(request.url);
+      return listProcessesAction({ telegram: param(url, "telegram") !== "0" });
+    },
   });
 }
 
 export async function POST(request: Request): Promise<Response> {
-  return withMeasuredApi(request, "POST:/api/processes", async () => {
-    try {
-      const body = (await request.json().catch(() => ({}))) as Record<
-        string,
-        unknown
-      >;
+  const body = (await readJson(request).catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  return withMeasuredApi({
+    request,
+    route: "/api/processes",
+    method: "POST",
+    label: String(body.action ?? "ensure"),
+    summarize: (value: any) => ({
+      ready: value?.ready,
+      workers: value?.workers?.length ?? value?.name ?? null,
+    }),
+    fn: async () => {
       const action = String(body.action ?? "ensure");
       const worker = typeof body.worker === "string" ? body.worker : null;
       const telegram = body.telegram !== false;
-      if (action === "stop") {
-        return jsonResponse({
-          ok: true,
-          value: stopProcessAction(worker ?? "all", { telegram }),
-        });
-      }
-      if (action === "restart") {
-        return jsonResponse({
-          ok: true,
-          value: await restartProcessesAction({
-            worker: worker ?? "all",
-            telegram,
-          }),
-        });
-      }
-      return jsonResponse({
-        ok: true,
-        value: await ensureProcessesAction({
+      if (action === "stop")
+        return stopProcessAction(worker ?? "all", { telegram });
+      if (action === "restart")
+        return await restartProcessesAction({
           worker: worker ?? "all",
           telegram,
-          restart: body.restart === true,
-          restartStale: body.restartStale !== false,
-        }),
+        });
+      return await ensureProcessesAction({
+        worker: worker ?? "all",
+        telegram,
+        restart: body.restart === true,
+        restartStale: body.restartStale !== false,
       });
-    } catch (error) {
-      return errorResponse(error);
-    }
+    },
   });
 }

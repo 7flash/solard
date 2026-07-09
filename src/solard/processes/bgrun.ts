@@ -5,6 +5,7 @@ import {
 import { processMeasure, summarizeForMeasure } from "../measure.js";
 
 export type SolardWorkerName =
+  | "solard-pumpportal"
   | "solard-pump-creates"
   | "solard-pump-trades"
   | "solard-reconciler"
@@ -21,6 +22,12 @@ export type WorkerSpec = {
 const ROOT = process.cwd();
 
 export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
+  "solard-pumpportal": {
+    name: "solard-pumpportal",
+    kind: "stream",
+    command: "bun run ./src/solard/workers/pumpportal-worker.ts",
+    staleAfterMs: Number(process.env.SOLARD_PUMPPORTAL_STALE_MS ?? "15000"),
+  },
   "solard-pump-creates": {
     name: "solard-pump-creates",
     kind: "stream",
@@ -50,6 +57,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
 };
 
 export const CORE_WORKERS: SolardWorkerName[] = [
+  "solard-pumpportal",
   "solard-pump-creates",
   "solard-pump-trades",
   "solard-reconciler",

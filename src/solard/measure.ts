@@ -1,6 +1,6 @@
 import {
   configure,
-  createMeasure,
+  createMeasure as createMeasureFn,
   measure,
   measureSync,
   safeStringify,
@@ -23,7 +23,14 @@ export function configureSolardMeasure(): void {
 
 configureSolardMeasure();
 
-export { measure, measureSync, createMeasure, safeStringify };
+export { measure, measureSync, safeStringify };
+
+export function createMeasure(
+  scope: string,
+): ReturnType<typeof createMeasureFn> {
+  configureSolardMeasure();
+  return createMeasureFn(scope);
+}
 
 export const apiMeasure = createMeasure("solard:api");
 export const cliMeasure = createMeasure("solard:cli");
@@ -43,6 +50,9 @@ export function summarizeForMeasure(value: unknown, depth = 0): unknown {
   if (typeof value === "string") {
     if (value.length <= 160) return value;
     return `${value.slice(0, 80)}…${value.slice(-24)} (${value.length} chars)`;
+  }
+  if (value instanceof Response) {
+    return { status: value.status, ok: value.ok };
   }
   if (value instanceof Error) {
     return {

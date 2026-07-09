@@ -32,7 +32,15 @@ export function terminalHealthAction(
       const latest = {
         token:
           terminalDb.raw<any>(
-            "SELECT mint, symbol, marketCapUsd, updatedAtMs FROM terminalTokens ORDER BY updatedAtMs DESC LIMIT 1",
+            "SELECT mint, symbol, name, image, marketCapUsd, priceUsd, source, updatedAtMs FROM terminalTokens ORDER BY updatedAtMs DESC LIMIT 1",
+          )[0] ?? null,
+        pricedToken:
+          terminalDb.raw<any>(
+            "SELECT mint, symbol, name, image, marketCapUsd, priceUsd, source, updatedAtMs FROM terminalTokens WHERE marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL ORDER BY updatedAtMs DESC LIMIT 1",
+          )[0] ?? null,
+        imagedToken:
+          terminalDb.raw<any>(
+            "SELECT mint, symbol, name, image, marketCapUsd, priceUsd, source, updatedAtMs FROM terminalTokens WHERE image IS NOT NULL AND image != '' ORDER BY updatedAtMs DESC LIMIT 1",
           )[0] ?? null,
         trade:
           terminalDb.raw<any>(

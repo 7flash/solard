@@ -1,3 +1,4 @@
+import "./globals.css";
 type RootLayoutProps = { children: unknown };
 
 type NavItem = { href: string; label: string; page: string };
@@ -49,12 +50,6 @@ export default function RootLayout({ children }: RootLayoutProps) {
 
           <section className="main-console">{children}</section>
         </main>
-        <script
-          dangerouslySetInnerHTML={{
-            __html:
-              "(()=>{const p=location.pathname.replace(/\\/+$/,'');const page=p.endsWith('/wallets')?'wallets':p.endsWith('/portfolio')?'portfolio':p.endsWith('/terminal')?'terminal':p.endsWith('/watchlists')?'watchlists':p.endsWith('/signals')?'signals':p.endsWith('/launch')?'launch':p.endsWith('/trade')?'trade':p.endsWith('/activity')?'jobs':'overview';document.querySelectorAll('#main-nav a').forEach(a=>{const active=a.dataset.page===page;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});})();",
-          }}
-        />
       </body>
     </html>
   );

@@ -9,9 +9,7 @@ import {
   tokenImage,
   passesBadgeFilters,
   formatMcap,
-  formatUsdMcap,
   latestMcap,
-  latestMcapUsd,
   mcapChangePct,
   formatPct,
   sortFeedRows,
@@ -55,6 +53,107 @@ function chooseInspector(rows: PumpFeedRow[]): PumpFeedRow | null {
 }
 
 let holderHoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+function tradeCount(row: PumpFeedRow | null | undefined): number {
+  if (!row) return 0;
+  const direct = Number((row as any).tradeCount ?? NaN);
+  if (Number.isFinite(direct)) return direct;
+  return row.trades?.length ?? 0;
+}
+
+function healthSummary() {
+  const health = state.terminalHealth as AnyRow | null;
+  const store = (health?.store ?? {}) as AnyRow;
+  const processes = Array.isArray(health?.processes)
+    ? (health!.processes as AnyRow[])
+    : [];
+  const errors = Array.isArray(health?.errors)
+    ? (health!.errors as AnyRow[])
+    : [];
+  const stale = processes.filter((row) => row.stale).length;
+  return { health, store, processes, errors, stale };
+}
+
+function WorkerDiagnostics() {
+  const { health, store, processes, errors, stale } = healthSummary();
+  const ok = health?.ok === true && stale === 0;
+  return (
+    <section className={`terminal-diagnostics ${ok ? "ok" : "warn"}`}>
+      <div>
+        <b>{ok ? "workers ok" : "terminal not healthy"}</b>
+        <span>
+          rows={state.terminalLastRows} poll=
+          {state.terminalLastPollAtMs
+            ? age(state.terminalLastPollAtMs)
+            : "never"}{" "}
+          · tokens={store.tokens ?? "?"} priced={store.pricedTokens ?? "?"}{" "}
+          images={store.imagedTokens ?? "?"} trades={store.trades ?? "?"}
+        </span>
+        {state.terminalLastError ? (
+          <code>{state.terminalLastError}</code>
+        ) : null}
+      </div>
+      <div className="terminal-worker-list">
+        {processes.slice(0, 5).map((proc) => (
+          <span
+            className={proc.stale || proc.error ? "bad" : "good"}
+            title={proc.error ?? JSON.stringify(proc.data ?? {})}
+          >
+            {String(proc.name ?? "worker").replace(/^solard-/, "")}:
+            {proc.stale ? "stale" : proc.status}
+          </span>
+        ))}
+        {!processes.length ? (
+          <span className="bad">no worker heartbeat yet</span>
+        ) : null}
+      </div>
+      <div className="terminal-diagnostic-actions">
+        <button
+          type="button"
+          className="secondary compact"
+          onClick={() =>
+            void runAction(async () => {
+              await api("/api/workers/ensure", {
+                method: "POST",
+                body: JSON.stringify({
+                  action: "ensure",
+                  all: true,
+                  telegram: true,
+                  restartStale: true,
+                }),
+              });
+              await startPumpFeed();
+            })
+          }
+        >
+          ensure + poll
+        </button>
+        <button
+          type="button"
+          className="secondary compact"
+          onClick={() =>
+            void runAction(() =>
+              api("/api/terminal/health?errors=12").then((h) => {
+                state.terminalHealth = h as AnyRow;
+                update();
+              }),
+            )
+          }
+        >
+          health
+        </button>
+      </div>
+      {errors.length ? (
+        <details>
+          <summary>latest worker errors ({errors.length})</summary>
+          <pre>
+            {JSON.stringify(errors.slice(0, 5), null, 2).slice(0, 3000)}
+          </pre>
+        </details>
+      ) : null}
+    </section>
+  );
+}
 
 function inspectRow(row: PumpFeedRow): void {
   fixTerminalInspector(row);
@@ -112,20 +211,34 @@ function HolderList({ mint }: { mint?: string | null }) {
         hover keeps inspector here; click refresh holders.
       </p>
     );
+  const maxPct = Math.max(
+    0.000001,
+    ...holders.map((holder) => Number(holder.pctSupply ?? 0)),
+  );
   return (
     <div className="terminal-holder-list">
-      {holders.slice(0, 10).map((holder: TokenHolder, index: number) => (
-        <a
-          className="terminal-holder"
-          href={`https://solscan.io/account/${holder.owner ?? holder.tokenAccount}`}
-          target="_blank"
-          rel="noreferrer"
-        >
-          <span>#{index + 1}</span>
-          <b>{holder.uiAmount ?? holder.amount ?? "—"}</b>
-          <code>{short(holder.owner ?? holder.tokenAccount, 4, 4)}</code>
-        </a>
-      ))}
+      {holders.slice(0, 12).map((holder: TokenHolder, index: number) => {
+        const pct = Number(holder.pctSupply ?? 0);
+        return (
+          <a
+            className="terminal-holder"
+            href={`https://solscan.io/account/${holder.owner ?? holder.tokenAccount}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <span>#{index + 1}</span>
+            <b>{holder.uiAmount ?? holder.amount ?? "—"}</b>
+            <code>{short(holder.owner ?? holder.tokenAccount, 4, 4)}</code>
+            <em title={`${pct.toFixed(4)}% supply`}>
+              <i
+                style={{
+                  width: `${Math.max(3, Math.min(100, (pct / maxPct) * 100))}%`,
+                }}
+              />
+            </em>
+          </a>
+        );
+      })}
     </div>
   );
 }
@@ -133,9 +246,9 @@ function HolderList({ mint }: { mint?: string | null }) {
 function SmaInline({ row }: { row: PumpFeedRow }) {
   return (
     <span className="terminal-sma-inline">
-      <b>{formatUsdMcap(row.sma1mUsd ?? null)}</b>
-      <b>{formatUsdMcap(row.sma5mUsd ?? null)}</b>
-      <b>{formatUsdMcap(row.sma15mUsd ?? null)}</b>
+      <b>{formatMcap(row.sma1m)}</b>
+      <b>{formatMcap(row.sma5m)}</b>
+      <b>{formatMcap(row.sma15m)}</b>
     </span>
   );
 }
@@ -187,7 +300,6 @@ export function TerminalPage() {
   const rows = sortPinnedFirst(sortFeedRows(filteredRows));
   const inspector = chooseInspector(rows);
   const currentMcap = latestMcap(inspector ?? {});
-  const currentMcapUsd = latestMcapUsd(inspector ?? {});
   const currentDeltaPct = mcapChangePct(inspector ?? {});
 
   return (
@@ -200,11 +312,8 @@ export function TerminalPage() {
           <h2>Pump</h2>
           <span className="muted tiny">
             {state.pumpFeedSource === "helius" ? "Helius" : "PumpPortal"} ·{" "}
-            {rows.length}/{state.pumpFeed.length} ·{" "}
+            {state.pumpFeedStatus} · {rows.length}/{state.pumpFeed.length} ·{" "}
             {state.terminalPinnedMints.length} pinned
-            {state.solUsdPrice
-              ? ` · SOL ${formatUsdMcap(state.solUsdPrice)}`
-              : ""}
           </span>
         </div>
         <div className="terminal-actions-compact">
@@ -219,8 +328,8 @@ export function TerminalPage() {
               update();
             }}
           >
-            <option value="helius">Helius</option>
-            <option value="pumpportal">PumpPortal</option>
+            <option value="pumpportal">PumpPortal live</option>
+            <option value="helius">Helius fallback</option>
           </select>
           <button
             type="button"
@@ -298,6 +407,8 @@ export function TerminalPage() {
           </label>
         </div>
       </section>
+
+      <WorkerDiagnostics />
 
       <section className="terminal-filterbar">
         <input
@@ -424,9 +535,7 @@ export function TerminalPage() {
                         </span>
                       </a>
                     </td>
-                    <td className="num-cell">
-                      {formatUsdMcap(latestMcapUsd(row))}
-                    </td>
+                    <td className="num-cell">{formatMcap(latestMcap(row))}</td>
                     <td
                       className={
                         mcapChangePct(row) != null && mcapChangePct(row)! > 0
@@ -442,7 +551,7 @@ export function TerminalPage() {
                     <td>
                       <SmaInline row={row} />
                     </td>
-                    <td>{row.trades?.length ?? 0}</td>
+                    <td>{tradeCount(row)}</td>
                     <td>
                       {row.lastTradeAtMs
                         ? age(row.lastTradeAtMs)
@@ -521,7 +630,7 @@ export function TerminalPage() {
                     void runAction(() => quickBuyPumpFeedRow(inspector))
                   }
                 >
-                  {state.terminalQuickLive ? "BUY" : "SIM"}
+                  {state.terminalQuickLive ? "LIVE BUY" : "SIM BUY"}
                 </button>
                 <button
                   type="button"
@@ -534,15 +643,7 @@ export function TerminalPage() {
               </div>
               <div className="terminal-kv">
                 <span>MCap</span>
-                <b
-                  title={
-                    currentMcap != null
-                      ? `${formatMcap(currentMcap)} SOL`
-                      : undefined
-                  }
-                >
-                  {formatUsdMcap(currentMcapUsd)}
-                </b>
+                <b>{formatMcap(currentMcap)}</b>
                 <span>Δ %</span>
                 <b
                   className={
@@ -556,13 +657,13 @@ export function TerminalPage() {
                   {formatPct(currentDeltaPct)}
                 </b>
                 <span>SMA 1m</span>
-                <b>{formatUsdMcap(inspector.sma1mUsd ?? null)}</b>
+                <b>{formatMcap(inspector.sma1m)}</b>
                 <span>SMA 5m</span>
-                <b>{formatUsdMcap(inspector.sma5mUsd ?? null)}</b>
+                <b>{formatMcap(inspector.sma5m)}</b>
                 <span>SMA 15m</span>
-                <b>{formatUsdMcap(inspector.sma15mUsd ?? null)}</b>
+                <b>{formatMcap(inspector.sma15m)}</b>
                 <span>Trades</span>
-                <b>{inspector.trades?.length ?? 0}</b>
+                <b>{tradeCount(inspector)}</b>
                 <span>Mint</span>
                 <a
                   href={tokenUrl(inspector.mint)}

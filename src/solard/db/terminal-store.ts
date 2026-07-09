@@ -524,18 +524,49 @@ export type TerminalFeedRow = TerminalToken & {
 };
 
 export function listTerminalFeed(
-  args: { limit?: number; sinceMs?: number } = {},
+  args: {
+    limit?: number;
+    sinceMs?: number;
+    activeWindowMs?: number;
+    includeUnpriced?: boolean;
+  } = {},
 ): TerminalFeedRow[] {
   const limit = Math.max(1, Math.min(args.limit ?? 250, 1000));
-  const since = args.sinceMs ?? 0;
-  const tokens = terminalDb.raw<TerminalToken>(
-    `SELECT * FROM terminalTokens
-     WHERE updatedAtMs >= ?
-     ORDER BY updatedAtMs DESC
-     LIMIT ?`,
-    since,
-    limit,
+  const activeWindowMs = Math.max(
+    0,
+    args.activeWindowMs ??
+      Number(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "1200000"),
   );
+  const minUpdatedAt = Math.max(
+    args.sinceMs ?? 0,
+    activeWindowMs > 0 ? Date.now() - activeWindowMs : 0,
+  );
+  const includeUnpriced =
+    args.includeUnpriced === true ||
+    process.env.SOLARD_TERMINAL_INCLUDE_UNPRICED === "1";
+  const tokens = includeUnpriced
+    ? terminalDb.raw<TerminalToken>(
+        `SELECT * FROM terminalTokens
+         WHERE updatedAtMs >= ?
+         ORDER BY updatedAtMs DESC
+         LIMIT ?`,
+        minUpdatedAt,
+        limit,
+      )
+    : terminalDb.raw<TerminalToken>(
+        `SELECT * FROM terminalTokens
+         WHERE updatedAtMs >= ?
+           AND (
+             source LIKE 'telegram%'
+             OR marketCapUsd IS NOT NULL
+             OR priceUsd IS NOT NULL
+             OR image IS NOT NULL
+           )
+         ORDER BY updatedAtMs DESC
+         LIMIT ?`,
+        minUpdatedAt,
+        limit,
+      );
   return tokens.map((token) => {
     const indicators = terminalDb.raw<TerminalIndicator>(
       "SELECT * FROM terminalIndicators WHERE mint = ?",
@@ -550,9 +581,10 @@ export function listTerminalFeed(
     return {
       ...token,
       kind: token.source.startsWith("telegram") ? "signal" : "pump",
-      sma1m: byInterval.get(60)?.smaMarketCapUsd ?? null,
-      sma5m: byInterval.get(300)?.smaMarketCapUsd ?? null,
-      sma15m: byInterval.get(900)?.smaMarketCapUsd ?? null,
+      sma1m: byInterval.get(60)?.smaMarketCapUsd ?? token.marketCapUsd ?? null,
+      sma5m: byInterval.get(300)?.smaMarketCapUsd ?? token.marketCapUsd ?? null,
+      sma15m:
+        byInterval.get(900)?.smaMarketCapUsd ?? token.marketCapUsd ?? null,
       tradeCount: Number(tradeCount),
     };
   });
@@ -694,6 +726,23 @@ export function terminalStoreStats(): Record<string, unknown> {
       tokens: Number(
         terminalDb.raw<{ count: number }>(
           "SELECT COUNT(*) as count FROM terminalTokens",
+        )[0]?.count ?? 0,
+      ),
+      activeTokens: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalTokens WHERE updatedAtMs >= ?",
+          Date.now() -
+            Number(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "1200000"),
+        )[0]?.count ?? 0,
+      ),
+      pricedTokens: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalTokens WHERE marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL",
+        )[0]?.count ?? 0,
+      ),
+      imagedTokens: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalTokens WHERE image IS NOT NULL AND image != ''",
         )[0]?.count ?? 0,
       ),
       trades: Number(

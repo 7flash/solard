@@ -26,7 +26,9 @@ export function errorResponse(
 ): Response {
   const message = error instanceof Error ? error.message : String(error);
   const stack =
-    process.env.SOLWAL_WEB_DEBUG === "1" && error instanceof Error
+    (process.env.SOLWAL_WEB_DEBUG === "1" ||
+      process.env.SOLARD_WEB_DEBUG === "1") &&
+    error instanceof Error
       ? error.stack
       : undefined;
   return jsonResponse(
@@ -129,9 +131,7 @@ export async function withSowl<T>(
         return await fn(sowl);
       },
       {
-        result: summarizeForMeasure,
-        onError: summarizeForMeasure,
-        meta: { route, method: request.method, requestId: id },
+        summarize: summarizeForMeasure,
       },
     );
     return jsonResponse({
@@ -156,66 +156,6 @@ export async function withSowl<T>(
     );
   } finally {
     sowl?.close();
-  }
-}
-
-export type MeasuredApiOptions<T = unknown> = {
-  meta?: Record<string, unknown>;
-  status?: number;
-  result?: (value: T) => unknown;
-  onError?: (error: unknown) => unknown;
-};
-
-export async function withMeasuredApi<T>(
-  request: Request,
-  label: string,
-  fn: () => Promise<T> | T,
-  options: MeasuredApiOptions<T> = {},
-): Promise<Response> {
-  const id = requestId();
-  const url = new URL(request.url);
-  const route = url.pathname;
-  const scope = `solard:api:${request.method}:${route}`;
-  const meta = {
-    route,
-    method: request.method,
-    requestId: id,
-    ...(options.meta ?? {}),
-  };
-  try {
-    const measured = await measureSolard(
-      scope,
-      label,
-      async () => {
-        assertWebAuth(request);
-        return await fn();
-      },
-      {
-        result: options.result ?? summarizeForMeasure,
-        onError: options.onError ?? summarizeForMeasure,
-        meta,
-      },
-    );
-    return jsonResponse(
-      {
-        ok: true,
-        value: measured.value,
-        meta: {
-          ...meta,
-          scope: measured.scope,
-          label: measured.label,
-          tookMs: measured.tookMs,
-          summary: measured.summary,
-        },
-      },
-      { status: options.status ?? 200 },
-    );
-  } catch (error) {
-    const status =
-      typeof (error as { status?: unknown }).status === "number"
-        ? (error as { status: number }).status
-        : 500;
-    return errorResponse(error, status, { ...meta, scope, label });
   }
 }
 

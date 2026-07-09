@@ -63,7 +63,7 @@ export type PumpFeedRow = {
   solAmount?: number | null;
   marketCapSol?: number | null;
   marketCapUsd?: number | null;
-  solUsdPrice?: number | null;
+  priceUsd?: number | null;
   priceSolPerToken?: number | null;
   image?: string | null;
   website?: string | null;
@@ -72,25 +72,23 @@ export type PumpFeedRow = {
   description?: string | null;
   samples?: TokenWatchSample[];
   initialMarketCapSol?: number | null;
+  initialMarketCapUsd?: number | null;
   lastMarketCapSol?: number | null;
   marketCapChangeSol?: number | null;
-  initialMarketCapUsd?: number | null;
-  lastMarketCapUsd?: number | null;
-  marketCapChangeUsd?: number | null;
   marketCapChangePct?: number | null;
   sma1m?: number | null;
   sma5m?: number | null;
   sma15m?: number | null;
   sma60m?: number | null;
-  sma1mUsd?: number | null;
-  sma5mUsd?: number | null;
-  sma15mUsd?: number | null;
-  sma60mUsd?: number | null;
   lastTradeAtMs?: number | null;
   isMayhemMode?: boolean | null;
   quoteAsset?: string | null;
   quoteMint?: string | null;
   trades?: AnyRow[];
+  tradeCount?: number | null;
+  signalText?: string | null;
+  signalSource?: string | null;
+  source?: string | null;
   raw?: AnyRow;
 };
 
@@ -119,7 +117,6 @@ export type Toast = {
 export type TokenWatchSample = {
   capturedAtMs: number;
   marketCapSol: number | null;
-  marketCapUsd?: number | null;
   source?: string | null;
 };
 
@@ -135,28 +132,24 @@ export type TokenWatchToken = {
   updatedAtMs: number;
   samples: TokenWatchSample[];
   priceSolPerToken?: number | null;
-  marketCapUsd?: number | null;
-  solUsdPrice?: number | null;
   lastTradeAtMs?: number | null;
   initialMarketCapSol?: number | null;
-  lastMarketCapUsd?: number | null;
   initialMarketCapUsd?: number | null;
   marketCapChangeSol?: number | null;
-  marketCapChangeUsd?: number | null;
   marketCapChangePct?: number | null;
   isMayhemMode?: boolean | null;
   quoteAsset?: string | null;
   quoteMint?: string | null;
   trades?: AnyRow[];
+  tradeCount?: number | null;
+  signalText?: string | null;
+  signalSource?: string | null;
+  source?: string | null;
   lastMarketCapSol: number | null;
   sma1m: number | null;
   sma5m: number | null;
   sma15m: number | null;
   sma60m: number | null;
-  sma1mUsd?: number | null;
-  sma5mUsd?: number | null;
-  sma15mUsd?: number | null;
-  sma60mUsd?: number | null;
 };
 
 export type TokenWatchGroup = {
@@ -237,7 +230,6 @@ export type State = {
     | "sma15m-desc"
     | "trades-desc";
   pumpFeedSource: "helius" | "pumpportal";
-  solUsdPrice: number | null;
   terminalDefaultWallet: string;
   terminalDefaultBuySol: string;
   terminalDefaultSender: "helius-fast" | "helius-rpc" | "rpc";
@@ -273,6 +265,10 @@ export type State = {
   terminalInspectorFixed: boolean;
   terminalPinnedMints: string[];
   terminalSessionStartedAtMs: number | null;
+  terminalHealth: AnyRow | null;
+  terminalLastPollAtMs: number | null;
+  terminalLastRows: number;
+  terminalLastError: string | null;
   tokenHolders: Record<string, TokenHolder[]>;
   tokenHolderErrors: Record<string, string>;
   tokenHoldersCheckedAt: Record<string, number>;
@@ -304,8 +300,7 @@ export const state: State = {
   pumpFeedSource:
     (localStorage.getItem(
       "solwal:pump-feed-source",
-    ) as State["pumpFeedSource"]) || "helius",
-  solUsdPrice: null,
+    ) as State["pumpFeedSource"]) || "pumpportal",
   terminalDefaultWallet:
     localStorage.getItem("solwal:terminal-default-wallet") ?? "",
   terminalDefaultBuySol:
@@ -358,6 +353,10 @@ export const state: State = {
     }
   })(),
   terminalSessionStartedAtMs: null,
+  terminalHealth: null,
+  terminalLastPollAtMs: null,
+  terminalLastRows: 0,
+  terminalLastError: null,
   tokenHolders: {},
   tokenHolderErrors: {},
   tokenHoldersCheckedAt: {},
@@ -371,11 +370,11 @@ const toastDedupedAt: Record<string, number> = {};
 function clientMeasureEnabled(): boolean {
   try {
     return (
-      localStorage.getItem("solard:measure") === "1" ||
-      localStorage.getItem("solwal:measure") === "1"
+      localStorage.getItem("solard:measure") !== "0" &&
+      localStorage.getItem("solwal:measure") !== "0"
     );
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -788,28 +787,14 @@ export function formatMcap(value: number | null | undefined): string {
     : value.toExponential(2);
 }
 
-export function formatUsdMcap(value: number | null | undefined): string {
-  const formatted = formatMcap(value);
-  return formatted === "—" ? formatted : `$${formatted}`;
-}
-
-function solMcapToUsd(
-  value: number | null | undefined,
-  row?: { solUsdPrice?: number | null },
-): number | null {
-  const solUsdPrice = row?.solUsdPrice ?? state.solUsdPrice;
-  if (value == null || solUsdPrice == null) return null;
-  if (!Number.isFinite(value) || !Number.isFinite(solUsdPrice)) return null;
-  if (value < 0 || solUsdPrice <= 0) return null;
-  return value * solUsdPrice;
-}
-
 export function latestMcap(row: {
   marketCapSol?: number | null;
+  marketCapUsd?: number | null;
+  priceUsd?: number | null;
   lastMarketCapSol?: number | null;
   samples?: TokenWatchSample[];
 }): number | null {
-  const direct = row.marketCapSol ?? row.lastMarketCapSol;
+  const direct = row.marketCapUsd ?? row.marketCapSol ?? row.lastMarketCapSol;
   if (typeof direct === "number" && Number.isFinite(direct)) return direct;
   const samples = [...(row.samples ?? [])].sort(
     (a, b) => b.capturedAtMs - a.capturedAtMs,
@@ -823,35 +808,19 @@ export function latestMcap(row: {
   );
 }
 
-export function latestMcapUsd(row: {
-  marketCapUsd?: number | null;
-  lastMarketCapUsd?: number | null;
-  marketCapSol?: number | null;
-  lastMarketCapSol?: number | null;
-  solUsdPrice?: number | null;
-  samples?: TokenWatchSample[];
-}): number | null {
-  const directUsd = row.marketCapUsd ?? row.lastMarketCapUsd;
-  if (typeof directUsd === "number" && Number.isFinite(directUsd))
-    return directUsd;
-  const samples = [...(row.samples ?? [])].sort(
-    (a, b) => b.capturedAtMs - a.capturedAtMs,
-  );
-  const sampleUsd = samples.find(
-    (sample) =>
-      typeof sample.marketCapUsd === "number" &&
-      Number.isFinite(sample.marketCapUsd),
-  )?.marketCapUsd;
-  if (typeof sampleUsd === "number" && Number.isFinite(sampleUsd))
-    return sampleUsd;
-  return solMcapToUsd(latestMcap(row), row);
-}
-
 export function initialMcap(row: {
   initialMarketCapSol?: number | null;
+  initialMarketCapUsd?: number | null;
   marketCapSol?: number | null;
+  marketCapUsd?: number | null;
+  priceUsd?: number | null;
   samples?: TokenWatchSample[];
 }): number | null {
+  if (
+    typeof row.initialMarketCapUsd === "number" &&
+    Number.isFinite(row.initialMarketCapUsd)
+  )
+    return row.initialMarketCapUsd;
   if (
     typeof row.initialMarketCapSol === "number" &&
     Number.isFinite(row.initialMarketCapSol)
@@ -866,38 +835,20 @@ export function initialMcap(row: {
         typeof sample.marketCapSol === "number" &&
         Number.isFinite(sample.marketCapSol),
     )?.marketCapSol ??
-    (typeof row.marketCapSol === "number" ? row.marketCapSol : null)
+    (typeof row.marketCapUsd === "number"
+      ? row.marketCapUsd
+      : typeof row.marketCapSol === "number"
+        ? row.marketCapSol
+        : null)
   );
-}
-
-export function initialMcapUsd(row: {
-  initialMarketCapUsd?: number | null;
-  initialMarketCapSol?: number | null;
-  marketCapSol?: number | null;
-  solUsdPrice?: number | null;
-  samples?: TokenWatchSample[];
-}): number | null {
-  if (
-    typeof row.initialMarketCapUsd === "number" &&
-    Number.isFinite(row.initialMarketCapUsd)
-  )
-    return row.initialMarketCapUsd;
-  const samples = [...(row.samples ?? [])].sort(
-    (a, b) => a.capturedAtMs - b.capturedAtMs,
-  );
-  const sampleUsd = samples.find(
-    (sample) =>
-      typeof sample.marketCapUsd === "number" &&
-      Number.isFinite(sample.marketCapUsd),
-  )?.marketCapUsd;
-  if (typeof sampleUsd === "number" && Number.isFinite(sampleUsd))
-    return sampleUsd;
-  return solMcapToUsd(initialMcap(row), row);
 }
 
 export function mcapChange(row: {
   initialMarketCapSol?: number | null;
+  initialMarketCapUsd?: number | null;
   marketCapSol?: number | null;
+  marketCapUsd?: number | null;
+  priceUsd?: number | null;
   lastMarketCapSol?: number | null;
   marketCapChangeSol?: number | null;
   samples?: TokenWatchSample[];
@@ -912,30 +863,12 @@ export function mcapChange(row: {
   return first != null && last != null ? last - first : null;
 }
 
-export function mcapChangeUsd(row: {
-  initialMarketCapUsd?: number | null;
-  lastMarketCapUsd?: number | null;
-  marketCapUsd?: number | null;
-  initialMarketCapSol?: number | null;
-  marketCapSol?: number | null;
-  lastMarketCapSol?: number | null;
-  marketCapChangeUsd?: number | null;
-  solUsdPrice?: number | null;
-  samples?: TokenWatchSample[];
-}): number | null {
-  if (
-    typeof row.marketCapChangeUsd === "number" &&
-    Number.isFinite(row.marketCapChangeUsd)
-  )
-    return row.marketCapChangeUsd;
-  const first = initialMcapUsd(row);
-  const last = latestMcapUsd(row);
-  return first != null && last != null ? last - first : null;
-}
-
 export function mcapChangePct(row: {
   initialMarketCapSol?: number | null;
+  initialMarketCapUsd?: number | null;
   marketCapSol?: number | null;
+  marketCapUsd?: number | null;
+  priceUsd?: number | null;
   lastMarketCapSol?: number | null;
   marketCapChangePct?: number | null;
   samples?: TokenWatchSample[];
@@ -958,12 +891,6 @@ export function formatSignedMcap(value: number | null | undefined): string {
   return `${sign}${formatMcap(value)}`;
 }
 
-export function formatSignedUsdMcap(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return "—";
-  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
-  return `${sign}${formatUsdMcap(Math.abs(value))}`;
-}
-
 export function formatPct(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
   const sign = value > 0 ? "+" : "";
@@ -976,22 +903,20 @@ export function sortFeedRows(rows: PumpFeedRow[]): PumpFeedRow[] {
     row.receivedAt
       ? new Date(row.receivedAt).getTime()
       : (row.lastTradeAtMs ?? 0);
-  const byTrades = (row: PumpFeedRow) => row.trades?.length ?? 0;
+  const byTrades = (row: PumpFeedRow) =>
+    Number(row.tradeCount ?? row.trades?.length ?? 0);
   switch (state.pumpFeedSort) {
     case "mcap-desc":
       return copy.sort(
-        (a, b) =>
-          (latestMcapUsd(b) ?? -Infinity) - (latestMcapUsd(a) ?? -Infinity),
+        (a, b) => (latestMcap(b) ?? -Infinity) - (latestMcap(a) ?? -Infinity),
       );
     case "mcap-asc":
       return copy.sort(
-        (a, b) =>
-          (latestMcapUsd(a) ?? Infinity) - (latestMcapUsd(b) ?? Infinity),
+        (a, b) => (latestMcap(a) ?? Infinity) - (latestMcap(b) ?? Infinity),
       );
     case "mcap-change-desc":
       return copy.sort(
-        (a, b) =>
-          (mcapChangeUsd(b) ?? -Infinity) - (mcapChangeUsd(a) ?? -Infinity),
+        (a, b) => (mcapChange(b) ?? -Infinity) - (mcapChange(a) ?? -Infinity),
       );
     case "mcap-change-pct-desc":
       return copy.sort(
@@ -1000,7 +925,7 @@ export function sortFeedRows(rows: PumpFeedRow[]): PumpFeedRow[] {
       );
     case "sma1m-desc":
       return copy.sort(
-        (a, b) => (b.sma1mUsd ?? -Infinity) - (a.sma1mUsd ?? -Infinity),
+        (a, b) => (b.sma1m ?? -Infinity) - (a.sma1m ?? -Infinity),
       );
     case "sma5m-desc":
       return copy.sort(
@@ -1022,13 +947,11 @@ export function sortWatchRows(rows: TokenWatchToken[]): TokenWatchToken[] {
   switch (state.watchSort) {
     case "mcap-asc":
       return copy.sort(
-        (a, b) =>
-          (latestMcapUsd(a) ?? Infinity) - (latestMcapUsd(b) ?? Infinity),
+        (a, b) => (latestMcap(a) ?? Infinity) - (latestMcap(b) ?? Infinity),
       );
     case "mcap-change-desc":
       return copy.sort(
-        (a, b) =>
-          (mcapChangeUsd(b) ?? -Infinity) - (mcapChangeUsd(a) ?? -Infinity),
+        (a, b) => (mcapChange(b) ?? -Infinity) - (mcapChange(a) ?? -Infinity),
       );
     case "mcap-change-pct-desc":
       return copy.sort(
@@ -1037,7 +960,7 @@ export function sortWatchRows(rows: TokenWatchToken[]): TokenWatchToken[] {
       );
     case "sma1m-desc":
       return copy.sort(
-        (a, b) => (b.sma1mUsd ?? -Infinity) - (a.sma1mUsd ?? -Infinity),
+        (a, b) => (b.sma1m ?? -Infinity) - (a.sma1m ?? -Infinity),
       );
     case "trades-desc":
       return copy.sort(
@@ -1049,8 +972,7 @@ export function sortWatchRows(rows: TokenWatchToken[]): TokenWatchToken[] {
       return copy.sort((a, b) => b.addedAtMs - a.addedAtMs);
     default:
       return copy.sort(
-        (a, b) =>
-          (latestMcapUsd(b) ?? -Infinity) - (latestMcapUsd(a) ?? -Infinity),
+        (a, b) => (latestMcap(b) ?? -Infinity) - (latestMcap(a) ?? -Infinity),
       );
   }
 }
@@ -1147,13 +1069,7 @@ export async function refreshPumpLive(): Promise<void> {
   const live = await api<{
     newTokens: PumpFeedRow[];
     watchGroups: TokenWatchGroup[];
-    quote?: { solUsdPrice?: number | null };
   }>(`/api/pump-live${suffix}`);
-  if (
-    typeof live.quote?.solUsdPrice === "number" &&
-    Number.isFinite(live.quote.solUsdPrice)
-  )
-    state.solUsdPrice = live.quote.solUsdPrice;
   state.watchGroups = live.watchGroups ?? state.watchGroups;
   if (!state.selectedWatchGroupId && state.watchGroups[0])
     state.selectedWatchGroupId = state.watchGroups[0].id;
@@ -1255,6 +1171,8 @@ export async function addWatchedToken(
     image?: string | null;
     signature?: string | null;
     marketCapSol?: number | null;
+    marketCapUsd?: number | null;
+    priceUsd?: number | null;
     isMayhemMode?: boolean | null;
     quoteAsset?: string | null;
     quoteMint?: string | null;
@@ -1350,13 +1268,12 @@ function normalizeFeedRow(
 ): PumpFeedRow {
   const now = Date.now();
   const directMcap =
-    typeof row.marketCapSol === "number" && Number.isFinite(row.marketCapSol)
-      ? row.marketCapSol
-      : null;
-  const directMcapUsd =
     typeof row.marketCapUsd === "number" && Number.isFinite(row.marketCapUsd)
       ? row.marketCapUsd
-      : solMcapToUsd(directMcap, row);
+      : typeof row.marketCapSol === "number" &&
+          Number.isFinite(row.marketCapSol)
+        ? row.marketCapSol
+        : null;
   const samples = [...(row.samples ?? [])];
   if (
     directMcap != null &&
@@ -1369,7 +1286,6 @@ function normalizeFeedRow(
     samples.unshift({
       capturedAtMs: now,
       marketCapSol: directMcap,
-      marketCapUsd: directMcapUsd,
       source: row.eventType ?? row.raw?.txType ?? row.raw?.source ?? "stream",
     });
   }
@@ -1405,41 +1321,13 @@ function normalizeFeedRow(
     existing?.marketCapSol ??
     existing?.lastMarketCapSol ??
     null;
-  const lastUsd = mergedSamples.find(
-    (sample) =>
-      typeof sample.marketCapUsd === "number" &&
-      Number.isFinite(sample.marketCapUsd),
-  );
-  const mcapUsd =
-    directMcapUsd ??
-    row.lastMarketCapUsd ??
-    lastUsd?.marketCapUsd ??
-    existing?.marketCapUsd ??
-    existing?.lastMarketCapUsd ??
-    solMcapToUsd(mcap, row) ??
-    null;
   const initial =
     row.initialMarketCapSol ??
     existing?.initialMarketCapSol ??
     first?.marketCapSol ??
     mcap ??
     null;
-  const initialUsd =
-    row.initialMarketCapUsd ??
-    existing?.initialMarketCapUsd ??
-    [...mergedSamples]
-      .reverse()
-      .find(
-        (sample) =>
-          typeof sample.marketCapUsd === "number" &&
-          Number.isFinite(sample.marketCapUsd),
-      )?.marketCapUsd ??
-    solMcapToUsd(initial, row) ??
-    mcapUsd ??
-    null;
   const change = mcap != null && initial != null ? mcap - initial : null;
-  const changeUsd =
-    mcapUsd != null && initialUsd != null ? mcapUsd - initialUsd : null;
   const pct =
     change != null && initial != null && initial > 0
       ? (change / initial) * 100
@@ -1460,23 +1348,16 @@ function normalizeFeedRow(
     ...existing,
     ...row,
     marketCapSol: mcap,
+    marketCapUsd: mcap,
     lastMarketCapSol: mcap,
     initialMarketCapSol: initial,
-    marketCapUsd: mcapUsd,
-    lastMarketCapUsd: mcapUsd,
-    initialMarketCapUsd: initialUsd,
+    initialMarketCapUsd: initial,
     marketCapChangeSol: row.marketCapChangeSol ?? change,
-    marketCapChangeUsd: row.marketCapChangeUsd ?? changeUsd,
     marketCapChangePct: row.marketCapChangePct ?? pct,
-    solUsdPrice: row.solUsdPrice ?? existing?.solUsdPrice ?? state.solUsdPrice,
     samples: mergedSamples,
     sma1m: row.sma1m ?? avg(60_000),
     sma5m: row.sma5m ?? avg(5 * 60_000),
     sma15m: row.sma15m ?? avg(15 * 60_000),
-    sma1mUsd: row.sma1mUsd ?? solMcapToUsd(row.sma1m ?? avg(60_000), row),
-    sma5mUsd: row.sma5mUsd ?? solMcapToUsd(row.sma5m ?? avg(5 * 60_000), row),
-    sma15mUsd:
-      row.sma15mUsd ?? solMcapToUsd(row.sma15m ?? avg(15 * 60_000), row),
     lastTradeAtMs:
       row.lastTradeAtMs ??
       (row.eventType === "trade" ? now : existing?.lastTradeAtMs) ??
@@ -1573,29 +1454,23 @@ export function handleSseBlock(block: string): void {
   }
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = window.setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-async function startPumpFeedWorkerSession(): Promise<void> {
-  await api("/api/pump-live", {
-    method: "POST",
-    body: JSON.stringify({
-      action: "start-worker",
-      source: state.pumpFeedSource,
-      resetSession: true,
-    }),
-  });
+function summarizeTerminalHealth(health: AnyRow | null): string {
+  if (!health) return "health unknown";
+  const store = (health.store ?? {}) as AnyRow;
+  const processes = Array.isArray(health.processes) ? health.processes : [];
+  const stale = processes.filter((row: AnyRow) => row.stale).length;
+  const errors = Array.isArray(health.errors) ? health.errors.length : 0;
+  return `tokens=${store.tokens ?? "?"} priced=${store.pricedTokens ?? "?"} imaged=${store.imagedTokens ?? "?"} trades=${store.trades ?? "?"} stale=${stale} errors=${errors}`;
+}
+
+export async function refreshTerminalHealth(): Promise<void> {
+  const health = await api<AnyRow>("/api/terminal/health?errors=8");
+  state.terminalHealth = health;
+  measureEvent("terminal health", summarizeTerminalHealth(health));
 }
 
 export async function startPumpFeed(): Promise<void> {
@@ -1604,58 +1479,86 @@ export async function startPumpFeed(): Promise<void> {
   state.pumpFeedAbort = abort;
   state.pumpFeedStatus = "connecting";
   state.pumpFeedError = null;
+  state.terminalLastError = null;
   state.terminalSessionStartedAtMs = Date.now();
-  // Keep explicitly pinned rows, but clear stale cached DB rows so Terminal
-  // behaves like a real-time feed instead of a historical dump.
   state.pumpFeed = state.pumpFeed.filter(
     (row) => row.mint && state.terminalPinnedMints.includes(row.mint),
   );
   followLatestInTerminalInspector();
+  measureEvent("terminal connect", { source: state.pumpFeedSource });
   update();
 
-  let backoffMs = 1_000;
   try {
-    await startPumpFeedWorkerSession();
-    state.pumpFeedStatus = "connected";
-    update();
-    while (!abort.signal.aborted) {
-      try {
-        await refreshPumpLive();
-        if (!abort.signal.aborted) {
-          state.pumpFeedStatus = "connected";
-          state.pumpFeedError = null;
-          backoffMs = 1_000;
-        }
-      } catch (error) {
-        if (!abort.signal.aborted) {
-          state.pumpFeedStatus = "error";
-          state.pumpFeedError = null;
-          pushToast(
-            "error",
-            "Pump feed polling",
-            error instanceof Error ? error.message : String(error),
-            5000,
-          );
-          backoffMs = Math.min(backoffMs * 1.6, 10_000);
-        }
-      }
-      update();
-      await sleep(backoffMs, abort.signal);
-    }
-    if (!abort.signal.aborted) state.pumpFeedStatus = "closed";
+    const ensure = await api<AnyRow>("/api/workers/ensure", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "ensure",
+        all: true,
+        telegram: true,
+        restartStale: true,
+      }),
+    });
+    measureEvent("terminal workers ensure", ensure);
+    pushToast(
+      "success",
+      "Workers ensured",
+      "terminal will poll SQLite feed",
+      3500,
+    );
   } catch (error) {
-    if (!abort.signal.aborted) {
-      state.pumpFeedStatus = "error";
-      state.pumpFeedError = null;
-      pushToast(
-        "error",
-        "Pump feed start failed",
-        error instanceof Error ? error.message : String(error),
-        8000,
+    state.terminalLastError =
+      error instanceof Error ? error.message : String(error);
+    measureEvent("terminal workers ensure failed", {
+      error: state.terminalLastError,
+    });
+    pushToast("error", "Worker ensure failed", state.terminalLastError, 9000);
+  }
+
+  let intervalMs = 1000;
+  while (!abort.signal.aborted) {
+    try {
+      const payload = await measureClient(
+        "terminal poll sqlite feed",
+        () =>
+          api<{ rows: PumpFeedRow[]; stats?: AnyRow; health?: AnyRow }>(
+            `/api/terminal/feed?ensure=1&limit=300&activeWindowMs=${encodeURIComponent(String(20 * 60_000))}&includeUnpriced=0&source=${encodeURIComponent(state.pumpFeedSource)}`,
+          ),
+        (value) => ({
+          rows: value.rows?.length ?? 0,
+          stats: value.stats,
+          health: summarizeTerminalHealth(value.health ?? null),
+        }),
       );
+      state.pumpFeedStatus = "connected";
+      state.pumpFeedError = null;
+      state.terminalLastError = null;
+      state.terminalLastPollAtMs = Date.now();
+      state.terminalLastRows = payload.rows?.length ?? 0;
+      if (payload.health) state.terminalHealth = payload.health;
+      for (const row of payload.rows ?? []) mergePumpToken(row);
+      measureEvent("terminal poll result", {
+        rows: state.terminalLastRows,
+        health: summarizeTerminalHealth(state.terminalHealth),
+      });
+      intervalMs = 1000;
+      update();
+    } catch (error) {
+      if (abort.signal.aborted) break;
+      state.pumpFeedStatus = "error";
+      state.terminalLastError =
+        error instanceof Error ? error.message : String(error);
+      state.pumpFeedError = state.terminalLastError;
+      measureEvent("terminal poll failed", { error: state.terminalLastError });
+      pushToast("error", "Terminal poll failed", state.terminalLastError, 6500);
+      update();
+      intervalMs = Math.min(8000, Math.floor(intervalMs * 1.6));
     }
-  } finally {
-    if (state.pumpFeedAbort === abort) state.pumpFeedAbort = null;
+    await sleep(intervalMs);
+  }
+
+  if (state.pumpFeedAbort === abort) {
+    state.pumpFeedAbort = null;
+    if (state.pumpFeedStatus !== "error") state.pumpFeedStatus = "closed";
     update();
   }
 }
@@ -1665,10 +1568,7 @@ export function stopPumpFeed(): void {
   state.pumpFeedAbort = null;
   state.pumpFeedStatus = "closed";
   state.terminalSessionStartedAtMs = null;
-  void api("/api/pump-live", {
-    method: "POST",
-    body: JSON.stringify({ action: "stop-worker" }),
-  }).catch(() => {});
+  measureEvent("terminal local stop");
   update();
 }
 
