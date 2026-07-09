@@ -1,7 +1,7 @@
 import { listProcessStatus, upsertProcessStatus } from "../db/terminal-store.js";
 import { clearWorkerErrors } from "../db/terminal-ingestion.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
-import { getBgrunSdk, normalizeBgrunProcess, safeGetBgrunSdkSync } from "./bgrun-sdk.js";
+import { getBgrunSdk, normalizeBgrunProcess, safeGetBgrunSdkSync, stopBgrunProcessByName } from "./bgrun-sdk.js";
 
 export type SolardWorkerName =
   | "solard-helius-logs-v1"
@@ -135,6 +135,12 @@ export function isSolardWorkerName(value: string | null | undefined): value is S
   return !!normalizeWorkerName(value);
 }
 
+function inheritedStringEnv(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+}
+
 export function resolveWorkerNames(input?: {
   worker?: string | null;
   all?: boolean;
@@ -154,12 +160,27 @@ export function resolveWorkerNames(input?: {
 function workerEnv(name: SolardWorkerName): Record<string, string> {
   const spec = WORKER_SPECS[name];
   return {
-    ...process.env,
+    ...inheritedStringEnv(),
     SOLARD_WORKER_NAME: name,
     SOLARD_WORKER_SUPERVISOR: "bgrun-sdk",
     SOLARD_EXPECTED_BUILD_ID: spec.buildId,
     BGR_PARENT_NAME: process.env.BGR_PROCESS_NAME || "solard",
   };
+}
+
+export function listManagedBgrunChildren(parentName = process.env.BGR_PROCESS_NAME || "solard"): Array<Record<string, unknown>> {
+  return processMeasure.measureSync(
+    {
+      start: () => "bgrun sdk child list",
+      end: (rows) => ({ rows: Array.isArray(rows) ? rows.length : 0, parent: parentName }),
+      catch: (error) => [{ name: "bgrun-sdk-error", error: error instanceof Error ? error.message : String(error) }],
+    },
+    () => {
+      const bgrun = safeGetBgrunSdkSync();
+      if (!bgrun) return [];
+      return bgrun.getManagedChildProcesses(parentName).map(normalizeBgrunProcess);
+    },
+  );
 }
 
 export function listBgrunProcesses(): Array<Record<string, unknown>> {
@@ -244,12 +265,7 @@ export function listWorkerRuntimeStatus(input: { telegram?: boolean; source?: st
 }
 
 async function terminateByName(name: string): Promise<boolean> {
-  const bgrun = await getBgrunSdk();
-  const proc = bgrun.getProcess(name);
-  if (!proc || typeof proc.pid !== "number") return false;
-  await bgrun.terminateProcess(proc.pid, true);
-  await bgrun.removeProcessByName(name);
-  return true;
+  return await stopBgrunProcessByName(name);
 }
 
 async function stopLegacyWorkersFor(name: SolardWorkerName): Promise<void> {
@@ -315,9 +331,8 @@ export async function ensureBgrunWorker(name: SolardWorkerName, restart = false)
       const shouldRestart = restart || buildMismatch;
       const shouldStart = shouldRestart || !existing;
 
-      if (existing && shouldRestart && typeof existing.pid === "number") {
-        await bgrun.terminateProcess(existing.pid, true);
-        await bgrun.removeProcessByName(name);
+      if (existing && shouldRestart) {
+        await bgrun.handleStop(name);
         await Bun.sleep(250);
       }
 

@@ -23,11 +23,11 @@ export type BgrunRunInput = {
 
 export type BgrunSdk = {
   handleRun: (input: BgrunRunInput) => Promise<unknown> | unknown;
+  handleStop: (name: string) => Promise<unknown> | unknown;
   getAllProcesses: () => BgrunProcess[];
+  getManagedChildProcesses: (parentName: string) => BgrunProcess[];
   getProcess: (name: string) => BgrunProcess | null | undefined;
   isProcessRunning: (pid: number, command?: string) => Promise<boolean> | boolean;
-  terminateProcess: (pid: number, force?: boolean) => Promise<unknown> | unknown;
-  removeProcessByName: (name: string) => Promise<unknown> | unknown;
 };
 
 let cachedSdk: BgrunSdk | null = null;
@@ -37,15 +37,18 @@ function unwrapBgrunModule(mod: unknown): BgrunSdk {
   const value = ((mod as { default?: unknown })?.default ?? mod) as Partial<BgrunSdk>;
   const missing = [
     "handleRun",
+    "handleStop",
     "getAllProcesses",
+    "getManagedChildProcesses",
     "getProcess",
     "isProcessRunning",
-    "terminateProcess",
-    "removeProcessByName",
   ].filter((key) => typeof (value as Record<string, unknown>)[key] !== "function");
 
   if (missing.length) {
-    throw new Error(`bgrun SDK is missing required exports: ${missing.join(", ")}`);
+    throw new Error(
+      `bgrun SDK is missing required Solard lifecycle exports: ${missing.join(", ")}. ` +
+        "Update bgrun to the build that exports handleStop/getManagedChildProcesses.",
+    );
   }
 
   return value as BgrunSdk;
@@ -75,6 +78,14 @@ export function safeGetBgrunSdkSync(): BgrunSdk | null {
   } catch {
     return null;
   }
+}
+
+export async function stopBgrunProcessByName(name: string): Promise<boolean> {
+  const bgrun = await getBgrunSdk();
+  const existing = bgrun.getProcess(name);
+  if (!existing) return false;
+  await bgrun.handleStop(name);
+  return true;
 }
 
 export function normalizeBgrunProcess(row: BgrunProcess): Record<string, unknown> {

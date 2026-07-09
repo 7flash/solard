@@ -23,14 +23,27 @@ export type BgrunWorkerSupervisor = {
   stop: (reason?: string) => Promise<void>;
 };
 
+function parentName(): string {
+  return process.env.BGR_PROCESS_NAME || "solard";
+}
+
+function inheritedStringEnv(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+}
+
 function envForWorker(name: SolardWorkerName): Record<string, string> {
   const spec = WORKER_SPECS[name];
   return {
-    ...process.env,
+    ...inheritedStringEnv(),
     SOLARD_WORKER_NAME: name,
     SOLARD_WORKER_SUPERVISOR: "bgrun-sdk",
     SOLARD_EXPECTED_BUILD_ID: spec.buildId,
-    BGR_PARENT_NAME: process.env.BGR_PROCESS_NAME || "solard",
+
+    // bgrun now auto-injects this when the parent is itself managed. Keeping it
+    // explicit makes ownership reliable for local/manual server starts too.
+    BGR_PARENT_NAME: parentName(),
   };
 }
 
@@ -39,9 +52,8 @@ async function ensureBgrunSdkWorker(name: SolardWorkerName, restart = false): Pr
   const spec = WORKER_SPECS[name];
   const existing = bgrun.getProcess(name);
 
-  if (existing && restart && typeof existing.pid === "number") {
-    await bgrun.terminateProcess(existing.pid, true);
-    await bgrun.removeProcessByName(name);
+  if (existing && restart) {
+    await bgrun.handleStop(name);
     await Bun.sleep(250);
   }
 
@@ -65,7 +77,7 @@ async function ensureBgrunSdkWorker(name: SolardWorkerName, restart = false): Pr
       command: spec.command,
       buildId: spec.buildId,
       supervisor: "bgrun-sdk",
-      parent: process.env.BGR_PROCESS_NAME || "solard",
+      parent: parentName(),
       restart,
     },
   });
@@ -79,7 +91,10 @@ export async function startBgrunWorkerSupervisor(
   await workerMeasure.measure(
     {
       start: () => "start bgrun sdk workers",
-      end: () => ({ names, supervisor: "bgrun-sdk" }),
+      end: () => ({ names, supervisor: "bgrun-sdk", parent: parentName() }),
+      catch: (error) => {
+        throw error;
+      },
     },
     async () => {
       for (const name of names) {
@@ -110,11 +125,11 @@ export async function startBgrunWorkerSupervisor(
       await workerMeasure.measure(
         {
           start: () => "stop bgrun sdk workers",
-          end: () => ({ reason, stopped: names.length }),
+          end: () => ({ reason, stopped: names.length, parent: parentName() }),
         },
         async () => {
           const bgrun = await getBgrunSdk();
-          for (const name of names) {
+          for (const name of names.toReversed()) {
             const spec = WORKER_SPECS[name];
             const proc = bgrun.getProcess(name);
             upsertProcessStatus({
@@ -123,10 +138,9 @@ export async function startBgrunWorkerSupervisor(
               status: "stopping",
               data: { reason, supervisor: "bgrun-sdk", command: spec.command, buildId: spec.buildId },
             });
-            if (proc && typeof proc.pid === "number") {
-              await bgrun.terminateProcess(proc.pid, true);
-              await bgrun.removeProcessByName(name);
-            }
+
+            if (proc) await bgrun.handleStop(name);
+
             upsertProcessStatus({
               name,
               kind: spec.kind,

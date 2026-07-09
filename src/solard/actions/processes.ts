@@ -3,6 +3,7 @@ import {
   ensureWorkerGroup,
   normalizeWorkerName,
   listBgrunProcesses,
+  listManagedBgrunChildren,
   listWorkerRuntimeStatus,
   resolveWorkerNames,
   stopBgrunWorker,
@@ -21,6 +22,7 @@ export function listProcessesAction(input: { telegram?: boolean; source?: string
       ready: listWorkerRuntimeStatus(input).every((row) => row.managed && !row.stale && !row.error),
       workers: listWorkerRuntimeStatus(input),
       bgrun: listBgrunProcesses(),
+      bgrunChildren: listManagedBgrunChildren(),
       store: terminalStoreStats(),
     }),
   );
