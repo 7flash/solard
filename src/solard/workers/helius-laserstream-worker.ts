@@ -39,7 +39,7 @@ function heliusWsUrl(): string {
   if (explicit) return explicit;
   const key = process.env.HELIUS_API_KEY?.trim();
   if (key)
-    return `wss://atlas-mainnet.helius-rpc.com/?api-key=${encodeURIComponent(key)}`;
+    return `wss://mainnet.helius-rpc.com/?api-key=${encodeURIComponent(key)}`;
   throw new Error(
     "Missing SOLARD_HELIUS_WS_URL, HELIUS_WS_URL, or HELIUS_API_KEY for Helius LaserStream mode",
   );
@@ -124,8 +124,37 @@ async function processNotification(item: {
 }
 
 async function makeWebSocket(url: string): Promise<any> {
-  const mod = await import("ws");
-  return new (mod.default ?? (mod as any).WebSocket)(url);
+  const WebSocketCtor = globalThis.WebSocket;
+  if (!WebSocketCtor)
+    throw new Error("globalThis.WebSocket is unavailable in this Bun runtime");
+  return new WebSocketCtor(url);
+}
+
+function onSocket(
+  ws: any,
+  event: string,
+  handler: (...args: any[]) => void,
+): void {
+  if (typeof ws.addEventListener === "function") {
+    ws.addEventListener(event, (ev: any) => handler(ev));
+    return;
+  }
+  if (typeof ws.on === "function") ws.on(event, handler);
+}
+
+function socketPayload(value: any): string {
+  const payload = value?.data ?? value;
+  if (typeof payload === "string") return payload;
+  if (payload instanceof ArrayBuffer)
+    return Buffer.from(payload).toString("utf8");
+  if (ArrayBuffer.isView(payload))
+    return Buffer.from(
+      payload.buffer,
+      payload.byteOffset,
+      payload.byteLength,
+    ).toString("utf8");
+  if (Buffer.isBuffer(payload)) return payload.toString("utf8");
+  return String(payload ?? "");
 }
 
 async function runOnce(attempt: number): Promise<void> {
@@ -176,7 +205,7 @@ async function runOnce(attempt: number): Promise<void> {
   const pulse = setInterval(heartbeat, 1_000);
 
   await new Promise<void>((resolve, reject) => {
-    ws.on("open", () => {
+    onSocket(ws, "open", () => {
       const req = {
         jsonrpc: "2.0",
         id: 1,
@@ -200,9 +229,8 @@ async function runOnce(attempt: number): Promise<void> {
       heartbeat();
     });
 
-    ws.on("message", (payload: Buffer | string) => {
-      const raw =
-        typeof payload === "string" ? payload : payload.toString("utf8");
+    onSocket(ws, "message", (payload: any) => {
+      const raw = socketPayload(payload);
       lastRaw = summarizeRawMessage(raw);
       lastMessageAtMs = Date.now();
       received++;
@@ -241,13 +269,13 @@ async function runOnce(attempt: number): Promise<void> {
       }
     });
 
-    ws.on("close", () => {
+    onSocket(ws, "close", () => {
       clearInterval(pulse);
       heartbeat();
       resolve();
     });
 
-    ws.on("error", (error: unknown) => {
+    onSocket(ws, "error", (error: unknown) => {
       upsertProcessStatus({
         name: WORKER,
         kind: "stream",

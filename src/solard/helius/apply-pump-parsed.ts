@@ -51,7 +51,8 @@ export async function applyParsedPumpTransaction(args: {
         creator: create.creator,
         bondingCurveKey: create.bondingCurveKey,
         source: `${args.source}-create`,
-        phase: create.launchMode === "mayhem" ? "mayhem" : "pump",
+        phase: "pump",
+        isMayhemMode: create.isMayhemMode === true ? 1 : 0,
         supplyUi: 1_000_000_000,
         lastSlot: create.slot,
         signature: create.signature,
@@ -109,7 +110,7 @@ export async function applyParsedPumpTransaction(args: {
       upsertTerminalToken({
         mint: complete.mint,
         source: `${args.source}-complete`,
-        phase: "complete",
+        phase: "migrated",
         lastSlot: complete.slot,
         signature: complete.signature,
         updatedAtMs: Date.now(),

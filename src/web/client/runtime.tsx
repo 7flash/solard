@@ -298,10 +298,12 @@ export const state: State = {
   pumpFeedSort:
     (localStorage.getItem("solwal:pump-feed-sort") as State["pumpFeedSort"]) ||
     "newest",
-  pumpFeedSource:
-    (localStorage.getItem(
-      "solwal:pump-feed-source",
-    ) as State["pumpFeedSource"]) || "pumpportal",
+  pumpFeedSource: (() => {
+    const saved = localStorage.getItem("solwal:pump-feed-source") as
+      State["pumpFeedSource"] | null;
+    if (!saved || saved === "pumpportal") return "helius";
+    return saved;
+  })(),
   terminalDefaultWallet:
     localStorage.getItem("solwal:terminal-default-wallet") ?? "",
   terminalDefaultBuySol:

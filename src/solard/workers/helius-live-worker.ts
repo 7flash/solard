@@ -17,7 +17,7 @@ import {
 import { applyParsedPumpTransaction } from "../helius/apply-pump-parsed.js";
 
 const WORKER = "solard-helius-live-v2";
-const BUILD_ID = "helius-live-v5-shared-parser";
+const BUILD_ID = "helius-live-v6-logs-primary-fallback";
 const POLL_MS = Math.max(
   500,
   Number(process.env.SOLARD_HELIUS_POLL_MS ?? "1500"),

@@ -26,11 +26,13 @@ export async function terminalFeedSnapshotAction(
       const rows = listTerminalFeed({
         limit: input.limit ?? 250,
         sinceMs: input.sinceMs ?? 0,
-        includeUnpriced: String(input.source ?? "").includes("helius"),
-        source: input.source,
+        includeUnpriced: String(
+          input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "helius",
+        ).includes("helius"),
+        source: input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "helius",
       });
       return {
-        source: input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "default",
+        source: input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "helius",
         rows,
         stats: terminalStoreStats(),
       };
@@ -77,15 +79,17 @@ export async function followTerminalFeedAction(
         ? (ensureResult.status as any[])
         : undefined;
       emit(
-        `🦉 terminal feed listening source=${input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "default"} store=sqlite ${formatProcessSummary(status)} poll=${pollMs}ms`,
+        `🦉 terminal feed listening source=${input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "helius"} store=sqlite ${formatProcessSummary(status)} poll=${pollMs}ms`,
       );
       while (true) {
         const now = Date.now();
         const rows = listTerminalFeed({
           limit: input.limit ?? 250,
           sinceMs: lastSeen,
-          includeUnpriced: String(input.source ?? "").includes("helius"),
-          source: input.source,
+          includeUnpriced: String(
+            input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "helius",
+          ).includes("helius"),
+          source: input.source ?? process.env.SOLARD_STREAM_SOURCE ?? "helius",
         });
         for (const row of [...rows].reverse()) {
           const mark = Math.max(

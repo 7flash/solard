@@ -3,7 +3,6 @@ import {
   terminalFeedSnapshotAction,
 } from "../actions/terminal.js";
 import { followTradesAction } from "../actions/streams.js";
-import { terminalProbeAction } from "../actions/terminal-probe.js";
 import {
   ensureProcessesAction,
   listProcessesAction,
@@ -66,12 +65,15 @@ function sourceArg(
   flags: Map<string, string>,
 ): "helius" | "pumpportal" | "both" | undefined {
   const text = String(
-    flags.get("source") ?? flags.get("provider") ?? "",
+    flags.get("source") ??
+      flags.get("provider") ??
+      process.env.SOLARD_STREAM_SOURCE ??
+      "helius",
   ).toLowerCase();
   if (text.includes("both")) return "both";
-  if (text.includes("helius")) return "helius";
   if (text.includes("pump")) return "pumpportal";
-  return undefined;
+  if (text.includes("helius")) return "helius";
+  return "helius";
 }
 
 function printProcessTable(result: Record<string, unknown>): void {
@@ -119,21 +121,6 @@ export async function maybeRunWorkerCliCommand(
       restartStale: !bool(flags, "no-restart-stale", false),
       source: sourceArg(flags),
     });
-    return true;
-  }
-
-  if (
-    (cmd === "stream" || cmd === "terminal") &&
-    (sub === "probe" || sub === "doctor")
-  ) {
-    const result = await terminalProbeAction({
-      source: sourceArg(flags),
-      inject: bool(flags, "inject", false),
-      ensure: !bool(flags, "no-ensure", false),
-      restartStale: !bool(flags, "no-restart-stale", false),
-      limit: int(flags, "limit", 20),
-    });
-    emit(result);
     return true;
   }
 

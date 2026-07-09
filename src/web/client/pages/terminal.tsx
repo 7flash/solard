@@ -360,7 +360,7 @@ export function TerminalPage() {
             {state.pumpFeedSource === "both"
               ? "Both"
               : state.pumpFeedSource === "helius"
-                ? "Helius"
+                ? "Helius primary"
                 : "PumpPortal"}{" "}
             · {state.pumpFeedStatus} · {rows.length}/{state.pumpFeed.length} ·{" "}
             {state.terminalPinnedMints.length} pinned
@@ -378,8 +378,8 @@ export function TerminalPage() {
               update();
             }}
           >
-            <option value="pumpportal">PumpPortal live</option>
-            <option value="helius">Helius fallback</option>
+            <option value="helius">Helius primary</option>
+            <option value="pumpportal">PumpPortal secondary</option>
             <option value="both">Both</option>
           </select>
           <button
