@@ -22,7 +22,9 @@ import {
   getPumpFeedDbStats,
   listPumpTerminalFeedRows,
   recordPumpFeedObservation,
+  type PumpTerminalFeedRow,
 } from "../../solard/feed/feed-repo.js";
+import { resolveSolUsdPrice } from "../../solard/market/sol-usd.js";
 import {
   PUMP_PROGRAM_ID,
   findPumpCreateInTransaction,
@@ -1204,6 +1206,85 @@ function tokenRowTimeMs(row: Raw): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+async function refreshTerminalCurveRows(args: {
+  sinceMs: number;
+  pinnedMints: string[];
+  limit?: number;
+}): Promise<{ checked: number; updated: number }> {
+  if (
+    process.env.SOLARD_TERMINAL_CURVE_REFRESH === "0" ||
+    process.env.SOLWAL_TERMINAL_CURVE_REFRESH === "0"
+  )
+    return { checked: 0, updated: 0 };
+
+  const minGapMs = Math.max(
+    2_000,
+    intEnv(
+      "SOLARD_TERMINAL_CURVE_REFRESH_MIN_MS",
+      intEnv("SOLWAL_TERMINAL_CURVE_REFRESH_MIN_MS", 3_000),
+    ),
+  );
+  const minDelta = Number(
+    process.env.SOLARD_TERMINAL_CURVE_MIN_DELTA_SOL ??
+      process.env.SOLWAL_TERMINAL_CURVE_MIN_DELTA_SOL ??
+      "0.000001",
+  );
+  const now = Date.now();
+  const rows = listPumpTerminalFeedRows({
+    sinceMs: args.sinceMs,
+    pinnedMints: args.pinnedMints,
+    limit: Math.max(1, Math.min(120, args.limit ?? 80)),
+  });
+  const candidates = rows
+    .map((row) => ({
+      ...row,
+      curve: clean(row.bondingCurveKey) ?? derivePumpBondingCurve(row.mint),
+    }))
+    .filter(
+      (row): row is PumpTerminalFeedRow & { curve: string } =>
+        !!row.mint && !!row.curve && !!publicKey(row.curve),
+    )
+    .filter((row) => now - Number(row.updatedAtMs ?? 0) >= minGapMs);
+  if (!candidates.length) return { checked: 0, updated: 0 };
+
+  const snapshots = await loadBondingCurveSnapshots(
+    candidates.map((row) => row.curve),
+  );
+  let updated = 0;
+  for (const row of candidates) {
+    const snapshot = snapshots.get(row.curve);
+    if (!snapshot || snapshot.marketCapSol == null) continue;
+    const previous = Number(row.marketCapSol ?? row.lastMarketCapSol ?? NaN);
+    if (
+      Number.isFinite(previous) &&
+      Math.abs(snapshot.marketCapSol - previous) < minDelta &&
+      now - Number(row.updatedAtMs ?? 0) < minGapMs * 2
+    )
+      continue;
+    recordPumpFeedObservation({
+      eventType: "curve-poll",
+      source: "terminal-poll",
+      token: {
+        ...row,
+        mint: row.mint,
+        bondingCurveKey: row.curve,
+        marketCapSol: snapshot.marketCapSol,
+        priceSolPerToken: snapshot.priceSolPerToken,
+        txType: "curve-poll",
+      } as unknown as Raw,
+      raw: {
+        mint: row.mint,
+        bondingCurveKey: row.curve,
+        marketCapSol: snapshot.marketCapSol,
+        priceSolPerToken: snapshot.priceSolPerToken,
+        source: "terminal-poll",
+      },
+    });
+    updated += 1;
+  }
+  return { checked: candidates.length, updated };
+}
+
 function filterPumpLiveForTerminal<
   T extends { newTokens: Raw[]; watchGroups: Raw[] },
 >(state: T, sinceMs: number): T {
@@ -1236,7 +1317,7 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
       const measured = await measureSolard(
         "solard:api:GET:/api/pump-live",
         terminal ? "terminal-db-snapshot" : "list-state",
-        () => {
+        async () => {
           const state = listPumpLiveState() as unknown as {
             newTokens: Raw[];
             watchGroups: Raw[];
@@ -1247,6 +1328,12 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
             .split(",")
             .map((item) => item.trim())
             .filter(Boolean);
+          const solUsdPrice = await resolveSolUsdPrice();
+          const curveRefresh = await refreshTerminalCurveRows({
+            sinceMs,
+            pinnedMints,
+            limit: 120,
+          });
           return {
             ...filterPumpLiveForTerminal(state, sinceMs),
             // Terminal gets its live rows from the feed-worker tables, not the old
@@ -1256,11 +1343,18 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
               sinceMs,
               pinnedMints,
               limit: 300,
+              solUsdPrice,
             }) as unknown as Raw[],
+            quote: { solUsdPrice },
+            curveRefresh,
             db: getPumpFeedDbStats(),
           };
         },
-        summarizeForMeasure,
+        {
+          result: summarizeForMeasure,
+          onError: summarizeForMeasure,
+          meta: { terminal, sinceMs },
+        },
       );
       return jsonResponse({
         ok: true,

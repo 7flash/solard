@@ -62,6 +62,8 @@ export type PumpFeedRow = {
   initialBuy?: number | null;
   solAmount?: number | null;
   marketCapSol?: number | null;
+  marketCapUsd?: number | null;
+  solUsdPrice?: number | null;
   priceSolPerToken?: number | null;
   image?: string | null;
   website?: string | null;
@@ -72,11 +74,18 @@ export type PumpFeedRow = {
   initialMarketCapSol?: number | null;
   lastMarketCapSol?: number | null;
   marketCapChangeSol?: number | null;
+  initialMarketCapUsd?: number | null;
+  lastMarketCapUsd?: number | null;
+  marketCapChangeUsd?: number | null;
   marketCapChangePct?: number | null;
   sma1m?: number | null;
   sma5m?: number | null;
   sma15m?: number | null;
   sma60m?: number | null;
+  sma1mUsd?: number | null;
+  sma5mUsd?: number | null;
+  sma15mUsd?: number | null;
+  sma60mUsd?: number | null;
   lastTradeAtMs?: number | null;
   isMayhemMode?: boolean | null;
   quoteAsset?: string | null;
@@ -110,6 +119,7 @@ export type Toast = {
 export type TokenWatchSample = {
   capturedAtMs: number;
   marketCapSol: number | null;
+  marketCapUsd?: number | null;
   source?: string | null;
 };
 
@@ -125,9 +135,14 @@ export type TokenWatchToken = {
   updatedAtMs: number;
   samples: TokenWatchSample[];
   priceSolPerToken?: number | null;
+  marketCapUsd?: number | null;
+  solUsdPrice?: number | null;
   lastTradeAtMs?: number | null;
   initialMarketCapSol?: number | null;
+  lastMarketCapUsd?: number | null;
+  initialMarketCapUsd?: number | null;
   marketCapChangeSol?: number | null;
+  marketCapChangeUsd?: number | null;
   marketCapChangePct?: number | null;
   isMayhemMode?: boolean | null;
   quoteAsset?: string | null;
@@ -138,6 +153,10 @@ export type TokenWatchToken = {
   sma5m: number | null;
   sma15m: number | null;
   sma60m: number | null;
+  sma1mUsd?: number | null;
+  sma5mUsd?: number | null;
+  sma15mUsd?: number | null;
+  sma60mUsd?: number | null;
 };
 
 export type TokenWatchGroup = {
@@ -218,6 +237,7 @@ export type State = {
     | "sma15m-desc"
     | "trades-desc";
   pumpFeedSource: "helius" | "pumpportal";
+  solUsdPrice: number | null;
   terminalDefaultWallet: string;
   terminalDefaultBuySol: string;
   terminalDefaultSender: "helius-fast" | "helius-rpc" | "rpc";
@@ -285,6 +305,7 @@ export const state: State = {
     (localStorage.getItem(
       "solwal:pump-feed-source",
     ) as State["pumpFeedSource"]) || "helius",
+  solUsdPrice: null,
   terminalDefaultWallet:
     localStorage.getItem("solwal:terminal-default-wallet") ?? "",
   terminalDefaultBuySol:
@@ -767,6 +788,22 @@ export function formatMcap(value: number | null | undefined): string {
     : value.toExponential(2);
 }
 
+export function formatUsdMcap(value: number | null | undefined): string {
+  const formatted = formatMcap(value);
+  return formatted === "—" ? formatted : `$${formatted}`;
+}
+
+function solMcapToUsd(
+  value: number | null | undefined,
+  row?: { solUsdPrice?: number | null },
+): number | null {
+  const solUsdPrice = row?.solUsdPrice ?? state.solUsdPrice;
+  if (value == null || solUsdPrice == null) return null;
+  if (!Number.isFinite(value) || !Number.isFinite(solUsdPrice)) return null;
+  if (value < 0 || solUsdPrice <= 0) return null;
+  return value * solUsdPrice;
+}
+
 export function latestMcap(row: {
   marketCapSol?: number | null;
   lastMarketCapSol?: number | null;
@@ -784,6 +821,30 @@ export function latestMcap(row: {
         Number.isFinite(sample.marketCapSol),
     )?.marketCapSol ?? null
   );
+}
+
+export function latestMcapUsd(row: {
+  marketCapUsd?: number | null;
+  lastMarketCapUsd?: number | null;
+  marketCapSol?: number | null;
+  lastMarketCapSol?: number | null;
+  solUsdPrice?: number | null;
+  samples?: TokenWatchSample[];
+}): number | null {
+  const directUsd = row.marketCapUsd ?? row.lastMarketCapUsd;
+  if (typeof directUsd === "number" && Number.isFinite(directUsd))
+    return directUsd;
+  const samples = [...(row.samples ?? [])].sort(
+    (a, b) => b.capturedAtMs - a.capturedAtMs,
+  );
+  const sampleUsd = samples.find(
+    (sample) =>
+      typeof sample.marketCapUsd === "number" &&
+      Number.isFinite(sample.marketCapUsd),
+  )?.marketCapUsd;
+  if (typeof sampleUsd === "number" && Number.isFinite(sampleUsd))
+    return sampleUsd;
+  return solMcapToUsd(latestMcap(row), row);
 }
 
 export function initialMcap(row: {
@@ -809,6 +870,31 @@ export function initialMcap(row: {
   );
 }
 
+export function initialMcapUsd(row: {
+  initialMarketCapUsd?: number | null;
+  initialMarketCapSol?: number | null;
+  marketCapSol?: number | null;
+  solUsdPrice?: number | null;
+  samples?: TokenWatchSample[];
+}): number | null {
+  if (
+    typeof row.initialMarketCapUsd === "number" &&
+    Number.isFinite(row.initialMarketCapUsd)
+  )
+    return row.initialMarketCapUsd;
+  const samples = [...(row.samples ?? [])].sort(
+    (a, b) => a.capturedAtMs - b.capturedAtMs,
+  );
+  const sampleUsd = samples.find(
+    (sample) =>
+      typeof sample.marketCapUsd === "number" &&
+      Number.isFinite(sample.marketCapUsd),
+  )?.marketCapUsd;
+  if (typeof sampleUsd === "number" && Number.isFinite(sampleUsd))
+    return sampleUsd;
+  return solMcapToUsd(initialMcap(row), row);
+}
+
 export function mcapChange(row: {
   initialMarketCapSol?: number | null;
   marketCapSol?: number | null;
@@ -823,6 +909,27 @@ export function mcapChange(row: {
     return row.marketCapChangeSol;
   const first = initialMcap(row);
   const last = latestMcap(row);
+  return first != null && last != null ? last - first : null;
+}
+
+export function mcapChangeUsd(row: {
+  initialMarketCapUsd?: number | null;
+  lastMarketCapUsd?: number | null;
+  marketCapUsd?: number | null;
+  initialMarketCapSol?: number | null;
+  marketCapSol?: number | null;
+  lastMarketCapSol?: number | null;
+  marketCapChangeUsd?: number | null;
+  solUsdPrice?: number | null;
+  samples?: TokenWatchSample[];
+}): number | null {
+  if (
+    typeof row.marketCapChangeUsd === "number" &&
+    Number.isFinite(row.marketCapChangeUsd)
+  )
+    return row.marketCapChangeUsd;
+  const first = initialMcapUsd(row);
+  const last = latestMcapUsd(row);
   return first != null && last != null ? last - first : null;
 }
 
@@ -851,6 +958,12 @@ export function formatSignedMcap(value: number | null | undefined): string {
   return `${sign}${formatMcap(value)}`;
 }
 
+export function formatSignedUsdMcap(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}${formatUsdMcap(Math.abs(value))}`;
+}
+
 export function formatPct(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
   const sign = value > 0 ? "+" : "";
@@ -867,15 +980,18 @@ export function sortFeedRows(rows: PumpFeedRow[]): PumpFeedRow[] {
   switch (state.pumpFeedSort) {
     case "mcap-desc":
       return copy.sort(
-        (a, b) => (latestMcap(b) ?? -Infinity) - (latestMcap(a) ?? -Infinity),
+        (a, b) =>
+          (latestMcapUsd(b) ?? -Infinity) - (latestMcapUsd(a) ?? -Infinity),
       );
     case "mcap-asc":
       return copy.sort(
-        (a, b) => (latestMcap(a) ?? Infinity) - (latestMcap(b) ?? Infinity),
+        (a, b) =>
+          (latestMcapUsd(a) ?? Infinity) - (latestMcapUsd(b) ?? Infinity),
       );
     case "mcap-change-desc":
       return copy.sort(
-        (a, b) => (mcapChange(b) ?? -Infinity) - (mcapChange(a) ?? -Infinity),
+        (a, b) =>
+          (mcapChangeUsd(b) ?? -Infinity) - (mcapChangeUsd(a) ?? -Infinity),
       );
     case "mcap-change-pct-desc":
       return copy.sort(
@@ -884,7 +1000,7 @@ export function sortFeedRows(rows: PumpFeedRow[]): PumpFeedRow[] {
       );
     case "sma1m-desc":
       return copy.sort(
-        (a, b) => (b.sma1m ?? -Infinity) - (a.sma1m ?? -Infinity),
+        (a, b) => (b.sma1mUsd ?? -Infinity) - (a.sma1mUsd ?? -Infinity),
       );
     case "sma5m-desc":
       return copy.sort(
@@ -906,11 +1022,13 @@ export function sortWatchRows(rows: TokenWatchToken[]): TokenWatchToken[] {
   switch (state.watchSort) {
     case "mcap-asc":
       return copy.sort(
-        (a, b) => (latestMcap(a) ?? Infinity) - (latestMcap(b) ?? Infinity),
+        (a, b) =>
+          (latestMcapUsd(a) ?? Infinity) - (latestMcapUsd(b) ?? Infinity),
       );
     case "mcap-change-desc":
       return copy.sort(
-        (a, b) => (mcapChange(b) ?? -Infinity) - (mcapChange(a) ?? -Infinity),
+        (a, b) =>
+          (mcapChangeUsd(b) ?? -Infinity) - (mcapChangeUsd(a) ?? -Infinity),
       );
     case "mcap-change-pct-desc":
       return copy.sort(
@@ -919,7 +1037,7 @@ export function sortWatchRows(rows: TokenWatchToken[]): TokenWatchToken[] {
       );
     case "sma1m-desc":
       return copy.sort(
-        (a, b) => (b.sma1m ?? -Infinity) - (a.sma1m ?? -Infinity),
+        (a, b) => (b.sma1mUsd ?? -Infinity) - (a.sma1mUsd ?? -Infinity),
       );
     case "trades-desc":
       return copy.sort(
@@ -931,7 +1049,8 @@ export function sortWatchRows(rows: TokenWatchToken[]): TokenWatchToken[] {
       return copy.sort((a, b) => b.addedAtMs - a.addedAtMs);
     default:
       return copy.sort(
-        (a, b) => (latestMcap(b) ?? -Infinity) - (latestMcap(a) ?? -Infinity),
+        (a, b) =>
+          (latestMcapUsd(b) ?? -Infinity) - (latestMcapUsd(a) ?? -Infinity),
       );
   }
 }
@@ -1028,7 +1147,13 @@ export async function refreshPumpLive(): Promise<void> {
   const live = await api<{
     newTokens: PumpFeedRow[];
     watchGroups: TokenWatchGroup[];
+    quote?: { solUsdPrice?: number | null };
   }>(`/api/pump-live${suffix}`);
+  if (
+    typeof live.quote?.solUsdPrice === "number" &&
+    Number.isFinite(live.quote.solUsdPrice)
+  )
+    state.solUsdPrice = live.quote.solUsdPrice;
   state.watchGroups = live.watchGroups ?? state.watchGroups;
   if (!state.selectedWatchGroupId && state.watchGroups[0])
     state.selectedWatchGroupId = state.watchGroups[0].id;
@@ -1228,6 +1353,10 @@ function normalizeFeedRow(
     typeof row.marketCapSol === "number" && Number.isFinite(row.marketCapSol)
       ? row.marketCapSol
       : null;
+  const directMcapUsd =
+    typeof row.marketCapUsd === "number" && Number.isFinite(row.marketCapUsd)
+      ? row.marketCapUsd
+      : solMcapToUsd(directMcap, row);
   const samples = [...(row.samples ?? [])];
   if (
     directMcap != null &&
@@ -1240,6 +1369,7 @@ function normalizeFeedRow(
     samples.unshift({
       capturedAtMs: now,
       marketCapSol: directMcap,
+      marketCapUsd: directMcapUsd,
       source: row.eventType ?? row.raw?.txType ?? row.raw?.source ?? "stream",
     });
   }
@@ -1275,13 +1405,41 @@ function normalizeFeedRow(
     existing?.marketCapSol ??
     existing?.lastMarketCapSol ??
     null;
+  const lastUsd = mergedSamples.find(
+    (sample) =>
+      typeof sample.marketCapUsd === "number" &&
+      Number.isFinite(sample.marketCapUsd),
+  );
+  const mcapUsd =
+    directMcapUsd ??
+    row.lastMarketCapUsd ??
+    lastUsd?.marketCapUsd ??
+    existing?.marketCapUsd ??
+    existing?.lastMarketCapUsd ??
+    solMcapToUsd(mcap, row) ??
+    null;
   const initial =
     row.initialMarketCapSol ??
     existing?.initialMarketCapSol ??
     first?.marketCapSol ??
     mcap ??
     null;
+  const initialUsd =
+    row.initialMarketCapUsd ??
+    existing?.initialMarketCapUsd ??
+    [...mergedSamples]
+      .reverse()
+      .find(
+        (sample) =>
+          typeof sample.marketCapUsd === "number" &&
+          Number.isFinite(sample.marketCapUsd),
+      )?.marketCapUsd ??
+    solMcapToUsd(initial, row) ??
+    mcapUsd ??
+    null;
   const change = mcap != null && initial != null ? mcap - initial : null;
+  const changeUsd =
+    mcapUsd != null && initialUsd != null ? mcapUsd - initialUsd : null;
   const pct =
     change != null && initial != null && initial > 0
       ? (change / initial) * 100
@@ -1304,12 +1462,21 @@ function normalizeFeedRow(
     marketCapSol: mcap,
     lastMarketCapSol: mcap,
     initialMarketCapSol: initial,
+    marketCapUsd: mcapUsd,
+    lastMarketCapUsd: mcapUsd,
+    initialMarketCapUsd: initialUsd,
     marketCapChangeSol: row.marketCapChangeSol ?? change,
+    marketCapChangeUsd: row.marketCapChangeUsd ?? changeUsd,
     marketCapChangePct: row.marketCapChangePct ?? pct,
+    solUsdPrice: row.solUsdPrice ?? existing?.solUsdPrice ?? state.solUsdPrice,
     samples: mergedSamples,
     sma1m: row.sma1m ?? avg(60_000),
     sma5m: row.sma5m ?? avg(5 * 60_000),
     sma15m: row.sma15m ?? avg(15 * 60_000),
+    sma1mUsd: row.sma1mUsd ?? solMcapToUsd(row.sma1m ?? avg(60_000), row),
+    sma5mUsd: row.sma5mUsd ?? solMcapToUsd(row.sma5m ?? avg(5 * 60_000), row),
+    sma15mUsd:
+      row.sma15mUsd ?? solMcapToUsd(row.sma15m ?? avg(15 * 60_000), row),
     lastTradeAtMs:
       row.lastTradeAtMs ??
       (row.eventType === "trade" ? now : existing?.lastTradeAtMs) ??

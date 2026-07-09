@@ -22,10 +22,14 @@ import {
   TokenBadges,
   passesBadgeFilters,
   formatMcap,
+  formatUsdMcap,
   latestMcap,
+  latestMcapUsd,
   mcapChange,
+  mcapChangeUsd,
   mcapChangePct,
   formatSignedMcap,
+  formatSignedUsdMcap,
   formatPct,
   sortFeedRows,
   sortWatchRows,
@@ -111,7 +115,7 @@ export function WatchlistsPage() {
             >
               <option value="mcap-desc">MCap high → low</option>
               <option value="mcap-asc">MCap low → high</option>
-              <option value="mcap-change-desc">Raised most SOL</option>
+              <option value="mcap-change-desc">Raised most $</option>
               <option value="mcap-change-pct-desc">Raised most %</option>
               <option value="sma1m-desc">SMA 1m high → low</option>
               <option value="trades-desc">Most trades</option>
@@ -212,8 +216,8 @@ export function WatchlistsPage() {
                 <th>Token</th>
                 <th>Mint</th>
                 <th>Creator</th>
-                <th>Last mcap</th>
-                <th>Δ MCap</th>
+                <th>Last mcap $</th>
+                <th>Δ MCap $</th>
                 <th>Δ %</th>
                 <th>SMA 1m</th>
                 <th>SMA 5m</th>
@@ -257,17 +261,31 @@ export function WatchlistsPage() {
                     </a>
                   </td>
                   <td className="code">{short(token.creator)}</td>
-                  <td>{formatMcap(latestMcap(token))}</td>
+                  <td
+                    title={
+                      latestMcap(token) != null
+                        ? `${formatMcap(latestMcap(token))} SOL`
+                        : undefined
+                    }
+                  >
+                    {formatUsdMcap(latestMcapUsd(token))}
+                  </td>
                   <td
                     className={
-                      mcapChange(token) != null && mcapChange(token)! > 0
+                      mcapChangeUsd(token) != null && mcapChangeUsd(token)! > 0
                         ? "gain"
-                        : mcapChange(token) != null && mcapChange(token)! < 0
+                        : mcapChangeUsd(token) != null &&
+                            mcapChangeUsd(token)! < 0
                           ? "loss"
                           : ""
                     }
+                    title={
+                      mcapChange(token) != null
+                        ? `${formatSignedMcap(mcapChange(token))} SOL`
+                        : undefined
+                    }
                   >
-                    {formatSignedMcap(mcapChange(token))}
+                    {formatSignedUsdMcap(mcapChangeUsd(token))}
                   </td>
                   <td
                     className={
@@ -281,10 +299,10 @@ export function WatchlistsPage() {
                   >
                     {formatPct(mcapChangePct(token))}
                   </td>
-                  <td>{formatMcap(token.sma1m)}</td>
-                  <td>{formatMcap(token.sma5m)}</td>
-                  <td>{formatMcap(token.sma15m)}</td>
-                  <td>{formatMcap(token.sma60m)}</td>
+                  <td>{formatUsdMcap(token.sma1mUsd ?? null)}</td>
+                  <td>{formatUsdMcap(token.sma5mUsd ?? null)}</td>
+                  <td>{formatUsdMcap(token.sma15mUsd ?? null)}</td>
+                  <td>{formatUsdMcap(token.sma60mUsd ?? null)}</td>
                   <td>{token.trades?.length ?? token.samples.length}</td>
                   <td>
                     {token.lastTradeAtMs ? age(token.lastTradeAtMs) : "—"}

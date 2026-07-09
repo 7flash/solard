@@ -1,4 +1,5 @@
 import { openDatabase } from "../../db/database.js";
+import { convertSolMcapToUsd } from "../market/sol-usd.js";
 import type {
   PumpBalanceDeltaRow,
   PumpHolderCurrentRow,
@@ -46,17 +47,24 @@ export type PumpTerminalFeedRow = {
   lastMarketCapSol?: number | null;
   initialMarketCapSol?: number | null;
   marketCapChangeSol?: number | null;
+  marketCapUsd?: number | null;
+  lastMarketCapUsd?: number | null;
+  initialMarketCapUsd?: number | null;
+  marketCapChangeUsd?: number | null;
+  solUsdPrice?: number | null;
   marketCapChangePct?: number | null;
   priceSolPerToken?: number | null;
   samples: Array<{
     capturedAtMs: number;
     marketCapSol: number | null;
+    marketCapUsd?: number | null;
     priceSolPerToken?: number | null;
     source?: string | null;
   }>;
   trades: Array<{
     capturedAtMs: number;
     marketCapSol: number | null;
+    marketCapUsd?: number | null;
     priceSolPerToken?: number | null;
     solAmount?: number | null;
     tokenAmount?: number | null;
@@ -67,6 +75,9 @@ export type PumpTerminalFeedRow = {
   sma1m: number | null;
   sma5m: number | null;
   sma15m: number | null;
+  sma1mUsd?: number | null;
+  sma5mUsd?: number | null;
+  sma15mUsd?: number | null;
   source?: string | null;
   eventType?: string | null;
   quoteAsset?: string | null;
@@ -149,10 +160,20 @@ function latestPumpSwaps(mint: string, limit = 50): PumpSwapRow[] {
     .all() as PumpSwapRow[];
 }
 
+function mcapUsd(
+  value: number | null | undefined,
+  solUsdPrice: number | null | undefined,
+): number | null {
+  return convertSolMcapToUsd(value, solUsdPrice);
+}
+
 export function latestPumpAggregates(mint: string): {
   sma1m: number | null;
   sma5m: number | null;
   sma15m: number | null;
+  sma1mUsd?: number | null;
+  sma5mUsd?: number | null;
+  sma15mUsd?: number | null;
 } {
   const rows = db()
     .pumpPriceAggregates.select()
@@ -402,6 +423,7 @@ export function recordPumpFeedObservation(
 function terminalRowFromToken(
   row: PumpTokenEventRow,
   now = Date.now(),
+  solUsdPrice: number | null = null,
 ): PumpTerminalFeedRow {
   const aggregateRows = latestPumpAggregateRows(row.mint);
   const aggregateFor = (
@@ -414,6 +436,10 @@ function terminalRowFromToken(
     .map((agg) => ({
       capturedAtMs: agg.updatedAtMs || agg.bucketStartMs,
       marketCapSol: agg.lastMarketCapSol ?? agg.smaMarketCapSol ?? null,
+      marketCapUsd: mcapUsd(
+        agg.lastMarketCapSol ?? agg.smaMarketCapSol ?? null,
+        solUsdPrice,
+      ),
       priceSolPerToken: row.priceSolPerToken ?? null,
       source: `sma-${agg.intervalSeconds}s`,
     }))
@@ -436,6 +462,7 @@ function terminalRowFromToken(
     samples.unshift({
       capturedAtMs: row.updatedAtMs || now,
       marketCapSol: row.marketCapSol,
+      marketCapUsd: mcapUsd(row.marketCapSol, solUsdPrice),
       priceSolPerToken: row.priceSolPerToken ?? null,
       source: row.source,
     });
@@ -443,6 +470,7 @@ function terminalRowFromToken(
   const trades = swaps.map((swap) => ({
     capturedAtMs: swap.createdAtMs,
     marketCapSol: swap.marketCapSol ?? null,
+    marketCapUsd: mcapUsd(swap.marketCapSol, solUsdPrice),
     priceSolPerToken: swap.priceSolPerToken ?? null,
     solAmount: swap.solAmount ?? null,
     tokenAmount: swap.tokenAmountUi ?? null,
@@ -460,7 +488,11 @@ function terminalRowFromToken(
       ?.marketCapSol ??
     current ??
     null;
+  const currentUsd = mcapUsd(current, solUsdPrice);
+  const initialUsd = mcapUsd(initial, solUsdPrice);
   const change = current != null && initial != null ? current - initial : null;
+  const changeUsd =
+    currentUsd != null && initialUsd != null ? currentUsd - initialUsd : null;
   const changePct =
     change != null && initial != null && initial > 0
       ? (change / initial) * 100
@@ -487,6 +519,11 @@ function terminalRowFromToken(
     lastMarketCapSol: current,
     initialMarketCapSol: initial,
     marketCapChangeSol: change,
+    marketCapUsd: currentUsd,
+    lastMarketCapUsd: currentUsd,
+    initialMarketCapUsd: initialUsd,
+    marketCapChangeUsd: changeUsd,
+    solUsdPrice,
     marketCapChangePct: changePct,
     priceSolPerToken: row.priceSolPerToken,
     samples,
@@ -494,6 +531,9 @@ function terminalRowFromToken(
     sma1m: aggregateFor(60)?.smaMarketCapSol ?? null,
     sma5m: aggregateFor(300)?.smaMarketCapSol ?? null,
     sma15m: aggregateFor(900)?.smaMarketCapSol ?? null,
+    sma1mUsd: mcapUsd(aggregateFor(60)?.smaMarketCapSol ?? null, solUsdPrice),
+    sma5mUsd: mcapUsd(aggregateFor(300)?.smaMarketCapSol ?? null, solUsdPrice),
+    sma15mUsd: mcapUsd(aggregateFor(900)?.smaMarketCapSol ?? null, solUsdPrice),
     source: row.source,
     eventType: row.eventType,
     quoteAsset: "SOL",
@@ -503,7 +543,12 @@ function terminalRowFromToken(
 }
 
 export function listPumpTerminalFeedRows(
-  args: { sinceMs?: number; pinnedMints?: string[]; limit?: number } = {},
+  args: {
+    sinceMs?: number;
+    pinnedMints?: string[];
+    limit?: number;
+    solUsdPrice?: number | null;
+  } = {},
 ): PumpTerminalFeedRow[] {
   const now = Date.now();
   const limit = Math.max(1, Math.min(500, Math.floor(args.limit ?? 250)));
@@ -528,7 +573,7 @@ export function listPumpTerminalFeedRows(
   );
   return filtered
     .slice(0, limit)
-    .map((row) => terminalRowFromToken(row, now))
+    .map((row) => terminalRowFromToken(row, now, args.solUsdPrice ?? null))
     .sort((a, b) => {
       const pinDelta = Number(pinned.has(b.mint)) - Number(pinned.has(a.mint));
       if (pinDelta) return pinDelta;

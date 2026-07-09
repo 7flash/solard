@@ -9,7 +9,9 @@ import {
   tokenImage,
   passesBadgeFilters,
   formatMcap,
+  formatUsdMcap,
   latestMcap,
+  latestMcapUsd,
   mcapChangePct,
   formatPct,
   sortFeedRows,
@@ -131,9 +133,9 @@ function HolderList({ mint }: { mint?: string | null }) {
 function SmaInline({ row }: { row: PumpFeedRow }) {
   return (
     <span className="terminal-sma-inline">
-      <b>{formatMcap(row.sma1m)}</b>
-      <b>{formatMcap(row.sma5m)}</b>
-      <b>{formatMcap(row.sma15m)}</b>
+      <b>{formatUsdMcap(row.sma1mUsd ?? null)}</b>
+      <b>{formatUsdMcap(row.sma5mUsd ?? null)}</b>
+      <b>{formatUsdMcap(row.sma15mUsd ?? null)}</b>
     </span>
   );
 }
@@ -185,6 +187,7 @@ export function TerminalPage() {
   const rows = sortPinnedFirst(sortFeedRows(filteredRows));
   const inspector = chooseInspector(rows);
   const currentMcap = latestMcap(inspector ?? {});
+  const currentMcapUsd = latestMcapUsd(inspector ?? {});
   const currentDeltaPct = mcapChangePct(inspector ?? {});
 
   return (
@@ -199,6 +202,9 @@ export function TerminalPage() {
             {state.pumpFeedSource === "helius" ? "Helius" : "PumpPortal"} ·{" "}
             {rows.length}/{state.pumpFeed.length} ·{" "}
             {state.terminalPinnedMints.length} pinned
+            {state.solUsdPrice
+              ? ` · SOL ${formatUsdMcap(state.solUsdPrice)}`
+              : ""}
           </span>
         </div>
         <div className="terminal-actions-compact">
@@ -369,7 +375,7 @@ export function TerminalPage() {
               <tr>
                 <th></th>
                 <th>token</th>
-                <th>mcap</th>
+                <th>mcap $</th>
                 <th>Δ%</th>
                 <th>SMA 1/5/15</th>
                 <th>trd</th>
@@ -418,7 +424,9 @@ export function TerminalPage() {
                         </span>
                       </a>
                     </td>
-                    <td className="num-cell">{formatMcap(latestMcap(row))}</td>
+                    <td className="num-cell">
+                      {formatUsdMcap(latestMcapUsd(row))}
+                    </td>
                     <td
                       className={
                         mcapChangePct(row) != null && mcapChangePct(row)! > 0
@@ -526,7 +534,15 @@ export function TerminalPage() {
               </div>
               <div className="terminal-kv">
                 <span>MCap</span>
-                <b>{formatMcap(currentMcap)} SOL</b>
+                <b
+                  title={
+                    currentMcap != null
+                      ? `${formatMcap(currentMcap)} SOL`
+                      : undefined
+                  }
+                >
+                  {formatUsdMcap(currentMcapUsd)}
+                </b>
                 <span>Δ %</span>
                 <b
                   className={
@@ -540,11 +556,11 @@ export function TerminalPage() {
                   {formatPct(currentDeltaPct)}
                 </b>
                 <span>SMA 1m</span>
-                <b>{formatMcap(inspector.sma1m)}</b>
+                <b>{formatUsdMcap(inspector.sma1mUsd ?? null)}</b>
                 <span>SMA 5m</span>
-                <b>{formatMcap(inspector.sma5m)}</b>
+                <b>{formatUsdMcap(inspector.sma5mUsd ?? null)}</b>
                 <span>SMA 15m</span>
-                <b>{formatMcap(inspector.sma15m)}</b>
+                <b>{formatUsdMcap(inspector.sma15mUsd ?? null)}</b>
                 <span>Trades</span>
                 <b>{inspector.trades?.length ?? 0}</b>
                 <span>Mint</span>
