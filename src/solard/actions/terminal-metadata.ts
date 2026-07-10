@@ -14,7 +14,7 @@ const attempted = new Map<string, number>();
 function needsRetry(mint: string): boolean {
   const now = Date.now();
   const last = attempted.get(mint) ?? 0;
-  const ttl = Number(process.env.SOLARD_METADATA_RETRY_MS ?? "120000");
+  const ttl = Number(process.env.SOLARD_METADATA_RETRY_MS ?? "45000");
   return now - last >= ttl;
 }
 
@@ -22,9 +22,23 @@ function remember(mint: string): void {
   attempted.set(mint, Date.now());
   if (attempted.size <= 5000) return;
   const cutoff =
-    Date.now() - Number(process.env.SOLARD_METADATA_RETRY_MS ?? "120000") * 4;
+    Date.now() - Number(process.env.SOLARD_METADATA_RETRY_MS ?? "45000") * 6;
   for (const [key, value] of attempted)
     if (value < cutoff) attempted.delete(key);
+}
+
+function goodText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (
+    !text ||
+    text === "-" ||
+    /^token$/i.test(text) ||
+    /^new token$/i.test(text) ||
+    /^unknown$/i.test(text)
+  )
+    return undefined;
+  return text;
 }
 
 function hasAnyMetadata(value: Record<string, unknown>): boolean {
@@ -60,7 +74,7 @@ export async function hydrateMissingTerminalMetadata(
     async () => {
       const rows = listTerminalTokensNeedingMetadata(
         input.limit ??
-          Number(process.env.SOLARD_METADATA_BACKFILL_LIMIT ?? "8"),
+          Number(process.env.SOLARD_METADATA_BACKFILL_LIMIT ?? "12"),
       );
       let hydrated = 0;
       let skipped = 0;
@@ -86,20 +100,16 @@ export async function hydrateMissingTerminalMetadata(
           }
           upsertTerminalToken({
             mint: row.mint,
-            symbol:
-              typeof merged.symbol === "string" ? merged.symbol : undefined,
-            name: typeof merged.name === "string" ? merged.name : undefined,
-            image: typeof merged.image === "string" ? merged.image : undefined,
-            description:
-              typeof merged.description === "string"
-                ? merged.description
+            symbol: goodText(merged.symbol),
+            name: goodText(merged.name),
+            image:
+              typeof merged.image === "string" && merged.image.trim()
+                ? merged.image
                 : undefined,
-            website:
-              typeof merged.website === "string" ? merged.website : undefined,
-            twitter:
-              typeof merged.twitter === "string" ? merged.twitter : undefined,
-            telegram:
-              typeof merged.telegram === "string" ? merged.telegram : undefined,
+            description: goodText(merged.description),
+            website: goodText(merged.website),
+            twitter: goodText(merged.twitter),
+            telegram: goodText(merged.telegram),
             updatedAtMs: Date.now(),
           });
           hydrated++;

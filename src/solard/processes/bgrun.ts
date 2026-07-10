@@ -15,6 +15,8 @@ export type SolardWorkerName =
   | "solard-helius-laserstream-v1"
   | "solard-pumpportal-live-v2"
   | "solard-curve-snapshots"
+  | "solard-holder-snapshots"
+  | "solard-metadata-repair"
   | "solard-reconciler"
   | "solard-telegram-signals";
 
@@ -42,6 +44,10 @@ const WORKER_ALIASES: Record<string, SolardWorkerName> = {
   "solard-pump-trades": "solard-helius-live-v2",
   "solard-curve": "solard-curve-snapshots",
   "solard-curve-worker": "solard-curve-snapshots",
+  "solard-holders": "solard-holder-snapshots",
+  "solard-holder-snapshot": "solard-holder-snapshots",
+  "solard-metadata": "solard-metadata-repair",
+  "solard-metadata-worker": "solard-metadata-repair",
 };
 
 export type WorkerSpec = {
@@ -90,6 +96,24 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     command: "bun run ./src/solard/workers/curve-snapshot-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_CURVE_SNAPSHOT_STALE_MS ?? "12000"),
     buildId: "curve-snapshots-v1-bonding-account",
+  },
+  "solard-holder-snapshots": {
+    name: "solard-holder-snapshots",
+    kind: "stream",
+    command: "bun run ./src/solard/workers/holder-snapshot-worker.ts",
+    staleAfterMs: Number(
+      process.env.SOLARD_HOLDER_SNAPSHOT_STALE_MS ?? "45000",
+    ),
+    buildId: "holder-snapshots-v1-largest-accounts",
+  },
+  "solard-metadata-repair": {
+    name: "solard-metadata-repair",
+    kind: "stream",
+    command: "bun run ./src/solard/workers/metadata-repair-worker.ts",
+    staleAfterMs: Number(
+      process.env.SOLARD_METADATA_REPAIR_STALE_MS ?? "30000",
+    ),
+    buildId: "metadata-repair-v1-das-uri-loop",
   },
   "solard-reconciler": {
     name: "solard-reconciler",
@@ -152,7 +176,13 @@ export function coreWorkersForSource(
         : source === "both"
           ? ["solard-pumpportal-live-v2", ...heliusWorkers]
           : ["solard-pumpportal-live-v2"];
-  return [...streamWorkers, "solard-curve-snapshots", "solard-reconciler"];
+  return [
+    ...streamWorkers,
+    "solard-curve-snapshots",
+    "solard-holder-snapshots",
+    "solard-metadata-repair",
+    "solard-reconciler",
+  ];
 }
 
 export const CORE_WORKERS: SolardWorkerName[] = coreWorkersForSource();
