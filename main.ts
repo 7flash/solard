@@ -1,14 +1,9 @@
-import bgrun, * as bgrunModule from "bgrun";
-import { measure, measureSync, configure } from "measure-fn";
+import bgrun from "bgrun";
 import {
   listProcessStatus,
   upsertProcessStatus,
 } from "./src/solard/db/terminal-store.js";
-import {
-  processMeasure,
-  createMeasure,
-  summarizeForMeasure,
-} from "./src/solard/measure.js";
+import { processMeasure as m } from "./src/solard/measure.js";
 
 export type SolardWorkerName =
   | "solard-server-worker"
@@ -21,6 +16,7 @@ export type SolardWorkerName =
   | "solard-metadata-repair"
   | "solard-reconciler"
   | "solard-telegram-signals";
+
 export type WorkerSpec = {
   name: SolardWorkerName;
   kind: "stream" | "reconciler" | "signals" | "server";
@@ -29,27 +25,29 @@ export type WorkerSpec = {
   buildId: string;
 };
 
-configure({ timestamps: true });
-const workerMeasure = createMeasure("solard:orchestrator"),
-  ROOT = process.cwd(),
-  P_NAME = () => process.env.BGR_PROCESS_NAME || "solard";
-const bgrunSdk = [
-  bgrun,
-  (bgrun as any)?.default,
-  bgrunModule,
-  bgrunModule.default,
-  (bgrunModule.default as any)?.default,
-].find((c) => c && typeof c.handleRun === "function") as any;
-if (!bgrunSdk) throw new Error("bgrun SDK missing required lifecycle exports.");
+const ROOT = process.cwd();
+const P_NAME = () => process.env.BGR_PROCESS_NAME || "solard";
+
+if (!bgrun || typeof bgrun.handleRun !== "function") {
+  throw new Error(
+    "bgrun SDK compatibility error: require bgrun@3.13.0+ exports.",
+  );
+}
+
+m.sync("bgrun_db", () => ({
+  dbPath: bgrun.dbPath,
+  bgrHome: bgrun.bgrHome,
+}));
 
 export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
   "solard-server-worker": {
     name: "solard-server-worker",
     kind: "server",
     command: "bun run ./src/solard/workers/server-worker.ts",
-    staleAfterMs: 10000,
+    staleAfterMs: 10_000,
     buildId: "solard-server-v1",
   },
+
   "solard-helius-logs-v1": {
     name: "solard-helius-logs-v1",
     kind: "stream",
@@ -57,6 +55,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     staleAfterMs: Number(process.env.SOLARD_HELIUS_LOGS_STALE_MS ?? "12000"),
     buildId: "helius-logs-v1-standard-logs-subscribe",
   },
+
   "solard-helius-live-v2": {
     name: "solard-helius-live-v2",
     kind: "stream",
@@ -64,6 +63,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     staleAfterMs: Number(process.env.SOLARD_HELIUS_STALE_MS ?? "15000"),
     buildId: "helius-live-v6-logs-primary-fallback",
   },
+
   "solard-helius-laserstream-v1": {
     name: "solard-helius-laserstream-v1",
     kind: "stream",
@@ -71,6 +71,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     staleAfterMs: Number(process.env.SOLARD_HELIUS_WS_STALE_MS ?? "12000"),
     buildId: "helius-laserstream-v1-transaction-subscribe",
   },
+
   "solard-pumpportal-live-v2": {
     name: "solard-pumpportal-live-v2",
     kind: "stream",
@@ -78,6 +79,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     staleAfterMs: Number(process.env.SOLARD_PUMPPORTAL_STALE_MS ?? "15000"),
     buildId: "pumpportal-live-v4-trades-mayhem",
   },
+
   "solard-curve-snapshots": {
     name: "solard-curve-snapshots",
     kind: "stream",
@@ -85,6 +87,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     staleAfterMs: Number(process.env.SOLARD_CURVE_SNAPSHOT_STALE_MS ?? "12000"),
     buildId: "curve-snapshots-v1-bonding-account",
   },
+
   "solard-holder-snapshots": {
     name: "solard-holder-snapshots",
     kind: "stream",
@@ -94,6 +97,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     ),
     buildId: "holder-snapshots-v1-largest-accounts",
   },
+
   "solard-metadata-repair": {
     name: "solard-metadata-repair",
     kind: "stream",
@@ -103,6 +107,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     ),
     buildId: "metadata-repair-v1-das-uri-loop",
   },
+
   "solard-reconciler": {
     name: "solard-reconciler",
     kind: "reconciler",
@@ -110,6 +115,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     staleAfterMs: Number(process.env.SOLARD_RECONCILER_STALE_MS ?? "30000"),
     buildId: "reconciler-v3-build-heartbeat",
   },
+
   "solard-telegram-signals": {
     name: "solard-telegram-signals",
     kind: "signals",
@@ -121,47 +127,24 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
   },
 };
 
-export function resolveWorkerNames() {
-  const src = String(
-    process.env.SOLARD_STREAM_SOURCE || "helius",
-  ).toLowerCase();
-  const mode = String(
-    process.env.SOLARD_HELIUS_MODE ?? "logs+poll",
-  ).toLowerCase();
-  const hWorkers: SolardWorkerName[] =
-    mode === "poll"
-      ? ["solard-helius-live-v2"]
-      : mode === "laserstream" ||
-          mode === "ws" ||
-          process.env.SOLARD_HELIUS_TRANSPORT === "ws"
-        ? ["solard-helius-laserstream-v1"]
-        : mode === "all"
-          ? [
-              "solard-helius-logs-v1",
-              "solard-helius-live-v2",
-              "solard-helius-laserstream-v1",
-            ]
-          : ["solard-helius-logs-v1", "solard-helius-live-v2"];
+export function resolveWorkerNames(): SolardWorkerName[] {
   const list: SolardWorkerName[] = [
     "solard-server-worker",
-    // ...(src === "helius"
-    //   ? hWorkers
-    //   : src === "helius-ws"
-    //     ? ["solard-helius-laserstream-v1"]
-    //     : src === "both"
-    //       ? ["solard-pumpportal-live-v2", ...hWorkers]
-    //       : (["solard-pumpportal-live-v2"] as SolardWorkerName[])),
-    // "solard-curve-snapshots",
-    // "solard-holder-snapshots",
-    // "solard-metadata-repair",
-    // "solard-reconciler",
+    "solard-helius-logs-v1",
   ];
-  if (process.env.SOLARD_TELEGRAM_SIGNALS === "1")
+
+  if (process.env.SOLARD_TELEGRAM_SIGNALS === "1") {
     list.push("solard-telegram-signals");
+  }
+
   return list;
 }
 
-async function syncStatus(name: SolardWorkerName, status: string, extra = {}) {
+function syncStatus(
+  name: SolardWorkerName,
+  status: string,
+  extra: Record<string, unknown> = {},
+): void {
   upsertProcessStatus({
     name,
     kind: WORKER_SPECS[name].kind,
@@ -176,141 +159,352 @@ async function syncStatus(name: SolardWorkerName, status: string, extra = {}) {
   });
 }
 
-export async function manageWorkers(
-  action: "start" | "stop",
-  names: SolardWorkerName[],
-) {
-  for (const name of action === "stop" ? names.toReversed() : names) {
-    const proc = bgrunSdk.getProcess(name);
-    if (action === "start") {
-      if (proc && process.env.SOLARD_RESTART_WORKERS_ON_BOOT === "1") {
-        await bgrunSdk.handleStop(name);
-        await Bun.sleep(200);
+function cleanEnv(name: SolardWorkerName): Record<string, string> {
+  const clean: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      key === "BGR_PROCESS_NAME" ||
+      key === "BGR_PARENT_NAME" ||
+      key === "BGR_STDOUT" ||
+      key === "BGR_STDERR" ||
+      typeof value !== "string"
+    ) {
+      continue;
+    }
+
+    clean[key] = value;
+  }
+
+  return {
+    ...clean,
+    SOLARD_WORKER_NAME: name,
+    SOLARD_WORKER_SUPERVISOR: "bgrun-sdk",
+    SOLARD_EXPECTED_BUILD_ID: WORKER_SPECS[name].buildId,
+    BGR_PARENT_NAME: P_NAME(),
+  };
+}
+
+async function isBgrunProcessAlive(processInfo: any | undefined): Promise<boolean> {
+  const pid = Number(processInfo?.pid ?? 0);
+
+  if (!pid || pid <= 0) {
+    return false;
+  }
+
+  return await bgrun.isProcessRunning(
+    pid,
+    String(processInfo?.command ?? ""),
+  );
+}
+
+async function cleanStaleWorker(
+  name: SolardWorkerName,
+  existing: any,
+  alive: boolean,
+  restartRequested: boolean,
+): Promise<void> {
+  await m("clean_stale", async () => {
+    try {
+      await bgrun.handleStop(name);
+    } catch (error) {
+      m.sync("stop_failed", () => ({
+        name,
+        error,
+      }));
+    }
+
+    if (bgrun.getProcess(name)) {
+      const removeProcessByName = (bgrun as any).removeProcessByName;
+
+      if (typeof removeProcessByName === "function") {
+        removeProcessByName.call(bgrun, name);
       }
-      if (
-        !bgrunSdk.getProcess(name) ||
-        process.env.SOLARD_RESTART_WORKERS_ON_BOOT === "1"
-      ) {
-        await bgrunSdk.handleRun({
+    }
+
+    await Bun.sleep(250);
+
+    return {
+      pid: existing?.pid ?? null,
+      alive,
+      restartRequested,
+      removed: !bgrun.getProcess(name),
+    };
+  });
+}
+
+export async function ensureWorker(name: SolardWorkerName): Promise<void> {
+  await m(`worker:${name}`, async () => {
+    const spec = WORKER_SPECS[name];
+
+    const existing = bgrun.getProcess(name);
+    const alive = await isBgrunProcessAlive(existing);
+
+    const restartRequested =
+      process.env.SOLARD_RESTART_WORKERS_ON_BOOT === "1";
+
+    if (existing && (!alive || restartRequested)) {
+      await cleanStaleWorker(name, existing, alive, restartRequested);
+    }
+
+    if (!bgrun.getProcess(name)) {
+      await m("start", async () => {
+        await bgrun.handleRun({
           action: "run",
           name,
-          command: WORKER_SPECS[name].command,
+          command: spec.command,
           directory: ROOT,
-          env: {
-            ...Object.fromEntries(
-              Object.entries(process.env).filter(
-                (e) => typeof e[1] === "string",
-              ),
-            ),
-            SOLARD_WORKER_NAME: name,
-            SOLARD_WORKER_SUPERVISOR: "bgrun-sdk",
-            SOLARD_EXPECTED_BUILD_ID: WORKER_SPECS[name].buildId,
-            BGR_PARENT_NAME: P_NAME(),
-          },
+          env: cleanEnv(name),
           force: true,
           remoteName: "",
         });
-      }
-      await syncStatus(name, bgrunSdk.getProcess(name) ? "started" : "error");
-    } else {
-      await syncStatus(name, "stopping");
-      if (proc) await bgrunSdk.handleStop(name);
-      await syncStatus(name, "stopped");
+
+        syncStatus(name, "started");
+
+        return {
+          command: spec.command,
+          buildId: spec.buildId,
+        };
+      });
     }
-    await Bun.sleep(200);
-  }
+
+    const after = bgrun.getProcess(name);
+    const afterAlive = await isBgrunProcessAlive(after);
+
+    if (!after || !after.pid || after.pid <= 0 || !afterAlive) {
+      throw new Error(
+        `bgrun failed to start ${name}: registered pid=${
+          after?.pid ?? "null"
+        }, alive=${afterAlive}`,
+      );
+    }
+
+    return {
+      status: "ready",
+      name,
+      pid: after.pid,
+      alive: afterAlive,
+      command: after.command ?? null,
+    };
+  });
+}
+
+export async function stopWorker(name: SolardWorkerName): Promise<void> {
+  await m(`stop_worker:${name}`, async () => {
+    syncStatus(name, "stopping");
+
+    const existing = bgrun.getProcess(name);
+
+    if (existing) {
+      await bgrun.handleStop(name);
+    }
+
+    syncStatus(name, "stopped");
+
+    return {
+      name,
+      existed: !!existing,
+      pid: existing?.pid ?? null,
+    };
+  });
+}
+
+export async function startAllWorkers(): Promise<void> {
+  await m("start_all_workers", async () => {
+    const started: SolardWorkerName[] = [];
+
+    for (const name of targetWorkers) {
+      await ensureWorker(name);
+      started.push(name);
+      await Bun.sleep(200);
+    }
+
+    return {
+      count: started.length,
+      workers: started,
+    };
+  });
+}
+
+export async function stopAllWorkers(): Promise<void> {
+  await m("stop_all_workers", async () => {
+    const stopped: SolardWorkerName[] = [];
+
+    for (const name of targetWorkers.toReversed()) {
+      await stopWorker(name);
+      stopped.push(name);
+      await Bun.sleep(200);
+    }
+
+    return {
+      count: stopped.length,
+      workers: stopped,
+    };
+  });
+}
+
+async function checkWorker(
+  name: SolardWorkerName,
+  dbStatuses: Map<string, any>,
+) {
+  return await m(`check:${name}`, async () => {
+    const processInfo = bgrun.getProcess(name);
+    const db = dbStatuses.get(name);
+
+    const alive = await isBgrunProcessAlive(processInfo);
+
+    const stale =
+      !db?.heartbeatAtMs ||
+      Date.now() - Number(db.heartbeatAtMs) >
+        WORKER_SPECS[name].staleAfterMs;
+
+    const hasErrors = !!db?.error;
+
+    if (!alive || stale || hasErrors) {
+      m.sync(`alert:${name}`, () => {
+        console.warn(
+          `Recovery trigger on ${name}. Alive: ${alive}, Stale: ${stale}, Error: ${
+            db?.error ?? "none"
+          }`,
+        );
+
+        return {
+          alive,
+          stale,
+          hasErrors,
+          error: db?.error ?? null,
+        };
+      });
+
+      if (process.env.SOLARD_AUTO_RECOVERY === "1") {
+        await m(`recover:${name}`, async () => {
+          if (processInfo) {
+            await bgrun.handleStop(name);
+            await Bun.sleep(250);
+          }
+
+          await ensureWorker(name);
+
+          return {
+            recovered: true,
+          };
+        });
+      }
+    }
+
+    return {
+      name,
+      alive,
+      stale,
+      hasErrors,
+    };
+  });
+}
+
+async function healthCheckTick(): Promise<void> {
+  await m.root("health_check_tick", async () => {
+    const dbStatuses = new Map(
+      listProcessStatus().map((row) => [row.name, row]),
+    );
+
+    const checked = await Promise.all(
+      targetWorkers.map((name) => checkWorker(name, dbStatuses)),
+    );
+
+    return {
+      targetCount: targetWorkers.length,
+      activeCount: checked.filter((worker) => worker.alive && !worker.stale)
+        .length,
+      status: checked,
+    };
+  });
 }
 
 const targetWorkers = resolveWorkerNames();
-let exitCode = 0,
-  keepRunning = true;
+
+let exitCode = 0;
+let keepRunning = true;
 
 const shutdown = (reason: string, code: number) => {
   if (!keepRunning) return;
+
   keepRunning = false;
   exitCode = code;
-  measureSync(`solard:shutdown:${reason}`, () =>
-    console.log(`Triggering orchestrator teardown: ${reason}`),
-  );
+
+  m.sync(`shutdown:${reason}`, () => {
+    console.log(`Teardown initiated: ${reason}`);
+
+    return {
+      reason,
+      code,
+    };
+  });
 };
+
 process.once("SIGINT", () => shutdown("SIGINT", 130));
 process.once("SIGTERM", () => shutdown("SIGTERM", 143));
-process.on("unhandledRejection", (r) => {
-  console.error(r);
+
+process.on("unhandledRejection", (reason) => {
+  m.sync("unhandled_rejection", () => {
+    console.error(reason);
+    return reason;
+  });
+
   shutdown("Unhandled Rejection", 1);
 });
-process.on("uncaughtException", (e) => {
-  console.error(e);
+
+process.on("uncaughtException", (error) => {
+  m.sync("uncaught_exception", () => {
+    console.error(error);
+    return error;
+  });
+
   shutdown("Uncaught Exception", 1);
 });
 
 try {
-  await measure(
+  await m.root(
     {
-      start: () => "solard:orchestrator:boot",
-      end: () => "Runtime processing established.",
+      start: () => "boot",
+      end: () => "workers ready",
     },
     async () => {
-      await manageWorkers("start", targetWorkers);
+      await startAllWorkers();
 
-      while (keepRunning) {
-        await processMeasure.measure(
-          { start: () => "solard:health_check_tick", end: (res) => res },
-          async () => {
-            const dbStatuses = new Map(
-              listProcessStatus().map((r) => [r.name, r]),
-            );
-            const checked = await Promise.all(
-              targetWorkers.map(async (name) => {
-                const p = bgrunSdk.getProcess(name),
-                  db = dbStatuses.get(name);
-                const alive = p?.pid
-                  ? await bgrunSdk.isProcessRunning(
-                      p.pid,
-                      String(p.command ?? ""),
-                    )
-                  : false;
-                const stale =
-                  !db?.heartbeatAtMs ||
-                  Date.now() - Number(db.heartbeatAtMs) >
-                    WORKER_SPECS[name].staleAfterMs;
-
-                if (!alive || stale || db?.error) {
-                  measureSync(`solard:alert:${name}`, () =>
-                    console.warn(
-                      `Worker failure detected on ${name}. Alive: ${alive}, Stale: ${stale}, Error: ${db?.error ?? "none"}`,
-                    ),
-                  );
-                  if (process.env.SOLARD_AUTO_RECOVERY === "1")
-                    await manageWorkers("start", [name]);
-                }
-                return { name, alive, stale, hasErrors: !!db?.error };
-              }),
-            );
-            return {
-              targetCount: targetWorkers.length,
-              activeCount: checked.filter((c) => c.alive && !c.stale).length,
-              status: checked,
-            };
-          },
-        );
-        await Bun.sleep(5000);
-      }
+      return {
+        workers: targetWorkers,
+        count: targetWorkers.length,
+      };
     },
   );
-} catch (err) {
+
+  while (keepRunning) {
+    await healthCheckTick();
+    await Bun.sleep(5000);
+  }
+} catch (error) {
   exitCode = 1;
-  console.error("Fatal exception in main loop block:", err);
+
+  m.sync("fatal", () => {
+    console.error("Fatal exception:", error);
+    return error;
+  });
 } finally {
   try {
-    if (process.env.SOLARD_STOP_WORKERS_ON_EXIT !== "0")
-      await manageWorkers("stop", targetWorkers);
-  } catch (e) {
-    console.error(e);
+    if (process.env.SOLARD_STOP_WORKERS_ON_EXIT !== "0") {
+      await stopAllWorkers();
+    }
+  } catch (error) {
+    m.sync("stop_workers_on_exit_failed", () => {
+      console.error(error);
+      return error;
+    });
   }
-  measureSync(
-    "solard:orchestrator:complete",
-    () => `Exiting pipeline system with exit code ${exitCode}`,
-  );
+
+  m.sync("complete", () => ({
+    exitCode,
+    message: `Exiting pipeline system with exit code ${exitCode}`,
+  }));
+
   setTimeout(() => process.exit(exitCode), 50).unref();
 }
