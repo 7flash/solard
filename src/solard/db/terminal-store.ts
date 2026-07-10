@@ -372,10 +372,16 @@ export function initTerminalStore(): void {
 
 initTerminalStore();
 
+import { dbMeasure, dbMeasureAction } from "../measure.js";
+
 export async function dbWrite<T>(label: string, fn: () => T): Promise<T> {
-  return await measureRetry(
-    `db.${label}`,
-    { attempts: 5, delay: 20, backoff: 2 },
+  return await dbMeasure.retry(
+    dbMeasureAction<T>(label),
+    {
+      attempts: 5,
+      delay: 20,
+      backoff: 2,
+    },
     async () => fn(),
   );
 }
