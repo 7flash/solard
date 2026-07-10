@@ -26,7 +26,10 @@ export async function inspectProcessTreeAction(
 }
 
 export async function ensureAndInspectProcessTreeAction(
-  input: BgrunLifecycleTreeInput & { restart?: boolean; restartStale?: boolean } = {},
+  input: BgrunLifecycleTreeInput & {
+    restart?: boolean;
+    restartStale?: boolean;
+  } = {},
 ): Promise<Record<string, unknown>> {
   return await processMeasure.measure(
     {
@@ -46,6 +49,8 @@ export async function ensureAndInspectProcessTreeAction(
   );
 }
 
-export async function stopProcessTreeAction(parent?: string | null): Promise<Record<string, unknown>> {
+export async function stopProcessTreeAction(
+  parent?: string | null,
+): Promise<Record<string, unknown>> {
   return await stopBgrunLifecycleParent(parent);
 }

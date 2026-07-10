@@ -1,5 +1,8 @@
 import { processMeasure, summarizeForMeasure } from "../measure.js";
-import bgrun, { normalizeBgrunProcess, type BgrunProcess } from "./bgrun-sdk.js";
+import bgrun, {
+  normalizeBgrunProcess,
+  type BgrunProcess,
+} from "./bgrun-sdk.js";
 import {
   listWorkerRuntimeStatus,
   resolveWorkerNames,
@@ -48,14 +51,19 @@ function parentName(input?: string | null): string {
   return String(input || process.env.BGR_PROCESS_NAME || "solard");
 }
 
-function envValue(row: Record<string, unknown> | null, key: string): string | null {
+function envValue(
+  row: Record<string, unknown> | null,
+  key: string,
+): string | null {
   const env = row?.env;
   if (!env || typeof env !== "object") return null;
   const value = (env as Record<string, unknown>)[key];
   return typeof value === "string" && value.length ? value : null;
 }
 
-function asProcessRow(row: BgrunProcess | null | undefined): Record<string, unknown> | null {
+function asProcessRow(
+  row: BgrunProcess | null | undefined,
+): Record<string, unknown> | null {
   return row ? normalizeBgrunProcess(row) : null;
 }
 
@@ -79,18 +87,27 @@ export async function listBgrunLifecycleTree(
       const parent = parentName(input.parent);
       const parentRow = asProcessRow(bgrun.getProcess(parent));
       const parentAlive = await isAlive(parentRow);
-      const children = bgrun.getManagedChildProcesses(parent).map(normalizeBgrunProcess);
+      const children = bgrun
+        .getManagedChildProcesses(parent)
+        .map(normalizeBgrunProcess);
       const childNames = new Set(children.map((row) => String(row.name ?? "")));
-      const expectedWorkers = resolveWorkerNames({ source: input.source, telegram: input.telegram });
+      const expectedWorkers = resolveWorkerNames({
+        source: input.source,
+        telegram: input.telegram,
+      });
       const runtimeRows = new Map(
-        listWorkerRuntimeStatus({ source: input.source, telegram: input.telegram }).map((row) => [row.name, row]),
+        listWorkerRuntimeStatus({
+          source: input.source,
+          telegram: input.telegram,
+        }).map((row) => [row.name, row]),
       );
       const problems: string[] = [];
 
       if (!parentRow && process.env.SOLARD_REQUIRE_BGRUN_PARENT === "1") {
         problems.push(`parent ${parent} is not registered in bgrun`);
       }
-      if (parentRow && !parentAlive) problems.push(`parent ${parent} is registered but not running`);
+      if (parentRow && !parentAlive)
+        problems.push(`parent ${parent} is registered but not running`);
 
       const workers: BgrunLifecycleWorkerRow[] = [];
       for (const name of expectedWorkers) {
@@ -99,21 +116,32 @@ export async function listBgrunLifecycleTree(
         const runtime = runtimeRows.get(name);
         const alive = await isAlive(row);
         const workerParent = envValue(row, "BGR_PARENT_NAME");
-        const supervisor = envValue(row, "SOLARD_WORKER_SUPERVISOR") ??
-          (runtime?.data && typeof (runtime.data as Record<string, unknown>).supervisor === "string"
+        const supervisor =
+          envValue(row, "SOLARD_WORKER_SUPERVISOR") ??
+          (runtime?.data &&
+          typeof (runtime.data as Record<string, unknown>).supervisor ===
+            "string"
             ? String((runtime.data as Record<string, unknown>).supervisor)
             : null);
         const childOfParent = childNames.has(name) || workerParent === parent;
-        const actualBuildId = runtime?.actualBuildId ?? envValue(row, "SOLARD_EXPECTED_BUILD_ID");
+        const actualBuildId =
+          runtime?.actualBuildId ?? envValue(row, "SOLARD_EXPECTED_BUILD_ID");
         const registered = !!row;
         const stale = runtime?.stale ?? true;
-        const buildMismatch = runtime?.buildMismatch ?? (actualBuildId !== null && actualBuildId !== spec.buildId);
+        const buildMismatch =
+          runtime?.buildMismatch ??
+          (actualBuildId !== null && actualBuildId !== spec.buildId);
 
         if (!registered) problems.push(`${name} is not registered in bgrun`);
         else if (!alive) problems.push(`${name} is registered but not running`);
-        if (registered && !childOfParent) problems.push(`${name} is not tagged as child of ${parent}`);
-        if (registered && supervisor !== "bgrun-sdk") problems.push(`${name} supervisor is ${supervisor || "missing"}`);
-        if (buildMismatch) problems.push(`${name} build mismatch (${actualBuildId || "missing"} != ${spec.buildId})`);
+        if (registered && !childOfParent)
+          problems.push(`${name} is not tagged as child of ${parent}`);
+        if (registered && supervisor !== "bgrun-sdk")
+          problems.push(`${name} supervisor is ${supervisor || "missing"}`);
+        if (buildMismatch)
+          problems.push(
+            `${name} build mismatch (${actualBuildId || "missing"} != ${spec.buildId})`,
+          );
         if (stale) problems.push(`${name} heartbeat is stale`);
         if (runtime?.error) problems.push(`${name} error: ${runtime.error}`);
 
@@ -127,7 +155,9 @@ export async function listBgrunLifecycleTree(
           childOfParent,
           parentName: workerParent,
           supervisor,
-          status: runtime?.status ?? (registered ? (alive ? "running" : "stopped") : "missing"),
+          status:
+            runtime?.status ??
+            (registered ? (alive ? "running" : "stopped") : "missing"),
           stale,
           ageMs: runtime?.ageMs ?? Number.POSITIVE_INFINITY,
           buildMismatch,
@@ -154,17 +184,23 @@ export async function listBgrunLifecycleTree(
 
 export function formatBgrunLifecycleTree(tree: BgrunLifecycleTree): string {
   const lines: string[] = [];
-  lines.push(`bgrun parent: ${tree.parentName} ${tree.parentAlive ? "running" : tree.parent ? "stopped" : "not-registered"}`);
+  lines.push(
+    `bgrun parent: ${tree.parentName} ${tree.parentAlive ? "running" : tree.parent ? "stopped" : "not-registered"}`,
+  );
   lines.push(`children registered: ${tree.children.length}`);
   for (const worker of tree.workers) {
-    const age = Number.isFinite(worker.ageMs) ? `${Math.round(worker.ageMs)}ms` : "never";
+    const age = Number.isFinite(worker.ageMs)
+      ? `${Math.round(worker.ageMs)}ms`
+      : "never";
     const flags = [
       worker.alive ? "alive" : "dead",
       worker.childOfParent ? "child" : "not-child",
       worker.stale ? "stale" : "fresh",
       worker.buildMismatch ? "build-mismatch" : "build-ok",
     ].join(", ");
-    lines.push(`- ${worker.name}: ${worker.status} pid=${worker.pid || "-"} age=${age} (${flags})`);
+    lines.push(
+      `- ${worker.name}: ${worker.status} pid=${worker.pid || "-"} age=${age} (${flags})`,
+    );
   }
   if (tree.problems.length) {
     lines.push("problems:");
@@ -175,7 +211,9 @@ export function formatBgrunLifecycleTree(tree: BgrunLifecycleTree): string {
   return lines.join("\n");
 }
 
-export async function stopBgrunLifecycleParent(parent?: string | null): Promise<Record<string, unknown>> {
+export async function stopBgrunLifecycleParent(
+  parent?: string | null,
+): Promise<Record<string, unknown>> {
   return await processMeasure.measure(
     {
       start: () => "bgrun lifecycle stop parent",
@@ -183,10 +221,18 @@ export async function stopBgrunLifecycleParent(parent?: string | null): Promise<
     },
     async () => {
       const name = parentName(parent);
-      const before = await listBgrunLifecycleTree({ parent: name, source: "both", telegram: true });
+      const before = await listBgrunLifecycleTree({
+        parent: name,
+        source: "both",
+        telegram: true,
+      });
       await bgrun.handleStop(name);
       await Bun.sleep(500);
-      const after = await listBgrunLifecycleTree({ parent: name, source: "both", telegram: true });
+      const after = await listBgrunLifecycleTree({
+        parent: name,
+        source: "both",
+        telegram: true,
+      });
       return { parent: name, before, after };
     },
   );

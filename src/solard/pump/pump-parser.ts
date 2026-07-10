@@ -322,9 +322,7 @@ function readBool(
   return { value: buf[offset] !== 0, offset: offset + 1 };
 }
 
-function parseCreateInstructionData(
-  buf: Buffer,
-): {
+function parseCreateInstructionData(buf: Buffer): {
   name: string;
   symbol: string;
   uri: string | null;
@@ -350,9 +348,7 @@ function parseCreateInstructionData(
   };
 }
 
-function parsePumpEvent(
-  buf: Buffer,
-): {
+function parsePumpEvent(buf: Buffer): {
   name: "CreateEvent" | "TradeEvent" | "CompleteEvent";
   data: Record<string, unknown>;
 } | null {

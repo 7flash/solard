@@ -9,7 +9,9 @@ const ownsWorkers =
   process.env.SOLARD_SERVER_WORKERS !== "0" &&
   process.env.SOLARD_DISABLE_SERVER_WORKERS !== "1";
 const stopWorkersOnExit = process.env.SOLARD_STOP_WORKERS_ON_EXIT !== "0";
-const source = normalizeStreamSource(process.env.SOLARD_STREAM_SOURCE ?? "helius");
+const source = normalizeStreamSource(
+  process.env.SOLARD_STREAM_SOURCE ?? "helius",
+);
 const telegram = process.env.SOLARD_TELEGRAM_SIGNALS === "1";
 
 let exitCode = 0;
@@ -18,7 +20,9 @@ let workerSupervisor: BgrunWorkerSupervisor | null = null;
 let stopping = false;
 
 function summarizeError(error: unknown): string {
-  return error instanceof Error ? (error.stack ?? error.message) : String(error);
+  return error instanceof Error
+    ? (error.stack ?? error.message)
+    : String(error);
 }
 
 async function startWorkers(): Promise<void> {
@@ -28,7 +32,9 @@ async function startWorkers(): Promise<void> {
     telegram,
     restart: process.env.SOLARD_RESTART_WORKERS_ON_BOOT === "1",
   });
-  console.error(`[solard:server] bgrun-sdk workers ready (${workerSupervisor.names.join(", ")})`);
+  console.error(
+    `[solard:server] bgrun-sdk workers ready (${workerSupervisor.names.join(", ")})`,
+  );
 }
 
 async function stopWorkers(reason: string): Promise<void> {
@@ -38,12 +44,17 @@ async function stopWorkers(reason: string): Promise<void> {
   try {
     await workerSupervisor?.stop(reason);
   } catch (error) {
-    console.error("[solard:server] worker shutdown failed", summarizeError(error));
+    console.error(
+      "[solard:server] worker shutdown failed",
+      summarizeError(error),
+    );
   }
 }
 
 function stopServerHandle(): void {
-  const maybeServer = serverHandle as { stop?: (closeActiveConnections?: boolean) => unknown } | null;
+  const maybeServer = serverHandle as {
+    stop?: (closeActiveConnections?: boolean) => unknown;
+  } | null;
   if (!maybeServer || typeof maybeServer.stop !== "function") return;
   try {
     maybeServer.stop(true);

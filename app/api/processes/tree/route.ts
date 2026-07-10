@@ -29,7 +29,12 @@ export async function GET(request: Request): Promise<Response> {
     });
     return jsonResponse({ ok: true, value });
   } catch (error) {
-    return errorResponse(error, typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : 500);
+    return errorResponse(
+      error,
+      typeof (error as { status?: unknown }).status === "number"
+        ? (error as { status: number }).status
+        : 500,
+    );
   }
 }
 
@@ -43,17 +48,23 @@ export async function POST(request: Request): Promise<Response> {
       source: typeof body.source === "string" ? body.source : null,
       telegram: typeof body.telegram === "boolean" ? body.telegram : undefined,
     };
-    const value = action === "ensure"
-      ? await ensureAndInspectProcessTreeAction({
-          ...input,
-          restart: body.restart === true,
-          restartStale: body.restartStale === true,
-        })
-      : action === "stop-parent"
-        ? await stopProcessTreeAction(input.parent)
-        : await inspectProcessTreeAction(input);
+    const value =
+      action === "ensure"
+        ? await ensureAndInspectProcessTreeAction({
+            ...input,
+            restart: body.restart === true,
+            restartStale: body.restartStale === true,
+          })
+        : action === "stop-parent"
+          ? await stopProcessTreeAction(input.parent)
+          : await inspectProcessTreeAction(input);
     return jsonResponse({ ok: true, value });
   } catch (error) {
-    return errorResponse(error, typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : 500);
+    return errorResponse(
+      error,
+      typeof (error as { status?: unknown }).status === "number"
+        ? (error as { status: number }).status
+        : 500,
+    );
   }
 }

@@ -155,7 +155,9 @@ function tableColumns(table: string): PragmaColumn[] {
 }
 
 function columnType(cols: PragmaColumn[], name: string): string {
-  return String(cols.find((col) => col.name === name)?.type ?? "").toUpperCase();
+  return String(
+    cols.find((col) => col.name === name)?.type ?? "",
+  ).toUpperCase();
 }
 
 function isTextColumn(cols: PragmaColumn[], name: string): boolean {
@@ -166,7 +168,11 @@ function safeBackupName(table: string): string {
   return `${table}_bad_${Date.now()}`;
 }
 
-function recreateIncompatibleTable(table: string, ddl: string, isCompatible: (columns: PragmaColumn[]) => boolean): void {
+function recreateIncompatibleTable(
+  table: string,
+  ddl: string,
+  isCompatible: (columns: PragmaColumn[]) => boolean,
+): void {
   const columns = tableColumns(table);
   if (!columns.length) {
     terminalDb.exec(ddl);
@@ -238,7 +244,10 @@ function ensureTerminalLiveTables(): void {
       createdAtMs INTEGER NOT NULL DEFAULT 0,
       updatedAtMs INTEGER NOT NULL DEFAULT 0
     )`,
-    (cols) => isTextColumn(cols, "id") && isTextColumn(cols, "mint") && isTextColumn(cols, "signature"),
+    (cols) =>
+      isTextColumn(cols, "id") &&
+      isTextColumn(cols, "mint") &&
+      isTextColumn(cols, "signature"),
   );
 
   recreateIncompatibleTable(
@@ -300,23 +309,63 @@ export function initTerminalStore(): void {
       terminalDb.exec("PRAGMA synchronous=NORMAL");
       terminalDb.exec("PRAGMA busy_timeout=5000");
       ensureTerminalLiveTables();
-      addColumnIfMissing("terminalTokensLive", "isMayhemMode", "ALTER TABLE terminalTokensLive ADD COLUMN isMayhemMode INTEGER DEFAULT 0");
-      addColumnIfMissing("terminalTokensLive", "quoteAsset", "ALTER TABLE terminalTokensLive ADD COLUMN quoteAsset TEXT");
-      addColumnIfMissing("terminalTokensLive", "quoteMint", "ALTER TABLE terminalTokensLive ADD COLUMN quoteMint TEXT");
-      terminalDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_terminal_tokens_live_mint ON terminalTokensLive(mint)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_updated ON terminalTokensLive(updatedAtMs DESC)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_mcap ON terminalTokensLive(marketCapUsd DESC)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_source ON terminalTokensLive(source)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_mayhem ON terminalTokensLive(isMayhemMode)");
-      terminalDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_terminal_trades_live_id ON terminalTradesLive(id)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_mint_created ON terminalTradesLive(mint, createdAtMs DESC)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_sig ON terminalTradesLive(signature)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_created ON terminalTradesLive(createdAtMs DESC)");
-      terminalDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_terminal_indicators_live_mint_interval ON terminalIndicatorsLive(mint, intervalSec)");
-      terminalDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_process_status_name ON processStatus(name)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_process_status_heartbeat ON processStatus(heartbeatAtMs DESC)");
-      terminalDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_cursors_key ON workerCursors(key)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_telegram_signals_received ON telegramSignals(receivedAtMs DESC)");
+      addColumnIfMissing(
+        "terminalTokensLive",
+        "isMayhemMode",
+        "ALTER TABLE terminalTokensLive ADD COLUMN isMayhemMode INTEGER DEFAULT 0",
+      );
+      addColumnIfMissing(
+        "terminalTokensLive",
+        "quoteAsset",
+        "ALTER TABLE terminalTokensLive ADD COLUMN quoteAsset TEXT",
+      );
+      addColumnIfMissing(
+        "terminalTokensLive",
+        "quoteMint",
+        "ALTER TABLE terminalTokensLive ADD COLUMN quoteMint TEXT",
+      );
+      terminalDb.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_terminal_tokens_live_mint ON terminalTokensLive(mint)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_updated ON terminalTokensLive(updatedAtMs DESC)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_mcap ON terminalTokensLive(marketCapUsd DESC)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_source ON terminalTokensLive(source)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_tokens_live_mayhem ON terminalTokensLive(isMayhemMode)",
+      );
+      terminalDb.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_terminal_trades_live_id ON terminalTradesLive(id)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_mint_created ON terminalTradesLive(mint, createdAtMs DESC)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_sig ON terminalTradesLive(signature)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_created ON terminalTradesLive(createdAtMs DESC)",
+      );
+      terminalDb.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_terminal_indicators_live_mint_interval ON terminalIndicatorsLive(mint, intervalSec)",
+      );
+      terminalDb.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_process_status_name ON processStatus(name)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_process_status_heartbeat ON processStatus(heartbeatAtMs DESC)",
+      );
+      terminalDb.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_cursors_key ON workerCursors(key)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_telegram_signals_received ON telegramSignals(receivedAtMs DESC)",
+      );
     },
   );
 }
@@ -324,11 +373,17 @@ export function initTerminalStore(): void {
 initTerminalStore();
 
 export async function dbWrite<T>(label: string, fn: () => T): Promise<T> {
-  return await measureRetry(`db.${label}`, { attempts: 5, delay: 20, backoff: 2 }, async () => fn());
+  return await measureRetry(
+    `db.${label}`,
+    { attempts: 5, delay: 20, backoff: 2 },
+    async () => fn(),
+  );
 }
 
 function json(value: unknown): string {
-  return JSON.stringify(value, (_, item) => (typeof item === "bigint" ? item.toString() : item));
+  return JSON.stringify(value, (_, item) =>
+    typeof item === "bigint" ? item.toString() : item,
+  );
 }
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
@@ -387,14 +442,21 @@ export function upsertProcessStatus(input: {
   );
 }
 
-export function listProcessStatus(): Array<ProcessStatus & { data: Record<string, unknown> }> {
+export function listProcessStatus(): Array<
+  ProcessStatus & { data: Record<string, unknown> }
+> {
   return terminalDb
-    .raw<ProcessStatus>("SELECT * FROM processStatus ORDER BY heartbeatAtMs DESC")
+    .raw<ProcessStatus>(
+      "SELECT * FROM processStatus ORDER BY heartbeatAtMs DESC",
+    )
     .map((row) => ({ ...row, data: parseJson(row.dataJson, {}) }));
 }
 
 export function getCursor(key: string): string | null {
-  const row = terminalDb.raw<{ value: string }>("SELECT value FROM workerCursors WHERE key = ? LIMIT 1", key)[0];
+  const row = terminalDb.raw<{ value: string }>(
+    "SELECT value FROM workerCursors WHERE key = ? LIMIT 1",
+    key,
+  )[0];
   return row?.value ?? null;
 }
 
@@ -409,12 +471,14 @@ export function setCursor(key: string, value: string): void {
   );
 }
 
-
-export function clearTerminalLiveData(input: { source?: string | null; keepSignals?: boolean } = {}): Record<string, unknown> {
+export function clearTerminalLiveData(
+  input: { source?: string | null; keepSignals?: boolean } = {},
+): Record<string, unknown> {
   const source = String(input.source ?? "").toLowerCase();
   const matchPump = source.includes("pump");
   const matchHelius = source.includes("helius");
-  const clearAll = !source || source.includes("both") || (!matchPump && !matchHelius);
+  const clearAll =
+    !source || source.includes("both") || (!matchPump && !matchHelius);
   const tokenWhere = clearAll
     ? "1=1"
     : matchHelius
@@ -426,7 +490,9 @@ export function clearTerminalLiveData(input: { source?: string | null; keepSigna
       ? "LOWER(source) LIKE '%helius%'"
       : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump'";
   const before = terminalStoreStats();
-  terminalDb.exec(`DELETE FROM terminalIndicatorsLive WHERE mint IN (SELECT mint FROM terminalTokensLive WHERE ${tokenWhere})`);
+  terminalDb.exec(
+    `DELETE FROM terminalIndicatorsLive WHERE mint IN (SELECT mint FROM terminalTokensLive WHERE ${tokenWhere})`,
+  );
   terminalDb.exec(`DELETE FROM terminalTradesLive WHERE ${tradeWhere}`);
   terminalDb.exec(`DELETE FROM terminalTokensLive WHERE ${tokenWhere}`);
   const after = terminalStoreStats();
@@ -438,11 +504,23 @@ function cleanDisplayText(value: unknown): string | null {
   const text = value.trim();
   if (!text) return null;
   const lowered = text.toLowerCase();
-  if (lowered === "-" || lowered === "new token" || lowered === "token" || lowered === "unknown" || lowered === "null" || lowered === "undefined") return null;
+  if (
+    lowered === "-" ||
+    lowered === "new token" ||
+    lowered === "token" ||
+    lowered === "unknown" ||
+    lowered === "null" ||
+    lowered === "undefined"
+  )
+    return null;
   return text;
 }
 
-function pickDisplayText(input: unknown, existing: unknown, fallback = ""): string {
+function pickDisplayText(
+  input: unknown,
+  existing: unknown,
+  fallback = "",
+): string {
   return cleanDisplayText(input) ?? cleanDisplayText(existing) ?? fallback;
 }
 
@@ -450,37 +528,67 @@ function pickNullableText(input: unknown, existing: unknown): string | null {
   return cleanDisplayText(input) ?? cleanDisplayText(existing);
 }
 
-export function upsertTerminalToken(input: Partial<TerminalToken> & { mint: string }): TerminalToken {
+export function upsertTerminalToken(
+  input: Partial<TerminalToken> & { mint: string },
+): TerminalToken {
   const now = Date.now();
-  const existing = terminalDb.raw<TerminalToken>("SELECT * FROM terminalTokensLive WHERE mint = ? LIMIT 1", input.mint)[0];
+  const existing = terminalDb.raw<TerminalToken>(
+    "SELECT * FROM terminalTokensLive WHERE mint = ? LIMIT 1",
+    input.mint,
+  )[0];
   const row: TerminalToken = {
     mint: requiredText(input.mint),
     symbol: pickDisplayText(input.symbol, existing?.symbol, ""),
     name: pickDisplayText(input.name, existing?.name, ""),
     image: pickNullableText(input.image, existing?.image),
     uri: pickNullableText(input.uri, existing?.uri),
-    description: nullableText((input as any).description ?? (existing as any)?.description),
+    description: nullableText(
+      (input as any).description ?? (existing as any)?.description,
+    ),
     website: nullableText((input as any).website ?? (existing as any)?.website),
     twitter: nullableText((input as any).twitter ?? (existing as any)?.twitter),
-    telegram: nullableText((input as any).telegram ?? (existing as any)?.telegram),
+    telegram: nullableText(
+      (input as any).telegram ?? (existing as any)?.telegram,
+    ),
     creator: nullableText(input.creator ?? existing?.creator),
-    bondingCurveKey: nullableText(input.bondingCurveKey ?? existing?.bondingCurveKey),
+    bondingCurveKey: nullableText(
+      input.bondingCurveKey ?? existing?.bondingCurveKey,
+    ),
     source: requiredText(input.source ?? existing?.source, "unknown"),
     phase: (input.phase ?? existing?.phase ?? "pump") as TerminalToken["phase"],
-    isMayhemMode: finiteInteger((input as any).isMayhemMode ?? (existing as any)?.isMayhemMode ?? 0, 0),
-    quoteAsset: nullableText((input as any).quoteAsset ?? (existing as any)?.quoteAsset),
-    quoteMint: nullableText((input as any).quoteMint ?? (existing as any)?.quoteMint),
-    supplyUi: finiteNumber(input.supplyUi ?? existing?.supplyUi ?? 1_000_000_000, 1_000_000_000),
+    isMayhemMode: finiteInteger(
+      (input as any).isMayhemMode ?? (existing as any)?.isMayhemMode ?? 0,
+      0,
+    ),
+    quoteAsset: nullableText(
+      (input as any).quoteAsset ?? (existing as any)?.quoteAsset,
+    ),
+    quoteMint: nullableText(
+      (input as any).quoteMint ?? (existing as any)?.quoteMint,
+    ),
+    supplyUi: finiteNumber(
+      input.supplyUi ?? existing?.supplyUi ?? 1_000_000_000,
+      1_000_000_000,
+    ),
     priceSol: nullableFiniteNumber(input.priceSol ?? existing?.priceSol),
     priceUsd: nullableFiniteNumber(input.priceUsd ?? existing?.priceUsd),
-    marketCapSol: nullableFiniteNumber(input.marketCapSol ?? existing?.marketCapSol),
-    marketCapUsd: nullableFiniteNumber(input.marketCapUsd ?? existing?.marketCapUsd),
+    marketCapSol: nullableFiniteNumber(
+      input.marketCapSol ?? existing?.marketCapSol,
+    ),
+    marketCapUsd: nullableFiniteNumber(
+      input.marketCapUsd ?? existing?.marketCapUsd,
+    ),
     initialMarketCapUsd: nullableFiniteNumber(
-      existing?.initialMarketCapUsd ?? input.initialMarketCapUsd ?? input.marketCapUsd,
+      existing?.initialMarketCapUsd ??
+        input.initialMarketCapUsd ??
+        input.marketCapUsd,
     ),
     lastSlot: finiteInteger(input.lastSlot ?? existing?.lastSlot ?? 0, 0),
     signature: nullableText(input.signature ?? existing?.signature),
-    createdAtMs: finiteInteger(existing?.createdAtMs ?? input.createdAtMs ?? now, now),
+    createdAtMs: finiteInteger(
+      existing?.createdAtMs ?? input.createdAtMs ?? now,
+      now,
+    ),
     updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
   terminalDb.exec(
@@ -541,11 +649,20 @@ export function upsertTerminalToken(input: Partial<TerminalToken> & { mint: stri
   return row;
 }
 
-export function insertTerminalTrade(input: Partial<TerminalTrade> & { id: string; mint: string; signature: string }): TerminalTrade {
+export function insertTerminalTrade(
+  input: Partial<TerminalTrade> & {
+    id: string;
+    mint: string;
+    signature: string;
+  },
+): TerminalTrade {
   const now = Date.now();
-  const side = input.side === "buy" || input.side === "sell" ? input.side : "unknown";
+  const side =
+    input.side === "buy" || input.side === "sell" ? input.side : "unknown";
   const parsedConfidence = ConfidenceSchema.safeParse(input.confidence);
-  const confidenceValue: TerminalConfidence = parsedConfidence.success ? parsedConfidence.data : "processed";
+  const confidenceValue: TerminalConfidence = parsedConfidence.success
+    ? parsedConfidence.data
+    : "processed";
   const row: TerminalTrade = {
     id: requiredText(input.id),
     mint: requiredText(input.mint),
@@ -560,7 +677,10 @@ export function insertTerminalTrade(input: Partial<TerminalTrade> & { id: string
     marketCapUsd: nullableFiniteNumber(input.marketCapUsd),
     confidence: confidenceValue,
     source: requiredText(input.source, "unknown"),
-    rawJson: typeof input.rawJson === "string" ? input.rawJson : json(input.rawJson ?? {}),
+    rawJson:
+      typeof input.rawJson === "string"
+        ? input.rawJson
+        : json(input.rawJson ?? {}),
     createdAtMs: finiteInteger(input.createdAtMs ?? now, now),
     updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
@@ -603,12 +723,20 @@ function median(values: number[]): number | null {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1]! + sorted[mid]!) / 2
+    : sorted[mid]!;
 }
 
-export function recomputeTerminalIndicators(mint: string, now = Date.now()): TerminalIndicator[] {
+export function recomputeTerminalIndicators(
+  mint: string,
+  now = Date.now(),
+): TerminalIndicator[] {
   const intervals = [60, 300, 900, 3600, 21600, 86400];
-  const token = terminalDb.raw<TerminalToken>("SELECT * FROM terminalTokensLive WHERE mint = ? LIMIT 1", mint)[0];
+  const token = terminalDb.raw<TerminalToken>(
+    "SELECT * FROM terminalTokensLive WHERE mint = ? LIMIT 1",
+    mint,
+  )[0];
   const out: TerminalIndicator[] = [];
   for (const intervalSec of intervals) {
     const since = now - intervalSec * 1000;
@@ -620,22 +748,45 @@ export function recomputeTerminalIndicators(mint: string, now = Date.now()): Ter
       since,
     );
     const tradeCount = trades.length;
-    const volumeSol = trades.reduce((sum, row) => sum + Number(row.solDeltaUi || 0), 0);
-    const sumPrice = trades.reduce((sum, row) => sum + Number(row.priceUsd || 0), 0);
-    const weighted = trades.reduce(
-      (sum, row) => sum + Number(row.priceUsd || 0) * Math.max(0, Number(row.tokenDeltaUi || 0)),
+    const volumeSol = trades.reduce(
+      (sum, row) => sum + Number(row.solDeltaUi || 0),
       0,
     );
-    const volumeTokenUi = trades.reduce((sum, row) => sum + Math.max(0, Number(row.tokenDeltaUi || 0)), 0);
-    const smaPriceUsd = tradeCount > 0 ? sumPrice / tradeCount : token?.priceUsd ?? null;
-    const vwmaPriceUsd = volumeTokenUi > 0 ? weighted / volumeTokenUi : token?.priceUsd ?? null;
-    const med = median(trades.map((row) => Number(row.priceUsd)).filter((value) => Number.isFinite(value) && value > 0)) ?? token?.priceUsd ?? null;
+    const sumPrice = trades.reduce(
+      (sum, row) => sum + Number(row.priceUsd || 0),
+      0,
+    );
+    const weighted = trades.reduce(
+      (sum, row) =>
+        sum +
+        Number(row.priceUsd || 0) * Math.max(0, Number(row.tokenDeltaUi || 0)),
+      0,
+    );
+    const volumeTokenUi = trades.reduce(
+      (sum, row) => sum + Math.max(0, Number(row.tokenDeltaUi || 0)),
+      0,
+    );
+    const smaPriceUsd =
+      tradeCount > 0 ? sumPrice / tradeCount : (token?.priceUsd ?? null);
+    const vwmaPriceUsd =
+      volumeTokenUi > 0 ? weighted / volumeTokenUi : (token?.priceUsd ?? null);
+    const med =
+      median(
+        trades
+          .map((row) => Number(row.priceUsd))
+          .filter((value) => Number.isFinite(value) && value > 0),
+      ) ??
+      token?.priceUsd ??
+      null;
     const indicator: TerminalIndicator = {
       id: `${mint}:${intervalSec}`,
       mint,
       intervalSec,
       smaPriceUsd,
-      smaMarketCapUsd: smaPriceUsd != null ? smaPriceUsd * Number(token?.supplyUi ?? 1_000_000_000) : token?.marketCapUsd ?? null,
+      smaMarketCapUsd:
+        smaPriceUsd != null
+          ? smaPriceUsd * Number(token?.supplyUi ?? 1_000_000_000)
+          : (token?.marketCapUsd ?? null),
       vwmaPriceUsd,
       medianPriceUsd: med,
       tradeCount,
@@ -679,32 +830,43 @@ export type TerminalFeedRow = TerminalToken & {
   tradeCount?: number;
 };
 
-export function listTerminalFeed(args: {
-  limit?: number;
-  sinceMs?: number;
-  activeWindowMs?: number;
-  includeUnpriced?: boolean;
-  source?: string | null;
-  hideMayhem?: boolean;
-  hideUsdc?: boolean;
-} = {}): TerminalFeedRow[] {
+export function listTerminalFeed(
+  args: {
+    limit?: number;
+    sinceMs?: number;
+    activeWindowMs?: number;
+    includeUnpriced?: boolean;
+    source?: string | null;
+    hideMayhem?: boolean;
+    hideUsdc?: boolean;
+  } = {},
+): TerminalFeedRow[] {
   const limit = Math.max(1, Math.min(args.limit ?? 250, 1000));
   const activeWindowMs = Math.max(
     0,
-    args.activeWindowMs ?? Number(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "1200000"),
+    args.activeWindowMs ??
+      Number(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "1200000"),
   );
-  const minUpdatedAt = Math.max(args.sinceMs ?? 0, activeWindowMs > 0 ? Date.now() - activeWindowMs : 0);
-  const includeUnpriced = args.includeUnpriced === true || process.env.SOLARD_TERMINAL_INCLUDE_UNPRICED === "1";
+  const minUpdatedAt = Math.max(
+    args.sinceMs ?? 0,
+    activeWindowMs > 0 ? Date.now() - activeWindowMs : 0,
+  );
+  const includeUnpriced =
+    args.includeUnpriced === true ||
+    process.env.SOLARD_TERMINAL_INCLUDE_UNPRICED === "1";
   const source = String(args.source ?? "").toLowerCase();
-  const sourceClause = source.includes("both") || !source
-    ? "1=1"
-    : source.includes("helius")
-      ? "LOWER(source) LIKE '%helius%' OR LOWER(source) LIKE 'telegram%'"
-      : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump' OR LOWER(source) LIKE 'telegram%'";
+  const sourceClause =
+    source.includes("both") || !source
+      ? "1=1"
+      : source.includes("helius")
+        ? "LOWER(source) LIKE '%helius%' OR LOWER(source) LIKE 'telegram%'"
+        : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump' OR LOWER(source) LIKE 'telegram%'";
   const priceClause = includeUnpriced
     ? "1=1"
     : "(source LIKE 'telegram%' OR marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL OR image IS NOT NULL)";
-  const mayhemClause = args.hideMayhem ? "COALESCE(isMayhemMode, 0) = 0" : "1=1";
+  const mayhemClause = args.hideMayhem
+    ? "COALESCE(isMayhemMode, 0) = 0"
+    : "1=1";
   const usdcClause = args.hideUsdc
     ? "LOWER(COALESCE(quoteAsset, '')) != 'usdc' AND LOWER(COALESCE(quoteMint, '')) NOT LIKE '%epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v%'"
     : "1=1";
@@ -725,11 +887,16 @@ export function listTerminalFeed(args: {
       "SELECT * FROM terminalIndicatorsLive WHERE mint = ?",
       token.mint,
     );
-    const byInterval = new Map<number, TerminalIndicator>(indicators.map((row) => [row.intervalSec, row] as [number, TerminalIndicator]));
-    const tradeCount = terminalDb.raw<{ count: number }>(
-      "SELECT COUNT(*) as count FROM terminalTradesLive WHERE mint = ?",
-      token.mint,
-    )[0]?.count ?? 0;
+    const byInterval = new Map<number, TerminalIndicator>(
+      indicators.map(
+        (row) => [row.intervalSec, row] as [number, TerminalIndicator],
+      ),
+    );
+    const tradeCount =
+      terminalDb.raw<{ count: number }>(
+        "SELECT COUNT(*) as count FROM terminalTradesLive WHERE mint = ?",
+        token.mint,
+      )[0]?.count ?? 0;
     const latestTrade = terminalDb.raw<TerminalTrade>(
       `SELECT * FROM terminalTradesLive
        WHERE mint = ? AND (marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL OR priceSol IS NOT NULL)
@@ -737,16 +904,24 @@ export function listTerminalFeed(args: {
        LIMIT 1`,
       token.mint,
     )[0];
-    const liveMarketCapUsd = latestTrade?.marketCapUsd ?? token.marketCapUsd ?? null;
+    const liveMarketCapUsd =
+      latestTrade?.marketCapUsd ?? token.marketCapUsd ?? null;
     const livePriceUsd = latestTrade?.priceUsd ?? token.priceUsd ?? null;
     const livePriceSol = latestTrade?.priceSol ?? token.priceSol ?? null;
-    const liveUpdatedAtMs = Math.max(Number(token.updatedAtMs || 0), Number(latestTrade?.createdAtMs || 0), Number(latestTrade?.updatedAtMs || 0));
+    const liveUpdatedAtMs = Math.max(
+      Number(token.updatedAtMs || 0),
+      Number(latestTrade?.createdAtMs || 0),
+      Number(latestTrade?.updatedAtMs || 0),
+    );
     return {
       ...token,
       priceSol: livePriceSol,
       priceUsd: livePriceUsd,
       marketCapUsd: liveMarketCapUsd,
-      marketCapSol: latestTrade?.priceSol != null ? latestTrade.priceSol * Number(token.supplyUi ?? 1_000_000_000) : token.marketCapSol ?? null,
+      marketCapSol:
+        latestTrade?.priceSol != null
+          ? latestTrade.priceSol * Number(token.supplyUi ?? 1_000_000_000)
+          : (token.marketCapSol ?? null),
       updatedAtMs: liveUpdatedAtMs || token.updatedAtMs,
       kind: token.source.startsWith("telegram") ? "signal" : "pump",
       sma1m: byInterval.get(60)?.smaMarketCapUsd ?? liveMarketCapUsd,
@@ -757,15 +932,23 @@ export function listTerminalFeed(args: {
   });
 }
 
-export function listTerminalTrades(args: { limit?: number; sinceMs?: number; mint?: string | null; source?: string | null } = {}): TerminalTrade[] {
+export function listTerminalTrades(
+  args: {
+    limit?: number;
+    sinceMs?: number;
+    mint?: string | null;
+    source?: string | null;
+  } = {},
+): TerminalTrade[] {
   const limit = Math.max(1, Math.min(args.limit ?? 250, 1000));
   const since = args.sinceMs ?? 0;
   const source = String(args.source ?? "").toLowerCase();
-  const sourceClause = source.includes("both") || !source
-    ? "1=1"
-    : source.includes("helius")
-      ? "LOWER(source) LIKE '%helius%'"
-      : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump'";
+  const sourceClause =
+    source.includes("both") || !source
+      ? "1=1"
+      : source.includes("helius")
+        ? "LOWER(source) LIKE '%helius%'"
+        : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump'";
   if (args.mint) {
     return terminalDb.raw<TerminalTrade>(
       `SELECT * FROM terminalTradesLive
@@ -787,6 +970,115 @@ export function listTerminalTrades(args: { limit?: number; sinceMs?: number; min
   );
 }
 
+export type TerminalCurveSnapshotCandidate = Pick<
+  TerminalToken,
+  | "mint"
+  | "bondingCurveKey"
+  | "supplyUi"
+  | "marketCapUsd"
+  | "priceUsd"
+  | "updatedAtMs"
+  | "source"
+  | "phase"
+>;
+
+export function listTerminalCurveSnapshotCandidates(
+  args: {
+    limit?: number;
+    source?: string | null;
+    activeWindowMs?: number;
+    includeMigrated?: boolean;
+  } = {},
+): TerminalCurveSnapshotCandidate[] {
+  const limit = Math.max(1, Math.min(args.limit ?? 80, 500));
+  const activeWindowMs = Math.max(
+    0,
+    args.activeWindowMs ??
+      Number(process.env.SOLARD_CURVE_SNAPSHOT_ACTIVE_WINDOW_MS ?? "900000"),
+  );
+  const minUpdatedAt = activeWindowMs > 0 ? Date.now() - activeWindowMs : 0;
+  const source = String(args.source ?? "").toLowerCase();
+  const sourceClause =
+    source.includes("both") || !source
+      ? "1=1"
+      : source.includes("helius")
+        ? "LOWER(source) LIKE '%helius%'"
+        : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump'";
+  const phaseClause = args.includeMigrated
+    ? "1=1"
+    : "LOWER(COALESCE(phase, 'pump')) != 'migrated'";
+  return terminalDb.raw<TerminalCurveSnapshotCandidate>(
+    `SELECT mint, bondingCurveKey, supplyUi, marketCapUsd, priceUsd, updatedAtMs, source, phase
+     FROM terminalTokensLive
+     WHERE mint IS NOT NULL
+       AND mint != ''
+       AND updatedAtMs >= ?
+       AND ${sourceClause}
+       AND ${phaseClause}
+     ORDER BY updatedAtMs DESC
+     LIMIT ?`,
+    minUpdatedAt,
+    limit,
+  );
+}
+
+export function applyTerminalCurveSnapshot(input: {
+  mint: string;
+  bondingCurveKey?: string | null;
+  priceSol: number | null;
+  priceUsd: number | null;
+  marketCapSol: number | null;
+  marketCapUsd: number | null;
+  realTokenReservesUi?: number | null;
+  realSolReservesUi?: number | null;
+  virtualTokenReservesUi?: number | null;
+  virtualSolReservesUi?: number | null;
+  progressPct?: number | null;
+  complete?: boolean | null;
+  creator?: string | null;
+  source?: string | null;
+  slot?: number | null;
+  now?: number;
+}): TerminalToken {
+  const now = input.now ?? Date.now();
+  const rawSource = String(input.source ?? "curve-snapshot");
+  const token = upsertTerminalToken({
+    mint: input.mint,
+    bondingCurveKey: input.bondingCurveKey ?? undefined,
+    creator: input.creator ?? undefined,
+    source: rawSource,
+    phase: input.complete ? "migrated" : "pump",
+    priceSol: input.priceSol ?? undefined,
+    priceUsd: input.priceUsd ?? undefined,
+    marketCapSol: input.marketCapSol ?? undefined,
+    marketCapUsd: input.marketCapUsd ?? undefined,
+    lastSlot: input.slot ?? undefined,
+    updatedAtMs: now,
+  });
+
+  upsertProcessStatus({
+    name: "solard-curve-snapshot-last",
+    kind: "snapshot",
+    status: input.complete ? "complete" : "updated",
+    data: {
+      mint: input.mint,
+      bondingCurveKey: input.bondingCurveKey ?? null,
+      source: rawSource,
+      priceSol: input.priceSol,
+      priceUsd: input.priceUsd,
+      marketCapSol: input.marketCapSol,
+      marketCapUsd: input.marketCapUsd,
+      realTokenReservesUi: input.realTokenReservesUi ?? null,
+      realSolReservesUi: input.realSolReservesUi ?? null,
+      virtualTokenReservesUi: input.virtualTokenReservesUi ?? null,
+      virtualSolReservesUi: input.virtualSolReservesUi ?? null,
+      progressPct: input.progressPct ?? null,
+      complete: input.complete ?? null,
+    },
+  });
+  return token;
+}
+
 export function pendingTradeSignatures(limit = 100): string[] {
   return terminalDb
     .raw<{ signature: string }>(
@@ -800,7 +1092,10 @@ export function pendingTradeSignatures(limit = 100): string[] {
     .filter(Boolean);
 }
 
-export function updateTradeConfidence(signature: string, confidence: TerminalConfidence): void {
+export function updateTradeConfidence(
+  signature: string,
+  confidence: TerminalConfidence,
+): void {
   terminalDb.exec(
     "UPDATE terminalTradesLive SET confidence = ?, updatedAtMs = ? WHERE signature = ?",
     confidence,
@@ -809,8 +1104,14 @@ export function updateTradeConfidence(signature: string, confidence: TerminalCon
   );
 }
 
-
-export function listTerminalTokensNeedingMetadata(limit = 20): Array<Pick<TerminalToken, "mint" | "uri" | "name" | "symbol" | "image" | "updatedAtMs">> {
+export function listTerminalTokensNeedingMetadata(
+  limit = 20,
+): Array<
+  Pick<
+    TerminalToken,
+    "mint" | "uri" | "name" | "symbol" | "image" | "updatedAtMs"
+  >
+> {
   const capped = Math.max(1, Math.min(limit, 100));
   return terminalDb.raw(
     `SELECT mint, uri, name, symbol, image, updatedAtMs
@@ -828,9 +1129,15 @@ export function listTerminalTokensNeedingMetadata(limit = 20): Array<Pick<Termin
   );
 }
 
-export function insertTerminalProbeRow(input: { source?: string | null; now?: number } = {}): Record<string, unknown> {
+export function insertTerminalProbeRow(
+  input: { source?: string | null; now?: number } = {},
+): Record<string, unknown> {
   const now = input.now ?? Date.now();
-  const sourceText = String(input.source ?? "pumpportal").toLowerCase().includes("helius") ? "helius-probe" : "pumpportal-probe";
+  const sourceText = String(input.source ?? "pumpportal")
+    .toLowerCase()
+    .includes("helius")
+    ? "helius-probe"
+    : "pumpportal-probe";
   const mint = sourceText.includes("helius")
     ? "So11111111111111111111111111111111111111112"
     : "11111111111111111111111111111111";
@@ -838,7 +1145,9 @@ export function insertTerminalProbeRow(input: { source?: string | null; now?: nu
   const token = upsertTerminalToken({
     mint,
     symbol: sourceText.includes("helius") ? "H-PROBE" : "P-PROBE",
-    name: sourceText.includes("helius") ? "Helius probe row" : "PumpPortal probe row",
+    name: sourceText.includes("helius")
+      ? "Helius probe row"
+      : "PumpPortal probe row",
     source: sourceText,
     phase: "pump",
     priceUsd: marketCapUsd / 1_000_000_000,
@@ -921,9 +1230,16 @@ export function upsertTelegramSignal(input: {
   return row;
 }
 
-export function listTelegramSignals(limit = 100): Array<TelegramSignal & { mints: string[]; symbols: string[]; urls: string[] }> {
+export function listTelegramSignals(
+  limit = 100,
+): Array<
+  TelegramSignal & { mints: string[]; symbols: string[]; urls: string[] }
+> {
   return terminalDb
-    .raw<TelegramSignal>("SELECT * FROM telegramSignals ORDER BY receivedAtMs DESC LIMIT ?", limit)
+    .raw<TelegramSignal>(
+      "SELECT * FROM telegramSignals ORDER BY receivedAtMs DESC LIMIT ?",
+      limit,
+    )
     .map((row) => ({
       ...row,
       mints: parseJson<string[]>(row.mintsJson, []),
@@ -940,16 +1256,59 @@ export function terminalStoreStats(): Record<string, unknown> {
     },
     () => ({
       dbPath: SOLARD_DB_PATH,
-      tokens: Number(terminalDb.raw<{ count: number }>("SELECT COUNT(*) as count FROM terminalTokensLive")[0]?.count ?? 0),
-      activeTokens: Number(terminalDb.raw<{ count: number }>("SELECT COUNT(*) as count FROM terminalTokensLive WHERE updatedAtMs >= ?", Date.now() - Number(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "1200000"))[0]?.count ?? 0),
-      pricedTokens: Number(terminalDb.raw<{ count: number }>("SELECT COUNT(*) as count FROM terminalTokensLive WHERE marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL")[0]?.count ?? 0),
-      imagedTokens: Number(terminalDb.raw<{ count: number }>("SELECT COUNT(*) as count FROM terminalTokensLive WHERE image IS NOT NULL AND image != ''")[0]?.count ?? 0),
-      trades: Number(terminalDb.raw<{ count: number }>("SELECT COUNT(*) as count FROM terminalTradesLive")[0]?.count ?? 0),
-      indicators: Number(terminalDb.raw<{ count: number }>("SELECT COUNT(*) as count FROM terminalIndicatorsLive")[0]?.count ?? 0),
-      signals: Number(terminalDb.raw<{ count: number }>("SELECT COUNT(*) as count FROM telegramSignals")[0]?.count ?? 0),
-      processes: Number(terminalDb.raw<{ count: number }>("SELECT COUNT(*) as count FROM processStatus")[0]?.count ?? 0),
-      latestUpdatedAtMs: terminalDb.raw<{ latest: number }>("SELECT MAX(updatedAtMs) as latest FROM terminalTokensLive")[0]?.latest ?? null,
-      bySource: terminalDb.raw<{ source: string; tokens: number; priced: number; images: number; latest: number | null }>(
+      tokens: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalTokensLive",
+        )[0]?.count ?? 0,
+      ),
+      activeTokens: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalTokensLive WHERE updatedAtMs >= ?",
+          Date.now() -
+            Number(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "1200000"),
+        )[0]?.count ?? 0,
+      ),
+      pricedTokens: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalTokensLive WHERE marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL",
+        )[0]?.count ?? 0,
+      ),
+      imagedTokens: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalTokensLive WHERE image IS NOT NULL AND image != ''",
+        )[0]?.count ?? 0,
+      ),
+      trades: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalTradesLive",
+        )[0]?.count ?? 0,
+      ),
+      indicators: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalIndicatorsLive",
+        )[0]?.count ?? 0,
+      ),
+      signals: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM telegramSignals",
+        )[0]?.count ?? 0,
+      ),
+      processes: Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM processStatus",
+        )[0]?.count ?? 0,
+      ),
+      latestUpdatedAtMs:
+        terminalDb.raw<{ latest: number }>(
+          "SELECT MAX(updatedAtMs) as latest FROM terminalTokensLive",
+        )[0]?.latest ?? null,
+      bySource: terminalDb.raw<{
+        source: string;
+        tokens: number;
+        priced: number;
+        images: number;
+        latest: number | null;
+      }>(
         `SELECT source, COUNT(*) as tokens,
                 SUM(CASE WHEN marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL THEN 1 ELSE 0 END) as priced,
                 SUM(CASE WHEN image IS NOT NULL AND image != '' THEN 1 ELSE 0 END) as images,

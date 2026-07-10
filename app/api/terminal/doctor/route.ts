@@ -1,13 +1,25 @@
 import { runLiveDoctor } from "../../../../src/solard/diagnostics/live-doctor.js";
-import { createMeasure, summarizeError, summarizeForMeasure } from "../../../../src/solard/measure.js";
+import {
+  createMeasure,
+  summarizeError,
+  summarizeForMeasure,
+} from "../../../../src/solard/measure.js";
 
 const api = createMeasure("api");
 
 function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item)), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
-  });
+  return new Response(
+    JSON.stringify(value, (_key, item) =>
+      typeof item === "bigint" ? item.toString() : item,
+    ),
+    {
+      status,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    },
+  );
 }
 
 export async function GET(request: Request): Promise<Response> {

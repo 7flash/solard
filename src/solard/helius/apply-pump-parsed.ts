@@ -4,11 +4,16 @@ import {
   recomputeTerminalIndicators,
   upsertTerminalToken,
 } from "../db/terminal-store.js";
-import { fetchHeliusAssetMetadata, fetchUriMetadata } from "./token-metadata.js";
+import {
+  fetchHeliusAssetMetadata,
+  fetchUriMetadata,
+} from "./token-metadata.js";
 import type { ParsedPumpTransaction } from "../pump/pump-parser.js";
 
 function formatRaw(value: unknown): string {
-  return JSON.stringify(value, (_, item) => (typeof item === "bigint" ? item.toString() : item));
+  return JSON.stringify(value, (_, item) =>
+    typeof item === "bigint" ? item.toString() : item,
+  );
 }
 
 const tradeMetadataAttempts = new Map<string, number>();
@@ -20,13 +25,22 @@ function shouldHydrateTradeMint(mint: string): boolean {
   if (now - last < ttl) return false;
   tradeMetadataAttempts.set(mint, now);
   if (tradeMetadataAttempts.size > 5000) {
-    for (const [key, value] of tradeMetadataAttempts) if (now - value > ttl * 4) tradeMetadataAttempts.delete(key);
+    for (const [key, value] of tradeMetadataAttempts)
+      if (now - value > ttl * 4) tradeMetadataAttempts.delete(key);
   }
   return true;
 }
 
 function hasMetadata(value: Record<string, unknown>): boolean {
-  return ["name", "symbol", "image", "description", "website", "twitter", "telegram"].some((key) => {
+  return [
+    "name",
+    "symbol",
+    "image",
+    "description",
+    "website",
+    "twitter",
+    "telegram",
+  ].some((key) => {
     const item = value[key];
     return typeof item === "string" && item.trim().length > 0;
   });
@@ -35,7 +49,8 @@ function hasMetadata(value: Record<string, unknown>): boolean {
 async function hydrateTradeMint(mint: string): Promise<{ imaged: boolean }> {
   if (!shouldHydrateTradeMint(mint)) return { imaged: false };
   const assetMeta = await fetchHeliusAssetMetadata(mint);
-  if (!hasMetadata(assetMeta as Record<string, unknown>)) return { imaged: false };
+  if (!hasMetadata(assetMeta as Record<string, unknown>))
+    return { imaged: false };
   await dbWrite("hydrate_trade_mint", () =>
     upsertTerminalToken({
       mint,
@@ -57,7 +72,12 @@ export async function applyParsedPumpTransaction(args: {
   source: string;
   confidence: "processed" | "confirmed" | "finalized" | "dropped";
   solUsd: number | null;
-}): Promise<{ tokens: number; trades: number; imaged: number; completes: number }> {
+}): Promise<{
+  tokens: number;
+  trades: number;
+  imaged: number;
+  completes: number;
+}> {
   let tokens = 0;
   let trades = 0;
   let imaged = 0;
@@ -95,8 +115,11 @@ export async function applyParsedPumpTransaction(args: {
   }
 
   for (const trade of args.parsed.trades) {
-    const marketCapSol = trade.priceSol != null ? trade.priceSol * 1_000_000_000 : null;
-    const hydrated = await hydrateTradeMint(trade.mint).catch(() => ({ imaged: false }));
+    const marketCapSol =
+      trade.priceSol != null ? trade.priceSol * 1_000_000_000 : null;
+    const hydrated = await hydrateTradeMint(trade.mint).catch(() => ({
+      imaged: false,
+    }));
     if (hydrated.imaged) imaged++;
     await dbWrite(`${args.source}_insert_trade`, () =>
       insertTerminalTrade({
@@ -131,7 +154,9 @@ export async function applyParsedPumpTransaction(args: {
         updatedAtMs: Date.now(),
       }),
     );
-    await dbWrite(`${args.source}_indicators`, () => recomputeTerminalIndicators(trade.mint));
+    await dbWrite(`${args.source}_indicators`, () =>
+      recomputeTerminalIndicators(trade.mint),
+    );
     trades++;
   }
 
@@ -148,5 +173,10 @@ export async function applyParsedPumpTransaction(args: {
     );
   }
 
-  return { tokens, trades, imaged, completes: args.parsed.completes?.length ?? 0 };
+  return {
+    tokens,
+    trades,
+    imaged,
+    completes: args.parsed.completes?.length ?? 0,
+  };
 }

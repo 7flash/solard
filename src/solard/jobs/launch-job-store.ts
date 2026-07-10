@@ -72,7 +72,10 @@ function parseJson<T>(value: string | null | undefined, fallback: T): T {
   }
 }
 
-function clampLimit(value: number | null | undefined, fallback: number): number {
+function clampLimit(
+  value: number | null | undefined,
+  fallback: number,
+): number {
   const parsed = Number(value ?? fallback);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(1, Math.min(500, Math.trunc(parsed)));
@@ -83,7 +86,9 @@ function tableColumns(table: string): PragmaColumn[] {
 }
 
 function columnType(cols: PragmaColumn[], name: string): string {
-  return String(cols.find((col) => col.name === name)?.type ?? "").toUpperCase();
+  return String(
+    cols.find((col) => col.name === name)?.type ?? "",
+  ).toUpperCase();
 }
 
 function hasTextColumn(cols: PragmaColumn[], name: string): boolean {
@@ -161,16 +166,24 @@ export function initLaunchJobStore(): void {
           hasTextColumn(cols, "valueJson"),
       );
 
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_launch_jobs_created ON launchJobs(createdAtMs DESC)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_launch_jobs_status ON launchJobs(status, createdAtMs DESC)");
-      terminalDb.exec("CREATE INDEX IF NOT EXISTS idx_launch_job_logs_job_at ON launchJobLogs(jobId, atMs DESC)");
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_launch_jobs_created ON launchJobs(createdAtMs DESC)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_launch_jobs_status ON launchJobs(status, createdAtMs DESC)",
+      );
+      terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_launch_job_logs_job_at ON launchJobLogs(jobId, atMs DESC)",
+      );
     },
   );
 }
 
 initLaunchJobStore();
 
-export function launchJobStatus(value: string | null | undefined): LaunchJobStatus | null {
+export function launchJobStatus(
+  value: string | null | undefined,
+): LaunchJobStatus | null {
   if (
     value === "queued" ||
     value === "running" ||
@@ -183,7 +196,10 @@ export function launchJobStatus(value: string | null | undefined): LaunchJobStat
 }
 
 function rowToJob(row: LaunchJobRow, logs?: LaunchJob["logs"]): LaunchJob {
-  const result = parseJson<PumpTokenLaunchCliResult | null>(row.resultJson, null);
+  const result = parseJson<PumpTokenLaunchCliResult | null>(
+    row.resultJson,
+    null,
+  );
   return {
     id: row.jobId,
     kind: "launch:pump",
@@ -198,7 +214,10 @@ function rowToJob(row: LaunchJobRow, logs?: LaunchJob["logs"]): LaunchJob {
   };
 }
 
-export function listLaunchJobLogs(jobId: string, limit = MAX_LOGS_PER_JOB): LaunchJob["logs"] {
+export function listLaunchJobLogs(
+  jobId: string,
+  limit = MAX_LOGS_PER_JOB,
+): LaunchJob["logs"] {
   initLaunchJobStore();
   const rows = terminalDb.raw<LaunchJobLogRow>(
     `SELECT id, jobId, atMs, label, valueJson
@@ -209,13 +228,11 @@ export function listLaunchJobLogs(jobId: string, limit = MAX_LOGS_PER_JOB): Laun
     jobId,
     clampLimit(limit, MAX_LOGS_PER_JOB),
   );
-  return rows
-    .reverse()
-    .map((row) => ({
-      atMs: Number(row.atMs) || 0,
-      label: row.label,
-      value: parseJson(row.valueJson, null),
-    }));
+  return rows.reverse().map((row) => ({
+    atMs: Number(row.atMs) || 0,
+    label: row.label,
+    value: parseJson(row.valueJson, null),
+  }));
 }
 
 function createJobRow(input: PumpLaunchInput): LaunchJobRow {
@@ -313,7 +330,8 @@ export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
         pushLog(row.jobId, "launch input", summarizeForMeasure(input));
         pushLog(row.jobId, "launch argv", pumpLaunchArgsFromInput(input));
         const result = await launchPumpTokenAction(input, {
-          report: (label, value) => pushLog(row.jobId, label, summarizeForMeasure(value)),
+          report: (label, value) =>
+            pushLog(row.jobId, label, summarizeForMeasure(value)),
         });
         updateJob(row.jobId, {
           status: "succeeded",
@@ -321,7 +339,10 @@ export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
           error: null,
         });
       } catch (error) {
-        const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+        const message =
+          error instanceof Error
+            ? (error.stack ?? error.message)
+            : String(error);
         pushLog(row.jobId, "fatal", message);
         updateJob(row.jobId, { status: "failed", error: message });
       }
@@ -330,7 +351,9 @@ export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
   return rowToJob(row, []);
 }
 
-export function listLaunchJobs(options: ListLaunchJobsOptions = {}): LaunchJob[] {
+export function listLaunchJobs(
+  options: ListLaunchJobsOptions = {},
+): LaunchJob[] {
   initLaunchJobStore();
   const limit = clampLimit(options.limit, DEFAULT_JOB_LIMIT);
   const status = launchJobStatus(options.status ?? null);
@@ -351,7 +374,9 @@ export function listLaunchJobs(options: ListLaunchJobsOptions = {}): LaunchJob[]
          LIMIT ?`,
         limit,
       );
-  return rows.map((row) => rowToJob(row, options.includeLogs ? listLaunchJobLogs(row.jobId) : []));
+  return rows.map((row) =>
+    rowToJob(row, options.includeLogs ? listLaunchJobLogs(row.jobId) : []),
+  );
 }
 
 export function getLaunchJob(id: string): LaunchJob | undefined {

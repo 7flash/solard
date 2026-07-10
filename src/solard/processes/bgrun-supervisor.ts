@@ -19,7 +19,13 @@ export type BgrunWorkerSupervisorOptions = {
 
 export type BgrunWorkerSupervisor = {
   readonly names: SolardWorkerName[];
-  running: () => Promise<Array<{ name: SolardWorkerName; pid: number; status: "running" | "stopped" | "missing" }>>;
+  running: () => Promise<
+    Array<{
+      name: SolardWorkerName;
+      pid: number;
+      status: "running" | "stopped" | "missing";
+    }>
+  >;
   stop: (reason?: string) => Promise<void>;
 };
 
@@ -29,7 +35,9 @@ function parentName(): string {
 
 function inheritedStringEnv(): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
   );
 }
 
@@ -47,7 +55,10 @@ function envForWorker(name: SolardWorkerName): Record<string, string> {
   };
 }
 
-async function ensureBgrunSdkWorker(name: SolardWorkerName, restart = false): Promise<void> {
+async function ensureBgrunSdkWorker(
+  name: SolardWorkerName,
+  restart = false,
+): Promise<void> {
   const spec = WORKER_SPECS[name];
   const existing = bgrun.getProcess(name);
 
@@ -71,7 +82,12 @@ async function ensureBgrunSdkWorker(name: SolardWorkerName, restart = false): Pr
   upsertProcessStatus({
     name,
     kind: spec.kind,
-    status: existing && !restart ? "already-running" : restart ? "restarted" : "started",
+    status:
+      existing && !restart
+        ? "already-running"
+        : restart
+          ? "restarted"
+          : "started",
     data: {
       command: spec.command,
       buildId: spec.buildId,
@@ -85,7 +101,10 @@ async function ensureBgrunSdkWorker(name: SolardWorkerName, restart = false): Pr
 export async function startBgrunWorkerSupervisor(
   options: BgrunWorkerSupervisorOptions = {},
 ): Promise<BgrunWorkerSupervisor> {
-  const names = resolveWorkerNames({ source: options.source, telegram: options.telegram });
+  const names = resolveWorkerNames({
+    source: options.source,
+    telegram: options.telegram,
+  });
 
   await workerMeasure.measure(
     {
@@ -107,15 +126,22 @@ export async function startBgrunWorkerSupervisor(
   return {
     names,
     running: async () => {
-          const rows = [];
+      const rows = [];
       for (const name of names) {
         const proc = bgrun.getProcess(name);
         if (!proc || typeof proc.pid !== "number") {
           rows.push({ name, pid: 0, status: "missing" as const });
           continue;
         }
-        const alive = await bgrun.isProcessRunning(proc.pid, String(proc.command ?? ""));
-        rows.push({ name, pid: proc.pid, status: alive ? "running" as const : "stopped" as const });
+        const alive = await bgrun.isProcessRunning(
+          proc.pid,
+          String(proc.command ?? ""),
+        );
+        rows.push({
+          name,
+          pid: proc.pid,
+          status: alive ? ("running" as const) : ("stopped" as const),
+        });
       }
       return rows;
     },
@@ -126,14 +152,19 @@ export async function startBgrunWorkerSupervisor(
           end: () => ({ reason, stopped: names.length, parent: parentName() }),
         },
         async () => {
-                  for (const name of names.toReversed()) {
+          for (const name of names.toReversed()) {
             const spec = WORKER_SPECS[name];
             const proc = bgrun.getProcess(name);
             upsertProcessStatus({
               name,
               kind: spec.kind,
               status: "stopping",
-              data: { reason, supervisor: "bgrun-sdk", command: spec.command, buildId: spec.buildId },
+              data: {
+                reason,
+                supervisor: "bgrun-sdk",
+                command: spec.command,
+                buildId: spec.buildId,
+              },
             });
 
             if (proc) await bgrun.handleStop(name);
@@ -142,7 +173,12 @@ export async function startBgrunWorkerSupervisor(
               name,
               kind: spec.kind,
               status: "stopped",
-              data: { reason, supervisor: "bgrun-sdk", command: spec.command, buildId: spec.buildId },
+              data: {
+                reason,
+                supervisor: "bgrun-sdk",
+                command: spec.command,
+                buildId: spec.buildId,
+              },
             });
           }
           return summarizeForMeasure({ stopped: names });

@@ -27,18 +27,24 @@ export type BgrunSdk = {
   getAllProcesses: () => BgrunProcess[];
   getManagedChildProcesses: (parentName: string) => BgrunProcess[];
   getProcess: (name: string) => BgrunProcess | null | undefined;
-  isProcessRunning: (pid: number, command?: string) => Promise<boolean> | boolean;
+  isProcessRunning: (
+    pid: number,
+    command?: string,
+  ) => Promise<boolean> | boolean;
 };
 
 function hasSdkShape(value: unknown): value is BgrunSdk {
-  const row = value as Partial<Record<keyof BgrunSdk, unknown>> | null | undefined;
-  return !!row &&
+  const row = value as
+    Partial<Record<keyof BgrunSdk, unknown>> | null | undefined;
+  return (
+    !!row &&
     typeof row.handleRun === "function" &&
     typeof row.handleStop === "function" &&
     typeof row.getAllProcesses === "function" &&
     typeof row.getManagedChildProcesses === "function" &&
     typeof row.getProcess === "function" &&
-    typeof row.isProcessRunning === "function";
+    typeof row.isProcessRunning === "function"
+  );
 }
 
 function resolveBgrunSdk(): BgrunSdk {
@@ -59,7 +65,8 @@ function resolveBgrunSdk(): BgrunSdk {
   const keys = new Set<string>();
   for (const candidate of candidates) {
     if (candidate && typeof candidate === "object") {
-      for (const key of Object.keys(candidate as Record<string, unknown>)) keys.add(key);
+      for (const key of Object.keys(candidate as Record<string, unknown>))
+        keys.add(key);
     }
   }
   throw new Error(
@@ -85,7 +92,9 @@ export async function stopBgrunProcessByName(name: string): Promise<boolean> {
   return true;
 }
 
-export function normalizeBgrunProcess(row: BgrunProcess): Record<string, unknown> {
+export function normalizeBgrunProcess(
+  row: BgrunProcess,
+): Record<string, unknown> {
   return {
     ...row,
     name: row.name ?? "",

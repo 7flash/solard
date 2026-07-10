@@ -12,14 +12,18 @@ import {
 import { terminalStoreStats } from "../db/terminal-store.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
 
-export function listProcessesAction(input: { telegram?: boolean; source?: string | null } = {}): Record<string, unknown> {
+export function listProcessesAction(
+  input: { telegram?: boolean; source?: string | null } = {},
+): Record<string, unknown> {
   return processMeasure.measureSync(
     {
       start: () => "list processes",
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     () => ({
-      ready: listWorkerRuntimeStatus(input).every((row) => row.managed && !row.stale && !row.error),
+      ready: listWorkerRuntimeStatus(input).every(
+        (row) => row.managed && !row.stale && !row.error,
+      ),
       workers: listWorkerRuntimeStatus(input),
       bgrun: listBgrunProcesses(),
       bgrunChildren: listManagedBgrunChildren(),
@@ -28,14 +32,16 @@ export function listProcessesAction(input: { telegram?: boolean; source?: string
   );
 }
 
-export async function ensureProcessesAction(input: {
-  worker?: string | null;
-  all?: boolean;
-  telegram?: boolean;
-  source?: string | null;
-  restart?: boolean;
-  restartStale?: boolean;
-} = {}): Promise<Record<string, unknown>> {
+export async function ensureProcessesAction(
+  input: {
+    worker?: string | null;
+    all?: boolean;
+    telegram?: boolean;
+    source?: string | null;
+    restart?: boolean;
+    restartStale?: boolean;
+  } = {},
+): Promise<Record<string, unknown>> {
   return await processMeasure.measure(
     {
       start: () => "ensure processes",
@@ -57,11 +63,13 @@ export async function ensureProcessesAction(input: {
   );
 }
 
-export async function restartProcessesAction(input: {
-  worker?: string | null;
-  telegram?: boolean;
-  source?: string | null;
-} = {}): Promise<Record<string, unknown>> {
+export async function restartProcessesAction(
+  input: {
+    worker?: string | null;
+    telegram?: boolean;
+    source?: string | null;
+  } = {},
+): Promise<Record<string, unknown>> {
   return await processMeasure.measure(
     {
       start: () => "restart processes",
@@ -73,7 +81,11 @@ export async function restartProcessesAction(input: {
         if (!worker) throw new Error(`Unknown worker: ${input.worker}`);
         return await ensureBgrunWorker(worker, true);
       }
-      return await ensureWorkerGroup({ telegram: input.telegram, source: input.source, restart: true });
+      return await ensureWorkerGroup({
+        telegram: input.telegram,
+        source: input.source,
+        restart: true,
+      });
     },
   );
 }
@@ -88,7 +100,11 @@ export async function stopProcessAction(
       end: (result) => ({ result: summarizeForMeasure(result) }),
     },
     async () => {
-      if (!worker || worker === "all") return await stopWorkerGroup({ telegram: input.telegram, source: input.source });
+      if (!worker || worker === "all")
+        return await stopWorkerGroup({
+          telegram: input.telegram,
+          source: input.source,
+        });
       const normalized = normalizeWorkerName(worker);
       if (!normalized) throw new Error(`Unknown worker: ${worker}`);
       return await stopBgrunWorker(normalized);
@@ -96,8 +112,18 @@ export async function stopProcessAction(
   );
 }
 
-export function resolveProcessesAction(input: { worker?: string | null; telegram?: boolean; source?: string | null } = {}): Record<string, unknown> {
+export function resolveProcessesAction(
+  input: {
+    worker?: string | null;
+    telegram?: boolean;
+    source?: string | null;
+  } = {},
+): Record<string, unknown> {
   return {
-    workers: resolveWorkerNames({ worker: input.worker, telegram: input.telegram, source: input.source }),
+    workers: resolveWorkerNames({
+      worker: input.worker,
+      telegram: input.telegram,
+      source: input.source,
+    }),
   };
 }
