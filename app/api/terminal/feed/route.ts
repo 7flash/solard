@@ -7,10 +7,9 @@ import {
 import { ensureProcessesAction } from "../../../../src/solard/actions/processes.js";
 import { terminalHealthAction } from "../../../../src/solard/actions/terminal-health.js";
 import { terminalFeedRowsToPumpRows } from "../../../../src/solard/terminal/api-map.js";
+import { triggerTerminalMetadataHydration } from "../../../../src/solard/actions/terminal-metadata.js";
 
-function sourceFrom(
-  value: string | null,
-): "helius" | "pumpportal" | "both" | undefined {
+function sourceFrom(value: string | null): "helius" | "pumpportal" | "both" | undefined {
   const text = String(value ?? "").toLowerCase();
   if (text.includes("both")) return "both";
   if (text.includes("helius")) return "helius";
@@ -43,6 +42,11 @@ export function GET(request: Request): Promise<Response> {
           restartStale: true,
         });
       }
+      if (url.searchParams.get("hydrateMetadata") !== "0") {
+        triggerTerminalMetadataHydration({
+          limit: Number(url.searchParams.get("metadataLimit") ?? process.env.SOLARD_METADATA_BACKFILL_LIMIT ?? "8"),
+        });
+      }
       const rawRows = listTerminalFeed({
         limit: Number(url.searchParams.get("limit") ?? "250"),
         sinceMs: Number(url.searchParams.get("sinceMs") ?? "0"),
@@ -53,7 +57,7 @@ export function GET(request: Request): Promise<Response> {
         ),
         includeUnpriced:
           url.searchParams.get("includeUnpriced") === "1" ||
-          (source === "helius" && url.searchParams.get("pricedOnly") !== "1"),
+          source === "helius" && url.searchParams.get("pricedOnly") !== "1",
         source,
         hideMayhem: url.searchParams.get("hideMayhem") === "1",
         hideUsdc: url.searchParams.get("hideUsdc") === "1",
@@ -69,11 +73,7 @@ export function GET(request: Request): Promise<Response> {
         health,
         debug: {
           source,
-          activeWindowMs: Number(
-            url.searchParams.get("activeWindowMs") ??
-              process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ??
-              "300000",
-          ),
+          activeWindowMs: Number(url.searchParams.get("activeWindowMs") ?? process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "300000"),
           includeUnpriced: url.searchParams.get("includeUnpriced") === "1",
           hideMayhem: url.searchParams.get("hideMayhem") === "1",
           hideUsdc: url.searchParams.get("hideUsdc") === "1",

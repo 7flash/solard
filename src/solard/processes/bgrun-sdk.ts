@@ -1,4 +1,4 @@
-import bgrun from "bgrun";
+import bgrun, * as bgrunModule from "bgrun";
 
 export type BgrunProcess = {
   name?: string;
@@ -30,33 +30,58 @@ export type BgrunSdk = {
   isProcessRunning: (pid: number, command?: string) => Promise<boolean> | boolean;
 };
 
-export const bgrunSdk = bgrun as BgrunSdk;
+function hasSdkShape(value: unknown): value is BgrunSdk {
+  const row = value as Partial<Record<keyof BgrunSdk, unknown>> | null | undefined;
+  return !!row &&
+    typeof row.handleRun === "function" &&
+    typeof row.handleStop === "function" &&
+    typeof row.getAllProcesses === "function" &&
+    typeof row.getManagedChildProcesses === "function" &&
+    typeof row.getProcess === "function" &&
+    typeof row.isProcessRunning === "function";
+}
+
+function resolveBgrunSdk(): BgrunSdk {
+  const direct = bgrun as unknown;
+  const module = bgrunModule as unknown as Record<string, unknown>;
+  const candidates = [
+    direct,
+    (direct as any)?.default,
+    module,
+    module.default,
+    (module.default as any)?.default,
+  ];
+
+  for (const candidate of candidates) {
+    if (hasSdkShape(candidate)) return candidate;
+  }
+
+  const keys = new Set<string>();
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === "object") {
+      for (const key of Object.keys(candidate as Record<string, unknown>)) keys.add(key);
+    }
+  }
+  throw new Error(
+    `bgrun SDK is missing required Solard lifecycle exports. ` +
+      `Found exports: ${Array.from(keys).sort().join(", ") || "(none)"}. ` +
+      `Update bgrun to the Solard SDK finalization build and ensure package exports src/api.`,
+  );
+}
+
+export const bgrunSdk = resolveBgrunSdk();
 export default bgrunSdk;
 
 export function assertBgrunSdk(value: Partial<BgrunSdk> = bgrunSdk): BgrunSdk {
-  const missing = [
-    "handleRun",
-    "handleStop",
-    "getAllProcesses",
-    "getManagedChildProcesses",
-    "getProcess",
-    "isProcessRunning",
-  ].filter((key) => typeof (value as Record<string, unknown>)[key] !== "function");
-
-  if (missing.length) {
-    throw new Error(
-      `bgrun SDK is missing required Solard lifecycle exports: ${missing.join(", ")}. ` +
-        "Update bgrun to the Solard SDK finalization build.",
-    );
-  }
-
+  if (!hasSdkShape(value)) return resolveBgrunSdk();
   return value as BgrunSdk;
 }
 
 export async function stopBgrunProcessByName(name: string): Promise<boolean> {
-  const existing = bgrunSdk.getProcess(name);
+  const sdk = assertBgrunSdk();
+  const existing = sdk.getProcess(name);
   if (!existing) return false;
-  await bgrunSdk.handleStop(name);
+  await sdk.handleStop(name);
   return true;
 }
 
