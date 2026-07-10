@@ -1,3 +1,11 @@
+/**
+ * Streams Pump.fun logs from Helius logsSubscribe into the terminal store.
+ *
+ * Key env: HELIUS_API_KEY / HELIUS_RPC_URL / SOLARD_HELIUS_LOGS_WS_URL,
+ * SOLARD_HELIUS_LOGS_CONCURRENCY, SOLARD_HELIUS_LOGS_MAX_QUEUED,
+ * SOLARD_HELIUS_LOGS_HEARTBEAT_MS, SOLARD_HELIUS_LOGS_INDICATOR_FLUSH_MS.
+ */
+
 import {
   dbWrite,
   insertTerminalTrade,
@@ -43,7 +51,32 @@ const DEDUPE_TTL_MS = Math.max(
   Number(process.env.SOLARD_HELIUS_LOGS_DEDUPE_TTL_MS ?? "120000"),
 );
 
+const INDICATOR_FLUSH_MS = Math.max(
+  50,
+  Number(process.env.SOLARD_HELIUS_LOGS_INDICATOR_FLUSH_MS ?? "250"),
+);
+
+const HEARTBEAT_MS = Math.max(
+  1_000,
+  Number(process.env.SOLARD_HELIUS_LOGS_HEARTBEAT_MS ?? "3000"),
+);
+
+const CIRCUIT_BREAKER_MIN_RECEIVED = Math.max(
+  10,
+  Number(process.env.SOLARD_HELIUS_LOGS_CIRCUIT_MIN_RECEIVED ?? "200"),
+);
+
+const CIRCUIT_BREAKER_ERROR_RATE = Math.min(
+  1,
+  Math.max(
+    0,
+    Number(process.env.SOLARD_HELIUS_LOGS_CIRCUIT_ERROR_RATE ?? "0.25"),
+  ),
+);
+
 let running = true;
+let lastSessionErrorRate = 0;
+let lastSessionReceived = 0;
 
 function apiKeyFromUrl(url: string | null | undefined): string | null {
   const match = String(url ?? "").match(/[?&](?:api-key|apiKey)=([^&]+)/i);
@@ -93,7 +126,7 @@ function json(value: unknown): string {
   );
 }
 
-function eventData(event: any): string {
+function eventData(event: MessageEvent<unknown> | { data?: unknown }): string {
   const data = event?.data;
 
   if (typeof data === "string") return data;
@@ -125,6 +158,24 @@ type LogJob = {
   receivedAtMs: number;
 };
 
+type HeliusLogsRpcMessage = {
+  id?: unknown;
+  result?: unknown;
+  method?: unknown;
+  params?: {
+    result?: {
+      context?: {
+        slot?: unknown;
+      };
+      value?: {
+        err?: unknown;
+        signature?: unknown;
+        logs?: unknown;
+      };
+    };
+  };
+};
+
 type Counters = {
   received: number;
   accepted: number;
@@ -135,12 +186,83 @@ type Counters = {
   completes: number;
   imaged: number;
   errors: number;
+  hydrationErrors: number;
+  lastJobProcessingMs: number | null;
+  avgJobProcessingMs: number | null;
   lastSignature: string | null;
   lastMint: string | null;
   lastMcapUsd: number | null;
+  lastHydrationError: string | null;
   lastMessageAtMs: number;
   lastRaw: Record<string, unknown> | null;
 };
+
+const dirtyIndicatorMints = new Set<string>();
+let indicatorFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let indicatorFlushInFlight = false;
+
+function markIndicatorsDirty(mint: string): void {
+  dirtyIndicatorMints.add(mint);
+  scheduleIndicatorFlush();
+}
+
+function scheduleIndicatorFlush(): void {
+  if (indicatorFlushTimer) return;
+  indicatorFlushTimer = setTimeout(() => {
+    void flushIndicators();
+  }, INDICATOR_FLUSH_MS);
+}
+
+async function flushIndicators(): Promise<void> {
+  indicatorFlushTimer = null;
+
+  if (indicatorFlushInFlight) {
+    scheduleIndicatorFlush();
+    return;
+  }
+
+  const mints = Array.from(dirtyIndicatorMints);
+  dirtyIndicatorMints.clear();
+
+  if (mints.length === 0) return;
+
+  indicatorFlushInFlight = true;
+
+  try {
+    await dbWrite("helius_logs_indicators_flush", () => {
+      const now = Date.now();
+      for (const mint of mints) {
+        recomputeTerminalIndicators(mint, now);
+      }
+      return { mints: mints.length };
+    });
+  } catch (error) {
+    for (const mint of mints) dirtyIndicatorMints.add(mint);
+    recordWorkerError(WORKER, error, {
+      phase: "indicator-flush",
+      mints: mints.slice(0, 25),
+      mintCount: mints.length,
+    });
+  } finally {
+    indicatorFlushInFlight = false;
+    if (dirtyIndicatorMints.size > 0) scheduleIndicatorFlush();
+  }
+}
+
+function observeJobProcessing(counters: Counters, elapsedMs: number): void {
+  counters.lastJobProcessingMs = elapsedMs;
+  counters.avgJobProcessingMs =
+    counters.avgJobProcessingMs == null
+      ? elapsedMs
+      : counters.avgJobProcessingMs * 0.9 + elapsedMs * 0.1;
+}
+
+function oldestQueuedJobAgeMs(
+  queuedJobReceivedAtMs: Map<string, number>,
+): number | null {
+  const oldest = Math.min(...queuedJobReceivedAtMs.values());
+  return Number.isFinite(oldest) ? Date.now() - oldest : null;
+}
 
 const tradeMetadataAttempts = new Map<string, number>();
 
@@ -273,13 +395,19 @@ async function applyTradeEvents(
 
   for (const trade of trades) {
     await m(`trade:${trade.mint}`, async () => {
-      const hydrated = await hydrateTradeMint(trade.mint).catch(() => ({
-        imaged: false,
-      }));
+      const hydrated = await hydrateTradeMint(trade.mint).catch((error) => {
+        counters.hydrationErrors++;
+        counters.lastHydrationError = compactError(error);
+        recordWorkerError(WORKER, error, {
+          phase: "trade-metadata",
+          mint: trade.mint,
+        });
+        return { imaged: false };
+      });
 
       if (hydrated.imaged) imaged++;
 
-      await dbWrite("helius_logs_trade", () =>
+      await dbWrite("helius_logs_trade_apply", () => {
         insertTerminalTrade({
           id: trade.id,
           mint: trade.mint,
@@ -297,10 +425,8 @@ async function applyTradeEvents(
           rawJson: json(trade.raw),
           createdAtMs: trade.createdAtMs,
           updatedAtMs: Date.now(),
-        }),
-      );
+        });
 
-      await dbWrite("helius_logs_trade_token", () =>
         upsertTerminalToken({
           mint: trade.mint,
           source: "helius-logs-trade",
@@ -312,12 +438,12 @@ async function applyTradeEvents(
           lastSlot: trade.slot,
           signature: trade.signature,
           updatedAtMs: Date.now(),
-        }),
-      );
+        });
 
-      await dbWrite("helius_logs_indicators", () =>
-        recomputeTerminalIndicators(trade.mint),
-      );
+        return { mint: trade.mint, tradeId: trade.id };
+      });
+
+      markIndicatorsDirty(trade.mint);
 
       counters.lastMint = trade.mint;
       counters.lastMcapUsd = trade.marketCapUsd ?? counters.lastMcapUsd;
@@ -424,9 +550,13 @@ function createCounters(): Counters {
     completes: 0,
     imaged: 0,
     errors: 0,
+    hydrationErrors: 0,
+    lastJobProcessingMs: null,
+    avgJobProcessingMs: null,
     lastSignature: null,
     lastMint: null,
     lastMcapUsd: null,
+    lastHydrationError: null,
     lastMessageAtMs: 0,
     lastRaw: null,
   };
@@ -440,7 +570,16 @@ function heartbeat(
   counters: Counters,
   dedupe: TtlDeduper,
   queue: BoundedAsyncQueue<LogJob>,
+  queuedJobReceivedAtMs: Map<string, number>,
 ): void {
+  const queueStats = queue.stats();
+  const queueLagMs = oldestQueuedJobAgeMs(queuedJobReceivedAtMs);
+  const errorRate = counters.errors / Math.max(1, counters.received);
+  const dedupeHitRate = counters.duplicates / Math.max(1, counters.received);
+
+  lastSessionErrorRate = errorRate;
+  lastSessionReceived = counters.received;
+
   upsertProcessStatus({
     name: WORKER,
     kind: "stream",
@@ -457,11 +596,17 @@ function heartbeat(
       subscribed,
       subscriptionId,
       ...counters,
+      heartbeatMs: HEARTBEAT_MS,
+      indicatorFlushMs: INDICATOR_FLUSH_MS,
       lastMessageAgeMs: counters.lastMessageAtMs
         ? Date.now() - counters.lastMessageAtMs
         : null,
+      queueLagMs,
+      avgJobProcessingMs: counters.avgJobProcessingMs,
+      errorRate,
+      dedupeHitRate,
       dedupeSize: dedupe.size(),
-      queue: queue.stats(),
+      queue: { ...queueStats, oldestJobAgeMs: queueLagMs },
     },
     error: counters.errors ? `${counters.errors} parser/write errors` : null,
   });
@@ -474,9 +619,18 @@ async function runSession(attempt: number): Promise<void> {
 
     const dedupe = new TtlDeduper(DEDUPE_TTL_MS);
     const counters = createCounters();
+    const queuedJobReceivedAtMs = new Map<string, number>();
 
     const queue = new BoundedAsyncQueue<LogJob>(
-      (job) => applyLogJob(job, counters),
+      async (job) => {
+        queuedJobReceivedAtMs.delete(job.signature);
+        const startedAtMs = Date.now();
+        try {
+          await applyLogJob(job, counters);
+        } finally {
+          observeJobProcessing(counters, Date.now() - startedAtMs);
+        }
+      },
       {
         concurrency: CONCURRENCY,
         maxQueued: MAX_QUEUED,
@@ -493,8 +647,13 @@ async function runSession(attempt: number): Promise<void> {
 
     let subscribed = false;
     let subscriptionId: unknown = null;
+    let lastHeartbeatAtMs = 0;
 
-    const sendHeartbeat = () => {
+    const sendHeartbeat = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastHeartbeatAtMs < HEARTBEAT_MS) return;
+      lastHeartbeatAtMs = now;
+
       heartbeat(
         attempt,
         redactedUrl,
@@ -503,10 +662,11 @@ async function runSession(attempt: number): Promise<void> {
         counters,
         dedupe,
         queue,
+        queuedJobReceivedAtMs,
       );
     };
 
-    const pulse = setInterval(sendHeartbeat, 1_000);
+    const pulse = setInterval(sendHeartbeat, HEARTBEAT_MS);
 
     return await new Promise<void>((resolve, reject) => {
       ws.addEventListener("open", () => {
@@ -523,7 +683,7 @@ async function runSession(attempt: number): Promise<void> {
 
           ws.send(JSON.stringify(req));
           subscribed = true;
-          sendHeartbeat();
+          sendHeartbeat(true);
 
           return {
             commitment: COMMITMENT,
@@ -532,14 +692,14 @@ async function runSession(attempt: number): Promise<void> {
         });
       });
 
-      ws.addEventListener("message", (event: any) => {
+      ws.addEventListener("message", (event: MessageEvent<unknown>) => {
         counters.received++;
         counters.lastMessageAtMs = Date.now();
 
         const raw = eventData(event);
 
         try {
-          const data = JSON.parse(raw);
+          const data = JSON.parse(raw) as HeliusLogsRpcMessage;
 
           counters.lastRaw = {
             method: data?.method ?? null,
@@ -550,7 +710,7 @@ async function runSession(attempt: number): Promise<void> {
 
           if (data?.id === 1 && data?.result != null) {
             subscriptionId = data.result;
-            sendHeartbeat();
+            sendHeartbeat(true);
             return;
           }
 
@@ -584,15 +744,17 @@ async function runSession(attempt: number): Promise<void> {
             return;
           }
 
+          const receivedAtMs = Date.now();
           if (
             queue.push({
               signature,
               logs,
               slot,
-              receivedAtMs: Date.now(),
+              receivedAtMs,
             })
           ) {
             counters.accepted++;
+            queuedJobReceivedAtMs.set(signature, receivedAtMs);
           }
 
           sendHeartbeat();
@@ -605,13 +767,13 @@ async function runSession(attempt: number): Promise<void> {
             raw: raw.slice(0, 500),
           });
 
-          sendHeartbeat();
+          sendHeartbeat(true);
         }
       });
 
       ws.addEventListener("close", () => {
         clearInterval(pulse);
-        sendHeartbeat();
+        sendHeartbeat(true);
         resolve();
       });
 
@@ -684,7 +846,13 @@ async function main(): Promise<void> {
       () => runSession(attempt),
     );
 
-    const delay = Math.min(30_000, 500 * 2 ** Math.min(attempt, 6));
+    const baseDelay = Math.min(30_000, 500 * 2 ** Math.min(attempt, 6));
+    const circuitBreakerDelay =
+      lastSessionReceived >= CIRCUIT_BREAKER_MIN_RECEIVED &&
+      lastSessionErrorRate >= CIRCUIT_BREAKER_ERROR_RATE
+        ? baseDelay
+        : 0;
+    const delay = Math.min(60_000, baseDelay + circuitBreakerDelay);
 
     upsertProcessStatus({
       name: WORKER,
@@ -695,6 +863,10 @@ async function main(): Promise<void> {
         buildId: BUILD_ID,
         attempt,
         delay,
+        baseDelay,
+        circuitBreakerDelay,
+        lastSessionErrorRate,
+        lastSessionReceived,
       },
     });
 
