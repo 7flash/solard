@@ -34,10 +34,10 @@ export type BgrunSdk = {
 };
 
 function hasSdkShape(value: unknown): value is BgrunSdk {
-  const row = value as
-    Partial<Record<keyof BgrunSdk, unknown>> | null | undefined;
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<keyof BgrunSdk, unknown>;
+
   return (
-    !!row &&
     typeof row.handleRun === "function" &&
     typeof row.handleStop === "function" &&
     typeof row.getAllProcesses === "function" &&
@@ -48,14 +48,15 @@ function hasSdkShape(value: unknown): value is BgrunSdk {
 }
 
 function resolveBgrunSdk(): BgrunSdk {
-  const direct = bgrun as unknown;
-  const module = bgrunModule as unknown as Record<string, unknown>;
+  const direct = bgrun as Record<string, unknown> | null | undefined;
+  const module = bgrunModule as Record<string, unknown>;
+
   const candidates = [
     direct,
-    (direct as any)?.default,
+    direct?.default,
     module,
     module.default,
-    (module.default as any)?.default,
+    (module.default as Record<string, unknown> | null | undefined)?.default,
   ];
 
   for (const candidate of candidates) {
@@ -64,11 +65,16 @@ function resolveBgrunSdk(): BgrunSdk {
 
   const keys = new Set<string>();
   for (const candidate of candidates) {
-    if (candidate && typeof candidate === "object") {
-      for (const key of Object.keys(candidate as Record<string, unknown>))
+    if (
+      candidate &&
+      (typeof candidate === "object" || typeof candidate === "function")
+    ) {
+      for (const key of Object.keys(candidate)) {
         keys.add(key);
+      }
     }
   }
+
   throw new Error(
     `bgrun SDK is missing required Solard lifecycle exports. ` +
       `Found exports: ${Array.from(keys).sort().join(", ") || "(none)"}. ` +
@@ -81,7 +87,7 @@ export default bgrunSdk;
 
 export function assertBgrunSdk(value: Partial<BgrunSdk> = bgrunSdk): BgrunSdk {
   if (!hasSdkShape(value)) return resolveBgrunSdk();
-  return value as BgrunSdk;
+  return value;
 }
 
 export async function stopBgrunProcessByName(name: string): Promise<boolean> {
