@@ -514,7 +514,11 @@ async function applyLogJob(job: LogJob, counters: Counters): Promise<void> {
         now: job.receivedAtMs,
       });
 
-      const createImages = await applyCreateEvents(job, parsed.creates, counters);
+      const createImages = await applyCreateEvents(
+        job,
+        parsed.creates,
+        counters,
+      );
       const tradeImages = await applyTradeEvents(parsed.trades, counters);
 
       await applyCompleteEvents(parsed.completes);
@@ -640,7 +644,9 @@ async function runSession(attempt: number): Promise<void> {
     const WebSocketCtor = globalThis.WebSocket;
 
     if (!WebSocketCtor) {
-      throw new Error("globalThis.WebSocket is unavailable in this Bun runtime");
+      throw new Error(
+        "globalThis.WebSocket is unavailable in this Bun runtime",
+      );
     }
 
     const ws = new WebSocketCtor(url);

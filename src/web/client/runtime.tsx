@@ -65,6 +65,8 @@ export type PumpFeedRow = {
   marketCapUsd?: number | null;
   priceUsd?: number | null;
   priceSolPerToken?: number | null;
+  priceUpdatedAtMs?: number | null;
+  priceAgeMs?: number | null;
   image?: string | null;
   website?: string | null;
   twitter?: string | null;
@@ -1272,30 +1274,35 @@ export function schedulePumpFeedUpdate(): void {
   }, 120);
 }
 
+function finiteNumberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function normalizeFeedRow(
   row: PumpFeedRow,
   existing?: PumpFeedRow,
 ): PumpFeedRow {
   const now = Date.now();
-  const directMcap =
-    typeof row.marketCapUsd === "number" && Number.isFinite(row.marketCapUsd)
-      ? row.marketCapUsd
-      : typeof row.marketCapSol === "number" &&
-          Number.isFinite(row.marketCapSol)
-        ? row.marketCapSol
-        : null;
+  const directMcapUsd = finiteNumberOrNull(row.marketCapUsd);
+  const directMcapSol = finiteNumberOrNull(row.marketCapSol);
+  const directDisplayMcap = directMcapUsd ?? directMcapSol;
+  const capturedAtMs =
+    finiteNumberOrNull(row.priceUpdatedAtMs) ??
+    finiteNumberOrNull(row.lastTradeAtMs) ??
+    finiteNumberOrNull(row.updatedAtMs) ??
+    now;
   const samples = [...(row.samples ?? [])];
   if (
-    directMcap != null &&
+    directDisplayMcap != null &&
     !samples.some(
       (sample) =>
-        Math.abs(sample.capturedAtMs - now) < 1200 &&
-        sample.marketCapSol === directMcap,
+        Math.abs(sample.capturedAtMs - capturedAtMs) < 1200 &&
+        sample.marketCapSol === directDisplayMcap,
     )
   ) {
     samples.unshift({
-      capturedAtMs: now,
-      marketCapSol: directMcap,
+      capturedAtMs,
+      marketCapSol: directDisplayMcap,
       source: row.eventType ?? row.raw?.txType ?? row.raw?.source ?? "stream",
     });
   }
@@ -1324,20 +1331,28 @@ function normalizeFeedRow(
         typeof sample.marketCapSol === "number" &&
         Number.isFinite(sample.marketCapSol),
     );
-  const mcap =
-    directMcap ??
-    row.lastMarketCapSol ??
+  const displayMcap =
+    directDisplayMcap ??
+    finiteNumberOrNull(row.lastMarketCapSol) ??
     last?.marketCapSol ??
-    existing?.marketCapSol ??
-    existing?.lastMarketCapSol ??
+    finiteNumberOrNull(existing?.marketCapUsd) ??
+    finiteNumberOrNull(existing?.marketCapSol) ??
+    finiteNumberOrNull(existing?.lastMarketCapSol) ??
     null;
+  const marketCapUsd =
+    directMcapUsd ?? finiteNumberOrNull(existing?.marketCapUsd) ?? displayMcap;
+  const marketCapSol =
+    directMcapSol ?? finiteNumberOrNull(existing?.marketCapSol);
   const initial =
-    row.initialMarketCapSol ??
-    existing?.initialMarketCapSol ??
+    finiteNumberOrNull(row.initialMarketCapUsd) ??
+    finiteNumberOrNull(row.initialMarketCapSol) ??
+    finiteNumberOrNull(existing?.initialMarketCapUsd) ??
+    finiteNumberOrNull(existing?.initialMarketCapSol) ??
     first?.marketCapSol ??
-    mcap ??
+    displayMcap ??
     null;
-  const change = mcap != null && initial != null ? mcap - initial : null;
+  const change =
+    displayMcap != null && initial != null ? displayMcap - initial : null;
   const pct =
     change != null && initial != null && initial > 0
       ? (change / initial) * 100
@@ -1354,12 +1369,22 @@ function normalizeFeedRow(
       ? vals.reduce((sum, value) => sum + value, 0) / vals.length
       : null;
   };
+  const updatedAtCandidates = [
+    finiteNumberOrNull(existing?.updatedAtMs),
+    finiteNumberOrNull(row.updatedAtMs),
+    finiteNumberOrNull(row.lastTradeAtMs),
+    finiteNumberOrNull(row.priceUpdatedAtMs),
+    finiteNumberOrNull(row.createdAtMs),
+  ].filter((value): value is number => value != null && value > 0);
+  const mergedUpdatedAtMs = updatedAtCandidates.length
+    ? Math.max(...updatedAtCandidates)
+    : now;
   return {
     ...existing,
     ...row,
-    marketCapSol: mcap,
-    marketCapUsd: mcap,
-    lastMarketCapSol: mcap,
+    marketCapSol,
+    marketCapUsd,
+    lastMarketCapSol: displayMcap,
     initialMarketCapSol: initial,
     initialMarketCapUsd: initial,
     marketCapChangeSol: row.marketCapChangeSol ?? change,
@@ -1368,14 +1393,27 @@ function normalizeFeedRow(
     sma1m: row.sma1m ?? avg(60_000),
     sma5m: row.sma5m ?? avg(5 * 60_000),
     sma15m: row.sma15m ?? avg(15 * 60_000),
+    priceUpdatedAtMs:
+      row.priceUpdatedAtMs ??
+      (directDisplayMcap != null ||
+      row.priceUsd != null ||
+      row.priceSolPerToken != null
+        ? capturedAtMs
+        : existing?.priceUpdatedAtMs),
+    priceAgeMs:
+      row.priceAgeMs ??
+      (row.priceUpdatedAtMs || existing?.priceUpdatedAtMs
+        ? Math.max(
+            0,
+            now - Number(row.priceUpdatedAtMs ?? existing?.priceUpdatedAtMs),
+          )
+        : null),
     lastTradeAtMs:
       row.lastTradeAtMs ??
-      (row.eventType === "trade" ? now : existing?.lastTradeAtMs) ??
-      row.updatedAtMs ??
+      (row.eventType === "trade" ? capturedAtMs : existing?.lastTradeAtMs) ??
       existing?.lastTradeAtMs ??
-      row.createdAtMs ??
-      now,
-    updatedAtMs: row.updatedAtMs ?? now,
+      null,
+    updatedAtMs: mergedUpdatedAtMs,
   };
 }
 
@@ -1417,8 +1455,17 @@ export function replacePumpFeedFromRows(
 ): void {
   const next: PumpFeedRow[] = [];
   const seen = new Set<string>();
+  const existingByKey = new Map<string, PumpFeedRow>();
+  for (const existing of state.pumpFeed) {
+    const key = existing.mint || existing.signature || pumpRowKey(existing);
+    if (key && !existingByKey.has(key)) existingByKey.set(key, existing);
+  }
   const push = (row: PumpFeedRow) => {
-    const normalized = normalizeFeedRow(row);
+    const rawKey = row.mint || row.signature || pumpRowKey(row);
+    const normalized = normalizeFeedRow(
+      row,
+      rawKey ? existingByKey.get(rawKey) : undefined,
+    );
     const key =
       normalized.mint || normalized.signature || pumpRowKey(normalized);
     if (!key || seen.has(key)) return;

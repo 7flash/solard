@@ -185,17 +185,16 @@ function cleanEnv(name: SolardWorkerName): Record<string, string> {
   };
 }
 
-async function isBgrunProcessAlive(processInfo: any | undefined): Promise<boolean> {
+async function isBgrunProcessAlive(
+  processInfo: any | undefined,
+): Promise<boolean> {
   const pid = Number(processInfo?.pid ?? 0);
 
   if (!pid || pid <= 0) {
     return false;
   }
 
-  return await bgrun.isProcessRunning(
-    pid,
-    String(processInfo?.command ?? ""),
-  );
+  return await bgrun.isProcessRunning(pid, String(processInfo?.command ?? ""));
 }
 
 async function cleanStaleWorker(
@@ -240,8 +239,7 @@ export async function ensureWorker(name: SolardWorkerName): Promise<void> {
     const existing = bgrun.getProcess(name);
     const alive = await isBgrunProcessAlive(existing);
 
-    const restartRequested =
-      process.env.SOLARD_RESTART_WORKERS_ON_BOOT === "1";
+    const restartRequested = process.env.SOLARD_RESTART_WORKERS_ON_BOOT === "1";
 
     if (existing && (!alive || restartRequested)) {
       await cleanStaleWorker(name, existing, alive, restartRequested);
@@ -355,8 +353,7 @@ async function checkWorker(
 
     const stale =
       !db?.heartbeatAtMs ||
-      Date.now() - Number(db.heartbeatAtMs) >
-        WORKER_SPECS[name].staleAfterMs;
+      Date.now() - Number(db.heartbeatAtMs) > WORKER_SPECS[name].staleAfterMs;
 
     const hasErrors = !!db?.error;
 

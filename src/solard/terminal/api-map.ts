@@ -30,6 +30,9 @@ export function terminalFeedRowToPumpRow(
   const anyRow = row as Record<string, any>;
   const now = Date.now();
   const updatedAtMs = n(anyRow.updatedAtMs) ?? n(anyRow.createdAtMs) ?? now;
+  const lastTradeAtMs =
+    n(anyRow.lastTradeAtMs) ?? n(anyRow.latestTradeUpdatedAtMs);
+  const priceUpdatedAtMs = n(anyRow.priceUpdatedAtMs) ?? lastTradeAtMs;
   const mcapUsd = n(anyRow.marketCapUsd);
   const initialMcapUsd = n(anyRow.initialMarketCapUsd) ?? mcapUsd;
   const priceUsd = n(anyRow.priceUsd);
@@ -84,10 +87,12 @@ export function terminalFeedRowToPumpRow(
         ? ((mcapUsd - initialMcapUsd) / initialMcapUsd) * 100
         : null,
     priceSolPerToken: n(anyRow.priceSol),
+    priceUpdatedAtMs,
+    priceAgeMs: priceUpdatedAtMs ? Math.max(0, now - priceUpdatedAtMs) : null,
     sma1m: n(anyRow.sma1m),
     sma5m: n(anyRow.sma5m),
     sma15m: n(anyRow.sma15m),
-    lastTradeAtMs: tradeCount > 0 ? updatedAtMs : null,
+    lastTradeAtMs: lastTradeAtMs ?? (tradeCount > 0 ? updatedAtMs : null),
     tradeCount,
     trades,
     isMayhemMode,

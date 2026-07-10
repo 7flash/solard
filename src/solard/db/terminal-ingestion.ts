@@ -48,37 +48,51 @@ function json(value: unknown): string {
   );
 }
 
+function lastStatementChanges(): number {
+  return Number(
+    terminalDb.raw<{ changes: number }>("SELECT changes() as changes")[0]
+      ?.changes ?? 0,
+  );
+}
+
+function withIngestionTransaction<T>(fn: () => T): T {
+  terminalDb.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    terminalDb.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      terminalDb.exec("ROLLBACK");
+    } catch {
+      // Ignore rollback errors so the original error remains visible.
+    }
+    throw error;
+  }
+}
+
 export function rememberIngestionKey(
   key: string,
   kind: string,
   now = Date.now(),
 ): boolean {
   initTerminalIngestionTables();
-  const before = Number(
-    terminalDb.raw<{ count: number }>(
-      "SELECT COUNT(*) as count FROM terminalIngestionKeys WHERE key = ?",
-      key,
-    )[0]?.count ?? 0,
-  );
-  if (before > 0) return false;
   terminalDb.exec(
     "INSERT OR IGNORE INTO terminalIngestionKeys (key, kind, seenAtMs) VALUES (?, ?, ?)",
     key,
     kind,
     now,
   );
-  return true;
+  return lastStatementChanges() > 0;
 }
 
 export function hasIngestionKey(key: string): boolean {
   initTerminalIngestionTables();
-  return (
-    Number(
-      terminalDb.raw<{ count: number }>(
-        "SELECT COUNT(*) as count FROM terminalIngestionKeys WHERE key = ?",
-        key,
-      )[0]?.count ?? 0,
-    ) > 0
+  return Boolean(
+    terminalDb.raw<{ found: number }>(
+      "SELECT 1 as found FROM terminalIngestionKeys WHERE key = ? LIMIT 1",
+      key,
+    )[0],
   );
 }
 
@@ -89,15 +103,32 @@ export function pruneIngestionKeys(
 ): number {
   initTerminalIngestionTables();
   const cutoff = now - Math.max(60_000, maxAgeMs);
-  const rows = terminalDb.raw<{ key: string }>(
-    "SELECT key FROM terminalIngestionKeys WHERE kind = ? AND seenAtMs < ? LIMIT 5000",
-    kind,
-    cutoff,
+  const configuredLimit = Number(
+    process.env.SOLARD_INGESTION_PRUNE_LIMIT ?? "50000",
   );
-  if (!rows.length) return 0;
-  for (const row of rows)
-    terminalDb.exec("DELETE FROM terminalIngestionKeys WHERE key = ?", row.key);
-  return rows.length;
+  const limit = Math.max(
+    100,
+    Math.min(
+      Number.isFinite(configuredLimit) ? configuredLimit : 50_000,
+      500_000,
+    ),
+  );
+
+  return withIngestionTransaction(() => {
+    terminalDb.exec(
+      `DELETE FROM terminalIngestionKeys
+       WHERE key IN (
+         SELECT key FROM terminalIngestionKeys
+         WHERE kind = ? AND seenAtMs < ?
+         ORDER BY seenAtMs ASC
+         LIMIT ?
+       )`,
+      kind,
+      cutoff,
+      limit,
+    );
+    return lastStatementChanges();
+  });
 }
 
 export function recordWorkerError(
@@ -124,7 +155,7 @@ export function listWorkerErrors(
   worker?: string | null,
   limit = 50,
 ): Array<Record<string, unknown>> {
-  initTerminalIngestionTablesSafe();
+  initTerminalIngestionTables();
   const n = Math.max(1, Math.min(limit, 250));
   const rows = worker
     ? terminalDb.raw<any>(
@@ -146,10 +177,6 @@ export function listWorkerErrors(
       }
     })(),
   }));
-}
-
-function initTerminalIngestionTablesSafe(): void {
-  initTerminalIngestionTables();
 }
 
 export function terminalIngestionStats(): Record<string, unknown> {
@@ -181,27 +208,32 @@ export function terminalIngestionStats(): Record<string, unknown> {
 
 export function clearWorkerErrors(workers?: string[] | null): number {
   initTerminalIngestionTables();
-  if (!workers || workers.length === 0) {
+  const selected = [
+    ...new Set((workers ?? []).map((worker) => worker.trim())),
+  ].filter(Boolean);
+
+  return withIngestionTransaction(() => {
+    if (selected.length === 0) {
+      const count = Number(
+        terminalDb.raw<{ count: number }>(
+          "SELECT COUNT(*) as count FROM terminalWorkerErrors",
+        )[0]?.count ?? 0,
+      );
+      terminalDb.exec("DELETE FROM terminalWorkerErrors");
+      return count;
+    }
+
+    const placeholders = selected.map(() => "?").join(", ");
     const count = Number(
       terminalDb.raw<{ count: number }>(
-        "SELECT COUNT(*) as count FROM terminalWorkerErrors",
-      )[0]?.count ?? 0,
-    );
-    terminalDb.exec("DELETE FROM terminalWorkerErrors");
-    return count;
-  }
-  let count = 0;
-  for (const worker of workers) {
-    count += Number(
-      terminalDb.raw<{ count: number }>(
-        "SELECT COUNT(*) as count FROM terminalWorkerErrors WHERE worker = ?",
-        worker,
+        `SELECT COUNT(*) as count FROM terminalWorkerErrors WHERE worker IN (${placeholders})`,
+        ...selected,
       )[0]?.count ?? 0,
     );
     terminalDb.exec(
-      "DELETE FROM terminalWorkerErrors WHERE worker = ?",
-      worker,
+      `DELETE FROM terminalWorkerErrors WHERE worker IN (${placeholders})`,
+      ...selected,
     );
-  }
-  return count;
+    return count;
+  });
 }

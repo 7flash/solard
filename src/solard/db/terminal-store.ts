@@ -346,6 +346,9 @@ export function initTerminalStore(): void {
         "CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_mint_created ON terminalTradesLive(mint, createdAtMs DESC)",
       );
       terminalDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_mint_priced_created ON terminalTradesLive(mint, createdAtMs DESC) WHERE priceUsd IS NOT NULL",
+      );
+      terminalDb.exec(
         "CREATE INDEX IF NOT EXISTS idx_terminal_trades_live_sig ON terminalTradesLive(signature)",
       );
       terminalDb.exec(
@@ -372,18 +375,46 @@ export function initTerminalStore(): void {
 
 initTerminalStore();
 
-import { dbMeasure, dbMeasureAction } from "../measure.js";
-
 export async function dbWrite<T>(label: string, fn: () => T): Promise<T> {
-  return await dbMeasure.retry(
-    dbMeasureAction<T>(label),
-    {
-      attempts: 5,
-      delay: 20,
-      backoff: 2,
-    },
+  return await measureRetry(
+    `db.${label}`,
+    { attempts: 5, delay: 20, backoff: 2 },
     async () => fn(),
   );
+}
+
+let terminalTransactionDepth = 0;
+
+export function withTerminalDbTransaction<T>(fn: () => T): T {
+  if (terminalTransactionDepth > 0) {
+    terminalTransactionDepth++;
+    try {
+      return fn();
+    } finally {
+      terminalTransactionDepth--;
+    }
+  }
+
+  terminalDb.exec("BEGIN IMMEDIATE");
+  terminalTransactionDepth = 1;
+  try {
+    const result = fn();
+    terminalDb.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      terminalDb.exec("ROLLBACK");
+    } catch {
+      // Ignore rollback errors so the original error remains visible.
+    }
+    throw error;
+  } finally {
+    terminalTransactionDepth = 0;
+  }
+}
+
+export async function dbWriteBatch<T>(label: string, fn: () => T): Promise<T> {
+  return await dbWrite(label, () => withTerminalDbTransaction(fn));
 }
 
 function json(value: unknown): string {
@@ -538,85 +569,59 @@ export function upsertTerminalToken(
   input: Partial<TerminalToken> & { mint: string },
 ): TerminalToken {
   const now = Date.now();
-  const existing = terminalDb.raw<TerminalToken>(
-    "SELECT * FROM terminalTokensLive WHERE mint = ? LIMIT 1",
-    input.mint,
-  )[0];
   const row: TerminalToken = {
     mint: requiredText(input.mint),
-    symbol: pickDisplayText(input.symbol, existing?.symbol, ""),
-    name: pickDisplayText(input.name, existing?.name, ""),
-    image: pickNullableText(input.image, existing?.image),
-    uri: pickNullableText(input.uri, existing?.uri),
-    description: nullableText(
-      (input as any).description ?? (existing as any)?.description,
-    ),
-    website: nullableText((input as any).website ?? (existing as any)?.website),
-    twitter: nullableText((input as any).twitter ?? (existing as any)?.twitter),
-    telegram: nullableText(
-      (input as any).telegram ?? (existing as any)?.telegram,
-    ),
-    creator: nullableText(input.creator ?? existing?.creator),
-    bondingCurveKey: nullableText(
-      input.bondingCurveKey ?? existing?.bondingCurveKey,
-    ),
-    source: requiredText(input.source ?? existing?.source, "unknown"),
-    phase: (input.phase ?? existing?.phase ?? "pump") as TerminalToken["phase"],
-    isMayhemMode: finiteInteger(
-      (input as any).isMayhemMode ?? (existing as any)?.isMayhemMode ?? 0,
-      0,
-    ),
-    quoteAsset: nullableText(
-      (input as any).quoteAsset ?? (existing as any)?.quoteAsset,
-    ),
-    quoteMint: nullableText(
-      (input as any).quoteMint ?? (existing as any)?.quoteMint,
-    ),
-    supplyUi: finiteNumber(
-      input.supplyUi ?? existing?.supplyUi ?? 1_000_000_000,
-      1_000_000_000,
-    ),
-    priceSol: nullableFiniteNumber(input.priceSol ?? existing?.priceSol),
-    priceUsd: nullableFiniteNumber(input.priceUsd ?? existing?.priceUsd),
-    marketCapSol: nullableFiniteNumber(
-      input.marketCapSol ?? existing?.marketCapSol,
-    ),
-    marketCapUsd: nullableFiniteNumber(
-      input.marketCapUsd ?? existing?.marketCapUsd,
-    ),
+    symbol: cleanDisplayText(input.symbol) ?? "",
+    name: cleanDisplayText(input.name) ?? "",
+    image: cleanDisplayText(input.image),
+    uri: cleanDisplayText(input.uri),
+    description: nullableText((input as any).description),
+    website: nullableText((input as any).website),
+    twitter: nullableText((input as any).twitter),
+    telegram: nullableText((input as any).telegram),
+    creator: nullableText(input.creator),
+    bondingCurveKey: nullableText(input.bondingCurveKey),
+    // Empty source/unknown phase mean "do not overwrite existing value" on conflict.
+    // This matters for metadata-only hydration, which should not make a Helius
+    // token disappear from the Helius-filtered terminal feed.
+    source: cleanDisplayText(input.source) ?? "",
+    phase: (input.phase ?? "unknown") as TerminalToken["phase"],
+    isMayhemMode: finiteInteger((input as any).isMayhemMode ?? 0, 0),
+    quoteAsset: nullableText((input as any).quoteAsset),
+    quoteMint: nullableText((input as any).quoteMint),
+    supplyUi: finiteNumber(input.supplyUi ?? 1_000_000_000, 1_000_000_000),
+    priceSol: nullableFiniteNumber(input.priceSol),
+    priceUsd: nullableFiniteNumber(input.priceUsd),
+    marketCapSol: nullableFiniteNumber(input.marketCapSol),
+    marketCapUsd: nullableFiniteNumber(input.marketCapUsd),
     initialMarketCapUsd: nullableFiniteNumber(
-      existing?.initialMarketCapUsd ??
-        input.initialMarketCapUsd ??
-        input.marketCapUsd,
+      input.initialMarketCapUsd ?? input.marketCapUsd,
     ),
-    lastSlot: finiteInteger(input.lastSlot ?? existing?.lastSlot ?? 0, 0),
-    signature: nullableText(input.signature ?? existing?.signature),
-    createdAtMs: finiteInteger(
-      existing?.createdAtMs ?? input.createdAtMs ?? now,
-      now,
-    ),
+    lastSlot: finiteInteger(input.lastSlot ?? 0, 0),
+    signature: nullableText(input.signature),
+    createdAtMs: finiteInteger(input.createdAtMs ?? now, now),
     updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
   terminalDb.exec(
     `INSERT INTO terminalTokensLive (mint, symbol, name, image, uri, description, website, twitter, telegram, creator, bondingCurveKey, source, phase, isMayhemMode, quoteAsset, quoteMint, supplyUi, priceSol, priceUsd, marketCapSol, marketCapUsd, initialMarketCapUsd, lastSlot, signature, createdAtMs, updatedAtMs)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(mint) DO UPDATE SET
-       symbol=CASE WHEN excluded.symbol IS NOT NULL AND excluded.symbol != '' THEN excluded.symbol ELSE terminalTokensLive.symbol END,
-       name=CASE WHEN excluded.name IS NOT NULL AND excluded.name != '' THEN excluded.name ELSE terminalTokensLive.name END,
+       symbol=COALESCE(NULLIF(excluded.symbol, ''), terminalTokensLive.symbol),
+       name=COALESCE(NULLIF(excluded.name, ''), terminalTokensLive.name),
        image=COALESCE(NULLIF(excluded.image, ''), terminalTokensLive.image),
        uri=COALESCE(NULLIF(excluded.uri, ''), terminalTokensLive.uri),
        description=COALESCE(excluded.description, terminalTokensLive.description),
        website=COALESCE(excluded.website, terminalTokensLive.website),
        twitter=COALESCE(excluded.twitter, terminalTokensLive.twitter),
        telegram=COALESCE(excluded.telegram, terminalTokensLive.telegram),
-       creator=excluded.creator,
-       bondingCurveKey=excluded.bondingCurveKey,
-       source=excluded.source,
-       phase=excluded.phase,
+       creator=COALESCE(excluded.creator, terminalTokensLive.creator),
+       bondingCurveKey=COALESCE(excluded.bondingCurveKey, terminalTokensLive.bondingCurveKey),
+       source=COALESCE(NULLIF(excluded.source, ''), terminalTokensLive.source, 'unknown'),
+       phase=CASE WHEN excluded.phase != 'unknown' THEN excluded.phase ELSE terminalTokensLive.phase END,
        isMayhemMode=MAX(COALESCE(terminalTokensLive.isMayhemMode, 0), COALESCE(excluded.isMayhemMode, 0)),
        quoteAsset=COALESCE(excluded.quoteAsset, terminalTokensLive.quoteAsset),
        quoteMint=COALESCE(excluded.quoteMint, terminalTokensLive.quoteMint),
-       supplyUi=excluded.supplyUi,
+       supplyUi=CASE WHEN excluded.supplyUi > 0 THEN excluded.supplyUi ELSE terminalTokensLive.supplyUi END,
        priceSol=COALESCE(excluded.priceSol, terminalTokensLive.priceSol),
        priceUsd=COALESCE(excluded.priceUsd, terminalTokensLive.priceUsd),
        marketCapSol=COALESCE(excluded.marketCapSol, terminalTokensLive.marketCapSol),
@@ -624,7 +629,7 @@ export function upsertTerminalToken(
        initialMarketCapUsd=COALESCE(terminalTokensLive.initialMarketCapUsd, excluded.initialMarketCapUsd),
        lastSlot=MAX(terminalTokensLive.lastSlot, excluded.lastSlot),
        signature=COALESCE(excluded.signature, terminalTokensLive.signature),
-       updatedAtMs=excluded.updatedAtMs`,
+       updatedAtMs=MAX(terminalTokensLive.updatedAtMs, excluded.updatedAtMs)`,
     row.mint,
     row.symbol,
     row.name,
@@ -734,24 +739,38 @@ function median(values: number[]): number | null {
     : sorted[mid]!;
 }
 
-export function recomputeTerminalIndicators(
+const TERMINAL_INDICATOR_INTERVALS = [
+  60, 300, 900, 3600, 21600, 86400,
+] as const;
+
+type IndicatorTradeRow = Pick<
+  TerminalTrade,
+  "createdAtMs" | "priceUsd" | "marketCapUsd" | "solDeltaUi" | "tokenDeltaUi"
+>;
+
+function computeTerminalIndicatorsForMint(
   mint: string,
   now = Date.now(),
 ): TerminalIndicator[] {
-  const intervals = [60, 300, 900, 3600, 21600, 86400];
   const token = terminalDb.raw<TerminalToken>(
     "SELECT * FROM terminalTokensLive WHERE mint = ? LIMIT 1",
     mint,
   )[0];
-  const out: TerminalIndicator[] = [];
-  for (const intervalSec of intervals) {
+  const maxIntervalSec = TERMINAL_INDICATOR_INTERVALS.at(-1) ?? 86400;
+  const oldestSince = now - maxIntervalSec * 1000;
+  const pricedTrades = terminalDb.raw<IndicatorTradeRow>(
+    `SELECT createdAtMs, priceUsd, marketCapUsd, solDeltaUi, tokenDeltaUi
+     FROM terminalTradesLive
+     WHERE mint = ? AND createdAtMs >= ? AND priceUsd IS NOT NULL
+     ORDER BY createdAtMs DESC`,
+    mint,
+    oldestSince,
+  );
+
+  return TERMINAL_INDICATOR_INTERVALS.map((intervalSec) => {
     const since = now - intervalSec * 1000;
-    const trades = terminalDb.raw<TerminalTrade>(
-      `SELECT * FROM terminalTradesLive
-       WHERE mint = ? AND createdAtMs >= ? AND priceUsd IS NOT NULL
-       ORDER BY createdAtMs DESC`,
-      mint,
-      since,
+    const trades = pricedTrades.filter(
+      (row) => Number(row.createdAtMs || 0) >= since,
     );
     const tradeCount = trades.length;
     const volumeSol = trades.reduce(
@@ -784,7 +803,7 @@ export function recomputeTerminalIndicators(
       ) ??
       token?.priceUsd ??
       null;
-    const indicator: TerminalIndicator = {
+    return {
       id: `${mint}:${intervalSec}`,
       mint,
       intervalSec,
@@ -799,6 +818,13 @@ export function recomputeTerminalIndicators(
       volumeSol,
       updatedAtMs: now,
     };
+  });
+}
+
+function writeTerminalIndicators(
+  indicators: readonly TerminalIndicator[],
+): void {
+  for (const indicator of indicators) {
     terminalDb.exec(
       `INSERT INTO terminalIndicatorsLive (id, mint, intervalSec, smaPriceUsd, smaMarketCapUsd, vwmaPriceUsd, medianPriceUsd, tradeCount, volumeSol, updatedAtMs)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -821,8 +847,33 @@ export function recomputeTerminalIndicators(
       indicator.volumeSol,
       indicator.updatedAtMs,
     );
-    out.push(indicator);
   }
+}
+
+export function recomputeTerminalIndicators(
+  mint: string,
+  now = Date.now(),
+): TerminalIndicator[] {
+  const indicators = computeTerminalIndicatorsForMint(mint, now);
+  withTerminalDbTransaction(() => writeTerminalIndicators(indicators));
+  return indicators;
+}
+
+export function recomputeTerminalIndicatorsBatch(
+  mints: Iterable<string>,
+  now = Date.now(),
+): TerminalIndicator[] {
+  const uniqueMints = [
+    ...new Set([...mints].map((mint) => mint.trim())),
+  ].filter(Boolean);
+  const out: TerminalIndicator[] = [];
+  withTerminalDbTransaction(() => {
+    for (const mint of uniqueMints) {
+      const indicators = computeTerminalIndicatorsForMint(mint, now);
+      writeTerminalIndicators(indicators);
+      out.push(...indicators);
+    }
+  });
   return out;
 }
 
@@ -834,6 +885,10 @@ export type TerminalFeedRow = TerminalToken & {
   sma5m?: number | null;
   sma15m?: number | null;
   tradeCount?: number;
+  lastTradeAtMs?: number | null;
+  latestTradeUpdatedAtMs?: number | null;
+  priceUpdatedAtMs?: number | null;
+  priceAgeMs?: number | null;
 };
 
 export function listTerminalFeed(
@@ -865,8 +920,21 @@ export function listTerminalFeed(
     source.includes("both") || !source
       ? "1=1"
       : source.includes("helius")
-        ? "LOWER(source) LIKE '%helius%' OR LOWER(source) LIKE 'telegram%'"
-        : "LOWER(source) LIKE '%pumpportal%' OR LOWER(source) = 'pump' OR LOWER(source) LIKE 'telegram%'";
+        ? `(LOWER(terminalTokensLive.source) LIKE '%helius%'
+            OR LOWER(terminalTokensLive.source) LIKE 'telegram%'
+            OR EXISTS (
+              SELECT 1 FROM terminalTradesLive sourceTrades
+              WHERE sourceTrades.mint = terminalTokensLive.mint
+                AND LOWER(sourceTrades.source) LIKE '%helius%'
+            ))`
+        : `(LOWER(terminalTokensLive.source) LIKE '%pumpportal%'
+            OR LOWER(terminalTokensLive.source) = 'pump'
+            OR LOWER(terminalTokensLive.source) LIKE 'telegram%'
+            OR EXISTS (
+              SELECT 1 FROM terminalTradesLive sourceTrades
+              WHERE sourceTrades.mint = terminalTokensLive.mint
+                AND (LOWER(sourceTrades.source) LIKE '%pumpportal%' OR LOWER(sourceTrades.source) = 'pump')
+            ))`;
   const priceClause = includeUnpriced
     ? "1=1"
     : "(source LIKE 'telegram%' OR marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL OR image IS NOT NULL)";
@@ -878,13 +946,28 @@ export function listTerminalFeed(
     : "1=1";
   const tokens = terminalDb.raw<TerminalToken>(
     `SELECT * FROM terminalTokensLive
-     WHERE updatedAtMs >= ?
+     WHERE (
+         updatedAtMs >= ?
+         OR EXISTS (
+           SELECT 1 FROM terminalTradesLive recentTrades
+           WHERE recentTrades.mint = terminalTokensLive.mint
+             AND recentTrades.updatedAtMs >= ?
+         )
+       )
        AND ${sourceClause}
        AND ${priceClause}
        AND ${mayhemClause}
        AND ${usdcClause}
-     ORDER BY updatedAtMs DESC
+     ORDER BY MAX(
+       updatedAtMs,
+       COALESCE((
+         SELECT MAX(recentTrades.updatedAtMs)
+         FROM terminalTradesLive recentTrades
+         WHERE recentTrades.mint = terminalTokensLive.mint
+       ), 0)
+     ) DESC
      LIMIT ?`,
+    minUpdatedAt,
     minUpdatedAt,
     limit,
   );
@@ -910,14 +993,24 @@ export function listTerminalFeed(
        LIMIT 1`,
       token.mint,
     )[0];
+    const latestTradeAtMs = latestTrade
+      ? Math.max(
+          Number(latestTrade.createdAtMs || 0),
+          Number(latestTrade.updatedAtMs || 0),
+        )
+      : null;
     const liveMarketCapUsd =
       latestTrade?.marketCapUsd ?? token.marketCapUsd ?? null;
     const livePriceUsd = latestTrade?.priceUsd ?? token.priceUsd ?? null;
     const livePriceSol = latestTrade?.priceSol ?? token.priceSol ?? null;
+    const priceUpdatedAtMs =
+      latestTradeAtMs ??
+      (liveMarketCapUsd != null || livePriceUsd != null || livePriceSol != null
+        ? Number(token.updatedAtMs || 0) || null
+        : null);
     const liveUpdatedAtMs = Math.max(
       Number(token.updatedAtMs || 0),
-      Number(latestTrade?.createdAtMs || 0),
-      Number(latestTrade?.updatedAtMs || 0),
+      Number(latestTradeAtMs || 0),
     );
     return {
       ...token,
@@ -929,6 +1022,12 @@ export function listTerminalFeed(
           ? latestTrade.priceSol * Number(token.supplyUi ?? 1_000_000_000)
           : (token.marketCapSol ?? null),
       updatedAtMs: liveUpdatedAtMs || token.updatedAtMs,
+      lastTradeAtMs: latestTradeAtMs,
+      latestTradeUpdatedAtMs: latestTradeAtMs,
+      priceUpdatedAtMs,
+      priceAgeMs: priceUpdatedAtMs
+        ? Math.max(0, Date.now() - priceUpdatedAtMs)
+        : null,
       kind: token.source.startsWith("telegram") ? "signal" : "pump",
       sma1m: byInterval.get(60)?.smaMarketCapUsd ?? liveMarketCapUsd,
       sma5m: byInterval.get(300)?.smaMarketCapUsd ?? liveMarketCapUsd,
