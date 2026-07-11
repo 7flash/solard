@@ -1,24 +1,28 @@
-import type { Database } from "bun:sqlite";
+import type { TerminalDatabase } from "../shared/terminal-db.js";
 import { applyIndexedEvents } from "./apply.js";
 import { recordWorkerError, upsertProcessStatus } from "./db.js";
 import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
 import { parsePumpLogs } from "./pump-events.js";
+import { refreshSolUsd } from "./sol-usd.js";
 import type { Counters, LogJob } from "./types.js";
 import type { IndexerConfig } from "./config.js";
 import { redactedUrl } from "./config.js";
+
 type HeliusLogsNotification = {
   jsonrpc?: string;
   method?: string;
   params?: {
     result?: {
       context?: { slot?: number };
-      value?: { signature?: string; err?: unknown; logs?: string[] };
+      value?: {
+        signature?: string;
+        err?: unknown;
+        logs?: string[];
+      };
     };
   };
 };
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+
 function parseNotification(raw: string, receivedAtMs: number): LogJob | null {
   const msg = JSON.parse(raw) as HeliusLogsNotification;
   const value = msg.params?.result?.value;
@@ -31,39 +35,46 @@ function parseNotification(raw: string, receivedAtMs: number): LogJob | null {
     receivedAtMs,
   };
 }
+
 function socketClosed(ws: WebSocket): boolean {
   return (
     ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING
   );
 }
+
 export async function runHeliusWsSession(args: {
-  db: Database;
+  db: TerminalDatabase;
   config: IndexerConfig;
   counters: Counters;
   attempt: number;
   signal: AbortSignal;
 }): Promise<Record<string, unknown>> {
   const { db, config, counters, attempt, signal } = args;
+
   return await indexerMeasure.measure(
     {
       start: () => `helius ws session attempt=${attempt}`,
-      end: summarizeValue,
+      end: (value) => summarizeValue(value),
       catch: summarizeError,
     },
     async () => {
       counters.sessions++;
+
       const ws = new WebSocket(config.wsUrl);
       let subscribed = false;
       let heartbeat: ReturnType<typeof setInterval> | null = null;
       let openedAtMs = Date.now();
+
       const close = () => {
         if (heartbeat) clearInterval(heartbeat);
         try {
           if (!socketClosed(ws)) ws.close();
         } catch {}
       };
+
       const onAbort = () => close();
       signal.addEventListener("abort", onAbort, { once: true });
+
       try {
         await new Promise<void>((resolve, reject) => {
           ws.addEventListener("open", () => {
@@ -79,6 +90,7 @@ export async function runHeliusWsSession(args: {
                 ],
               }),
             );
+
             heartbeat = setInterval(() => {
               upsertProcessStatus(db, {
                 name: config.name,
@@ -96,6 +108,7 @@ export async function runHeliusWsSession(args: {
                 },
               });
             }, config.heartbeatMs);
+
             upsertProcessStatus(db, {
               name: config.name,
               kind: "indexer",
@@ -111,10 +124,12 @@ export async function runHeliusWsSession(args: {
               },
             });
           });
+
           ws.addEventListener("message", (event) => {
             void (async () => {
               const raw = String(event.data);
               const now = Date.now();
+
               if (raw.includes('"result"') && raw.includes('"id":1')) {
                 subscribed = true;
                 upsertProcessStatus(db, {
@@ -132,14 +147,17 @@ export async function runHeliusWsSession(args: {
                 });
                 return;
               }
+
               const job = parseNotification(raw, now);
               if (!job) return;
+
               counters.messages++;
+
               await indexerMeasure.measure(
                 {
                   start: () =>
                     `log:${job.signature.slice(0, 8)} slot=${job.slot}`,
-                  end: summarizeValue,
+                  end: (value) => summarizeValue(value),
                   catch: (error) => {
                     counters.errors++;
                     recordWorkerError(db, config.name, error, {
@@ -151,16 +169,28 @@ export async function runHeliusWsSession(args: {
                   },
                 },
                 async () => {
+                  const sol = await refreshSolUsd({
+                    fallback: config.solUsd,
+                    maxAgeMs: config.solUsdRefreshMs,
+                    timeoutMs: 2000,
+                  }).catch(() => ({ value: config.solUsd }));
+
+                  counters.solUsd = sol.value ?? config.solUsd ?? null;
+                  counters.solUsdAtMs = Date.now();
+
                   const events = parsePumpLogs(job, {
-                    solUsd: config.solUsd,
+                    solUsd: counters.solUsd,
                     tokenDecimals: config.tokenDecimals,
                     pumpSupplyUi: config.pumpSupplyUi,
                   });
+
                   const applied = applyIndexedEvents(db, events, {
                     signature: job.signature,
                     supplyUi: config.pumpSupplyUi,
+                    config,
                     counters,
                   });
+
                   upsertProcessStatus(db, {
                     name: config.name,
                     kind: "indexer",
@@ -178,12 +208,14 @@ export async function runHeliusWsSession(args: {
                       ...counters,
                     },
                   });
+
                   return {
                     signature: job.signature,
                     slot: job.slot,
                     eventCount: events.length,
                     applied: applied.applied,
                     duplicate: applied.duplicate,
+                    solUsd: counters.solUsd,
                     mints: events.map((item) => item.mint),
                   };
                 },
@@ -193,10 +225,12 @@ export async function runHeliusWsSession(args: {
               recordWorkerError(db, config.name, error, { phase: "message" });
             });
           });
+
           ws.addEventListener("close", () => {
             close();
             resolve();
           });
+
           ws.addEventListener("error", () => {
             const error = new Error("Helius websocket error");
             recordWorkerError(db, config.name, error, {
@@ -219,8 +253,12 @@ export async function runHeliusWsSession(args: {
         signal.removeEventListener("abort", onAbort);
         close();
       }
-      await sleep(0);
-      return { uptimeMs: Date.now() - openedAtMs, subscribed, ...counters };
+
+      return {
+        uptimeMs: Date.now() - openedAtMs,
+        subscribed,
+        ...counters,
+      };
     },
   );
 }

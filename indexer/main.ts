@@ -7,11 +7,15 @@ import {
   upsertProcessStatus,
 } from "./db.js";
 import { runHeliusWsSession } from "./helius-ws.js";
+import { startMetadataHydrator } from "./metadata.js";
 import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
+import { refreshSolUsd } from "./sol-usd.js";
 import type { Counters } from "./types.js";
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
 function counters(): Counters {
   return {
     sessions: 0,
@@ -19,6 +23,9 @@ function counters(): Counters {
     creates: 0,
     trades: 0,
     completes: 0,
+    metadataQueued: 0,
+    metadataHydrated: 0,
+    metadataFailed: 0,
     skipped: 0,
     duplicates: 0,
     errors: 0,
@@ -26,13 +33,17 @@ function counters(): Counters {
     lastMint: null,
     lastMcapUsd: null,
     lastEventAtMs: null,
+    solUsd: null,
+    solUsdAtMs: null,
   };
 }
+
 export async function runIndexer(): Promise<void> {
   const config = loadConfig();
-  const store = openIndexerDb(config.dbPath);
+  const store = openIndexerDb();
   const count = counters();
   const controller = new AbortController();
+
   let stopping = false;
   const stop = (reason: string) => {
     if (stopping) return;
@@ -47,8 +58,24 @@ export async function runIndexer(): Promise<void> {
     });
     setTimeout(() => process.exit(0), 50);
   };
+
   process.on("SIGINT", () => stop("SIGINT"));
   process.on("SIGTERM", () => stop("SIGTERM"));
+
+  const sol = await refreshSolUsd({
+    fallback: config.solUsd,
+    force: true,
+    timeoutMs: 2500,
+  }).catch(() => ({ value: config.solUsd, source: "fallback" }));
+  count.solUsd = sol.value ?? config.solUsd ?? null;
+  count.solUsdAtMs = Date.now();
+
+  startMetadataHydrator({
+    db: store.db,
+    config,
+    counters: count,
+  });
+
   upsertProcessStatus(store.db, {
     name: config.name,
     kind: "indexer",
@@ -57,21 +84,25 @@ export async function runIndexer(): Promise<void> {
     data: {
       source: "helius",
       mode: "logsSubscribe",
-      dbPath: config.dbPath,
+      dbPath: store.path,
       url: redactedUrl(config.wsUrl),
       programId: config.programId,
       commitment: config.commitment,
-      solUsd: config.solUsd,
+      solUsd: count.solUsd,
       metadataFetch: config.metadataFetch,
+      metadataConcurrency: config.metadataConcurrency,
     },
   });
+
   let attempt = 0;
+
   while (!stopping) {
     attempt++;
+
     await indexerMeasure.measure(
       {
         start: () => `indexer loop attempt=${attempt}`,
-        end: summarizeValue,
+        end: (value) => summarizeValue(value),
         catch: (error) => {
           count.errors++;
           recordWorkerError(store.db, config.name, error, {
@@ -97,19 +128,24 @@ export async function runIndexer(): Promise<void> {
           attempt,
           signal: controller.signal,
         });
+
         const pruned = pruneIngestionKeys(
           store.db,
           "helius-indexer",
           Number(process.env.SOLARD_INDEXER_SEEN_RETENTION_MS ?? "21600000"),
         );
+
         return { ...result, pruned };
       },
     );
+
     if (stopping) break;
+
     const delay = Math.min(
       config.reconnectMaxMs,
       config.reconnectMinMs * 2 ** Math.min(attempt, 6),
     );
+
     upsertProcessStatus(store.db, {
       name: config.name,
       kind: "indexer",
@@ -117,12 +153,16 @@ export async function runIndexer(): Promise<void> {
       buildId: config.buildId,
       data: { delay, attempt, ...count },
     });
+
     await sleep(delay);
   }
+
   store.close();
 }
-if (import.meta.main)
+
+if (import.meta.main) {
   runIndexer().catch((error) => {
     console.error("[solard:indexer] fatal", error);
     process.exitCode = 1;
   });
+}

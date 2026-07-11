@@ -11,6 +11,7 @@ export type IndexedCreate = {
   createdAtMs: number;
   raw: unknown;
 };
+
 export type IndexedTrade = {
   kind: "trade";
   id: string;
@@ -32,6 +33,7 @@ export type IndexedTrade = {
   createdAtMs: number;
   raw: unknown;
 };
+
 export type IndexedComplete = {
   kind: "complete";
   mint: string;
@@ -42,19 +44,25 @@ export type IndexedComplete = {
   createdAtMs: number;
   raw: unknown;
 };
+
 export type IndexedEvent = IndexedCreate | IndexedTrade | IndexedComplete;
+
 export type LogJob = {
   signature: string;
   slot: number;
   logs: string[];
   receivedAtMs: number;
 };
+
 export type Counters = {
   sessions: number;
   messages: number;
   creates: number;
   trades: number;
   completes: number;
+  metadataQueued: number;
+  metadataHydrated: number;
+  metadataFailed: number;
   skipped: number;
   duplicates: number;
   errors: number;
@@ -62,4 +70,19 @@ export type Counters = {
   lastMint: string | null;
   lastMcapUsd: number | null;
   lastEventAtMs: number | null;
+  solUsd: number | null;
+  solUsdAtMs: number | null;
+};
+
+export type TokenMetadataPatch = {
+  mint: string;
+  name?: string | null;
+  symbol?: string | null;
+  image?: string | null;
+  description?: string | null;
+  website?: string | null;
+  twitter?: string | null;
+  telegram?: string | null;
+  uri?: string | null;
+  rawJson?: string | null;
 };

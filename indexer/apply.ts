@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { TerminalDatabase } from "../shared/terminal-db.js";
 import {
   insertTradeAndToken,
   recomputeIndicators,
@@ -7,34 +7,48 @@ import {
   upsertCreate,
   withWrite,
 } from "./db.js";
+import { enqueueMetadata } from "./metadata.js";
 import type { Counters, IndexedEvent } from "./types.js";
+import type { IndexerConfig } from "./config.js";
+
 export function applyIndexedEvents(
-  db: Database,
+  db: TerminalDatabase,
   events: IndexedEvent[],
-  args: { signature: string; supplyUi: number; counters: Counters },
+  args: {
+    signature: string;
+    supplyUi: number;
+    config: IndexerConfig;
+    counters: Counters;
+  },
 ): { applied: number; duplicate: boolean } {
   if (!events.length) {
     args.counters.skipped++;
     return { applied: 0, duplicate: false };
   }
-  return withWrite(db, () => {
-    const fresh = rememberIngestionKey(
-      db,
-      `helius-indexer:${args.signature}`,
-      "helius-indexer",
-    );
+
+  const result = withWrite(db, () => {
+    const key = `helius-indexer:${args.signature}`;
+    const fresh = rememberIngestionKey(db, key, "helius-indexer");
     if (!fresh) {
       args.counters.duplicates++;
-      return { applied: 0, duplicate: true };
+      return {
+        applied: 0,
+        duplicate: true,
+        metadata: [] as Extract<IndexedEvent, { kind: "create" }>[],
+      };
     }
+
     let applied = 0;
     const touched = new Set<string>();
+    const metadata: Extract<IndexedEvent, { kind: "create" }>[] = [];
+
     for (const event of events) {
       if (event.kind === "create") {
         upsertCreate(db, event, args.supplyUi);
         args.counters.creates++;
         touched.add(event.mint);
         args.counters.lastMint = event.mint;
+        metadata.push(event);
         applied++;
       } else if (event.kind === "trade") {
         insertTradeAndToken(db, event, args.supplyUi);
@@ -52,9 +66,26 @@ export function applyIndexedEvents(
         applied++;
       }
     }
+
     for (const mint of touched) recomputeIndicators(db, mint);
+
     args.counters.lastSignature = args.signature;
     args.counters.lastEventAtMs = Date.now();
-    return { applied, duplicate: false };
+
+    return { applied, duplicate: false, metadata };
   });
+
+  for (const create of result.metadata) {
+    enqueueMetadata(
+      { db, config: args.config, counters: args.counters },
+      {
+        mint: create.mint,
+        uri: create.uri ?? "",
+        name: create.name,
+        symbol: create.symbol,
+      },
+    );
+  }
+
+  return { applied: result.applied, duplicate: result.duplicate };
 }
