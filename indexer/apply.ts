@@ -58,6 +58,8 @@ export function applyIndexedEvents(
 
         createdAtMs: event.createdAtMs,
 
+        observedAtMs: event.createdAtMs,
+
         updatedAtMs: Date.now(),
       });
 

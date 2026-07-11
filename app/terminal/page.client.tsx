@@ -61,6 +61,10 @@ type PageState = {
   sort: SortKey;
   selectedKey: string | null;
   pinned: string[];
+
+  resetBusy: boolean;
+  resetMessage: string | null;
+
   wallets: WalletRow[];
   selectedWallet: string;
   buySol: string;
@@ -102,6 +106,10 @@ const state: PageState = {
   pinned: storageJson<string[]>("solard:terminal-pinned-mints", []).filter(
     (x) => typeof x === "string",
   ),
+
+  resetBusy: false,
+  resetMessage: null,
+
   wallets: [],
   selectedWallet: storageGet("solwal:terminal-default-wallet", ""),
   buySol: storageGet("solwal:terminal-default-buy-sol", "0.05"),
@@ -505,7 +513,10 @@ async function reloadFeed(
           hideUsdc: state.hideUsdc ? "1" : "0",
           stats: options.includeHealth ? "1" : "0",
           health: options.includeHealth ? "1" : "0",
+
+          pinned: state.pinned.join(","),
         });
+
         return await api<TerminalFeedPayload>(`/api/terminal/feed?${params}`);
       },
     );
@@ -523,6 +534,97 @@ async function reloadFeed(
     pollInFlight = false;
     rerender();
     if (options.scheduleNext) scheduleNextPoll();
+  }
+}
+
+async function resetFeed(): Promise<void> {
+  if (state.resetBusy) return;
+
+  const keep = state.pinned.length;
+
+  const confirmed = window.confirm(
+    `Reset the live feed? ${keep} pinned token${keep === 1 ? "" : "s"} will remain visible. Append-only trade history will not be deleted.`,
+  );
+
+  if (!confirmed) return;
+
+  state.resetBusy = true;
+  state.resetMessage = null;
+  state.error = null;
+
+  clearPollTimer();
+  rerender();
+
+  try {
+    /**
+     * Let the current poll settle first so an older response cannot visually
+     * repopulate rows after the reset.
+     */
+    while (pollInFlight && !unmounted) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    clearPollTimer();
+
+    const result = await measureClient(
+      {
+        scope: SCOPE,
+
+        start: () => `reset feed pinned=${state.pinned.length}`,
+
+        end: (value: AnyRow) => ({
+          resetAtMs: value.resetAtMs ?? null,
+
+          pinned: Array.isArray(value.pinned) ? value.pinned.length : 0,
+        }),
+
+        catch: summarizeError,
+      },
+      async () =>
+        await api<AnyRow>("/api/terminal/feed/reset", {
+          method: "POST",
+
+          body: JSON.stringify({
+            pinned: state.pinned,
+          }),
+        }),
+    );
+
+    state.rows = state.rows.filter((row) => isPinned(row));
+
+    if (
+      state.selectedKey &&
+      !state.rows.some(
+        (row) =>
+          rowKey(row) === state.selectedKey || row.mint === state.selectedKey,
+      )
+    ) {
+      state.selectedKey = state.rows[0] ? rowKey(state.rows[0]) : null;
+
+      storageSet("solard:terminal-inspector-key", state.selectedKey ?? "");
+    }
+
+    state.resetMessage = `Feed reset · kept ${state.pinned.length} pinned`;
+
+    measureEvent(SCOPE, "feed reset", {
+      resetAtMs: result.resetAtMs ?? null,
+
+      pinned: state.pinned.length,
+    });
+
+    await reloadFeed({
+      includeHealth: true,
+      scheduleNext: true,
+    });
+  } catch (error) {
+    state.status = "error";
+
+    state.error = error instanceof Error ? error.message : String(error);
+
+    scheduleNextPoll();
+  } finally {
+    state.resetBusy = false;
+    rerender();
   }
 }
 
@@ -1144,6 +1246,16 @@ function TerminalPage() {
           >
             Refresh
           </button>
+
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={state.resetBusy}
+            onClick={() => void resetFeed()}
+          >
+            {state.resetBusy ? "Resetting…" : "Reset feed"}
+          </button>
+
           <button
             type="button"
             className="secondary compact"
@@ -1169,6 +1281,10 @@ function TerminalPage() {
       </section>
 
       {state.error ? <div className="pill bad">{state.error}</div> : null}
+
+      {state.resetMessage ? (
+        <div className="pill ok">{state.resetMessage}</div>
+      ) : null}
 
       <section className="terminal-v10-controls">
         <input

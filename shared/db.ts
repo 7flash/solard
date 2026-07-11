@@ -53,6 +53,15 @@ export const TerminalTokenSchema = z.object({
   signature: z.string().nullable().default(null),
 
   createdAtMs: z.number().default(0),
+
+  /**
+   * Feed membership timestamp.
+   *
+   * This is set only by a token create/discovery path. A trade by itself does
+   * not make an arbitrary historical token eligible for the Terminal feed.
+   */
+  observedAtMs: z.number().default(0),
+
   priceUpdatedAtMs: z.number().default(0),
   updatedAtMs: z.number().default(0),
 });
@@ -110,6 +119,12 @@ export const WorkerErrorSchema = z.object({
   createdAtMs: z.number(),
 });
 
+export const TerminalFeedStateSchema = z.object({
+  scope: z.string(),
+  resetAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
 export const TokenPriceWindowsSchema = z.object({
   mint: z.string(),
 
@@ -141,6 +156,8 @@ export type TokenPriceWindows = z.infer<typeof TokenPriceWindowsSchema>;
 
 export type WorkerError = z.infer<typeof WorkerErrorSchema>;
 
+export type TerminalFeedState = z.infer<typeof TerminalFeedStateSchema>;
+
 export type TerminalFeedRow = TerminalToken & {
   sma1m: number | null;
   sma5m: number | null;
@@ -169,6 +186,7 @@ export const db = new Database(
     tokenTrades: TokenTradeSchema,
     processStatus: ProcessStatusSchema,
     workerErrors: WorkerErrorSchema,
+    terminalFeedState: TerminalFeedStateSchema,
   },
   {
     timestamps: false,
@@ -181,6 +199,7 @@ export const db = new Database(
       tokenTrades: [["eventKey"]],
       processStatus: [["name"]],
       workerErrors: [["errorKey"]],
+      terminalFeedState: [["scope"]],
     },
 
     indexes: {
@@ -188,9 +207,11 @@ export const db = new Database(
         "mint",
         "updatedAtMs",
         "priceUpdatedAtMs",
+        "observedAtMs",
         "marketCapUsd",
         "source",
         ["source", "updatedAtMs"],
+        ["observedAtMs", "updatedAtMs"],
       ],
 
       tokenTrades: [
@@ -204,6 +225,8 @@ export const db = new Database(
       processStatus: [["heartbeatAtMs"], ["updatedAtMs"]],
 
       workerErrors: [["createdAtMs"], ["worker", "createdAtMs"]],
+
+      terminalFeedState: [["resetAtMs"], ["updatedAtMs"]],
     },
 
     views: {
@@ -434,6 +457,13 @@ export function upsertTerminalToken(
     input.marketCapUsd,
   ].some((value) => finite(value) != null);
 
+  const incomingSource = text(input.source) ?? "unknown";
+
+  const discoveryObservation =
+    /(?:create|discovery|new-token|telegram-signal|probe)/i.test(incomingSource)
+      ? now
+      : 0;
+
   const row: TerminalToken = {
     mint: text(input.mint) ?? "",
 
@@ -450,7 +480,7 @@ export function upsertTerminalToken(
     creator: text(input.creator),
     bondingCurveKey: text(input.bondingCurveKey),
 
-    source: text(input.source) ?? "unknown",
+    source: incomingSource,
 
     phase: input.phase ?? "unknown",
 
@@ -479,6 +509,8 @@ export function upsertTerminalToken(
     signature: text(input.signature),
 
     createdAtMs: integer(input.createdAtMs, now),
+
+    observedAtMs: integer(input.observedAtMs ?? discoveryObservation, 0),
 
     priceUpdatedAtMs: integer(
       input.priceUpdatedAtMs ??
@@ -537,6 +569,8 @@ export function upsertTerminalToken(
     signature: t.excludedIfNotNull("signature"),
 
     createdAtMs: t.keepFirst("createdAtMs"),
+
+    observedAtMs: t.max("observedAtMs"),
 
     priceUpdatedAtMs: t.max("priceUpdatedAtMs"),
 
@@ -662,6 +696,111 @@ export function listTokenPriceWindows(
     .all() as TokenPriceWindows[];
 }
 
+const TERMINAL_FEED_SCOPE = "pump";
+
+function cleanPinnedMints(
+  values: Iterable<string> | null | undefined,
+): string[] {
+  return [
+    ...new Set(
+      [...(values ?? [])].map((value) => String(value).trim()).filter(Boolean),
+    ),
+  ].slice(0, 250);
+}
+
+/**
+ * First deployment starts with only tokens observed during the current active
+ * window. Historical rows have observedAtMs=0 and are therefore excluded.
+ */
+export function getTerminalFeedState(
+  scope = TERMINAL_FEED_SCOPE,
+): TerminalFeedState {
+  const existing = db.terminalFeedState
+    .select()
+    .where({ scope })
+    .get() as TerminalFeedState | null;
+
+  if (existing) {
+    return existing;
+  }
+
+  const now = Date.now();
+
+  const row: TerminalFeedState = {
+    scope,
+    resetAtMs:
+      now -
+      Math.max(
+        1_000,
+        integer(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS, 300_000),
+      ),
+    updatedAtMs: now,
+  };
+
+  const inserted = db.terminalFeedState
+    .insert(row)
+    .onConflict("scope")
+    .doNothing() as TerminalFeedState | null;
+
+  return (
+    inserted ??
+    (db.terminalFeedState
+      .select()
+      .where({ scope })
+      .get() as TerminalFeedState | null) ??
+    row
+  );
+}
+
+/**
+ * Logical reset only. Append-only trades and historical token metadata remain
+ * available for audit/debugging, but cease to be feed members.
+ */
+export function resetTerminalFeed(
+  input: {
+    scope?: string;
+    now?: number;
+    pinnedMints?: Iterable<string>;
+  } = {},
+): {
+  state: TerminalFeedState;
+  pinnedMints: string[];
+} {
+  const scope = text(input.scope) ?? TERMINAL_FEED_SCOPE;
+
+  const now = integer(input.now, Date.now());
+
+  const pinnedMints = cleanPinnedMints(input.pinnedMints);
+
+  const state = db.terminalFeedState.upsertOnConflict(
+    {
+      scope,
+      resetAtMs: now,
+      updatedAtMs: now,
+    },
+    "scope",
+    (t) => ({
+      resetAtMs: t.excluded("resetAtMs"),
+      updatedAtMs: t.excluded("updatedAtMs"),
+    }),
+  ) as TerminalFeedState;
+
+  return {
+    state,
+    pinnedMints,
+  };
+}
+
+function isTerminalFeedMember(
+  token: TerminalToken,
+  resetAtMs: number,
+  pinnedMints: ReadonlySet<string>,
+): boolean {
+  return (
+    pinnedMints.has(token.mint) || Number(token.observedAtMs ?? 0) >= resetAtMs
+  );
+}
+
 export function listTerminalFeed(
   input: {
     limit?: number;
@@ -672,6 +811,7 @@ export function listTerminalFeed(
     hideMayhem?: boolean;
     hideUsdc?: boolean;
     priceWindowTtlMs?: number;
+    pinnedMints?: Iterable<string>;
   } = {},
 ): TerminalFeedRow[] {
   const now = Date.now();
@@ -687,6 +827,12 @@ export function listTerminalFeed(
     integer(input.sinceMs, 0),
     now - activeWindowMs,
   );
+
+  const feedState = getTerminalFeedState();
+
+  const pinnedMints = cleanPinnedMints(input.pinnedMints);
+
+  const pinnedSet = new Set(pinnedMints);
 
   const candidateLimit = Math.min(2_000, Math.max(limit * 4, 300));
 
@@ -726,13 +872,23 @@ export function listTerminalFeed(
         .all() as TerminalToken[])
     : [];
 
+  const pinnedTokens = pinnedMints.length
+    ? (db.terminalTokensLive
+        .select()
+        .whereIn("mint", pinnedMints)
+        .all() as TerminalToken[])
+    : [];
+
   const tokensByMint = new Map<string, TerminalToken>();
 
-  for (const token of [...recentTokens, ...tradedTokens]) {
+  for (const token of [...recentTokens, ...tradedTokens, ...pinnedTokens]) {
     tokensByMint.set(token.mint, token);
   }
 
   const rows = [...tokensByMint.values()]
+    .filter((token) =>
+      isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
+    )
     .filter((token) => sourceMatches(input.source, token.source))
     .filter((token) => !input.hideMayhem || token.isMayhemMode === 0)
     .filter((token) => !input.hideUsdc || !isUsdc(token))
@@ -928,26 +1084,68 @@ export function listWorkerErrors(
   ) as WorkerError[];
 }
 
-export function terminalStoreStats(): {
+export function terminalStoreStats(
+  input: {
+    pinnedMints?: Iterable<string>;
+  } = {},
+): {
   tokens: number;
+  storedTokens: number;
   pricedTokens: number;
   trades: number;
+  storedTrades: number;
   workerErrors: number;
+  feedResetAtMs: number;
 } {
-  const tokens = db.terminalTokensLive.count();
+  const feedState = getTerminalFeedState();
 
-  const pricedTokens = listTokenPriceWindows(PRICE_WINDOW_TTL_MS).filter(
-    (window) =>
-      window.latestPriceSol != null ||
-      window.latestPriceUsd != null ||
-      window.latestMarketCapUsd != null,
-  ).length;
+  const pinnedSet = new Set(cleanPinnedMints(input.pinnedMints));
+
+  const storedTokens = db.terminalTokensLive.select().all() as TerminalToken[];
+
+  const memberTokens = storedTokens.filter((token) =>
+    isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
+  );
+
+  const memberMints = new Set(memberTokens.map((token) => token.mint));
+
+  const windows = listTokenPriceWindows(PRICE_WINDOW_TTL_MS).filter((window) =>
+    memberMints.has(window.mint),
+  );
+
+  const pricedMints = new Set(
+    windows
+      .filter(
+        (window) =>
+          window.latestPriceSol != null ||
+          window.latestPriceUsd != null ||
+          window.latestMarketCapUsd != null,
+      )
+      .map((window) => window.mint),
+  );
+
+  for (const token of memberTokens) {
+    if (hasPrice(token)) {
+      pricedMints.add(token.mint);
+    }
+  }
 
   return {
-    tokens,
-    pricedTokens,
-    trades: db.tokenTrades.count(),
+    tokens: memberTokens.length,
+
+    storedTokens: storedTokens.length,
+
+    pricedTokens: pricedMints.size,
+
+    trades: windows.reduce(
+      (total, window) => total + Number(window.trades15m ?? 0),
+      0,
+    ),
+
+    storedTrades: db.tokenTrades.count(),
 
     workerErrors: db.workerErrors.count(),
+
+    feedResetAtMs: feedState.resetAtMs,
   };
 }

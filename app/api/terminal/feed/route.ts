@@ -1,4 +1,5 @@
 import {
+  getTerminalFeedState,
   listProcessStatus,
   listTerminalFeed,
   terminalStoreStats,
@@ -57,6 +58,14 @@ export async function GET(request: Request): Promise<Response> {
       24 * 60 * 60_000,
     );
 
+    const pinnedMints = String(url.searchParams.get("pinned") ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .slice(0, 250);
+
+    const feedState = getTerminalFeedState();
+
     const rows = await m(
       {
         start: () =>
@@ -82,10 +91,16 @@ export async function GET(request: Request): Promise<Response> {
           hideUsdc: enabled(url, "hideUsdc"),
 
           priceWindowTtlMs: 1_000,
+
+          pinnedMints,
         }),
     );
 
-    const stats = enabled(url, "stats") ? terminalStoreStats() : null;
+    const stats = enabled(url, "stats")
+      ? terminalStoreStats({
+          pinnedMints,
+        })
+      : null;
 
     const health = enabled(url, "health")
       ? (() => {
@@ -107,7 +122,11 @@ export async function GET(request: Request): Promise<Response> {
             processes,
             indexerProcess,
             indexer: processData(indexerProcess),
-            store: stats ?? terminalStoreStats(),
+            store:
+              stats ??
+              terminalStoreStats({
+                pinnedMints,
+              }),
           };
         })()
       : null;
@@ -137,6 +156,12 @@ export async function GET(request: Request): Promise<Response> {
         priced,
 
         priceWindowTtlMs: 1_000,
+
+        feedResetAtMs: feedState.resetAtMs,
+
+        pinned: pinnedMints.length,
+
+        membership: "observed-after-reset-or-pinned",
 
         reads: ["terminalTokensLive", "tokenPriceWindows"],
 
