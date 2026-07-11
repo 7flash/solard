@@ -19,8 +19,15 @@ export type IndexerConfig = {
   programId: string;
   programIdCorrected: boolean;
   programIdSource: "env" | "default" | "corrected";
+
+  rpcUrl: string;
   wsUrl: string;
   commitment: string;
+
+  mayhemFetch: boolean;
+  mayhemTimeoutMs: number;
+  mayhemConcurrency: number;
+  mayhemSweepMs: number;
 
   reconnectMinMs: number;
   reconnectMaxMs: number;
@@ -58,6 +65,18 @@ function boolEnv(name: string, fallback = false): boolean {
   }
 
   return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+}
+
+function wsToRpc(value: string): string {
+  if (value.startsWith("wss://")) {
+    return `https://${value.slice("wss://".length)}`;
+  }
+
+  if (value.startsWith("ws://")) {
+    return `http://${value.slice("ws://".length)}`;
+  }
+
+  return value;
 }
 
 function rpcToWs(value: string): string {
@@ -109,7 +128,9 @@ export function loadConfig(): IndexerConfig {
 
   const wsUrl = explicitWs ?? (rpc ? rpcToWs(rpc) : undefined);
 
-  if (!wsUrl) {
+  const rpcUrl = rpc ?? (explicitWs ? wsToRpc(explicitWs) : undefined);
+
+  if (!wsUrl || !rpcUrl) {
     throw new Error(
       "Missing Helius websocket URL. Set SOLARD_HELIUS_LOGS_WS_URL, HELIUS_WS_URL, HELIUS_RPC_URL, RPC_ENDPOINT, SOLANA_RPC_URL, or HELIUS_API_KEY.",
     );
@@ -120,7 +141,7 @@ export function loadConfig(): IndexerConfig {
   return {
     name: env("SOLARD_INDEXER_NAME") ?? "solard-indexer-helius",
 
-    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v9-pump-trade-stream",
+    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v16-mayhem-hydration",
 
     dbPath: SOLARD_DB_PATH,
 
@@ -146,6 +167,7 @@ export function loadConfig(): IndexerConfig {
       };
     })(),
 
+    rpcUrl,
     wsUrl,
 
     commitment: env("SOLARD_INDEXER_COMMITMENT") ?? "processed",
@@ -155,6 +177,14 @@ export function loadConfig(): IndexerConfig {
     reconnectMaxMs: numberEnv("SOLARD_INDEXER_RECONNECT_MAX_MS", 30_000),
 
     heartbeatMs: numberEnv("SOLARD_INDEXER_HEARTBEAT_MS", 5_000),
+
+    mayhemFetch: boolEnv("SOLARD_INDEXER_MAYHEM", true),
+
+    mayhemTimeoutMs: numberEnv("SOLARD_INDEXER_MAYHEM_TIMEOUT_MS", 3_500),
+
+    mayhemConcurrency: numberEnv("SOLARD_INDEXER_MAYHEM_CONCURRENCY", 4),
+
+    mayhemSweepMs: numberEnv("SOLARD_INDEXER_MAYHEM_SWEEP_MS", 2_000),
 
     metadataFetch: boolEnv("SOLARD_INDEXER_METADATA", true),
 

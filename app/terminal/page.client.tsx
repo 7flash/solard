@@ -419,26 +419,92 @@ function latestMcap(
 ): number | null {
   return (
     numberValue(row?.marketCapUsd) ??
+    numberValue((row as any)?.currentMarketCapUsd) ??
     numberValue((row as any)?.lastMarketCapUsd) ??
     numberValue(row?.marketCapSol) ??
     numberValue((row as any)?.lastMarketCapSol) ??
+    numberValue(row?.sma1m) ??
+    numberValue(row?.sma5m) ??
+    numberValue(row?.sma15m) ??
     numberValue(row?.initialMarketCapUsd) ??
     numberValue(row?.initialMarketCapSol)
   );
 }
 
 function latestTime(row: PumpFeedRow): number {
-  return Math.max(
-    Number(row.lastTradeAtMs ?? 0),
-    Number((row as any).priceUpdatedAtMs ?? 0),
-    Number(row.updatedAtMs ?? 0),
-    Number(row.createdAtMs ?? 0),
+  const tradeAt = Number(row.lastTradeAtMs ?? 0);
+
+  if (Number.isFinite(tradeAt) && tradeAt > 0) {
+    return tradeAt;
+  }
+
+  const priceAt = Number((row as any).priceUpdatedAtMs ?? 0);
+
+  if (Number.isFinite(priceAt) && priceAt > 0) {
+    return priceAt;
+  }
+
+  const observedAt = Number((row as any).observedAtMs ?? 0);
+
+  if (Number.isFinite(observedAt) && observedAt > 0) {
+    return observedAt;
+  }
+
+  return Number(row.createdAtMs ?? 0) || Number(row.updatedAtMs ?? 0);
+}
+
+function booleanFlag(value: unknown): boolean | null {
+  if (value === true || value === 1 || value === "1") {
+    return true;
+  }
+
+  if (value === false || value === 0 || value === "0") {
+    return false;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+
+    if (normalized === "true" || normalized === "yes") {
+      return true;
+    }
+
+    if (normalized === "false" || normalized === "no") {
+      return false;
+    }
+  }
+
+  return null;
+}
+
+function mayhemFlag(row: PumpFeedRow): boolean | null {
+  for (const value of [
+    row.isMayhemMode,
+    (row as any).is_mayhem_mode,
+    row.raw?.isMayhemMode,
+    row.raw?.is_mayhem_mode,
+    row.raw?.metadata?.isMayhemMode,
+    row.raw?.metadata?.is_mayhem_mode,
+  ]) {
+    const parsed = booleanFlag(value);
+
+    if (parsed != null) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function isMayhemKnown(row: PumpFeedRow): boolean {
+  return (
+    Number((row as any).mayhemCheckedAtMs ?? row.raw?.mayhemCheckedAtMs ?? 0) >
+      0 || mayhemFlag(row) != null
   );
 }
 
 function isMayhem(row: PumpFeedRow): boolean {
-  const value = row.isMayhemMode ?? row.raw?.isMayhemMode;
-  return value === true || value === 1 || value === "1" || value === "true";
+  return mayhemFlag(row) === true;
 }
 
 function isUsdc(row: PumpFeedRow): boolean {
@@ -455,7 +521,9 @@ function isPinned(row: PumpFeedRow): boolean {
 }
 
 function passesFilters(row: PumpFeedRow): boolean {
-  if (state.hideMayhem && isMayhem(row)) return false;
+  if (state.hideMayhem && (!isMayhemKnown(row) || isMayhem(row))) {
+    return false;
+  }
   if (state.hideUsdc && isUsdc(row)) return false;
   const q = state.filter.trim().toLowerCase();
   if (!q) return true;
@@ -844,8 +912,7 @@ function tokenMeta(row: PumpFeedRow): AnyRow {
     signature: row.signature ?? null,
     marketCapSol: row.marketCapSol ?? null,
     marketCapUsd: row.marketCapUsd ?? null,
-    isMayhemMode:
-      typeof row.isMayhemMode === "boolean" ? row.isMayhemMode : null,
+    isMayhemMode: isMayhemKnown(row) ? isMayhem(row) : null,
     quoteAsset: row.quoteAsset ?? null,
     quoteMint: row.quoteMint ?? null,
   };
@@ -1007,10 +1074,30 @@ function formatVolumeSol(value: unknown): string {
     return "—";
   }
 
-  const formatted = new Intl.NumberFormat("en-US", {
-    notation: Math.abs(number) >= 1_000 ? "compact" : "standard",
+  if (number === 0) {
+    return "0 SOL";
+  }
 
-    maximumFractionDigits: Math.abs(number) < 10 ? 2 : 1,
+  const absolute = Math.abs(number);
+
+  const maximumFractionDigits =
+    absolute < 0.001
+      ? 8
+      : absolute < 0.01
+        ? 6
+        : absolute < 1
+          ? 4
+          : absolute < 100
+            ? 2
+            : 1;
+
+  const formatted = new Intl.NumberFormat("en-US", {
+    notation: absolute >= 10_000 ? "compact" : "standard",
+
+    maximumFractionDigits,
+
+    minimumFractionDigits:
+      absolute < 0.01 ? Math.min(4, maximumFractionDigits) : 0,
   }).format(number);
 
   return `${formatted} SOL`;
@@ -1161,7 +1248,9 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
 
             <div className="terminal-v10-links">
               {linksFor(row)
-                .filter((link) => link.label !== "solscan")
+                .filter(
+                  (link) => link.label !== "solscan" && link.label !== "pump",
+                )
                 .map((link) => (
                   <a
                     href={link.href}
@@ -1779,6 +1868,16 @@ function TerminalPage() {
       ? state.health.indexer
       : processData(indexerProcess);
 
+  const hasIndexerDiagnostics = [
+    indexer.messages,
+    indexer.recognizedEventLines,
+    indexer.parsedTrades,
+    indexer.unknownEventLines,
+    indexer.eventParseErrors,
+  ].some((value) => value != null);
+
+  const pricedRows = state.rows.filter((row) => latestMcap(row) != null).length;
+
   return (
     <div className="terminal-v10">
       <section className="terminal-v10-top">
@@ -1856,7 +1955,7 @@ function TerminalPage() {
           className={`terminal-v10-toggle ${state.hideMayhem ? "active" : ""}`}
           onClick={() => toggleHide("hideMayhem", "solwal:pump-hide-mayhem")}
         >
-          Hide mayhem
+          {state.hideMayhem ? "Mayhem hidden" : "Hide mayhem"}
         </button>
         <button
           type="button"
@@ -1882,17 +1981,20 @@ function TerminalPage() {
           {state.health?.ok === true && stale === 0 ? "ok" : "check"}
         </span>
         <span className="muted small">
-          tokens={state.health?.store?.tokens ?? "?"} · priced=
-          {state.health?.store?.pricedTokens ?? "?"} · trades=
+          tokens={state.health?.store?.tokens ?? state.rows.length} · priced=
+          {pricedRows}/{state.rows.length} · trades=
           {state.health?.store?.trades ?? "?"} · stale={stale}
         </span>
-        <span className="muted small">
-          ws={indexer.messages ?? "?"} · events=
-          {indexer.recognizedEventLines ?? "?"} · parsed-trades=
-          {indexer.parsedTrades ?? "?"} · unknown=
-          {indexer.unknownEventLines ?? "?"} · parse-errors=
-          {indexer.eventParseErrors ?? "?"}
-        </span>
+
+        {hasIndexerDiagnostics ? (
+          <span className="muted small">
+            ws={indexer.messages ?? 0} · events=
+            {indexer.recognizedEventLines ?? 0} · parsed-trades=
+            {indexer.parsedTrades ?? 0} · unknown=
+            {indexer.unknownEventLines ?? 0} · parse-errors=
+            {indexer.eventParseErrors ?? 0}
+          </span>
+        ) : null}
       </section>
 
       <section className="terminal-v10-table-card">

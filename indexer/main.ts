@@ -8,6 +8,7 @@ import { loadConfig } from "./config.js";
 import { runHeliusWsSession } from "./helius-ws.js";
 import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
 import { startMetadataHydrator } from "./metadata.js";
+import { startMayhemHydrator } from "./mayhem.js";
 import { refreshSolUsd } from "./sol-usd.js";
 import type { Counters } from "./types.js";
 
@@ -34,6 +35,11 @@ function createCounters(): Counters {
     parsedCreates: 0,
     parsedTrades: 0,
     parsedCompletes: 0,
+
+    mayhemQueued: 0,
+    mayhemChecked: 0,
+    mayhemDetected: 0,
+    mayhemFailed: 0,
 
     lastUnknownDiscriminator: null,
 
@@ -73,6 +79,7 @@ export async function runIndexer(): Promise<void> {
     stopping = true;
 
     controller.abort();
+    stopMayhemHydrator?.();
 
     upsertProcessStatus({
       name: config.name,
@@ -113,6 +120,8 @@ export async function runIndexer(): Promise<void> {
 
   startMetadataHydrator(config, counters);
 
+  const stopMayhemHydrator = startMayhemHydrator(config, counters);
+
   upsertProcessStatus({
     name: config.name,
 
@@ -140,6 +149,10 @@ export async function runIndexer(): Promise<void> {
       solUsd: counters.solUsd,
 
       metadataFetch: config.metadataFetch,
+
+      mayhemFetch: config.mayhemFetch,
+
+      rpcUrl: config.rpcUrl.replace(/(api[-_]?key=)[^&]+/i, "$1***"),
     }),
 
     updatedAtMs: Date.now(),

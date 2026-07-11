@@ -80,6 +80,11 @@ export type Counters = {
   parsedTrades: number;
   parsedCompletes: number;
 
+  mayhemQueued: number;
+  mayhemChecked: number;
+  mayhemDetected: number;
+  mayhemFailed: number;
+
   lastUnknownDiscriminator: string | null;
   lastProgramDataLength: number | null;
 

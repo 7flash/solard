@@ -36,6 +36,12 @@ export const TerminalTokenSchema = z.object({
 
   isMayhemMode: z.number().default(0),
 
+  /**
+   * Zero means unknown. A positive timestamp means the Pump bonding-curve
+   * account was decoded (or the upstream source explicitly supplied the flag).
+   */
+  mayhemCheckedAtMs: z.number().default(0),
+
   quoteAsset: z.string().nullable().default(null),
   quoteMint: z.string().nullable().default(null),
 
@@ -147,6 +153,13 @@ export const TokenPriceWindowsSchema = z.object({
   latestPriceSol: z.number().nullable(),
   latestPriceUsd: z.number().nullable(),
   latestMarketCapUsd: z.number().nullable(),
+
+  /**
+   * Best current market-cap value available from the same 15-minute scan.
+   * Falls back through recent averages when the newest trade omitted MCAP.
+   */
+  currentMarketCapUsd: z.number().nullable(),
+
   latestTradeAtMs: z.number().nullable(),
 });
 
@@ -216,6 +229,7 @@ export const db = new Database(
         "updatedAtMs",
         "priceUpdatedAtMs",
         "observedAtMs",
+        "mayhemCheckedAtMs",
         "marketCapUsd",
         "source",
         ["source", "updatedAtMs"],
@@ -238,7 +252,7 @@ export const db = new Database(
     },
 
     views: {
-      tokenPriceWindowsV2: defineView(
+      tokenPriceWindowsV3: defineView(
         TokenPriceWindowsSchema,
         `
         WITH recent AS (
@@ -248,7 +262,15 @@ export const db = new Database(
             priceSol,
             priceUsd,
             marketCapUsd,
+            tokenDeltaUi,
             solDeltaUi,
+
+            COALESCE(
+              NULLIF(ABS(solDeltaUi), 0),
+              ABS(priceSol * tokenDeltaUi),
+              0
+            ) AS effectiveVolumeSol,
+
             tradedAtMs,
 
             ROW_NUMBER() OVER (
@@ -279,8 +301,9 @@ export const db = new Database(
 
           WHERE
             tradedAtMs >= unixepoch('subsec') * 1000 - 900000
-        )
+        ),
 
+        aggregated AS (
         SELECT
           mint,
 
@@ -331,19 +354,19 @@ export const db = new Database(
 
           SUM(CASE
             WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000
-            THEN ABS(solDeltaUi)
+            THEN effectiveVolumeSol
             ELSE 0
           END) AS volumeSol1m,
 
           SUM(CASE
             WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000
-            THEN ABS(solDeltaUi)
+            THEN effectiveVolumeSol
             ELSE 0
           END) AS volumeSol5m,
 
           SUM(CASE
             WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000
-            THEN ABS(solDeltaUi)
+            THEN effectiveVolumeSol
             ELSE 0
           END) AS volumeSol15m,
 
@@ -367,6 +390,24 @@ export const db = new Database(
         FROM recent
 
         GROUP BY mint
+        ),
+
+        resolved AS (
+          SELECT
+            *,
+
+            COALESCE(
+              latestMarketCapUsd,
+              avgMarketCapUsd1m,
+              avgMarketCapUsd5m,
+              avgMarketCapUsd15m
+            ) AS currentMarketCapUsd
+
+          FROM aggregated
+        )
+
+        SELECT *
+        FROM resolved
         `,
       ),
     },
@@ -486,6 +527,10 @@ export function upsertTerminalToken(
 
   const incomingSource = text(input.source) ?? "unknown";
 
+  const hasExplicitMayhemFlag =
+    Object.prototype.hasOwnProperty.call(input, "isMayhemMode") &&
+    input.isMayhemMode != null;
+
   const discoveryObservation =
     /(?:create|discovery|new-token|telegram-signal|probe)/i.test(incomingSource)
       ? now
@@ -512,6 +557,11 @@ export function upsertTerminalToken(
     phase: input.phase ?? "unknown",
 
     isMayhemMode: integer(input.isMayhemMode, 0),
+
+    mayhemCheckedAtMs: integer(
+      input.mayhemCheckedAtMs ?? (hasExplicitMayhemFlag ? now : 0),
+      0,
+    ),
 
     quoteAsset: text(input.quoteAsset),
 
@@ -574,6 +624,8 @@ export function upsertTerminalToken(
     phase: t.excluded("phase"),
 
     isMayhemMode: t.max("isMayhemMode"),
+
+    mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
 
     quoteAsset: t.excludedIfNotNull("quoteAsset"),
 
@@ -701,7 +753,7 @@ export function getTokenPriceWindows(
   if (!key) return null;
 
   return (
-    (db.tokenPriceWindowsV2
+    (db.tokenPriceWindowsV3
       .select()
       .where({ mint: key })
       .cache({
@@ -714,13 +766,100 @@ export function getTokenPriceWindows(
 export function listTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows[] {
-  return db.tokenPriceWindowsV2
+  return db.tokenPriceWindowsV3
     .select()
     .orderBy("latestTradeAtMs", "DESC")
     .cache({
       ttlMs: Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS)),
     })
     .all() as TokenPriceWindows[];
+}
+
+export function listTokensNeedingMayhemCheck(
+  limit = 250,
+): Array<
+  Pick<
+    TerminalToken,
+    | "mint"
+    | "bondingCurveKey"
+    | "phase"
+    | "observedAtMs"
+    | "updatedAtMs"
+    | "mayhemCheckedAtMs"
+  >
+> {
+  const capped = Math.max(1, Math.min(integer(limit, 250), 1_000));
+
+  return (
+    db.terminalTokensLive
+      .select()
+      .orderBy("updatedAtMs", "DESC")
+      .limit(capped * 8)
+      .all() as TerminalToken[]
+  )
+    .filter(
+      (token) =>
+        token.phase !== "migrated" &&
+        Number(token.observedAtMs ?? 0) > 0 &&
+        Number(token.mayhemCheckedAtMs ?? 0) <= 0,
+    )
+    .slice(0, capped)
+    .map((token) => ({
+      mint: token.mint,
+
+      bondingCurveKey: token.bondingCurveKey,
+
+      phase: token.phase,
+
+      observedAtMs: token.observedAtMs,
+
+      updatedAtMs: token.updatedAtMs,
+
+      mayhemCheckedAtMs: token.mayhemCheckedAtMs,
+    }));
+}
+
+/**
+ * Update only the authoritative Mayhem fields. This intentionally preserves
+ * source, phase, metadata timestamps, and feed-observation timestamps.
+ */
+export function setTerminalTokenMayhem(input: {
+  mint: string;
+  isMayhemMode: boolean;
+  checkedAtMs?: number;
+}): TerminalToken | null {
+  const existing = db.terminalTokensLive
+    .select()
+    .where({
+      mint: input.mint,
+    })
+    .get() as TerminalToken | null;
+
+  if (!existing) {
+    return null;
+  }
+
+  const row: TerminalToken = {
+    ...existing,
+
+    isMayhemMode: input.isMayhemMode ? 1 : 0,
+
+    mayhemCheckedAtMs: integer(input.checkedAtMs, Date.now()),
+  };
+
+  return db.terminalTokensLive.upsertOnConflict(row, "mint", (t) => ({
+    isMayhemMode: t.max("isMayhemMode"),
+
+    mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
+  })) as TerminalToken;
+}
+
+function terminalTokenIsMayhem(token: TerminalToken): boolean {
+  return Number(token.isMayhemMode ?? 0) > 0;
+}
+
+function terminalTokenMayhemKnown(token: TerminalToken): boolean {
+  return Number(token.mayhemCheckedAtMs ?? 0) > 0;
 }
 
 const TERMINAL_FEED_SCOPE = "pump";
@@ -917,7 +1056,11 @@ export function listTerminalFeed(
       isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
     )
     .filter((token) => sourceMatches(input.source, token.source))
-    .filter((token) => !input.hideMayhem || token.isMayhemMode === 0)
+    .filter(
+      (token) =>
+        !input.hideMayhem ||
+        (terminalTokenMayhemKnown(token) && !terminalTokenIsMayhem(token)),
+    )
     .filter((token) => !input.hideUsdc || !isUsdc(token))
     .map((token) => {
       const windows = windowsByMint.get(token.mint) ?? null;
@@ -927,6 +1070,7 @@ export function listTerminalFeed(
       const priceUsd = windows?.latestPriceUsd ?? token.priceUsd;
 
       const marketCapUsd =
+        windows?.currentMarketCapUsd ??
         windows?.latestMarketCapUsd ??
         (priceUsd != null ? priceUsd * token.supplyUi : token.marketCapUsd) ??
         windows?.avgMarketCapUsd1m ??
@@ -1157,6 +1301,7 @@ export function terminalStoreStats(
           window.latestPriceSol != null ||
           window.latestPriceUsd != null ||
           window.latestMarketCapUsd != null ||
+          window.currentMarketCapUsd != null ||
           window.avgPriceUsd1m != null ||
           window.avgMarketCapUsd1m != null ||
           window.avgMarketCapUsd5m != null ||

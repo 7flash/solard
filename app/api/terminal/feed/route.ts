@@ -132,12 +132,29 @@ export async function GET(request: Request): Promise<Response> {
       : null;
 
     const priced = rows.filter(
-      (row) =>
+      (row: any) =>
         row.marketCapUsd != null ||
         row.marketCapSol != null ||
         row.priceUsd != null ||
-        row.priceSol != null,
+        row.priceSol != null ||
+        row.sma1m != null ||
+        row.sma5m != null ||
+        row.sma15m != null,
     ).length;
+
+    if (health?.store && typeof health.store === "object") {
+      health.store = {
+        ...health.store,
+
+        /**
+         * Displayed-feed priced count. The stored-history count remains
+         * available as storedPricedTokens when supplied by the repository.
+         */
+        storedPricedTokens: (health.store as any).pricedTokens ?? null,
+
+        pricedTokens: priced,
+      };
+    }
 
     return Response.json({
       rows,
@@ -163,7 +180,13 @@ export async function GET(request: Request): Promise<Response> {
 
         membership: "observed-after-reset-or-pinned",
 
-        reads: ["terminalTokensLive", "tokenPriceWindows"],
+        hideMayhem: enabled(url, "hideMayhem"),
+
+        mayhemPolicy: enabled(url, "hideMayhem")
+          ? "verified-non-mayhem-only"
+          : "all",
+
+        reads: ["terminalTokensLive", "tokenPriceWindowsV3"],
 
         writes: [],
         appendOnlyTrades: true,

@@ -1,6 +1,7 @@
 import { appendTokenTradeOnce, upsertTerminalToken } from "../shared/db.js";
 import type { IndexerConfig } from "./config.js";
 import { enqueueMetadata } from "./metadata.js";
+import { enqueueMayhemCheck } from "./mayhem.js";
 import type { Counters, IndexedEvent } from "./types.js";
 
 function json(value: unknown): string {
@@ -61,6 +62,14 @@ export function applyIndexedEvents(
         observedAtMs: event.createdAtMs,
 
         updatedAtMs: Date.now(),
+      });
+
+      enqueueMayhemCheck(input.config, input.counters, {
+        mint: event.mint,
+
+        bondingCurveKey: event.bondingCurveKey ?? null,
+
+        attempt: 0,
       });
 
       enqueueMetadata(input.config, input.counters, {
