@@ -164,12 +164,16 @@ export async function GET(request: Request): Promise<Response> {
 
             reads: [
               "terminalTokensLive",
-              "tokenPriceWindowsV4",
-              "tokenMarketExtremaV1",
+              "tokenPriceWindowsV5",
+              "tokenMarketExtremaV2",
             ],
 
             writes: [],
             appendOnlyTrades: true,
+
+            tradeTable: "tokenTradesV2",
+
+            legacyTradeTableUsed: false,
 
             databaseModule: "shared/db.ts",
 

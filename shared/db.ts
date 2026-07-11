@@ -215,7 +215,7 @@ export const db = new Database(
   SOLARD_DB_PATH,
   {
     terminalTokensLive: TerminalTokenSchema,
-    tokenTrades: TokenTradeSchema,
+    tokenTradesV2: TokenTradeSchema,
     processStatus: ProcessStatusSchema,
     workerErrors: WorkerErrorSchema,
     terminalFeedState: TerminalFeedStateSchema,
@@ -228,7 +228,7 @@ export const db = new Database(
 
     unique: {
       terminalTokensLive: [["mint"]],
-      tokenTrades: [["eventKey"]],
+      tokenTradesV2: [["eventKey"]],
       processStatus: [["name"]],
       workerErrors: [["errorKey"]],
       terminalFeedState: [["scope"]],
@@ -247,7 +247,7 @@ export const db = new Database(
         ["observedAtMs", "updatedAtMs"],
       ],
 
-      tokenTrades: [
+      tokenTradesV2: [
         ["mint", "tradedAtMs"],
         ["tradedAtMs"],
         ["source", "tradedAtMs"],
@@ -264,7 +264,7 @@ export const db = new Database(
     },
 
     views: {
-      tokenPriceWindowsV4: defineView(
+      tokenPriceWindowsV5: defineView(
         TokenPriceWindowsSchema,
         `
         WITH recent AS (
@@ -309,7 +309,7 @@ export const db = new Database(
                 id DESC
             ) AS latestMarketCapUsdRank
 
-          FROM tokenTrades
+          FROM tokenTradesV2
 
           WHERE
             tradedAtMs >= unixepoch('subsec') * 1000 - 900000
@@ -418,7 +418,7 @@ export const db = new Database(
         `,
       ),
 
-      tokenMarketExtremaV1: defineView(
+      tokenMarketExtremaV2: defineView(
         TokenMarketExtremaSchema,
         `
         SELECT
@@ -426,7 +426,7 @@ export const db = new Database(
           MAX(marketCapUsd) AS athMarketCapUsd,
           MIN(marketCapUsd) AS atlMarketCapUsd
 
-        FROM tokenTrades
+        FROM tokenTradesV2
 
         WHERE
           marketCapUsd IS NOT NULL
@@ -461,7 +461,7 @@ export function isDuplicateTradeError(error: unknown): boolean {
 
   return (
     message.includes("unique constraint failed") &&
-    (message.includes("tokentrades.eventkey") || message.includes("eventkey"))
+    (message.includes("tokentradesv2.eventkey") || message.includes("eventkey"))
   );
 }
 
@@ -720,6 +720,25 @@ export type AppendTokenTradeResult = {
   inserted: boolean;
 };
 
+export type ObservedHolderPosition = {
+  owner: string;
+
+  buySol: number;
+  sellSol: number;
+  netSpentSol: number;
+
+  boughtTokens: number;
+  soldTokens: number;
+  netTokens: number;
+
+  buys: number;
+  sells: number;
+  trades: number;
+
+  firstTradeAtMs: number | null;
+  lastTradeAtMs: number | null;
+};
+
 /**
  * Append-only trade write with explicit duplicate result.
  *
@@ -781,7 +800,7 @@ export function appendTokenTradeOnce(
      * tokenTrades is append-only. A duplicate eventKey is normal websocket
      * redelivery and is handled by the UNIQUE exception below.
      */
-    const inserted = db.tokenTrades.insert(row) as TokenTrade;
+    const inserted = db.tokenTradesV2.insert(row) as TokenTrade;
 
     return {
       row: inserted,
@@ -819,7 +838,7 @@ export function getTokenPriceWindows(
   if (!key) return null;
 
   return (
-    (db.tokenPriceWindowsV4
+    (db.tokenPriceWindowsV5
       .select()
       .where({ mint: key })
       .cache({
@@ -832,7 +851,7 @@ export function getTokenPriceWindows(
 export function listTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows[] {
-  return db.tokenPriceWindowsV4
+  return db.tokenPriceWindowsV5
     .select()
     .orderBy("latestTradeAtMs", "DESC")
     .cache({
@@ -1044,7 +1063,7 @@ function isTerminalFeedMember(
 }
 
 export function listTokenMarketExtrema(ttlMs = 2_000): TokenMarketExtrema[] {
-  return db.tokenMarketExtremaV1
+  return db.tokenMarketExtremaV2
     .select()
     .cache({
       ttlMs: Math.max(0, integer(ttlMs, 2_000)),
@@ -1249,6 +1268,100 @@ export function listTerminalFeed(
   return rows;
 }
 
+function cleanOwners(values: Iterable<string>): string[] {
+  return [
+    ...new Set(
+      [...values].map((value) => String(value).trim()).filter(Boolean),
+    ),
+  ].slice(0, 100);
+}
+
+export function listObservedHolderPositions(input: {
+  mint: string;
+  owners: Iterable<string>;
+}): ObservedHolderPosition[] {
+  const mint = text(input.mint) ?? "";
+
+  const owners = cleanOwners(input.owners);
+
+  if (!mint || !owners.length) {
+    return [];
+  }
+
+  const rows = db.tokenTradesV2
+    .select()
+    .where({
+      mint,
+    })
+    .whereIn("owner", owners)
+    .orderBy("tradedAtMs", "ASC")
+    .all() as TokenTrade[];
+
+  const positions = new Map<string, ObservedHolderPosition>();
+
+  for (const trade of rows) {
+    const owner = text(trade.owner);
+
+    if (!owner) {
+      continue;
+    }
+
+    const position = positions.get(owner) ?? {
+      owner,
+
+      buySol: 0,
+      sellSol: 0,
+      netSpentSol: 0,
+
+      boughtTokens: 0,
+      soldTokens: 0,
+      netTokens: 0,
+
+      buys: 0,
+      sells: 0,
+      trades: 0,
+
+      firstTradeAtMs: null,
+
+      lastTradeAtMs: null,
+    };
+
+    const sol = Math.abs(finite(trade.solDeltaUi) ?? 0);
+
+    const tokens = Math.abs(finite(trade.tokenDeltaUi) ?? 0);
+
+    if (trade.side === "buy") {
+      position.buySol += sol;
+      position.boughtTokens += tokens;
+      position.buys++;
+    } else if (trade.side === "sell") {
+      position.sellSol += sol;
+      position.soldTokens += tokens;
+      position.sells++;
+    }
+
+    position.trades++;
+
+    position.firstTradeAtMs =
+      position.firstTradeAtMs == null
+        ? trade.tradedAtMs
+        : Math.min(position.firstTradeAtMs, trade.tradedAtMs);
+
+    position.lastTradeAtMs =
+      position.lastTradeAtMs == null
+        ? trade.tradedAtMs
+        : Math.max(position.lastTradeAtMs, trade.tradedAtMs);
+
+    position.netSpentSol = position.buySol - position.sellSol;
+
+    position.netTokens = position.boughtTokens - position.soldTokens;
+
+    positions.set(owner, position);
+  }
+
+  return [...positions.values()];
+}
+
 export function upsertProcessStatus(
   input: Partial<ProcessStatus> & {
     name: string;
@@ -1281,38 +1394,26 @@ export function upsertProcessStatus(
     updatedAtMs: integer(input.updatedAtMs, now),
   };
 
-  try {
-    return db.processStatus.upsert(row, {
-      on: "name",
-      merge: (t) => ({
-        kind: t.excluded("kind"),
+  return db.processStatus.upsert(row, {
+    on: "name",
+    merge: (t) => ({
+      kind: t.excluded("kind"),
 
-        status: t.excluded("status"),
+      status: t.excluded("status"),
 
-        heartbeatAtMs: t.excluded("heartbeatAtMs"),
+      heartbeatAtMs: t.excluded("heartbeatAtMs"),
 
-        pid: t.excluded("pid"),
+      pid: t.excluded("pid"),
 
-        buildId: t.excludedIfNotNull("buildId"),
+      buildId: t.excludedIfNotNull("buildId"),
 
-        error: t.excluded("error"),
+      error: t.excluded("error"),
 
-        dataJson: t.excluded("dataJson"),
+      dataJson: t.excluded("dataJson"),
 
-        updatedAtMs: t.excluded("updatedAtMs"),
-      }),
-    }) as ProcessStatus;
-  } catch (error) {
-    if (isSqliteBusyError(error)) {
-      console.warn(
-        `[solard:db] skipped process heartbeat while SQLite was busy: ${row.name}`,
-      );
-
-      return row;
-    }
-
-    throw error;
-  }
+      updatedAtMs: t.excluded("updatedAtMs"),
+    }),
+  }) as ProcessStatus;
 }
 
 export function listProcessStatus(limit = 50): ProcessStatus[] {
@@ -1446,7 +1547,7 @@ export function terminalStoreStats(
       0,
     ),
 
-    storedTrades: db.tokenTrades.count(),
+    storedTrades: db.tokenTradesV2.count(),
 
     workerErrors: db.workerErrors.count(),
 

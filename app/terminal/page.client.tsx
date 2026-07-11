@@ -51,6 +51,12 @@ type SortKey = `${SortBase}-asc` | `${SortBase}-desc`;
 type HolderRow = {
   owner?: string | null;
   tokenAccount?: string | null;
+
+  observedBuySol?: number | null;
+  observedSellSol?: number | null;
+  observedNetSpentSol?: number | null;
+  observedTrades?: number | null;
+
   uiAmount?: string | number | null;
   amountUi?: string | number | null;
   amount?: string | number | null;
@@ -59,12 +65,24 @@ type HolderRow = {
   [key: string]: any;
 };
 
+type UiErrorEntry = {
+  id: string;
+  message: string;
+  source: "render" | "feed";
+  createdAtMs: number;
+  count: number;
+};
+
 type PageState = {
   rows: PumpFeedRow[];
   health: TerminalHealthPayload | null;
   feedMeta: AnyRow | null;
   status: "idle" | "loading" | "live" | "error";
   error: string | null;
+
+  uiErrors: UiErrorEntry[];
+  errorDockOpen: boolean;
+
   lastPollAtMs: number | null;
   lastRows: number;
   filter: string;
@@ -110,6 +128,10 @@ const state: PageState = {
   feedMeta: null,
   status: "idle",
   error: null,
+
+  uiErrors: [],
+  errorDockOpen: false,
+
   lastPollAtMs: null,
   lastRows: 0,
   filter: storageGet("solwal:pump-feed-filter", ""),
@@ -157,6 +179,12 @@ const state: PageState = {
 let unmounted = false;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollInFlight = false;
+let pollStartedAtMs = 0;
+
+let pollAbortController: AbortController | null = null;
+
+let pollWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+
 let unsubscribeLogs: (() => void) | null = null;
 let logRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -186,6 +214,54 @@ function updateActiveNavigation(): void {
     );
 }
 
+function rememberUiError(source: UiErrorEntry["source"], error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+
+  const existing = state.uiErrors.find(
+    (item) => item.source === source && item.message === message,
+  );
+
+  if (existing) {
+    existing.count++;
+    existing.createdAtMs = Date.now();
+    return;
+  }
+
+  state.uiErrors = [
+    {
+      id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+
+      source,
+      message,
+      createdAtMs: Date.now(),
+
+      count: 1,
+    },
+
+    ...state.uiErrors,
+  ].slice(0, 25);
+}
+
+async function copyText(value: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const textarea = document.createElement("textarea");
+
+    textarea.value = value;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+
+    document.body.appendChild(textarea);
+
+    textarea.select();
+
+    document.execCommand("copy");
+
+    textarea.remove();
+  }
+}
+
 function renderTerminalPage(): void {
   if (unmounted) {
     return;
@@ -209,9 +285,7 @@ function renderTerminalPage(): void {
 
     updateActiveNavigation();
   } catch (error) {
-    state.status = "error";
-
-    state.error = error instanceof Error ? error.message : String(error);
+    rememberUiError("render", error);
 
     console.error("[solard:terminal] render failed", error);
   } finally {
@@ -263,6 +337,55 @@ function scheduleNextPoll(): void {
     () => void reloadFeed({ scheduleNext: true }),
     pollMs(),
   );
+}
+
+function startPollWatchdog(): void {
+  if (pollWatchdogTimer != null) {
+    return;
+  }
+
+  pollWatchdogTimer = setInterval(() => {
+    if (unmounted || state.status === "idle") {
+      return;
+    }
+
+    const now = Date.now();
+
+    const staleAfterMs = Math.max(12_000, pollMs() * 5);
+
+    if (
+      pollInFlight &&
+      pollStartedAtMs > 0 &&
+      now - pollStartedAtMs > staleAfterMs
+    ) {
+      pollAbortController?.abort();
+
+      return;
+    }
+
+    if (
+      !pollInFlight &&
+      (state.lastPollAtMs == null || now - state.lastPollAtMs > staleAfterMs)
+    ) {
+      void reloadFeed({
+        includeHealth: true,
+
+        scheduleNext: true,
+      });
+    }
+  }, 3_000);
+}
+
+function stopPollWatchdog(): void {
+  if (pollWatchdogTimer != null) {
+    clearInterval(pollWatchdogTimer);
+
+    pollWatchdogTimer = null;
+  }
+
+  pollAbortController?.abort();
+
+  pollAbortController = null;
 }
 
 function imageUrl(value: unknown): string | null {
@@ -659,10 +782,17 @@ async function loadWallets(): Promise<void> {
           "/api/overview?fast=1&balances=none&tokenLimit=0&executionLimit=0",
         );
         state.wallets = overview.wallets ?? [];
-        if (!state.selectedWallet && state.wallets[0]?.address) {
+
+        const selected = selectedWalletAddress();
+
+        if (!selected && state.wallets[0]?.address) {
           state.selectedWallet = state.wallets[0].address;
+
           storageSet("solwal:terminal-default-wallet", state.selectedWallet);
+        } else if (selected) {
+          state.selectedWallet = selected;
         }
+
         return overview;
       },
     )
@@ -673,8 +803,16 @@ async function loadWallets(): Promise<void> {
 async function reloadFeed(
   options: { includeHealth?: boolean; scheduleNext?: boolean } = {},
 ): Promise<void> {
-  if (pollInFlight) return;
+  if (pollInFlight) {
+    return;
+  }
+
   pollInFlight = true;
+  pollStartedAtMs = Date.now();
+
+  const controller = new AbortController();
+
+  pollAbortController = controller;
   state.status = state.rows.length ? "live" : "loading";
 
   state.error = null;
@@ -711,7 +849,9 @@ async function reloadFeed(
           pinned: state.pinned.join(","),
         });
 
-        return await api<TerminalFeedPayload>(`/api/terminal/feed?${params}`);
+        return await api<TerminalFeedPayload>(`/api/terminal/feed?${params}`, {
+          signal: controller.signal,
+        });
       },
     );
 
@@ -722,12 +862,31 @@ async function reloadFeed(
     if (payload.health) state.health = payload.health;
     state.status = "live";
   } catch (error) {
-    state.status = "error";
-    state.error = error instanceof Error ? error.message : String(error);
+    const aborted =
+      error instanceof DOMException
+        ? error.name === "AbortError"
+        : error instanceof Error && error.name === "AbortError";
+
+    if (!aborted) {
+      state.status = "error";
+
+      state.error = error instanceof Error ? error.message : String(error);
+
+      rememberUiError("feed", error);
+    }
   } finally {
+    if (pollAbortController === controller) {
+      pollAbortController = null;
+    }
+
+    pollStartedAtMs = 0;
     pollInFlight = false;
+
     rerender();
-    if (options.scheduleNext) scheduleNextPoll();
+
+    if (options.scheduleNext) {
+      scheduleNextPoll();
+    }
   }
 }
 
@@ -869,6 +1028,24 @@ function walletLabel(wallet: WalletRow): string {
     : short(wallet.address, 5, 5);
 }
 
+function selectedWalletRow(): WalletRow | null {
+  return (
+    state.wallets.find(
+      (wallet) =>
+        wallet.address === state.selectedWallet ||
+        wallet.name === state.selectedWallet,
+    ) ?? null
+  );
+}
+
+function selectedWalletAddress(): string | null {
+  const wallet = selectedWalletRow();
+
+  const address = String(wallet?.address ?? "").trim();
+
+  return address || null;
+}
+
 function selectedWalletLabel(): string {
   const wallet = state.wallets.find(
     (row) =>
@@ -950,11 +1127,18 @@ async function tradeSelected(
     rerender();
     return;
   }
-  if (!state.selectedWallet) {
-    state.tradeError = "Select a wallet first.";
+  const walletAddress = selectedWalletAddress();
+
+  if (!walletAddress) {
+    state.tradeError = "Select a loaded wallet before trading.";
+
     rerender();
     return;
   }
+
+  state.selectedWallet = walletAddress;
+
+  storageSet("solwal:terminal-default-wallet", walletAddress);
 
   state.tradeBusy = true;
   state.tradeMessage = null;
@@ -979,7 +1163,7 @@ async function tradeSelected(
             ? {
                 token: row.mint,
                 amountSol: state.buySol,
-                wallet: state.selectedWallet,
+                wallet: walletAddress,
                 slippageBps: Number(state.slippageBps || "9999"),
                 sender: state.sender,
                 live: state.liveTrade,
@@ -989,7 +1173,7 @@ async function tradeSelected(
               }
             : {
                 token: row.mint,
-                wallet: state.selectedWallet,
+                wallet: walletAddress,
                 bps: Math.max(
                   1,
                   Math.min(
@@ -1057,11 +1241,56 @@ async function refreshHolders(row: PumpFeedRow): Promise<void> {
         return await api<AnyRow>(`/api/token-holders?${params}`);
       },
     );
-    state.holders = Array.isArray(result.holders) ? result.holders : [];
+    const holders = Array.isArray(result.holders)
+      ? (result.holders as HolderRow[])
+      : [];
+
+    const owners = holders
+      .map((holder) => String(holder.owner ?? holder.tokenAccount ?? "").trim())
+      .filter(Boolean);
+
+    const pnl = owners.length
+      ? await api<AnyRow>("/api/terminal/holder-pnl", {
+          method: "POST",
+
+          body: JSON.stringify({
+            mint: row.mint,
+
+            owners,
+          }),
+        })
+      : {
+          positions: [],
+        };
+
+    const positions = new Map(
+      (Array.isArray(pnl.positions) ? pnl.positions : []).map(
+        (position: AnyRow) => [String(position.owner ?? ""), position],
+      ),
+    );
+
+    state.holders = holders.map((holder) => {
+      const owner = String(holder.owner ?? holder.tokenAccount ?? "");
+
+      const position = positions.get(owner);
+
+      return {
+        ...holder,
+
+        observedBuySol: numberValue(position?.buySol),
+
+        observedSellSol: numberValue(position?.sellSol),
+
+        observedNetSpentSol: numberValue(position?.netSpentSol),
+
+        observedTrades: numberValue(position?.trades),
+      };
+    });
+
     state.holdersMessage =
       result.unavailableReason ??
       (state.holders.length
-        ? `${state.holders.length} holders`
+        ? `${state.holders.length} holders · observed P/L uses indexed trades only`
         : "No holders yet");
   } catch (error) {
     state.holders = [];
@@ -1071,6 +1300,67 @@ async function refreshHolders(row: PumpFeedRow): Promise<void> {
     state.holdersBusy = false;
     rerender();
   }
+}
+
+function holderAmount(holder: HolderRow): number | null {
+  return numberValue(holder.uiAmount ?? holder.amountUi ?? holder.amount);
+}
+
+function holderCurrentValueSol(
+  holder: HolderRow,
+  row: PumpFeedRow,
+): number | null {
+  const amount = holderAmount(holder);
+
+  const price = numberValue(row.priceSol);
+
+  if (amount == null || price == null) {
+    return null;
+  }
+
+  return amount * price;
+}
+
+function holderPnlSol(holder: HolderRow, row: PumpFeedRow): number | null {
+  const current = holderCurrentValueSol(holder, row);
+
+  const spent = numberValue(holder.observedNetSpentSol);
+
+  if (current == null || spent == null) {
+    return null;
+  }
+
+  return current - spent;
+}
+
+function holderPnlPct(holder: HolderRow, row: PumpFeedRow): number | null {
+  const pnl = holderPnlSol(holder, row);
+
+  const spent = numberValue(holder.observedNetSpentSol);
+
+  if (pnl == null || spent == null || spent <= 0) {
+    return null;
+  }
+
+  return (pnl / spent) * 100;
+}
+
+function formatSol(value: unknown): string {
+  const number = numberValue(value);
+
+  if (number == null) {
+    return "—";
+  }
+
+  return `${number.toLocaleString("en-US", {
+    maximumFractionDigits: Math.abs(number) < 0.01 ? 6 : 3,
+  })} SOL`;
+}
+
+function formatPercent(value: unknown): string {
+  const number = numberValue(value);
+
+  return number == null ? "—" : `${number.toFixed(2)}%`;
 }
 
 function formatVolumeSol(value: unknown): string {
@@ -1276,6 +1566,63 @@ function MetricStack({
   );
 }
 
+function quoteLabel(row: PumpFeedRow): string {
+  if (isUsdc(row)) {
+    return "USDC";
+  }
+
+  const value = String(
+    row.quoteAsset ??
+      row.quoteMint ??
+      row.raw?.quoteAsset ??
+      row.raw?.quoteMint ??
+      "",
+  )
+    .trim()
+    .toUpperCase();
+
+  if (
+    !value ||
+    value.includes("SO111111") ||
+    value === "SOL" ||
+    value === "WSOL"
+  ) {
+    return "SOL";
+  }
+
+  return short(value, 4, 3);
+}
+
+function TokenFlags({ row }: { row: PumpFeedRow }) {
+  const known = isMayhemKnown(row);
+
+  const mayhem = isMayhem(row);
+
+  return (
+    <span className="terminal-v23-flags">
+      <span
+        className={mayhem ? "bad" : known ? "ok" : "pending"}
+        title={
+          mayhem
+            ? "Mayhem token"
+            : known
+              ? "Verified non-Mayhem"
+              : "Mayhem status checking"
+        }
+      >
+        {mayhem ? "M" : known ? "M−" : "M?"}
+      </span>
+
+      <span
+        className={isUsdc(row) ? "warn" : ""}
+        title={`Quote asset: ${quoteLabel(row)}`}
+      >
+        {quoteLabel(row)}
+      </span>
+    </span>
+  );
+}
+
 function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
   const pumpHref = row.mint ? `https://pump.fun/${row.mint}` : null;
 
@@ -1315,6 +1662,8 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
               </b>
 
               <small>{row.name || "unnamed"}</small>
+
+              <TokenFlags row={row} />
             </span>
           </a>
         ) : (
@@ -1508,6 +1857,11 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
             {isMayhemKnown(row) ? (isMayhem(row) ? "yes" : "no") : "checking"}
           </b>
         </div>
+
+        <div>
+          <span>Quote</span>
+          <b>{quoteLabel(row)}</b>
+        </div>
       </div>
       <div className="terminal-v10-selected-grid">
         <div className="terminal-v10-panel">
@@ -1630,6 +1984,10 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
                   <th>Owner</th>
                   <th>Amount</th>
                   <th>%</th>
+                  <th>Observed spent</th>
+                  <th>Current value</th>
+                  <th>P/L</th>
+                  <th>P/L %</th>
                 </tr>
               </thead>
               <tbody>
@@ -1647,11 +2005,16 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
                         holder.amount ??
                         "—"}
                     </td>
-                    <td>
-                      {numberValue(holder.pctSupply ?? holder.percent) == null
-                        ? "—"
-                        : `${numberValue(holder.pctSupply ?? holder.percent)!.toFixed(2)}%`}
-                    </td>
+
+                    <td>{formatPercent(holder.pctSupply ?? holder.percent)}</td>
+
+                    <td>{formatSol(holder.observedNetSpentSol)}</td>
+
+                    <td>{formatSol(holderCurrentValueSol(holder, row))}</td>
+
+                    <td>{formatSol(holderPnlSol(holder, row))}</td>
+
+                    <td>{formatPercent(holderPnlPct(holder, row))}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1841,6 +2204,92 @@ async function copyLog(
   }
 
   rerender();
+}
+
+function ErrorDock() {
+  const errors = state.uiErrors;
+
+  return (
+    <aside className="terminal-v23-error-dock">
+      <button
+        type="button"
+        className={errors.length ? "has-errors" : ""}
+        title={
+          errors.length
+            ? `${errors.length} retained Terminal errors`
+            : "No retained Terminal errors"
+        }
+        onClick={() => {
+          state.errorDockOpen = !state.errorDockOpen;
+
+          rerender();
+        }}
+      >
+        !{errors.length ? <span>{errors.length}</span> : null}
+      </button>
+
+      {state.errorDockOpen ? (
+        <div className="terminal-v23-error-panel">
+          <div className="row between">
+            <b>Terminal errors</b>
+
+            <div className="terminal-v10-links">
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={() => {
+                  state.uiErrors = [];
+                  state.error = null;
+                  rerender();
+                }}
+              >
+                Clear
+              </button>
+
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={() => {
+                  state.errorDockOpen = false;
+
+                  rerender();
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+
+          {errors.length ? (
+            errors.map((entry) => (
+              <div key={entry.id} className="terminal-v23-error-entry">
+                <div className="row between">
+                  <b>{entry.source}</b>
+
+                  <span className="muted small">
+                    {age(entry.createdAtMs)}
+                    {entry.count > 1 ? ` · ×${entry.count}` : ""}
+                  </span>
+                </div>
+
+                <pre>{entry.message}</pre>
+
+                <button
+                  type="button"
+                  className="secondary compact"
+                  onClick={() => void copyText(entry.message)}
+                >
+                  Copy
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="muted">No retained errors.</p>
+          )}
+        </div>
+      ) : null}
+    </aside>
+  );
 }
 
 function LogsPanel() {
@@ -2158,6 +2607,105 @@ function TerminalPage() {
           white-space: nowrap;
           font-size: 9px;
         }
+
+        .terminal-v23-flags {
+          display: flex;
+          gap: 3px;
+          margin-top: 2px;
+          min-height: 13px;
+        }
+
+        .terminal-v23-flags > span {
+          border: 1px solid var(--line);
+          border-radius: 3px;
+          padding: 0 3px;
+          font-size: 7px;
+          line-height: 11px;
+          color: var(--muted);
+        }
+
+        .terminal-v23-flags > .bad {
+          border-color: var(--red);
+          color: var(--red);
+        }
+
+        .terminal-v23-flags > .ok {
+          border-color: var(--green);
+          color: var(--green);
+        }
+
+        .terminal-v23-flags > .warn {
+          border-color: #f0b44c;
+          color: #f0b44c;
+        }
+
+        .terminal-v23-flags > .pending {
+          border-style: dashed;
+        }
+
+        .terminal-v23-error-dock {
+          position: fixed;
+          right: 14px;
+          bottom: 14px;
+          z-index: 1000;
+        }
+
+        .terminal-v23-error-dock > button {
+          position: relative;
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          border: 1px solid var(--line);
+          background: var(--panel);
+          color: var(--muted);
+          font-weight: 800;
+        }
+
+        .terminal-v23-error-dock > button.has-errors {
+          border-color: var(--red);
+          color: var(--red);
+        }
+
+        .terminal-v23-error-dock > button span {
+          position: absolute;
+          right: -5px;
+          top: -5px;
+          min-width: 16px;
+          height: 16px;
+          padding: 0 3px;
+          border-radius: 9px;
+          background: var(--red);
+          color: white;
+          font-size: 9px;
+          line-height: 16px;
+        }
+
+        .terminal-v23-error-panel {
+          position: absolute;
+          right: 0;
+          bottom: 42px;
+          width: min(430px, calc(100vw - 28px));
+          max-height: 55vh;
+          overflow: auto;
+          border: 1px solid var(--line);
+          background: var(--panel);
+          box-shadow: 0 14px 40px rgba(0, 0, 0, .42);
+          padding: 10px;
+        }
+
+        .terminal-v23-error-entry {
+          border-top: 1px solid var(--line);
+          margin-top: 8px;
+          padding-top: 8px;
+        }
+
+        .terminal-v23-error-entry pre {
+          max-height: 130px;
+          overflow: auto;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          font-size: 10px;
+        }
       `}</style>
       <section className="terminal-v10-top">
         <div className="terminal-v10-title">
@@ -2216,8 +2764,6 @@ function TerminalPage() {
         </div>
       </section>
 
-      {state.error ? <div className="pill bad">{state.error}</div> : null}
-
       {state.resetMessage ? (
         <div className="pill ok">{state.resetMessage}</div>
       ) : null}
@@ -2229,6 +2775,27 @@ function TerminalPage() {
           value={state.filter}
           onInput={(event: any) => setFilter(event.currentTarget.value)}
         />
+
+        <select
+          data-terminal-focus="top-wallet"
+          value={state.selectedWallet}
+          title="Wallet used by Buy and Sell"
+          onInput={(event: any) =>
+            updateTradeField("selectedWallet", event.currentTarget.value)
+          }
+        >
+          <option value="">Select trade wallet…</option>
+
+          {state.wallets.map((wallet) => {
+            const value = wallet.address ?? "";
+
+            return (
+              <option key={`top:${value}`} value={value}>
+                {walletLabel(wallet)}
+              </option>
+            );
+          })}
+        </select>
         <button
           type="button"
           className={`terminal-v10-toggle ${state.hideMayhem ? "active" : ""}`}
@@ -2320,6 +2887,7 @@ function TerminalPage() {
 
       <SelectedToken row={selected} />
       <LogsPanel />
+      <ErrorDock />
     </div>
   );
 }
@@ -2356,7 +2924,25 @@ export default function mount() {
   );
   rerender();
   void loadWallets();
-  void reloadFeed({ includeHealth: true, scheduleNext: true });
+
+  startPollWatchdog();
+
+  const onVisibility = () => {
+    if (document.visibilityState === "visible") {
+      void reloadFeed({
+        includeHealth: true,
+
+        scheduleNext: true,
+      });
+    }
+  };
+
+  document.addEventListener("visibilitychange", onVisibility);
+
+  void reloadFeed({
+    includeHealth: true,
+    scheduleNext: true,
+  });
 
   return () => {
     terminalUiMeasure.measureSync(
@@ -2384,6 +2970,10 @@ export default function mount() {
     renderPending = false;
 
     clearPollTimer();
+    stopPollWatchdog();
+
+    document.removeEventListener("visibilitychange", onVisibility);
+
     pollInFlight = false;
     unsubscribeLogs?.();
     unsubscribeLogs = null;

@@ -7,6 +7,7 @@ import {
 import { loadConfig } from "./config.js";
 import { runHeliusWsSession } from "./helius-ws.js";
 import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
+import { DB_RETRY, dbMeasure } from "../shared/measure.js";
 import { startMetadataHydrator } from "./metadata.js";
 import { startMayhemHydrator } from "./mayhem.js";
 import { refreshSolUsd } from "./sol-usd.js";
@@ -14,6 +15,24 @@ import type { Counters } from "./types.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function writeProcessStatus(
+  input: Parameters<typeof upsertProcessStatus>[0],
+): Promise<void> {
+  await dbMeasure.retry(
+    {
+      start: () => `db.process_status name=${input.name}`,
+
+      end: (result: any) => ({
+        updated: result != null,
+      }),
+
+      catch: summarizeError,
+    },
+    DB_RETRY,
+    async () => upsertProcessStatus(input),
+  );
 }
 
 function createCounters(): Counters {
@@ -81,7 +100,7 @@ export async function runIndexer(): Promise<void> {
     controller.abort();
     stopMayhemHydrator?.();
 
-    upsertProcessStatus({
+    void writeProcessStatus({
       name: config.name,
 
       kind: "indexer",
@@ -122,7 +141,7 @@ export async function runIndexer(): Promise<void> {
 
   const stopMayhemHydrator = startMayhemHydrator(config, counters);
 
-  upsertProcessStatus({
+  await writeProcessStatus({
     name: config.name,
 
     kind: "indexer",
@@ -178,7 +197,7 @@ export async function runIndexer(): Promise<void> {
             attempt,
           });
 
-          upsertProcessStatus({
+          void writeProcessStatus({
             name: config.name,
 
             kind: "indexer",
@@ -219,7 +238,7 @@ export async function runIndexer(): Promise<void> {
       config.reconnectMinMs * 2 ** Math.min(attempt, 6),
     );
 
-    upsertProcessStatus({
+    await writeProcessStatus({
       name: config.name,
 
       kind: "indexer",
