@@ -40,12 +40,27 @@ type SortBase =
   | "volume1m"
   | "volume5m"
   | "volume15m"
+  | "volumeDelta1m"
+  | "volumeDelta5m"
+  | "volumeDelta15m"
   | "sma1m"
   | "sma5m"
   | "sma15m"
+  | "smaDelta1m"
+  | "smaDelta5m"
+  | "smaDelta15m"
   | "trades1m"
   | "trades5m"
-  | "trades15m";
+  | "trades15m"
+  | "tradesDelta1m"
+  | "tradesDelta5m"
+  | "tradesDelta15m"
+  | "holdersNow"
+  | "holders5mAgo"
+  | "holders15mAgo"
+  | "holdersDelta1m"
+  | "holdersDelta5m"
+  | "holdersDelta15m";
 
 type SortKey = `${SortBase}-asc` | `${SortBase}-desc`;
 
@@ -562,11 +577,11 @@ function passesFilters(row: PumpFeedRow): boolean {
 
 type MetricWindow = "1m" | "5m" | "15m";
 
-function tradesFor(row: PumpFeedRow, window: MetricWindow): number {
-  const field = `trades${window}`;
+type WindowMetric = "volume" | "sma" | "trades";
 
+function tradesFor(row: PumpFeedRow, window: MetricWindow): number {
   return (
-    numberValue((row as any)[field]) ??
+    numberValue((row as any)[`trades${window}`]) ??
     (window === "15m" ? numberValue(row.tradeCount) : null) ??
     0
   );
@@ -580,6 +595,107 @@ function smaFor(row: PumpFeedRow, window: MetricWindow): number | null {
   return numberValue((row as any)[`sma${window}`]);
 }
 
+function previousTradesFor(row: PumpFeedRow, window: MetricWindow): number {
+  return numberValue((row as any)[`previousTrades${window}`]) ?? 0;
+}
+
+function previousVolumeFor(row: PumpFeedRow, window: MetricWindow): number {
+  return numberValue((row as any)[`previousVolumeSol${window}`]) ?? 0;
+}
+
+function previousSmaFor(row: PumpFeedRow, window: MetricWindow): number | null {
+  return numberValue((row as any)[`previousSma${window}`]);
+}
+
+function percentChange(
+  current: number | null,
+  previous: number | null,
+): number | null {
+  if (current == null || previous == null) {
+    return null;
+  }
+
+  if (previous === 0) {
+    if (current === 0) {
+      return 0;
+    }
+
+    return current > 0 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+  }
+
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+function metricDelta(
+  row: PumpFeedRow,
+  metric: WindowMetric,
+  window: MetricWindow,
+): number | null {
+  if (metric === "volume") {
+    return percentChange(
+      volumeFor(row, window),
+      previousVolumeFor(row, window),
+    );
+  }
+
+  if (metric === "trades") {
+    return percentChange(
+      tradesFor(row, window),
+      previousTradesFor(row, window),
+    );
+  }
+
+  return percentChange(smaFor(row, window), previousSmaFor(row, window));
+}
+
+function holderCount(
+  row: PumpFeedRow,
+  point: "Now" | "1mAgo" | "5mAgo" | "15mAgo",
+): number {
+  return numberValue((row as any)[`holders${point}`]) ?? 0;
+}
+
+function holderDelta(row: PumpFeedRow, window: MetricWindow): number | null {
+  const point =
+    window === "1m" ? "1mAgo" : window === "5m" ? "5mAgo" : "15mAgo";
+
+  return percentChange(holderCount(row, "Now"), holderCount(row, point));
+}
+
+function formatDelta(value: number | null): string {
+  if (value == null) {
+    return "—";
+  }
+
+  if (value === Number.POSITIVE_INFINITY) {
+    return "new";
+  }
+
+  if (value === Number.NEGATIVE_INFINITY) {
+    return "−∞";
+  }
+
+  const sign = value > 0 ? "+" : "";
+
+  return `${sign}${value.toFixed(Math.abs(value) >= 100 ? 0 : 1)}%`;
+}
+
+function deltaTone(value: number | null): string {
+  if (value == null) {
+    return "neutral";
+  }
+
+  if (value > 0) {
+    return "positive";
+  }
+
+  if (value < 0) {
+    return "negative";
+  }
+
+  return "neutral";
+}
+
 function athMcap(row: PumpFeedRow): number | null {
   return numberValue((row as any).athMarketCapUsd);
 }
@@ -588,38 +704,72 @@ function atlMcap(row: PumpFeedRow): number | null {
   return numberValue((row as any).atlMarketCapUsd);
 }
 
+function exactSortBase(): SortBase {
+  return state.sort.replace(/-(?:asc|desc)$/, "") as SortBase;
+}
+
 function sortValue(row: PumpFeedRow): number {
-  if (state.sort.startsWith("created")) {
+  const base = exactSortBase();
+
+  if (base === "created") {
     return createdTime(row) ?? -Infinity;
   }
 
-  if (state.sort.startsWith("lastTrade")) {
+  if (base === "lastTrade") {
     return lastTradeTime(row) ?? -Infinity;
   }
 
-  if (state.sort.startsWith("mcap")) {
+  if (base === "mcap") {
     return latestMcap(row) ?? -Infinity;
   }
 
-  if (state.sort.startsWith("ath")) {
+  if (base === "ath") {
     return athMcap(row) ?? -Infinity;
   }
 
-  if (state.sort.startsWith("atl")) {
+  if (base === "atl") {
     return atlMcap(row) ?? -Infinity;
   }
 
+  if (base === "holdersNow") {
+    return holderCount(row, "Now");
+  }
+
+  if (base === "holders5mAgo") {
+    return holderCount(row, "5mAgo");
+  }
+
+  if (base === "holders15mAgo") {
+    return holderCount(row, "15mAgo");
+  }
+
   for (const window of ["1m", "5m", "15m"] as const) {
-    if (state.sort.startsWith(`volume${window}`)) {
+    if (base === `volume${window}`) {
       return volumeFor(row, window);
     }
 
-    if (state.sort.startsWith(`sma${window}`)) {
+    if (base === `volumeDelta${window}`) {
+      return metricDelta(row, "volume", window) ?? -Infinity;
+    }
+
+    if (base === `sma${window}`) {
       return smaFor(row, window) ?? -Infinity;
     }
 
-    if (state.sort.startsWith(`trades${window}`)) {
+    if (base === `smaDelta${window}`) {
+      return metricDelta(row, "sma", window) ?? -Infinity;
+    }
+
+    if (base === `trades${window}`) {
       return tradesFor(row, window);
+    }
+
+    if (base === `tradesDelta${window}`) {
+      return metricDelta(row, "trades", window) ?? -Infinity;
+    }
+
+    if (base === `holdersDelta${window}`) {
+      return holderDelta(row, window) ?? -Infinity;
     }
   }
 
@@ -1514,6 +1664,28 @@ function SortButton({ base, label }: { base: SortBase; label: string }) {
   );
 }
 
+function HeaderSortButton({
+  base,
+  label,
+  title,
+}: {
+  base: SortBase;
+  label: string;
+  title: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={exactSortBase() === base ? "active" : ""}
+      title={title}
+      onClick={() => setSort(base)}
+    >
+      {label}
+      {sortMark(base)}
+    </button>
+  );
+}
+
 function WindowSortHeader({
   label,
   prefix,
@@ -1525,23 +1697,115 @@ function WindowSortHeader({
     <div className="terminal-metric-header">
       <b>{label}</b>
 
-      <div>
-        {(["1m", "5m", "15m"] as const).map((window) => {
-          const base = `${prefix}${window}` as SortBase;
+      <div className="terminal-header-values">
+        {(["1m", "5m", "15m"] as const).map((window) => (
+          <HeaderSortButton
+            key={`value:${window}`}
+            base={`${prefix}${window}` as SortBase}
+            label={window.replace("m", "")}
+            title={`Sort by ${label} during the current ${window} window`}
+          />
+        ))}
+      </div>
 
-          return (
-            <button
-              key={window}
-              type="button"
-              className={state.sort.startsWith(base) ? "active" : ""}
-              title={`Sort by ${label} ${window}`}
-              onClick={() => setSort(base)}
-            >
-              {window.replace("m", "")}
-              {sortMark(base)}
-            </button>
-          );
-        })}
+      <div className="terminal-header-deltas">
+        {(["1m", "5m", "15m"] as const).map((window) => (
+          <HeaderSortButton
+            key={`delta:${window}`}
+            base={`${prefix}Delta${window}` as SortBase}
+            label={`Δ${window.replace("m", "")}`}
+            title={`Sort by ${label} percentage change versus the previous ${window} window`}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MarketCapSortHeader() {
+  return (
+    <div className="terminal-metric-header terminal-market-cap-header">
+      <b>MC</b>
+
+      <div>
+        <HeaderSortButton
+          base="mcap"
+          label="MC"
+          title="Sort by current market cap"
+        />
+
+        <HeaderSortButton
+          base="ath"
+          label="ATH"
+          title="Sort by all-time-high market cap"
+        />
+
+        <HeaderSortButton
+          base="atl"
+          label="ATL"
+          title="Sort by all-time-low market cap"
+        />
+      </div>
+    </div>
+  );
+}
+
+function HolderSortHeader() {
+  return (
+    <div className="terminal-metric-header">
+      <b>HOLD</b>
+
+      <div className="terminal-header-values">
+        <HeaderSortButton
+          base="holdersNow"
+          label="N"
+          title="Sort by observed holders now"
+        />
+
+        <HeaderSortButton
+          base="holders5mAgo"
+          label="5"
+          title="Sort by observed holders five minutes ago"
+        />
+
+        <HeaderSortButton
+          base="holders15mAgo"
+          label="15"
+          title="Sort by observed holders fifteen minutes ago"
+        />
+      </div>
+
+      <div className="terminal-header-deltas">
+        {(["1m", "5m", "15m"] as const).map((window) => (
+          <HeaderSortButton
+            key={window}
+            base={`holdersDelta${window}` as SortBase}
+            label={`Δ${window.replace("m", "")}`}
+            title={`Sort by observed holder change during the last ${window}`}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MintTimeSortHeader() {
+  return (
+    <div className="terminal-metric-header terminal-time-header">
+      <b>Mint / time</b>
+
+      <div>
+        <HeaderSortButton
+          base="created"
+          label="C"
+          title="Sort by token creation time"
+        />
+
+        <HeaderSortButton
+          base="lastTrade"
+          label="T"
+          title="Sort by last trade time"
+        />
       </div>
     </div>
   );
@@ -1553,6 +1817,7 @@ function MetricStack({
   values: Array<{
     label: string;
     value: string;
+    delta?: number | null;
   }>;
 }) {
   return (
@@ -1560,7 +1825,19 @@ function MetricStack({
       {values.map((item) => (
         <div key={item.label}>
           <span>{item.label}</span>
-          <b>{item.value}</b>
+
+          <span className="terminal-metric-value">
+            <b>{item.value}</b>
+
+            {"delta" in item ? (
+              <em
+                className={`terminal-delta ${deltaTone(item.delta ?? null)}`}
+                title="Change versus the previous equal-length window"
+              >
+                {formatDelta(item.delta ?? null)}
+              </em>
+            ) : null}
+          </span>
         </div>
       ))}
     </div>
@@ -1675,16 +1952,31 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
               <b>{row.symbol || row.name || "token"}</b>
 
               <small>{row.name || "unnamed"}</small>
+
+              <TokenFlags row={row} />
             </span>
           </div>
         )}
       </td>
 
-      <td className="terminal-number">{formatMcap(latestMcap(row))}</td>
-
-      <td className="terminal-number">{formatMcap(athMcap(row))}</td>
-
-      <td className="terminal-number">{formatMcap(atlMcap(row))}</td>
+      <td>
+        <MetricStack
+          values={[
+            {
+              label: "MC",
+              value: formatMcap(latestMcap(row)),
+            },
+            {
+              label: "ATH",
+              value: formatMcap(athMcap(row)),
+            },
+            {
+              label: "ATL",
+              value: formatMcap(atlMcap(row)),
+            },
+          ]}
+        />
+      </td>
 
       <td>
         <MetricStack
@@ -1692,14 +1984,20 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
             {
               label: "1m",
               value: formatVolumeSol(volumeFor(row, "1m")),
+
+              delta: metricDelta(row, "volume", "1m"),
             },
             {
               label: "5m",
               value: formatVolumeSol(volumeFor(row, "5m")),
+
+              delta: metricDelta(row, "volume", "5m"),
             },
             {
               label: "15m",
               value: formatVolumeSol(volumeFor(row, "15m")),
+
+              delta: metricDelta(row, "volume", "15m"),
             },
           ]}
         />
@@ -1711,14 +2009,20 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
             {
               label: "1m",
               value: formatMcap(smaFor(row, "1m")),
+
+              delta: metricDelta(row, "sma", "1m"),
             },
             {
               label: "5m",
               value: formatMcap(smaFor(row, "5m")),
+
+              delta: metricDelta(row, "sma", "5m"),
             },
             {
               label: "15m",
               value: formatMcap(smaFor(row, "15m")),
+
+              delta: metricDelta(row, "sma", "15m"),
             },
           ]}
         />
@@ -1730,38 +2034,74 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
             {
               label: "1m",
               value: String(tradesFor(row, "1m")),
+
+              delta: metricDelta(row, "trades", "1m"),
             },
             {
               label: "5m",
               value: String(tradesFor(row, "5m")),
+
+              delta: metricDelta(row, "trades", "5m"),
             },
             {
               label: "15m",
               value: String(tradesFor(row, "15m")),
+
+              delta: metricDelta(row, "trades", "15m"),
             },
           ]}
         />
       </td>
 
-      <td
-        className="terminal-mint-cell"
-        style={{
-          padding: 0,
-        }}
-      >
+      <td>
+        <MetricStack
+          values={[
+            {
+              label: "Now",
+              value: String(holderCount(row, "Now")),
+
+              delta: holderDelta(row, "1m"),
+            },
+            {
+              label: "5m",
+              value: String(holderCount(row, "5mAgo")),
+
+              delta: holderDelta(row, "5m"),
+            },
+            {
+              label: "15m",
+              value: String(holderCount(row, "15mAgo")),
+
+              delta: holderDelta(row, "15m"),
+            },
+          ]}
+        />
+      </td>
+
+      <td className="terminal-mint-cell">
         {pumpHref ? (
           <a
-            className="terminal-mint-link code"
+            className="terminal-mint-time-link"
             href={pumpHref}
             target="_blank"
             rel="noreferrer"
             title={`Open ${row.mint} on Pump.fun`}
             onClick={(event: any) => event.stopPropagation()}
           >
-            {short(row.mint, 6, 5)}
+            <b className="code">{short(row.mint, 6, 5)}</b>
+
+            <span>
+              <small>Created</small>
+              <strong>{displayAge(createdTime(row))}</strong>
+            </span>
+
+            <span>
+              <small>Trade</small>
+              <strong>{displayAge(lastTradeTime(row))}</strong>
+            </span>
           </a>
         ) : (
-          <span className="terminal-mint-link">—</span>
+          <span className="terminal-mint-time-link">—</span>
         )}
       </td>
     </tr>
@@ -1835,12 +2175,53 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
             <span>{window}</span>
 
             <b>
-              V {formatVolumeSol(volumeFor(row, window))}
-              {" · "}S {formatMcap(smaFor(row, window))}
-              {" · "}T {tradesFor(row, window)}
+              V {formatVolumeSol(volumeFor(row, window))}{" "}
+              <em
+                className={`terminal-delta ${deltaTone(metricDelta(row, "volume", window))}`}
+              >
+                {formatDelta(metricDelta(row, "volume", window))}
+              </em>
+              {" · "}S {formatMcap(smaFor(row, window))}{" "}
+              <em
+                className={`terminal-delta ${deltaTone(metricDelta(row, "sma", window))}`}
+              >
+                {formatDelta(metricDelta(row, "sma", window))}
+              </em>
+              {" · "}T {tradesFor(row, window)}{" "}
+              <em
+                className={`terminal-delta ${deltaTone(metricDelta(row, "trades", window))}`}
+              >
+                {formatDelta(metricDelta(row, "trades", window))}
+              </em>
             </b>
           </div>
         ))}
+
+        <div>
+          <span>Holders</span>
+
+          <b>
+            {holderCount(row, "Now")}
+            {" · Δ1 "}
+            <em
+              className={`terminal-delta ${deltaTone(holderDelta(row, "1m"))}`}
+            >
+              {formatDelta(holderDelta(row, "1m"))}
+            </em>
+            {" · Δ5 "}
+            <em
+              className={`terminal-delta ${deltaTone(holderDelta(row, "5m"))}`}
+            >
+              {formatDelta(holderDelta(row, "5m"))}
+            </em>
+            {" · Δ15 "}
+            <em
+              className={`terminal-delta ${deltaTone(holderDelta(row, "15m"))}`}
+            >
+              {formatDelta(holderDelta(row, "15m"))}
+            </em>
+          </b>
+        </div>
 
         <div>
           <span>Created</span>
@@ -2608,14 +2989,9 @@ function TerminalPage() {
             <thead>
               <tr>
                 <th>Token</th>
+
                 <th>
-                  <SortButton base="mcap" label="MC" />
-                </th>
-                <th>
-                  <SortButton base="ath" label="ATH" />
-                </th>
-                <th>
-                  <SortButton base="atl" label="ATL" />
+                  <MarketCapSortHeader />
                 </th>
 
                 <th>
@@ -2630,7 +3006,13 @@ function TerminalPage() {
                   <WindowSortHeader label="TRX" prefix="trades" />
                 </th>
 
-                <th>Mint</th>
+                <th>
+                  <HolderSortHeader />
+                </th>
+
+                <th>
+                  <MintTimeSortHeader />
+                </th>
               </tr>
             </thead>
             <tbody>

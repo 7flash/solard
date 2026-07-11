@@ -137,6 +137,15 @@ export const TokenMarketExtremaSchema = z.object({
   atlMarketCapUsd: z.number().nullable(),
 });
 
+export const TokenHolderWindowsSchema = z.object({
+  mint: z.string(),
+
+  holdersNow: z.number(),
+  holders1mAgo: z.number(),
+  holders5mAgo: z.number(),
+  holders15mAgo: z.number(),
+});
+
 export const TokenPriceWindowsSchema = z.object({
   mint: z.string(),
 
@@ -148,21 +157,32 @@ export const TokenPriceWindowsSchema = z.object({
   avgMarketCapUsd5m: z.number().nullable(),
   avgMarketCapUsd15m: z.number().nullable(),
 
+  previousAvgMarketCapUsd1m: z.number().nullable(),
+  previousAvgMarketCapUsd5m: z.number().nullable(),
+  previousAvgMarketCapUsd15m: z.number().nullable(),
+
   trades1m: z.number(),
   trades5m: z.number(),
   trades15m: z.number(),
 
+  previousTrades1m: z.number(),
+  previousTrades5m: z.number(),
+  previousTrades15m: z.number(),
+
   volumeSol1m: z.number(),
   volumeSol5m: z.number(),
   volumeSol15m: z.number(),
+
+  previousVolumeSol1m: z.number(),
+  previousVolumeSol5m: z.number(),
+  previousVolumeSol15m: z.number(),
 
   latestPriceSol: z.number().nullable(),
   latestPriceUsd: z.number().nullable(),
   latestMarketCapUsd: z.number().nullable(),
 
   /**
-   * Best current market-cap value available from the same 15-minute scan.
-   * Falls back through recent averages when the newest trade omitted MCAP.
+   * Latest explicit market-cap value from the same 30-minute scan.
    */
   currentMarketCapUsd: z.number().nullable(),
 
@@ -179,6 +199,8 @@ export type TokenPriceWindows = z.infer<typeof TokenPriceWindowsSchema>;
 
 export type TokenMarketExtrema = z.infer<typeof TokenMarketExtremaSchema>;
 
+export type TokenHolderWindows = z.infer<typeof TokenHolderWindowsSchema>;
+
 export type WorkerError = z.infer<typeof WorkerErrorSchema>;
 
 export type TerminalFeedState = z.infer<typeof TerminalFeedStateSchema>;
@@ -187,6 +209,10 @@ export type TerminalFeedRow = TerminalToken & {
   sma1m: number | null;
   sma5m: number | null;
   sma15m: number | null;
+
+  previousSma1m: number | null;
+  previousSma5m: number | null;
+  previousSma15m: number | null;
 
   avgPriceUsd1m: number | null;
   avgPriceUsd5m: number | null;
@@ -197,9 +223,22 @@ export type TerminalFeedRow = TerminalToken & {
   trades5m: number;
   trades15m: number;
 
+  previousTrades1m: number;
+  previousTrades5m: number;
+  previousTrades15m: number;
+
   volumeSol1m: number;
   volumeSol5m: number;
   volumeSol15m: number;
+
+  previousVolumeSol1m: number;
+  previousVolumeSol5m: number;
+  previousVolumeSol15m: number;
+
+  holdersNow: number;
+  holders1mAgo: number;
+  holders5mAgo: number;
+  holders15mAgo: number;
 
   athMarketCapUsd: number | null;
   atlMarketCapUsd: number | null;
@@ -423,7 +462,7 @@ export const db = await openDatabaseWithRetry(
         },
 
         views: {
-          tokenPriceWindowsV5: defineView(
+          tokenPriceWindowsV6: defineView(
             TokenPriceWindowsSchema,
             `
         WITH recent AS (
@@ -471,7 +510,7 @@ export const db = await openDatabaseWithRetry(
           FROM tokenTradesV2
 
           WHERE
-            tradedAtMs >= unixepoch('subsec') * 1000 - 900000
+            tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
         ),
 
         aggregated AS (
@@ -508,6 +547,27 @@ export const db = await openDatabaseWithRetry(
             THEN marketCapUsd
           END) AS avgMarketCapUsd15m,
 
+          AVG(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 60000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000
+            THEN marketCapUsd
+          END) AS previousAvgMarketCapUsd1m,
+
+          AVG(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 300000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000
+            THEN marketCapUsd
+          END) AS previousAvgMarketCapUsd5m,
+
+          AVG(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 900000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
+            THEN marketCapUsd
+          END) AS previousAvgMarketCapUsd15m,
+
           COUNT(CASE
             WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000
             THEN 1
@@ -522,6 +582,27 @@ export const db = await openDatabaseWithRetry(
             WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000
             THEN 1
           END) AS trades15m,
+
+          COUNT(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 60000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000
+            THEN 1
+          END) AS previousTrades1m,
+
+          COUNT(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 300000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000
+            THEN 1
+          END) AS previousTrades5m,
+
+          COUNT(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 900000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
+            THEN 1
+          END) AS previousTrades15m,
 
           SUM(CASE
             WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000
@@ -540,6 +621,30 @@ export const db = await openDatabaseWithRetry(
             THEN effectiveVolumeSol
             ELSE 0
           END) AS volumeSol15m,
+
+          SUM(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 60000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000
+            THEN effectiveVolumeSol
+            ELSE 0
+          END) AS previousVolumeSol1m,
+
+          SUM(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 300000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000
+            THEN effectiveVolumeSol
+            ELSE 0
+          END) AS previousVolumeSol5m,
+
+          SUM(CASE
+            WHEN
+              tradedAtMs < unixepoch('subsec') * 1000 - 900000
+              AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
+            THEN effectiveVolumeSol
+            ELSE 0
+          END) AS previousVolumeSol15m,
 
           MAX(CASE
             WHEN latestPriceSolRank = 1
@@ -577,19 +682,177 @@ export const db = await openDatabaseWithRetry(
         `,
           ),
 
-          tokenMarketExtremaV2: defineView(
+          tokenMarketExtremaV3: defineView(
             TokenMarketExtremaSchema,
             `
+        WITH marketCaps AS (
+          SELECT
+            trade.mint AS mint,
+
+            COALESCE(
+              trade.marketCapUsd,
+              trade.priceUsd *
+                COALESCE(
+                  token.supplyUi,
+                  1000000000
+                )
+            ) AS marketCapUsd
+
+          FROM tokenTradesV2 AS trade
+
+          LEFT JOIN terminalTokensLive AS token
+            ON token.mint = trade.mint
+
+          UNION ALL
+
+          SELECT
+            mint,
+            marketCapUsd
+
+          FROM terminalTokensLive
+
+          WHERE
+            marketCapUsd IS NOT NULL
+            AND marketCapUsd > 0
+        )
+
         SELECT
           mint,
           MAX(marketCapUsd) AS athMarketCapUsd,
           MIN(marketCapUsd) AS atlMarketCapUsd
 
-        FROM tokenTradesV2
+        FROM marketCaps
 
         WHERE
           marketCapUsd IS NOT NULL
           AND marketCapUsd > 0
+
+        GROUP BY mint
+        `,
+          ),
+
+          tokenHolderWindowsV1: defineView(
+            TokenHolderWindowsSchema,
+            `
+        WITH ownerPositions AS (
+          SELECT
+            mint,
+            owner,
+
+            SUM(
+              CASE
+                WHEN side = 'buy'
+                THEN ABS(tokenDeltaUi)
+
+                WHEN side = 'sell'
+                THEN -ABS(tokenDeltaUi)
+
+                ELSE tokenDeltaUi
+              END
+            ) AS balanceNow,
+
+            SUM(
+              CASE
+                WHEN
+                  tradedAtMs <= unixepoch('subsec') * 1000 - 60000
+                THEN
+                  CASE
+                    WHEN side = 'buy'
+                    THEN ABS(tokenDeltaUi)
+
+                    WHEN side = 'sell'
+                    THEN -ABS(tokenDeltaUi)
+
+                    ELSE tokenDeltaUi
+                  END
+                ELSE 0
+              END
+            ) AS balance1mAgo,
+
+            SUM(
+              CASE
+                WHEN
+                  tradedAtMs <= unixepoch('subsec') * 1000 - 300000
+                THEN
+                  CASE
+                    WHEN side = 'buy'
+                    THEN ABS(tokenDeltaUi)
+
+                    WHEN side = 'sell'
+                    THEN -ABS(tokenDeltaUi)
+
+                    ELSE tokenDeltaUi
+                  END
+                ELSE 0
+              END
+            ) AS balance5mAgo,
+
+            SUM(
+              CASE
+                WHEN
+                  tradedAtMs <= unixepoch('subsec') * 1000 - 900000
+                THEN
+                  CASE
+                    WHEN side = 'buy'
+                    THEN ABS(tokenDeltaUi)
+
+                    WHEN side = 'sell'
+                    THEN -ABS(tokenDeltaUi)
+
+                    ELSE tokenDeltaUi
+                  END
+                ELSE 0
+              END
+            ) AS balance15mAgo
+
+          FROM tokenTradesV2
+
+          WHERE
+            owner IS NOT NULL
+            AND owner <> ''
+            AND tokenDeltaUi <> 0
+
+          GROUP BY
+            mint,
+            owner
+        )
+
+        SELECT
+          mint,
+
+          SUM(
+            CASE
+              WHEN balanceNow > 0.000000001
+              THEN 1
+              ELSE 0
+            END
+          ) AS holdersNow,
+
+          SUM(
+            CASE
+              WHEN balance1mAgo > 0.000000001
+              THEN 1
+              ELSE 0
+            END
+          ) AS holders1mAgo,
+
+          SUM(
+            CASE
+              WHEN balance5mAgo > 0.000000001
+              THEN 1
+              ELSE 0
+            END
+          ) AS holders5mAgo,
+
+          SUM(
+            CASE
+              WHEN balance15mAgo > 0.000000001
+              THEN 1
+              ELSE 0
+            END
+          ) AS holders15mAgo
+
+        FROM ownerPositions
 
         GROUP BY mint
         `,
@@ -983,7 +1246,7 @@ export function getTokenPriceWindows(
   if (!key) return null;
 
   return (
-    (db.tokenPriceWindowsV5
+    (db.tokenPriceWindowsV6
       .select()
       .where({ mint: key })
       .cache({
@@ -996,7 +1259,7 @@ export function getTokenPriceWindows(
 export function listTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows[] {
-  return db.tokenPriceWindowsV5
+  return db.tokenPriceWindowsV6
     .select()
     .orderBy("latestTradeAtMs", "DESC")
     .cache({
@@ -1208,12 +1471,33 @@ function isTerminalFeedMember(
 }
 
 export function listTokenMarketExtrema(ttlMs = 2_000): TokenMarketExtrema[] {
-  return db.tokenMarketExtremaV2
+  return db.tokenMarketExtremaV3
     .select()
     .cache({
       ttlMs: Math.max(0, integer(ttlMs, 2_000)),
     })
     .all() as TokenMarketExtrema[];
+}
+
+export function listTokenHolderWindows(
+  mints: Iterable<string>,
+  ttlMs = 5_000,
+): TokenHolderWindows[] {
+  const keys = [
+    ...new Set([...mints].map((mint) => String(mint).trim()).filter(Boolean)),
+  ].slice(0, 2_000);
+
+  if (!keys.length) {
+    return [];
+  }
+
+  return db.tokenHolderWindowsV1
+    .select()
+    .whereIn("mint", keys)
+    .cache({
+      ttlMs: Math.max(0, integer(ttlMs, 5_000)),
+    })
+    .all() as TokenHolderWindows[];
 }
 
 export function listTerminalFeed(
@@ -1252,7 +1536,7 @@ export function listTerminalFeed(
   const candidateLimit = Math.min(2_000, Math.max(limit * 4, 300));
 
   /**
-   * One cached view query scans the 15-minute trade candidate set once,
+   * One cached view query scans the 30-minute trade candidate set once,
    * groups once, and supplies both latest prices and all SMA windows.
    */
   const allWindows = listTokenPriceWindows(
@@ -1304,6 +1588,17 @@ export function listTerminalFeed(
     tokensByMint.set(token.mint, token);
   }
 
+  /**
+   * Holder counts are observed from indexed owner balance changes. Query only
+   * current feed candidates and cache the typed view for five seconds.
+   */
+  const holderWindowsByMint = new Map(
+    listTokenHolderWindows(tokensByMint.keys(), 5_000).map((window) => [
+      window.mint,
+      window,
+    ]),
+  );
+
   const rows = [...tokensByMint.values()]
     .filter((token) =>
       isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
@@ -1319,6 +1614,8 @@ export function listTerminalFeed(
       const windows = windowsByMint.get(token.mint) ?? null;
 
       const extrema = extremaByMint.get(token.mint) ?? null;
+
+      const holderWindows = holderWindowsByMint.get(token.mint) ?? null;
 
       const priceSol = windows?.latestPriceSol ?? token.priceSol;
 
@@ -1362,6 +1659,12 @@ export function listTerminalFeed(
 
         sma15m: windows?.avgMarketCapUsd15m ?? null,
 
+        previousSma1m: windows?.previousAvgMarketCapUsd1m ?? null,
+
+        previousSma5m: windows?.previousAvgMarketCapUsd5m ?? null,
+
+        previousSma15m: windows?.previousAvgMarketCapUsd15m ?? null,
+
         avgPriceUsd1m: windows?.avgPriceUsd1m ?? null,
 
         avgPriceUsd5m: windows?.avgPriceUsd5m ?? null,
@@ -1376,11 +1679,31 @@ export function listTerminalFeed(
 
         trades15m: windows?.trades15m ?? 0,
 
+        previousTrades1m: windows?.previousTrades1m ?? 0,
+
+        previousTrades5m: windows?.previousTrades5m ?? 0,
+
+        previousTrades15m: windows?.previousTrades15m ?? 0,
+
         volumeSol1m: windows?.volumeSol1m ?? 0,
 
         volumeSol5m: windows?.volumeSol5m ?? 0,
 
         volumeSol15m: windows?.volumeSol15m ?? 0,
+
+        previousVolumeSol1m: windows?.previousVolumeSol1m ?? 0,
+
+        previousVolumeSol5m: windows?.previousVolumeSol5m ?? 0,
+
+        previousVolumeSol15m: windows?.previousVolumeSol15m ?? 0,
+
+        holdersNow: holderWindows?.holdersNow ?? 0,
+
+        holders1mAgo: holderWindows?.holders1mAgo ?? 0,
+
+        holders5mAgo: holderWindows?.holders5mAgo ?? 0,
+
+        holders15mAgo: holderWindows?.holders15mAgo ?? 0,
 
         athMarketCapUsd: extrema?.athMarketCapUsd ?? null,
 
