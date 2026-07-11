@@ -1883,11 +1883,7 @@ function TerminalPage() {
       <section className="terminal-v10-top">
         <div className="terminal-v10-title">
           <h2>Pump</h2>
-          <span
-            className={`pill ${state.status === "live" ? "ok" : state.status === "error" ? "bad" : "warn"}`}
-          >
-            {state.status}
-          </span>
+          <span className="muted small">feed={state.status}</span>
           <span className="muted small">
             rows={rows.length}/{state.rows.length} · raw=
             {state.feedMeta?.count ?? "?"} · poll=
@@ -1912,6 +1908,10 @@ function TerminalPage() {
           >
             {state.resetBusy ? "Resetting…" : "Reset feed"}
           </button>
+
+          <a className="secondary compact button" href="/system">
+            System logs
+          </a>
 
           <button
             type="button"
@@ -1973,29 +1973,21 @@ function TerminalPage() {
         </button>
       </section>
 
-      <section className="terminal-v10-health">
-        <b>Terminal health</b>
-        <span
-          className={`pill ${state.health?.ok === true && stale === 0 ? "ok" : "warn"}`}
-        >
-          {state.health?.ok === true && stale === 0 ? "ok" : "check"}
-        </span>
-        <span className="muted small">
-          tokens={state.health?.store?.tokens ?? state.rows.length} · priced=
-          {pricedRows}/{state.rows.length} · trades=
-          {state.health?.store?.trades ?? "?"} · stale={stale}
-        </span>
+      {(state.health as AnyRow | null)?.status !== "ok" ? (
+        <section className="terminal-v10-health">
+          <b>System {(state.health as AnyRow | null)?.status ?? "checking"}</b>
 
-        {hasIndexerDiagnostics ? (
-          <span className="muted small">
-            ws={indexer.messages ?? 0} · events=
-            {indexer.recognizedEventLines ?? 0} · parsed-trades=
-            {indexer.parsedTrades ?? 0} · unknown=
-            {indexer.unknownEventLines ?? 0} · parse-errors=
-            {indexer.eventParseErrors ?? 0}
-          </span>
-        ) : null}
-      </section>
+          {(state.health as AnyRow | null)?.indexerError ? (
+            <span className="pill bad">
+              {(state.health as AnyRow).indexerError}
+            </span>
+          ) : null}
+
+          <a className="secondary compact button" href="/system">
+            Open system status and logs
+          </a>
+        </section>
+      ) : null}
 
       <section className="terminal-v10-table-card">
         <div className="terminal-v10-table-wrap">

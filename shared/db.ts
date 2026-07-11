@@ -416,6 +416,30 @@ export const db = new Database(
 
 const PRICE_WINDOW_TTL_MS = 1_000;
 
+function sqliteErrorMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).toLowerCase();
+}
+
+export function isSqliteBusyError(error: unknown): boolean {
+  const message = sqliteErrorMessage(error);
+
+  return (
+    message.includes("database is locked") ||
+    message.includes("database is busy") ||
+    message.includes("sqlite_busy") ||
+    message.includes("sqlite_locked")
+  );
+}
+
+export function isDuplicateTradeError(error: unknown): boolean {
+  const message = sqliteErrorMessage(error);
+
+  return (
+    message.includes("unique constraint failed") &&
+    (message.includes("tokentrades.eventkey") || message.includes("eventkey"))
+  );
+}
+
 function finite(value: unknown): number | null {
   if (value == null || value === "") {
     return null;
@@ -722,15 +746,32 @@ export function appendTokenTradeOnce(
     updatedAtMs: integer(input.updatedAtMs, now),
   };
 
-  const inserted = db.tokenTrades
-    .insert(row)
-    .onConflict("eventKey")
-    .doNothing() as TokenTrade | null;
+  try {
+    const inserted = db.tokenTrades
+      .insert(row)
+      .onConflict("eventKey")
+      .doNothing() as TokenTrade | null;
 
-  return {
-    row: inserted ?? row,
-    inserted: inserted != null,
-  };
+    return {
+      row: inserted ?? row,
+
+      inserted: inserted != null,
+    };
+  } catch (error) {
+    /**
+     * Some sqlite-zod-orm/SQLite combinations can still surface the UNIQUE
+     * exception instead of returning null from DO NOTHING. A duplicate Helius
+     * delivery is normal idempotency, not a parser/write failure.
+     */
+    if (isDuplicateTradeError(error)) {
+      return {
+        row,
+        inserted: false,
+      };
+    }
+
+    throw error;
+  }
 }
 
 export function appendTokenTrade(
@@ -1190,23 +1231,35 @@ export function upsertProcessStatus(
     updatedAtMs: integer(input.updatedAtMs, now),
   };
 
-  return db.processStatus.upsertOnConflict(row, "name", (t) => ({
-    kind: t.excluded("kind"),
+  try {
+    return db.processStatus.upsertOnConflict(row, "name", (t) => ({
+      kind: t.excluded("kind"),
 
-    status: t.excluded("status"),
+      status: t.excluded("status"),
 
-    heartbeatAtMs: t.excluded("heartbeatAtMs"),
+      heartbeatAtMs: t.excluded("heartbeatAtMs"),
 
-    pid: t.excluded("pid"),
+      pid: t.excluded("pid"),
 
-    buildId: t.excludedIfNotNull("buildId"),
+      buildId: t.excludedIfNotNull("buildId"),
 
-    error: t.excluded("error"),
+      error: t.excluded("error"),
 
-    dataJson: t.excluded("dataJson"),
+      dataJson: t.excluded("dataJson"),
 
-    updatedAtMs: t.excluded("updatedAtMs"),
-  })) as ProcessStatus;
+      updatedAtMs: t.excluded("updatedAtMs"),
+    })) as ProcessStatus;
+  } catch (error) {
+    if (isSqliteBusyError(error)) {
+      console.warn(
+        `[solard:db] skipped process heartbeat while SQLite was busy: ${row.name}`,
+      );
+
+      return row;
+    }
+
+    throw error;
+  }
 }
 
 export function listProcessStatus(limit = 50): ProcessStatus[] {
@@ -1226,7 +1279,7 @@ export function recordWorkerError(
 
   const value = error instanceof Error ? error : new Error(String(error));
 
-  return db.workerErrors.insert({
+  const row: WorkerError = {
     errorKey: [worker, now, Math.random().toString(36).slice(2, 10)].join(":"),
 
     worker,
@@ -1238,7 +1291,24 @@ export function recordWorkerError(
     dataJson: stringify(data),
 
     createdAtMs: now,
-  }) as WorkerError;
+  };
+
+  try {
+    return db.workerErrors.insert(row) as WorkerError;
+  } catch (writeError) {
+    /**
+     * Error telemetry must never crash the worker that is already handling a
+     * database problem. Keep the original error visible on stderr and skip the
+     * telemetry row during a transient lock.
+     */
+    if (isSqliteBusyError(writeError)) {
+      console.error(`[solard:indexer] ${worker}: ${value.message}`);
+
+      return row;
+    }
+
+    throw writeError;
+  }
 }
 
 export function listWorkerErrors(

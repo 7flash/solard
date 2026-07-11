@@ -254,7 +254,7 @@ export async function runHeliusWsSession(input: {
                       (event) => event.kind === "complete",
                     ).length;
 
-                    const applied = applyIndexedEvents(parsed.events, {
+                    const applied = await applyIndexedEvents(parsed.events, {
                       config,
                       counters,
                     });

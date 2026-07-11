@@ -1,4 +1,8 @@
-import { appendTokenTradeOnce, upsertTerminalToken } from "../shared/db.js";
+import {
+  appendTokenTradeOnce,
+  isSqliteBusyError,
+  upsertTerminalToken,
+} from "../shared/db.js";
 import type { IndexerConfig } from "./config.js";
 import { enqueueMetadata } from "./metadata.js";
 import { enqueueMayhemCheck } from "./mayhem.js";
@@ -10,16 +14,44 @@ function json(value: unknown): string {
   );
 }
 
-export function applyIndexedEvents(
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sqliteWrite<T>(label: string, operation: () => T): Promise<T> {
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return operation();
+    } catch (error) {
+      if (!isSqliteBusyError(error) || attempt >= 7) {
+        throw error;
+      }
+
+      attempt++;
+
+      const delay = Math.min(250, 5 * 2 ** attempt);
+
+      console.warn(
+        `[solard:indexer] SQLite busy during ${label}; retry ${attempt} in ${delay}ms`,
+      );
+
+      await sleep(delay);
+    }
+  }
+}
+
+export async function applyIndexedEvents(
   events: readonly IndexedEvent[],
   input: {
     config: IndexerConfig;
     counters: Counters;
   },
-): {
+): Promise<{
   applied: number;
   duplicateTrades: number;
-} {
+}> {
   if (!events.length) {
     input.counters.skipped++;
 
@@ -34,35 +66,37 @@ export function applyIndexedEvents(
 
   for (const event of events) {
     if (event.kind === "create") {
-      upsertTerminalToken({
-        mint: event.mint,
+      await sqliteWrite("create token", () =>
+        upsertTerminalToken({
+          mint: event.mint,
 
-        name: event.name,
+          name: event.name,
 
-        symbol: event.symbol,
+          symbol: event.symbol,
 
-        uri: event.uri,
+          uri: event.uri,
 
-        creator: event.creator,
+          creator: event.creator,
 
-        bondingCurveKey: event.bondingCurveKey,
+          bondingCurveKey: event.bondingCurveKey,
 
-        source: "helius-indexer-create",
+          source: "helius-indexer-create",
 
-        phase: "pump",
+          phase: "pump",
 
-        supplyUi: input.config.pumpSupplyUi,
+          supplyUi: input.config.pumpSupplyUi,
 
-        signature: event.signature,
+          signature: event.signature,
 
-        lastSlot: event.slot,
+          lastSlot: event.slot,
 
-        createdAtMs: event.createdAtMs,
+          createdAtMs: event.createdAtMs,
 
-        observedAtMs: event.createdAtMs,
+          observedAtMs: event.createdAtMs,
 
-        updatedAtMs: Date.now(),
-      });
+          updatedAtMs: Date.now(),
+        }),
+      );
 
       enqueueMayhemCheck(input.config, input.counters, {
         mint: event.mint,
@@ -90,39 +124,49 @@ export function applyIndexedEvents(
        * windows are read from tokenPriceWindows; no token-state update or
        * aggregation runs here.
        */
-      appendTokenTradeOnce({
-        eventKey: event.eventKey,
+      const tradeWrite = await sqliteWrite("append trade", () =>
+        appendTokenTradeOnce({
+          eventKey: event.eventKey,
 
-        mint: event.mint,
+          mint: event.mint,
 
-        signature: event.signature,
+          signature: event.signature,
 
-        slot: event.slot,
+          slot: event.slot,
 
-        owner: event.owner,
+          owner: event.owner,
 
-        side: event.side,
+          side: event.side,
 
-        tokenDeltaUi: event.tokenDeltaUi,
+          tokenDeltaUi: event.tokenDeltaUi,
 
-        solDeltaUi: event.solDeltaUi,
+          solDeltaUi: event.solDeltaUi,
 
-        priceSol: event.priceSol,
+          priceSol: event.priceSol,
 
-        priceUsd: event.priceUsd,
+          priceUsd: event.priceUsd,
 
-        marketCapUsd: event.marketCapUsd,
+          marketCapUsd: event.marketCapUsd,
 
-        confidence: "processed",
+          confidence: "processed",
 
-        source: "helius-indexer-trade",
+          source: "helius-indexer-trade",
 
-        rawJson: json(event.raw),
+          rawJson: json(event.raw),
 
-        tradedAtMs: event.createdAtMs,
+          tradedAtMs: event.createdAtMs,
 
-        updatedAtMs: Date.now(),
-      });
+          updatedAtMs: Date.now(),
+        }),
+      );
+
+      if (!tradeWrite.inserted) {
+        duplicateTrades++;
+
+        input.counters.duplicateTrades++;
+
+        continue;
+      }
 
       input.counters.trades++;
 
@@ -131,21 +175,23 @@ export function applyIndexedEvents(
 
       applied++;
     } else {
-      upsertTerminalToken({
-        mint: event.mint,
+      await sqliteWrite("complete token", () =>
+        upsertTerminalToken({
+          mint: event.mint,
 
-        bondingCurveKey: event.bondingCurveKey,
+          bondingCurveKey: event.bondingCurveKey,
 
-        source: "helius-indexer-complete",
+          source: "helius-indexer-complete",
 
-        phase: "migrated",
+          phase: "migrated",
 
-        lastSlot: event.slot,
+          lastSlot: event.slot,
 
-        signature: event.signature,
+          signature: event.signature,
 
-        updatedAtMs: Date.now(),
-      });
+          updatedAtMs: Date.now(),
+        }),
+      );
 
       input.counters.completes++;
       applied++;

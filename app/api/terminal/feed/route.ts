@@ -1,6 +1,5 @@
 import {
   getTerminalFeedState,
-  listProcessStatus,
   listTerminalFeed,
   terminalStoreStats,
 } from "../../../../shared/db.js";
@@ -12,24 +11,7 @@ import {
   resolveTerminalSource,
   summarizeError,
 } from "../../../_server/measure.js";
-
-function processData(
-  row: Record<string, any> | null | undefined,
-): Record<string, unknown> {
-  if (!row) return {};
-
-  if (row.data && typeof row.data === "object") {
-    return row.data;
-  }
-
-  try {
-    const parsed = JSON.parse(String(row.dataJson ?? "{}"));
-
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
+import { getSolardRuntimeHealth } from "../../../_server/process-health.js";
 
 function enabled(url: URL, name: string): boolean {
   const value = url.searchParams.get(name);
@@ -103,32 +85,15 @@ export async function GET(request: Request): Promise<Response> {
       : null;
 
     const health = enabled(url, "health")
-      ? (() => {
-          const processes = listProcessStatus();
+      ? {
+          ...(await getSolardRuntimeHealth()),
 
-          const indexerProcess =
-            processes.find((row: any) => row.kind === "indexer") ??
-            processes.find((row: any) => {
-              const data = processData(row);
-
-              return (
-                data.parsedTrades != null || data.recognizedEventLines != null
-              );
-            }) ??
-            null;
-
-          return {
-            ok: true,
-            processes,
-            indexerProcess,
-            indexer: processData(indexerProcess),
-            store:
-              stats ??
-              terminalStoreStats({
-                pinnedMints,
-              }),
-          };
-        })()
+          store:
+            stats ??
+            terminalStoreStats({
+              pinnedMints,
+            }),
+        }
       : null;
 
     const priced = rows.filter(

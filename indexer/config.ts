@@ -139,9 +139,15 @@ export function loadConfig(): IndexerConfig {
   const parsedSolUsd = Number(env("SOLARD_SOL_USD") ?? "");
 
   return {
-    name: env("SOLARD_INDEXER_NAME") ?? "solard-indexer-helius",
+    name:
+      env("SOLARD_INDEXER_NAME") ??
+      env("SOLARD_WORKER_NAME") ??
+      "solard-helius-logs-v1",
 
-    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v16-mayhem-hydration",
+    buildId:
+      env("SOLARD_INDEXER_BUILD_ID") ??
+      env("SOLARD_EXPECTED_BUILD_ID") ??
+      "indexer-v17-runtime-health",
 
     dbPath: SOLARD_DB_PATH,
 
