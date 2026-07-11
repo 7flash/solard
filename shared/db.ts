@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database, defineView, z } from "sqlite-zod-orm";
 
@@ -211,62 +211,221 @@ export type TerminalFeedRow = TerminalToken & {
   raw: TerminalToken;
 };
 
-export const db = new Database(
-  SOLARD_DB_PATH,
-  {
-    terminalTokensLive: TerminalTokenSchema,
-    tokenTradesV2: TokenTradeSchema,
-    processStatus: ProcessStatusSchema,
-    workerErrors: WorkerErrorSchema,
-    terminalFeedState: TerminalFeedStateSchema,
-  },
-  {
-    timestamps: false,
-    softDeletes: false,
-    reactive: false,
-    wal: true,
+function sqliteErrorMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).toLowerCase();
+}
 
-    unique: {
-      terminalTokensLive: [["mint"]],
-      tokenTradesV2: [["eventKey"]],
-      processStatus: [["name"]],
-      workerErrors: [["errorKey"]],
-      terminalFeedState: [["scope"]],
-    },
+export function isSqliteBusyError(error: unknown): boolean {
+  const message = sqliteErrorMessage(error);
 
-    indexes: {
-      terminalTokensLive: [
-        "mint",
-        "updatedAtMs",
-        "priceUpdatedAtMs",
-        "observedAtMs",
-        "mayhemCheckedAtMs",
-        "marketCapUsd",
-        "source",
-        ["source", "updatedAtMs"],
-        ["observedAtMs", "updatedAtMs"],
-      ],
+  return (
+    message.includes("database is locked") ||
+    message.includes("database is busy") ||
+    message.includes("sqlite_busy") ||
+    message.includes("sqlite_locked")
+  );
+}
 
-      tokenTradesV2: [
-        ["mint", "tradedAtMs"],
-        ["tradedAtMs"],
-        ["source", "tradedAtMs"],
-        ["signature"],
-        ["eventKey"],
-        ["mint", "marketCapUsd"],
-      ],
+function positiveInteger(value: unknown, fallback: number): number {
+  const number = Number(value);
 
-      processStatus: [["heartbeatAtMs"], ["updatedAtMs"]],
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
 
-      workerErrors: [["createdAtMs"], ["worker", "createdAtMs"]],
+const DB_OPEN_TIMEOUT_MS = positiveInteger(
+  process.env.SOLARD_DB_OPEN_TIMEOUT_MS,
+  45_000,
+);
 
-      terminalFeedState: [["resetAtMs"], ["updatedAtMs"]],
-    },
+const DB_INIT_LOCK_STALE_MS = positiveInteger(
+  process.env.SOLARD_DB_INIT_LOCK_STALE_MS,
+  Math.max(90_000, DB_OPEN_TIMEOUT_MS * 2),
+);
 
-    views: {
-      tokenPriceWindowsV5: defineView(
-        TokenPriceWindowsSchema,
-        `
+const DB_INIT_LOCK_PATH = `${SOLARD_DB_PATH}.init.lock`;
+
+function startupDelayMs(attempt: number): number {
+  const exponential = Math.min(1_000, 25 * 2 ** Math.min(attempt, 6));
+
+  const jitter = Math.floor(Math.random() * 50);
+
+  return exponential + jitter;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function removeStaleInitLock(): boolean {
+  try {
+    const stat = statSync(DB_INIT_LOCK_PATH);
+
+    if (Date.now() - stat.mtimeMs < DB_INIT_LOCK_STALE_MS) {
+      return false;
+    }
+
+    rmSync(DB_INIT_LOCK_PATH, {
+      recursive: true,
+      force: true,
+    });
+
+    console.warn(
+      `[solard:db] removed stale database initialization lock: ${DB_INIT_LOCK_PATH}`,
+    );
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireInitLock(deadlineAtMs: number): Promise<() => void> {
+  let attempt = 0;
+
+  while (true) {
+    try {
+      mkdirSync(DB_INIT_LOCK_PATH);
+
+      writeFileSync(
+        join(DB_INIT_LOCK_PATH, "owner.json"),
+        JSON.stringify(
+          {
+            pid: process.pid,
+
+            createdAtMs: Date.now(),
+
+            dbPath: SOLARD_DB_PATH,
+          },
+          null,
+          2,
+        ),
+      );
+
+      return () => {
+        rmSync(DB_INIT_LOCK_PATH, {
+          recursive: true,
+          force: true,
+        });
+      };
+    } catch (error) {
+      const code = (
+        error as {
+          code?: unknown;
+        }
+      )?.code;
+
+      if (code !== "EEXIST") {
+        throw error;
+      }
+
+      if (removeStaleInitLock()) {
+        continue;
+      }
+
+      if (Date.now() >= deadlineAtMs) {
+        throw new Error(
+          `Timed out waiting for database initialization lock: ${DB_INIT_LOCK_PATH}`,
+          {
+            cause: error,
+          },
+        );
+      }
+
+      await sleep(startupDelayMs(attempt++));
+    }
+  }
+}
+
+async function openDatabaseWithRetry<T>(factory: () => T): Promise<T> {
+  const deadlineAtMs = Date.now() + DB_OPEN_TIMEOUT_MS;
+
+  const release = await acquireInitLock(deadlineAtMs);
+
+  let attempt = 0;
+
+  try {
+    while (true) {
+      try {
+        return factory();
+      } catch (error) {
+        if (!isSqliteBusyError(error) || Date.now() >= deadlineAtMs) {
+          throw error;
+        }
+
+        const delayMs = startupDelayMs(attempt++);
+
+        if (attempt === 1 || attempt % 5 === 0) {
+          console.warn(
+            `[solard:db] SQLite busy during schema/index initialization; retrying in ${delayMs}ms`,
+          );
+        }
+
+        await sleep(delayMs);
+      }
+    }
+  } finally {
+    release();
+  }
+}
+
+export const db = await openDatabaseWithRetry(
+  () =>
+    new Database(
+      SOLARD_DB_PATH,
+      {
+        terminalTokensLive: TerminalTokenSchema,
+        tokenTradesV2: TokenTradeSchema,
+        processStatus: ProcessStatusSchema,
+        workerErrors: WorkerErrorSchema,
+        terminalFeedState: TerminalFeedStateSchema,
+      },
+      {
+        timestamps: false,
+        softDeletes: false,
+        reactive: false,
+        wal: true,
+
+        unique: {
+          terminalTokensLive: [["mint"]],
+          tokenTradesV2: [["eventKey"]],
+          processStatus: [["name"]],
+          workerErrors: [["errorKey"]],
+          terminalFeedState: [["scope"]],
+        },
+
+        indexes: {
+          terminalTokensLive: [
+            "mint",
+            "updatedAtMs",
+            "priceUpdatedAtMs",
+            "observedAtMs",
+            "mayhemCheckedAtMs",
+            "marketCapUsd",
+            "source",
+            ["source", "updatedAtMs"],
+            ["observedAtMs", "updatedAtMs"],
+          ],
+
+          tokenTradesV2: [
+            ["mint", "tradedAtMs"],
+            ["tradedAtMs"],
+            ["source", "tradedAtMs"],
+            ["signature"],
+            ["eventKey"],
+            ["mint", "marketCapUsd"],
+          ],
+
+          processStatus: [["heartbeatAtMs"], ["updatedAtMs"]],
+
+          workerErrors: [["createdAtMs"], ["worker", "createdAtMs"]],
+
+          terminalFeedState: [["resetAtMs"], ["updatedAtMs"]],
+        },
+
+        views: {
+          tokenPriceWindowsV5: defineView(
+            TokenPriceWindowsSchema,
+            `
         WITH recent AS (
           SELECT
             id,
@@ -416,11 +575,11 @@ export const db = new Database(
         SELECT *
         FROM resolved
         `,
-      ),
+          ),
 
-      tokenMarketExtremaV2: defineView(
-        TokenMarketExtremaSchema,
-        `
+          tokenMarketExtremaV2: defineView(
+            TokenMarketExtremaSchema,
+            `
         SELECT
           mint,
           MAX(marketCapUsd) AS athMarketCapUsd,
@@ -434,27 +593,13 @@ export const db = new Database(
 
         GROUP BY mint
         `,
-      ),
-    },
-  },
+          ),
+        },
+      },
+    ),
 );
 
 const PRICE_WINDOW_TTL_MS = 1_000;
-
-function sqliteErrorMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).toLowerCase();
-}
-
-export function isSqliteBusyError(error: unknown): boolean {
-  const message = sqliteErrorMessage(error);
-
-  return (
-    message.includes("database is locked") ||
-    message.includes("database is busy") ||
-    message.includes("sqlite_busy") ||
-    message.includes("sqlite_locked")
-  );
-}
 
 export function isDuplicateTradeError(error: unknown): boolean {
   const message = sqliteErrorMessage(error);
