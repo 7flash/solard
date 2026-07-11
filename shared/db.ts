@@ -252,7 +252,7 @@ export const db = new Database(
     },
 
     views: {
-      tokenPriceWindowsV3: defineView(
+      tokenPriceWindowsV4: defineView(
         TokenPriceWindowsSchema,
         `
         WITH recent AS (
@@ -396,12 +396,7 @@ export const db = new Database(
           SELECT
             *,
 
-            COALESCE(
-              latestMarketCapUsd,
-              avgMarketCapUsd1m,
-              avgMarketCapUsd5m,
-              avgMarketCapUsd15m
-            ) AS currentMarketCapUsd
+            latestMarketCapUsd AS currentMarketCapUsd
 
           FROM aggregated
         )
@@ -494,27 +489,27 @@ function sourceMatches(
   requested: string | null | undefined,
   actual: string,
 ): boolean {
-  const source = String(requested ?? "both").toLowerCase();
+  const source = String(requested ?? "both")
+    .trim()
+    .toLowerCase();
 
   if (!source || source === "both") {
     return true;
   }
 
-  const value = actual.toLowerCase();
+  const value = String(actual ?? "")
+    .trim()
+    .toLowerCase();
 
-  if (source.includes("helius")) {
-    return value.includes("helius") || value.startsWith("telegram");
+  if (source === "helius" || source.includes("helius")) {
+    return value.includes("helius");
   }
 
-  if (source.includes("pump")) {
-    return (
-      value.includes("pumpportal") ||
-      value === "pump" ||
-      value.startsWith("telegram")
-    );
+  if (source === "pumpportal" || source.includes("pumpportal")) {
+    return value.includes("pumpportal") || value === "pump";
   }
 
-  return true;
+  return value === source;
 }
 
 function isUsdc(token: TerminalToken): boolean {
@@ -794,7 +789,7 @@ export function getTokenPriceWindows(
   if (!key) return null;
 
   return (
-    (db.tokenPriceWindowsV3
+    (db.tokenPriceWindowsV4
       .select()
       .where({ mint: key })
       .cache({
@@ -807,7 +802,7 @@ export function getTokenPriceWindows(
 export function listTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows[] {
-  return db.tokenPriceWindowsV3
+  return db.tokenPriceWindowsV4
     .select()
     .orderBy("latestTradeAtMs", "DESC")
     .cache({
@@ -1100,7 +1095,7 @@ export function listTerminalFeed(
     .filter(
       (token) =>
         !input.hideMayhem ||
-        (terminalTokenMayhemKnown(token) && !terminalTokenIsMayhem(token)),
+        !(terminalTokenMayhemKnown(token) && terminalTokenIsMayhem(token)),
     )
     .filter((token) => !input.hideUsdc || !isUsdc(token))
     .map((token) => {
@@ -1111,12 +1106,8 @@ export function listTerminalFeed(
       const priceUsd = windows?.latestPriceUsd ?? token.priceUsd;
 
       const marketCapUsd =
-        windows?.currentMarketCapUsd ??
         windows?.latestMarketCapUsd ??
         (priceUsd != null ? priceUsd * token.supplyUi : token.marketCapUsd) ??
-        windows?.avgMarketCapUsd1m ??
-        windows?.avgMarketCapUsd5m ??
-        windows?.avgMarketCapUsd15m ??
         null;
 
       const marketCapSol =
@@ -1146,11 +1137,11 @@ export function listTerminalFeed(
         marketCapSol,
         marketCapUsd,
 
-        sma1m: windows?.avgMarketCapUsd1m ?? marketCapUsd,
+        sma1m: windows?.avgMarketCapUsd1m ?? null,
 
-        sma5m: windows?.avgMarketCapUsd5m ?? marketCapUsd,
+        sma5m: windows?.avgMarketCapUsd5m ?? null,
 
-        sma15m: windows?.avgMarketCapUsd15m ?? marketCapUsd,
+        sma15m: windows?.avgMarketCapUsd15m ?? null,
 
         avgPriceUsd1m: windows?.avgPriceUsd1m ?? null,
 
@@ -1172,7 +1163,7 @@ export function listTerminalFeed(
 
         volumeSol15m: windows?.volumeSol15m ?? 0,
 
-        lastTradeAtMs: latestTradeAtMs ?? (priceUpdatedAtMs || null),
+        lastTradeAtMs: latestTradeAtMs,
 
         priceAgeMs,
 
@@ -1370,12 +1361,7 @@ export function terminalStoreStats(
         (window) =>
           window.latestPriceSol != null ||
           window.latestPriceUsd != null ||
-          window.latestMarketCapUsd != null ||
-          window.currentMarketCapUsd != null ||
-          window.avgPriceUsd1m != null ||
-          window.avgMarketCapUsd1m != null ||
-          window.avgMarketCapUsd5m != null ||
-          window.avgMarketCapUsd15m != null,
+          window.latestMarketCapUsd != null,
       )
       .map((window) => window.mint),
   );

@@ -26,7 +26,8 @@ import type {
 } from "../_client/types";
 
 type SortBase =
-  | "age"
+  | "created"
+  | "lastTrade"
   | "mcap"
   | "sma1m"
   | "sma5m"
@@ -106,9 +107,13 @@ const state: PageState = {
   hideMayhem: storageFlag("solwal:pump-hide-mayhem"),
   hideUsdc: storageFlag("solwal:pump-hide-usdc"),
   sort: (() => {
-    const saved = storageGet("solwal:pump-feed-sort", "age-asc");
+    const saved = storageGet("solwal:pump-feed-sort", "created-desc");
 
-    return (saved === "newest" ? "age-asc" : saved) as SortKey;
+    if (saved === "newest" || saved.startsWith("age")) {
+      return "created-desc";
+    }
+
+    return saved as SortKey;
   })(),
   selectedKey: storageGet("solard:terminal-inspector-key", "") || null,
   pinned: storageJson<string[]>("solard:terminal-pinned-mints", []).filter(
@@ -145,7 +150,6 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollInFlight = false;
 let unsubscribeLogs: (() => void) | null = null;
 let logRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-let renderGeneration = 0;
 
 function pollMs(): number {
   const parsed = Number(storageGet("solard:terminal-poll-ms", "1000"));
@@ -160,10 +164,11 @@ function rootElement(): HTMLElement {
   return root;
 }
 
-let renderQueued = false;
-let renderAgain = false;
+let renderFrame: number | null = null;
 
-type TerminalUiSnapshot = {
+let renderGeneration = 0;
+
+type TerminalUiMemory = {
   windowX: number;
   windowY: number;
 
@@ -178,66 +183,153 @@ type TerminalUiSnapshot = {
   selectionEnd: number | null;
 };
 
-function terminalUiSnapshot(root: HTMLElement): TerminalUiSnapshot {
+const uiMemory: TerminalUiMemory = {
+  windowX: 0,
+  windowY: 0,
+
+  tableLeft: 0,
+  tableTop: 0,
+
+  activityLeft: 0,
+  activityTop: 0,
+
+  focusKey: null,
+  selectionStart: null,
+  selectionEnd: null,
+};
+
+function rememberTerminalUi(root: HTMLElement): void {
+  uiMemory.windowX = window.scrollX;
+
+  uiMemory.windowY = window.scrollY;
+
   const table = root.querySelector<HTMLElement>(".terminal-v10-table-wrap");
 
+  if (table) {
+    uiMemory.tableLeft = table.scrollLeft;
+
+    uiMemory.tableTop = table.scrollTop;
+  }
+
   const activity = root.querySelector<HTMLElement>(".terminal-v10-log-rows");
+
+  if (activity) {
+    uiMemory.activityLeft = activity.scrollLeft;
+
+    uiMemory.activityTop = activity.scrollTop;
+  }
 
   const active =
     document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
 
+  uiMemory.focusKey = active?.dataset.terminalFocus ?? null;
+
   const input =
     active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
       ? active
       : null;
 
-  return {
-    windowX: window.scrollX,
+  uiMemory.selectionStart = input?.selectionStart ?? null;
 
-    windowY: window.scrollY,
-
-    tableLeft: table?.scrollLeft ?? 0,
-
-    tableTop: table?.scrollTop ?? 0,
-
-    activityLeft: activity?.scrollLeft ?? 0,
-
-    activityTop: activity?.scrollTop ?? 0,
-
-    focusKey: active?.dataset.terminalFocus ?? null,
-
-    selectionStart: input?.selectionStart ?? null,
-
-    selectionEnd: input?.selectionEnd ?? null,
-  };
+  uiMemory.selectionEnd = input?.selectionEnd ?? null;
 }
 
-function restoreTerminalUi(
-  root: HTMLElement,
-  snapshot: TerminalUiSnapshot,
-): void {
+function observeTerminalUi(root: HTMLElement): void {
+  const table = root.querySelector<HTMLElement>(".terminal-v10-table-wrap");
+
+  table?.addEventListener(
+    "scroll",
+    () => {
+      uiMemory.tableLeft = table.scrollLeft;
+
+      uiMemory.tableTop = table.scrollTop;
+    },
+    {
+      passive: true,
+    },
+  );
+
+  const activity = root.querySelector<HTMLElement>(".terminal-v10-log-rows");
+
+  activity?.addEventListener(
+    "scroll",
+    () => {
+      uiMemory.activityLeft = activity.scrollLeft;
+
+      uiMemory.activityTop = activity.scrollTop;
+    },
+    {
+      passive: true,
+    },
+  );
+
+  root.addEventListener("focusin", (event) => {
+    const target = event.target;
+
+    if (target instanceof HTMLElement) {
+      uiMemory.focusKey = target.dataset.terminalFocus ?? null;
+    }
+  });
+
+  root.addEventListener("input", (event) => {
+    const target = event.target;
+
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement
+    ) {
+      uiMemory.focusKey = target.dataset.terminalFocus ?? null;
+
+      uiMemory.selectionStart = target.selectionStart;
+
+      uiMemory.selectionEnd = target.selectionEnd;
+    }
+  });
+}
+
+function restoreTerminalUi(root: HTMLElement, generation: number): void {
   const restore = () => {
+    if (
+      unmounted ||
+      generation !== renderGeneration ||
+      root !== document.getElementById("app-root")
+    ) {
+      return;
+    }
+
     const table = root.querySelector<HTMLElement>(".terminal-v10-table-wrap");
 
     if (table) {
-      table.scrollLeft = snapshot.tableLeft;
+      table.scrollLeft = Math.min(
+        uiMemory.tableLeft,
+        Math.max(0, table.scrollWidth - table.clientWidth),
+      );
 
-      table.scrollTop = snapshot.tableTop;
+      table.scrollTop = Math.min(
+        uiMemory.tableTop,
+        Math.max(0, table.scrollHeight - table.clientHeight),
+      );
     }
 
     const activity = root.querySelector<HTMLElement>(".terminal-v10-log-rows");
 
     if (activity) {
-      activity.scrollLeft = snapshot.activityLeft;
+      activity.scrollLeft = Math.min(
+        uiMemory.activityLeft,
+        Math.max(0, activity.scrollWidth - activity.clientWidth),
+      );
 
-      activity.scrollTop = snapshot.activityTop;
+      activity.scrollTop = Math.min(
+        uiMemory.activityTop,
+        Math.max(0, activity.scrollHeight - activity.clientHeight),
+      );
     }
 
-    if (snapshot.focusKey) {
+    if (uiMemory.focusKey) {
       const target = root.querySelector<HTMLElement>(
-        `[data-terminal-focus="${snapshot.focusKey}"]`,
+        `[data-terminal-focus="${uiMemory.focusKey}"]`,
       );
 
       target?.focus({
@@ -247,24 +339,43 @@ function restoreTerminalUi(
       if (
         (target instanceof HTMLInputElement ||
           target instanceof HTMLTextAreaElement) &&
-        snapshot.selectionStart != null &&
-        snapshot.selectionEnd != null
+        uiMemory.selectionStart != null &&
+        uiMemory.selectionEnd != null
       ) {
         try {
           target.setSelectionRange(
-            snapshot.selectionStart,
-            snapshot.selectionEnd,
+            uiMemory.selectionStart,
+            uiMemory.selectionEnd,
           );
         } catch {}
       }
     }
 
-    window.scrollTo(snapshot.windowX, snapshot.windowY);
+    window.scrollTo(uiMemory.windowX, uiMemory.windowY);
   };
 
+  /**
+   * Restore once immediately and again after layout settles. Generation checks
+   * prevent an older render from resetting a newer root.
+   */
   restore();
 
   requestAnimationFrame(restore);
+
+  setTimeout(restore, 40);
+}
+
+function copyRootAttributes(source: HTMLElement, target: HTMLElement): void {
+  for (const attribute of [...source.attributes]) {
+    if (
+      attribute.name === "id" ||
+      attribute.name === "data-terminal-render-generation"
+    ) {
+      continue;
+    }
+
+    target.setAttribute(attribute.name, attribute.value);
+  }
 }
 
 function renderTerminalPage(): void {
@@ -276,26 +387,40 @@ function renderTerminalPage(): void {
     throw new Error("Terminal root is detached");
   }
 
-  const snapshot = terminalUiSnapshot(current);
+  rememberTerminalUi(current);
+
+  const generation = ++renderGeneration;
 
   /**
-   * Terminal is a high-churn market screen. Replacing the root element gives
-   * every update a fresh TradJS mount target. No previous fiber can reference
-   * a stale row, log entry, selected panel, or insertBefore anchor.
+   * Render into a completely detached, uniquely named element first.
    *
-   * Do not call replaceChildren() on a root already tracked by TradJS.
+   * The live #app-root remains untouched while TradJS builds the new tree, so
+   * no renderer state can refer to children that another refresh has removed.
+   * Only after a successful mount do we atomically swap the finished root into
+   * the document.
    */
-  const replacement = current.cloneNode(false) as HTMLElement;
+  const staged = document.createElement(current.tagName.toLowerCase());
 
-  renderGeneration++;
+  copyRootAttributes(current, staged);
 
-  replacement.dataset.terminalRenderGeneration = String(renderGeneration);
+  staged.id = `terminal-stage-${generation}`;
 
-  parent.replaceChild(replacement, current);
+  staged.dataset.terminalRenderGeneration = String(generation);
 
-  render(<TerminalPage />, replacement, {
+  render(<TerminalPage />, staged, {
     reconciler: "sequential",
   });
+
+  /**
+   * Avoid duplicate #app-root ids during the swap.
+   */
+  current.removeAttribute("id");
+
+  staged.id = "app-root";
+
+  parent.replaceChild(staged, current);
+
+  observeTerminalUi(staged);
 
   document
     .querySelectorAll<HTMLAnchorElement>("#main-nav a")
@@ -303,40 +428,33 @@ function renderTerminalPage(): void {
       link.classList.toggle("active", link.dataset.page === "terminal"),
     );
 
-  restoreTerminalUi(replacement, snapshot);
+  restoreTerminalUi(staged, generation);
 }
 
 function rerender(): void {
-  if (unmounted) return;
-
-  if (renderQueued) {
-    renderAgain = true;
+  if (unmounted || renderFrame != null) {
     return;
   }
 
-  renderQueued = true;
+  /**
+   * One render per animation frame. Feed completion, activity updates, and
+   * state changes in the same frame collapse into a single detached mount.
+   */
+  renderFrame = requestAnimationFrame(() => {
+    renderFrame = null;
 
-  queueMicrotask(() => {
+    if (unmounted) {
+      return;
+    }
+
     try {
-      do {
-        renderAgain = false;
-
-        if (!unmounted) {
-          renderTerminalPage();
-        }
-      } while (renderAgain && !unmounted);
+      renderTerminalPage();
     } catch (error) {
       state.status = "error";
 
       state.error = error instanceof Error ? error.message : String(error);
 
       console.error("[solard:terminal] render failed", error);
-    } finally {
-      renderQueued = false;
-
-      if (renderAgain && !unmounted) {
-        rerender();
-      }
     }
   });
 }
@@ -420,37 +538,24 @@ function latestMcap(
   return (
     numberValue(row?.marketCapUsd) ??
     numberValue((row as any)?.currentMarketCapUsd) ??
-    numberValue((row as any)?.lastMarketCapUsd) ??
-    numberValue(row?.marketCapSol) ??
-    numberValue((row as any)?.lastMarketCapSol) ??
-    numberValue(row?.sma1m) ??
-    numberValue(row?.sma5m) ??
-    numberValue(row?.sma15m) ??
-    numberValue(row?.initialMarketCapUsd) ??
-    numberValue(row?.initialMarketCapSol)
+    numberValue((row as any)?.lastMarketCapUsd)
   );
 }
 
-function latestTime(row: PumpFeedRow): number {
-  const tradeAt = Number(row.lastTradeAtMs ?? 0);
+function createdTime(row: PumpFeedRow): number | null {
+  const value = Number(row.createdAtMs ?? 0);
 
-  if (Number.isFinite(tradeAt) && tradeAt > 0) {
-    return tradeAt;
-  }
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
 
-  const priceAt = Number((row as any).priceUpdatedAtMs ?? 0);
+function lastTradeTime(row: PumpFeedRow): number | null {
+  const value = Number(row.lastTradeAtMs ?? 0);
 
-  if (Number.isFinite(priceAt) && priceAt > 0) {
-    return priceAt;
-  }
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
 
-  const observedAt = Number((row as any).observedAtMs ?? 0);
-
-  if (Number.isFinite(observedAt) && observedAt > 0) {
-    return observedAt;
-  }
-
-  return Number(row.createdAtMs ?? 0) || Number(row.updatedAtMs ?? 0);
+function displayAge(value: number | null): string {
+  return value == null ? "—" : age(value);
 }
 
 function booleanFlag(value: unknown): boolean | null {
@@ -521,7 +626,7 @@ function isPinned(row: PumpFeedRow): boolean {
 }
 
 function passesFilters(row: PumpFeedRow): boolean {
-  if (state.hideMayhem && (!isMayhemKnown(row) || isMayhem(row))) {
+  if (state.hideMayhem && isMayhemKnown(row) && isMayhem(row)) {
     return false;
   }
   if (state.hideUsdc && isUsdc(row)) return false;
@@ -555,12 +660,15 @@ function volumeSol1m(row: PumpFeedRow): number {
   return numberValue((row as any).volumeSol1m) ?? 0;
 }
 
-function ageMs(row: PumpFeedRow): number {
-  return Math.max(0, Date.now() - latestTime(row));
-}
-
 function sortValue(row: PumpFeedRow): number {
-  if (state.sort.startsWith("age")) return ageMs(row);
+  if (state.sort.startsWith("created")) {
+    return createdTime(row) ?? -Infinity;
+  }
+
+  if (state.sort.startsWith("lastTrade")) {
+    return lastTradeTime(row) ?? -Infinity;
+  }
+
   if (state.sort.startsWith("mcap")) return latestMcap(row) ?? -Infinity;
   if (state.sort.startsWith("sma1m"))
     return numberValue(row.sma1m) ?? -Infinity;
@@ -571,7 +679,8 @@ function sortValue(row: PumpFeedRow): number {
   if (state.sort.startsWith("trades1m")) return trades1m(row);
   if (state.sort.startsWith("trades")) return trades15m(row);
   if (state.sort.startsWith("volume1m")) return volumeSol1m(row);
-  return ageMs(row);
+
+  return createdTime(row) ?? -Infinity;
 }
 
 function visibleRows(): PumpFeedRow[] {
@@ -581,7 +690,7 @@ function visibleRows(): PumpFeedRow[] {
     const av = sortValue(a);
     const bv = sortValue(b);
     if (av !== bv) return (av - bv) * dir;
-    return latestTime(b) - latestTime(a);
+    return (createdTime(b) ?? 0) - (createdTime(a) ?? 0);
   });
 }
 
@@ -597,7 +706,7 @@ function selectedRow(rows: PumpFeedRow[]): PumpFeedRow | null {
 }
 
 function setSort(base: SortBase): void {
-  const defaultKey = (base === "age" ? "age-asc" : `${base}-desc`) as SortKey;
+  const defaultKey = `${base}-desc` as SortKey;
 
   const alternateKey = (
     defaultKey.endsWith("-asc") ? `${base}-desc` : `${base}-asc`
@@ -691,8 +800,12 @@ async function reloadFeed(
   if (pollInFlight) return;
   pollInFlight = true;
   state.status = state.rows.length ? "live" : "loading";
+
   state.error = null;
-  rerender();
+
+  if (!state.rows.length) {
+    rerender();
+  }
 
   try {
     const payload = await measureClient(
@@ -1245,23 +1358,6 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
                 : row.name || short(row.mint, 5, 5)}
             </div>
             <div className="terminal-v10-name">{row.name || "unnamed"}</div>
-
-            <div className="terminal-v10-links">
-              {linksFor(row)
-                .filter(
-                  (link) => link.label !== "solscan" && link.label !== "pump",
-                )
-                .map((link) => (
-                  <a
-                    href={link.href}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(event: any) => event.stopPropagation()}
-                  >
-                    {link.label}
-                  </a>
-                ))}
-            </div>
           </div>
         </div>
       </td>
@@ -1275,22 +1371,47 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
       <td className="terminal-v10-num">{trades1m(row)}</td>
       <td className="terminal-v10-num">{formatVolumeSol(volumeSol1m(row))}</td>
 
-      <td className="terminal-v10-num">{age(latestTime(row))}</td>
+      <td className="terminal-v10-num">{displayAge(createdTime(row))}</td>
 
-      <td>
+      <td className="terminal-v10-num">{displayAge(lastTradeTime(row))}</td>
+
+      <td
+        className="terminal-v10-mint-cell"
+        style={{
+          padding: 0,
+        }}
+      >
         {row.mint ? (
           <a
             className="terminal-v10-small code"
             href={`https://pump.fun/${row.mint}`}
             target="_blank"
             rel="noreferrer"
-            title={row.mint}
+            title={`Open ${row.mint} on Pump.fun`}
             onClick={(event: any) => event.stopPropagation()}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              width: "100%",
+              minHeight: "44px",
+              padding: "0 10px",
+              boxSizing: "border-box",
+            }}
           >
             {short(row.mint, 5, 5)}
           </a>
         ) : (
-          <span className="terminal-v10-small">—</span>
+          <span
+            className="terminal-v10-small"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              minHeight: "44px",
+              padding: "0 10px",
+            }}
+          >
+            —
+          </span>
         )}
       </td>
     </tr>
@@ -1369,6 +1490,20 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
         <div>
           <span>Volume 1m</span>
           <b>{formatVolumeSol(volumeSol1m(row))}</b>
+        </div>
+        <div>
+          <span>Created</span>
+          <b>{displayAge(createdTime(row))}</b>
+        </div>
+        <div>
+          <span>Last trade</span>
+          <b>{displayAge(lastTradeTime(row))}</b>
+        </div>
+        <div>
+          <span>Mayhem</span>
+          <b>
+            {isMayhemKnown(row) ? (isMayhem(row) ? "yes" : "no") : "checking"}
+          </b>
         </div>
       </div>
 
@@ -1966,10 +2101,10 @@ function TerminalPage() {
         </button>
         <button
           type="button"
-          className={`terminal-v10-sort ${state.sort.startsWith("age") ? "active" : ""}`}
-          onClick={() => setSort("age")}
+          className={`terminal-v10-sort ${state.sort.startsWith("created") ? "active" : ""}`}
+          onClick={() => setSort("created")}
         >
-          Age {sortMark("age")}
+          Created {sortMark("created")}
         </button>
       </section>
 
@@ -2018,7 +2153,10 @@ function TerminalPage() {
                   <SortButton base="volume1m" label="Vol 1m" />
                 </th>
                 <th>
-                  <SortButton base="age" label="Age" />
+                  <SortButton base="created" label="Created" />
+                </th>
+                <th>
+                  <SortButton base="lastTrade" label="Last trade" />
                 </th>
                 <th>Mint</th>
               </tr>
@@ -2071,6 +2209,13 @@ export default function mount() {
   return () => {
     measureEvent(SCOPE, "unmount", { path: window.location.pathname });
     unmounted = true;
+
+    if (renderFrame != null) {
+      cancelAnimationFrame(renderFrame);
+
+      renderFrame = null;
+    }
+
     clearPollTimer();
     pollInFlight = false;
     unsubscribeLogs?.();

@@ -101,10 +101,7 @@ export async function GET(request: Request): Promise<Response> {
         row.marketCapUsd != null ||
         row.marketCapSol != null ||
         row.priceUsd != null ||
-        row.priceSol != null ||
-        row.sma1m != null ||
-        row.sma5m != null ||
-        row.sma15m != null,
+        row.priceSol != null,
     ).length;
 
     if (health?.store && typeof health.store === "object") {
@@ -148,10 +145,10 @@ export async function GET(request: Request): Promise<Response> {
         hideMayhem: enabled(url, "hideMayhem"),
 
         mayhemPolicy: enabled(url, "hideMayhem")
-          ? "verified-non-mayhem-only"
+          ? "hide-verified-mayhem-show-unknown"
           : "all",
 
-        reads: ["terminalTokensLive", "tokenPriceWindowsV3"],
+        reads: ["terminalTokensLive", "tokenPriceWindowsV4"],
 
         writes: [],
         appendOnlyTrades: true,
