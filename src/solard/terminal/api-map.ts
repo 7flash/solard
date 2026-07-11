@@ -30,9 +30,12 @@ export function terminalFeedRowToPumpRow(
   const anyRow = row as Record<string, any>;
   const now = Date.now();
   const updatedAtMs = n(anyRow.updatedAtMs) ?? n(anyRow.createdAtMs) ?? now;
-  const lastTradeAtMs =
-    n(anyRow.lastTradeAtMs) ?? n(anyRow.latestTradeUpdatedAtMs);
-  const priceUpdatedAtMs = n(anyRow.priceUpdatedAtMs) ?? lastTradeAtMs;
+  const priceUpdatedAtMs =
+    n(anyRow.priceUpdatedAtMs) ??
+    n(anyRow.lastTradeAtMs) ??
+    (n(anyRow.priceUsd) != null || n(anyRow.marketCapUsd) != null
+      ? updatedAtMs
+      : null);
   const mcapUsd = n(anyRow.marketCapUsd);
   const initialMcapUsd = n(anyRow.initialMarketCapUsd) ?? mcapUsd;
   const priceUsd = n(anyRow.priceUsd);
@@ -45,6 +48,16 @@ export function terminalFeedRowToPumpRow(
   );
   const eventType =
     anyRow.kind === "signal" ? "signal" : tradeCount > 0 ? "trade" : "create";
+  const priceAgeMs =
+    priceUpdatedAtMs == null ? null : Math.max(0, now - priceUpdatedAtMs);
+  const priceStatus =
+    priceUpdatedAtMs == null
+      ? "missing"
+      : priceAgeMs != null && priceAgeMs > 30_000
+        ? "stale"
+        : String(anyRow.priceSource ?? anyRow.source ?? "").includes("snapshot")
+          ? "snapshot"
+          : "live";
   const trades = Array.from(
     { length: Math.min(tradeCount, 80) },
     (_unused, index) => ({
@@ -74,7 +87,11 @@ export function terminalFeedRowToPumpRow(
     bondingCurveKey: s(anyRow.bondingCurveKey),
     marketCapUsd: mcapUsd,
     priceUsd,
-    marketCapSol: mcapUsd,
+    priceUpdatedAtMs,
+    priceAgeMs,
+    priceStatus,
+    priceSource: s(anyRow.priceSource),
+    marketCapSol: n(anyRow.marketCapSol),
     lastMarketCapSol: mcapUsd,
     initialMarketCapSol: initialMcapUsd,
     initialMarketCapUsd: initialMcapUsd,
@@ -87,12 +104,12 @@ export function terminalFeedRowToPumpRow(
         ? ((mcapUsd - initialMcapUsd) / initialMcapUsd) * 100
         : null,
     priceSolPerToken: n(anyRow.priceSol),
-    priceUpdatedAtMs,
-    priceAgeMs: priceUpdatedAtMs ? Math.max(0, now - priceUpdatedAtMs) : null,
     sma1m: n(anyRow.sma1m),
     sma5m: n(anyRow.sma5m),
     sma15m: n(anyRow.sma15m),
-    lastTradeAtMs: lastTradeAtMs ?? (tradeCount > 0 ? updatedAtMs : null),
+    lastTradeAtMs:
+      n(anyRow.lastTradeAtMs) ??
+      (tradeCount > 0 ? (priceUpdatedAtMs ?? updatedAtMs) : null),
     tradeCount,
     trades,
     isMayhemMode,

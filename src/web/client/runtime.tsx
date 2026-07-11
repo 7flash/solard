@@ -65,8 +65,6 @@ export type PumpFeedRow = {
   marketCapUsd?: number | null;
   priceUsd?: number | null;
   priceSolPerToken?: number | null;
-  priceUpdatedAtMs?: number | null;
-  priceAgeMs?: number | null;
   image?: string | null;
   website?: string | null;
   twitter?: string | null;
@@ -505,30 +503,6 @@ function unwrapApiPayload<T>(payload: any, status: number): T {
   return payload as T;
 }
 
-function compactApiErrorText(text: string, status: number): string {
-  const raw = text.trim();
-  if (!raw) return `HTTP ${status}`;
-
-  const titleMatch = raw.match(/<h1[^>]*>(.*?)<\/h1>/i);
-  const preMatch = raw.match(/<pre[^>]*>(.*?)<\/pre>/is);
-  const htmlLike = /<!doctype|<html|<body|<pre|<h1/i.test(raw);
-  const source = htmlLike
-    ? [titleMatch?.[1], preMatch?.[1]].filter(Boolean).join(" — ") || raw
-    : raw;
-  const noTags = source
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-  const clean = noTags || `HTTP ${status}`;
-  return clean.length > 360 ? `${clean.slice(0, 357)}...` : clean;
-}
-
 export async function api<T>(
   url: string,
   options: RequestInit = {},
@@ -558,17 +532,11 @@ export async function api<T>(
       try {
         payload = text ? JSON.parse(text) : {};
       } catch {
-        payload = {
-          ok: false,
-          error: compactApiErrorText(text, response.status),
-        };
+        payload = { ok: false, error: text || `HTTP ${response.status}` };
       }
       if (!response.ok)
         throw new Error(
-          compactApiErrorText(
-            String(payload?.error ?? payload?.message ?? text ?? ""),
-            response.status,
-          ),
+          payload?.error ?? payload?.message ?? `HTTP ${response.status}`,
         );
       return unwrapApiPayload<T>(payload, response.status);
     },
@@ -1115,30 +1083,22 @@ function currentSessionRows(
 }
 
 export async function refreshPumpLive(): Promise<void> {
-  const terminal = state.tab === "terminal";
-  const live = await api<{
-    newTokens: PumpFeedRow[];
-    watchGroups: TokenWatchGroup[];
-  }>(
-    terminal
-      ? `/api/pump-live?limit=1&activeWindowMs=1&source=${encodeURIComponent(state.pumpFeedSource)}`
-      : `/api/pump-live?source=${encodeURIComponent(state.pumpFeedSource)}`,
-  );
-  state.watchGroups = live.watchGroups ?? state.watchGroups;
-  if (!state.selectedWatchGroupId && state.watchGroups[0])
-    state.selectedWatchGroupId = state.watchGroups[0].id;
-
-  if (terminal) {
-    // Terminal rows must come from the worker SQLite read model, not the legacy
-    // pump-live cache. Replacing the list prevents one-hour-old rows from
-    // sticking around when the live stream is actually empty/stalled.
+  if (state.tab === "terminal") {
     await refreshTerminalFeedOnce({
       ensure: false,
       activeWindowMs: 5 * 60_000,
-      includeUnpriced: false,
+      includeUnpriced: state.pumpFeedSource === "helius",
     });
     return;
   }
+
+  const live = await api<{
+    newTokens: PumpFeedRow[];
+    watchGroups: TokenWatchGroup[];
+  }>(`/api/pump-live?source=${encodeURIComponent(state.pumpFeedSource)}`);
+  state.watchGroups = live.watchGroups ?? state.watchGroups;
+  if (!state.selectedWatchGroupId && state.watchGroups[0])
+    state.selectedWatchGroupId = state.watchGroups[0].id;
 
   for (const row of live.newTokens ?? []) mergePumpToken(row);
 }
@@ -1304,35 +1264,30 @@ export function schedulePumpFeedUpdate(): void {
   }, 120);
 }
 
-function finiteNumberOrNull(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 function normalizeFeedRow(
   row: PumpFeedRow,
   existing?: PumpFeedRow,
 ): PumpFeedRow {
   const now = Date.now();
-  const directMcapUsd = finiteNumberOrNull(row.marketCapUsd);
-  const directMcapSol = finiteNumberOrNull(row.marketCapSol);
-  const directDisplayMcap = directMcapUsd ?? directMcapSol;
-  const capturedAtMs =
-    finiteNumberOrNull(row.priceUpdatedAtMs) ??
-    finiteNumberOrNull(row.lastTradeAtMs) ??
-    finiteNumberOrNull(row.updatedAtMs) ??
-    now;
+  const directMcap =
+    typeof row.marketCapUsd === "number" && Number.isFinite(row.marketCapUsd)
+      ? row.marketCapUsd
+      : typeof row.marketCapSol === "number" &&
+          Number.isFinite(row.marketCapSol)
+        ? row.marketCapSol
+        : null;
   const samples = [...(row.samples ?? [])];
   if (
-    directDisplayMcap != null &&
+    directMcap != null &&
     !samples.some(
       (sample) =>
-        Math.abs(sample.capturedAtMs - capturedAtMs) < 1200 &&
-        sample.marketCapSol === directDisplayMcap,
+        Math.abs(sample.capturedAtMs - now) < 1200 &&
+        sample.marketCapSol === directMcap,
     )
   ) {
     samples.unshift({
-      capturedAtMs,
-      marketCapSol: directDisplayMcap,
+      capturedAtMs: now,
+      marketCapSol: directMcap,
       source: row.eventType ?? row.raw?.txType ?? row.raw?.source ?? "stream",
     });
   }
@@ -1361,28 +1316,20 @@ function normalizeFeedRow(
         typeof sample.marketCapSol === "number" &&
         Number.isFinite(sample.marketCapSol),
     );
-  const displayMcap =
-    directDisplayMcap ??
-    finiteNumberOrNull(row.lastMarketCapSol) ??
+  const mcap =
+    directMcap ??
+    row.lastMarketCapSol ??
     last?.marketCapSol ??
-    finiteNumberOrNull(existing?.marketCapUsd) ??
-    finiteNumberOrNull(existing?.marketCapSol) ??
-    finiteNumberOrNull(existing?.lastMarketCapSol) ??
+    existing?.marketCapSol ??
+    existing?.lastMarketCapSol ??
     null;
-  const marketCapUsd =
-    directMcapUsd ?? finiteNumberOrNull(existing?.marketCapUsd) ?? displayMcap;
-  const marketCapSol =
-    directMcapSol ?? finiteNumberOrNull(existing?.marketCapSol);
   const initial =
-    finiteNumberOrNull(row.initialMarketCapUsd) ??
-    finiteNumberOrNull(row.initialMarketCapSol) ??
-    finiteNumberOrNull(existing?.initialMarketCapUsd) ??
-    finiteNumberOrNull(existing?.initialMarketCapSol) ??
+    row.initialMarketCapSol ??
+    existing?.initialMarketCapSol ??
     first?.marketCapSol ??
-    displayMcap ??
+    mcap ??
     null;
-  const change =
-    displayMcap != null && initial != null ? displayMcap - initial : null;
+  const change = mcap != null && initial != null ? mcap - initial : null;
   const pct =
     change != null && initial != null && initial > 0
       ? (change / initial) * 100
@@ -1399,22 +1346,12 @@ function normalizeFeedRow(
       ? vals.reduce((sum, value) => sum + value, 0) / vals.length
       : null;
   };
-  const updatedAtCandidates = [
-    finiteNumberOrNull(existing?.updatedAtMs),
-    finiteNumberOrNull(row.updatedAtMs),
-    finiteNumberOrNull(row.lastTradeAtMs),
-    finiteNumberOrNull(row.priceUpdatedAtMs),
-    finiteNumberOrNull(row.createdAtMs),
-  ].filter((value): value is number => value != null && value > 0);
-  const mergedUpdatedAtMs = updatedAtCandidates.length
-    ? Math.max(...updatedAtCandidates)
-    : now;
   return {
     ...existing,
     ...row,
-    marketCapSol,
-    marketCapUsd,
-    lastMarketCapSol: displayMcap,
+    marketCapSol: mcap,
+    marketCapUsd: mcap,
+    lastMarketCapSol: mcap,
     initialMarketCapSol: initial,
     initialMarketCapUsd: initial,
     marketCapChangeSol: row.marketCapChangeSol ?? change,
@@ -1423,27 +1360,14 @@ function normalizeFeedRow(
     sma1m: row.sma1m ?? avg(60_000),
     sma5m: row.sma5m ?? avg(5 * 60_000),
     sma15m: row.sma15m ?? avg(15 * 60_000),
-    priceUpdatedAtMs:
-      row.priceUpdatedAtMs ??
-      (directDisplayMcap != null ||
-      row.priceUsd != null ||
-      row.priceSolPerToken != null
-        ? capturedAtMs
-        : existing?.priceUpdatedAtMs),
-    priceAgeMs:
-      row.priceAgeMs ??
-      (row.priceUpdatedAtMs || existing?.priceUpdatedAtMs
-        ? Math.max(
-            0,
-            now - Number(row.priceUpdatedAtMs ?? existing?.priceUpdatedAtMs),
-          )
-        : null),
     lastTradeAtMs:
       row.lastTradeAtMs ??
-      (row.eventType === "trade" ? capturedAtMs : existing?.lastTradeAtMs) ??
+      (row.eventType === "trade" ? now : existing?.lastTradeAtMs) ??
+      row.updatedAtMs ??
       existing?.lastTradeAtMs ??
-      null,
-    updatedAtMs: mergedUpdatedAtMs,
+      row.createdAtMs ??
+      now,
+    updatedAtMs: row.updatedAtMs ?? now,
   };
 }
 
@@ -1485,17 +1409,8 @@ export function replacePumpFeedFromRows(
 ): void {
   const next: PumpFeedRow[] = [];
   const seen = new Set<string>();
-  const existingByKey = new Map<string, PumpFeedRow>();
-  for (const existing of state.pumpFeed) {
-    const key = existing.mint || existing.signature || pumpRowKey(existing);
-    if (key && !existingByKey.has(key)) existingByKey.set(key, existing);
-  }
   const push = (row: PumpFeedRow) => {
-    const rawKey = row.mint || row.signature || pumpRowKey(row);
-    const normalized = normalizeFeedRow(
-      row,
-      rawKey ? existingByKey.get(rawKey) : undefined,
-    );
+    const normalized = normalizeFeedRow(row);
     const key =
       normalized.mint || normalized.signature || pumpRowKey(normalized);
     if (!key || seen.has(key)) return;
@@ -1513,7 +1428,7 @@ export function replacePumpFeedFromRows(
   schedulePumpFeedUpdate();
 }
 
-async function refreshTerminalFeedOnce(
+export async function refreshTerminalFeedOnce(
   args: {
     ensure?: boolean;
     activeWindowMs?: number;
@@ -1530,7 +1445,7 @@ async function refreshTerminalFeedOnce(
         health?: AnyRow;
         debug?: AnyRow;
       }>(
-        `/api/terminal/feed?ensure=${args.ensure ? "1" : "0"}&limit=300&activeWindowMs=${encodeURIComponent(String(activeWindowMs))}&includeUnpriced=${args.includeUnpriced ? "1" : "0"}&source=${encodeURIComponent(state.pumpFeedSource)}&hideMayhem=${state.hideMayhem ? "1" : "0"}&hideUsdc=${state.hideUsdc ? "1" : "0"}`,
+        `/api/terminal/feed?ensure=${args.ensure ? "1" : "0"}&limit=300&activeWindowMs=${encodeURIComponent(String(activeWindowMs))}&includeUnpriced=${args.includeUnpriced ? "1" : "0"}&source=${encodeURIComponent(state.pumpFeedSource)}&hideMayhem=${state.hideMayhem ? "1" : "0"}&hideUsdc=${state.hideUsdc ? "1" : "0"}&stats=0&health=0`,
       ),
     (value) => ({
       rows: value.rows?.length ?? 0,
@@ -2268,33 +2183,50 @@ export function mountPage(page: State["tab"], view: ConsolePage) {
   });
   update();
 
-  void runAction(async () => {
-    await measureClient("mount-load", async () => {
-      // Always load the local wallet/group/token index first. This is SQLite-only
-      // and keeps the default wallet dropdown populated on every page.
-      await refreshLocalOverview();
-      await refreshStatus().catch(() => undefined);
+  void runAction(
+    async () => {
+      await measureClient("mount-load", async () => {
+        await refreshLocalOverview().catch(() => undefined);
+        await refreshStatus().catch(() => undefined);
 
-      if (page === "overview")
-        await Promise.allSettled([refreshSolBalances(), refreshJobs()]);
-      else if (page === "wallets")
-        await refreshSolBalances().catch(() => undefined);
-      else if (page === "terminal")
-        await Promise.allSettled([refreshPumpLive(), refreshWatchGroups()]);
-      else if (page === "watchlists")
-        await Promise.allSettled([refreshWatchGroups(), refreshPumpLive()]);
-      else if (page === "portfolio")
-        await refreshPortfolio().catch(() => undefined);
-      else if (page === "signals")
-        await refreshSignals().catch(() => undefined);
-      else if (page === "jobs") await refreshJobs().catch(() => undefined);
-      return {
-        page,
-        wallets: state.overview?.wallets?.length ?? 0,
-        groups: state.overview?.groups?.length ?? 0,
-      };
-    });
-  });
+        if (page === "overview") {
+          await Promise.allSettled([refreshSolBalances(), refreshJobs()]);
+        } else if (page === "wallets") {
+          await refreshSolBalances().catch(() => undefined);
+        } else if (page === "terminal") {
+          void refreshTerminalFeedOnce({
+            ensure: false,
+            activeWindowMs: 5 * 60_000,
+            includeUnpriced: state.pumpFeedSource === "helius",
+          })
+            .then(update)
+            .catch((error) => {
+              state.terminalLastError =
+                error instanceof Error ? error.message : String(error);
+              update();
+            });
+          void refreshWatchGroups()
+            .then(update)
+            .catch(() => undefined);
+        } else if (page === "watchlists") {
+          await Promise.allSettled([refreshWatchGroups(), refreshPumpLive()]);
+        } else if (page === "portfolio") {
+          await refreshPortfolio().catch(() => undefined);
+        } else if (page === "signals") {
+          await refreshSignals().catch(() => undefined);
+        } else if (page === "jobs") {
+          await refreshJobs().catch(() => undefined);
+        }
+
+        return {
+          page,
+          wallets: state.overview?.wallets?.length ?? 0,
+          groups: state.overview?.groups?.length ?? 0,
+        };
+      });
+    },
+    { refreshAfter: false },
+  );
 
   if (
     page === "terminal" &&
@@ -2313,10 +2245,22 @@ export function mountPage(page: State["tab"], view: ConsolePage) {
           await refreshJobs()
             .then(update)
             .catch(() => undefined);
-        if (state.tab === "watchlists" || state.tab === "terminal")
+        if (state.tab === "watchlists")
           await refreshPumpLive()
             .then(update)
             .catch(() => undefined);
+        if (state.tab === "terminal")
+          await refreshTerminalFeedOnce({
+            ensure: false,
+            activeWindowMs: 5 * 60_000,
+            includeUnpriced: state.pumpFeedSource === "helius",
+          })
+            .then(update)
+            .catch((error) => {
+              state.terminalLastError =
+                error instanceof Error ? error.message : String(error);
+              update();
+            });
         if (state.tab === "signals")
           await refreshSignals()
             .then(update)

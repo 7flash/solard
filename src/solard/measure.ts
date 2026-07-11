@@ -5,7 +5,6 @@ import {
   measureSync,
   safeStringify,
   summarizeForMeasure,
-  type MeasureAction,
 } from "measure-fn";
 
 let configured = false;
@@ -18,101 +17,6 @@ function readIntEnv(name: string, fallback: number, max = 10_000): number {
   if (!Number.isFinite(value) || value < 0) return fallback;
 
   return Math.min(Math.floor(value), max);
-}
-
-function n(value: unknown, digits = 4): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-  return Number(value.toFixed(digits));
-}
-
-function compactId(value: unknown, head = 6, tail = 4): string | undefined {
-  if (typeof value !== "string") return undefined;
-  if (value.length <= head + tail + 1) return value;
-  return `${value.slice(0, head)}…${value.slice(-tail)}`;
-}
-
-function clean<T extends Record<string, unknown>>(value: T): T {
-  for (const key of Object.keys(value)) {
-    if (value[key] === undefined) delete value[key];
-  }
-
-  return value;
-}
-
-function compactDbResult(label: string, result: unknown): unknown {
-  if (result == null) return result;
-
-  if (Array.isArray(result)) {
-    if (label.includes("helius_logs_indicators")) {
-      return clean({
-        rows: result.length,
-        intervals: result.map((row: any) => row?.intervalSec).filter(Boolean),
-        trades: result[0]?.tradeCount,
-        vol: n(result[0]?.volumeSol, 4),
-      });
-    }
-
-    return { rows: result.length };
-  }
-
-  if (typeof result !== "object") return result;
-
-  const row = result as Record<string, any>;
-
-  if (label.includes("helius_logs_trade_metadata")) {
-    return clean({
-      mint: compactId(row.mint),
-      symbol: row.symbol,
-      image: !!row.image,
-      mcap: n(row.marketCapUsd, 2),
-    });
-  }
-
-  if (label.includes("helius_logs_trade_token")) {
-    return clean({
-      mint: compactId(row.mint),
-      symbol: row.symbol,
-      image: !!row.image,
-      mcap: n(row.marketCapUsd, 2),
-    });
-  }
-
-  if (label.includes("helius_logs_trade")) {
-    return clean({
-      mint: compactId(row.mint),
-      side: row.side,
-      sol: n(row.solDeltaUi, 4),
-      mcap: n(row.marketCapUsd, 2),
-    });
-  }
-
-  if (label.includes("helius_logs_create")) {
-    return clean({
-      mint: compactId(row.mint),
-      symbol: row.symbol,
-      name: row.name,
-      image: !!row.image,
-    });
-  }
-
-  if (label.includes("helius_logs_complete")) {
-    return clean({
-      mint: compactId(row.mint),
-      phase: row.phase,
-      slot: row.lastSlot ?? row.slot,
-    });
-  }
-
-  return summarizeForMeasure(result);
-}
-
-export function dbMeasureAction<T>(label: string): MeasureAction<T> {
-  const fullLabel = label.startsWith("db.") ? label : `db.${label}`;
-
-  return {
-    start: () => fullLabel,
-    end: (result: T) => compactDbResult(fullLabel, result),
-  };
 }
 
 export function configureSolardMeasure(): void {
@@ -128,7 +32,7 @@ export function configureSolardMeasure(): void {
       process.env.SOLARD_MEASURE === "0" ||
       process.env.SOLARD_MEASURE_SILENT === "1",
 
-    maxResultLength: readIntEnv("SOLARD_MEASURE_MAX_RESULT_LENGTH", 500),
+    maxResultLength: readIntEnv("SOLARD_MEASURE_MAX_RESULT_LENGTH", 900),
 
     summarize: true,
     stripScopePrefix: true,
@@ -136,25 +40,25 @@ export function configureSolardMeasure(): void {
     sensitiveKeyPattern:
       /secret|private|mnemonic|seed|keypair|password|authorization|cookie|token|apikey|api_key|rpc_endpoint|rpc_url|sender_url|endpoint|url/i,
 
-    maxSummaryDepth: readIntEnv("SOLARD_MEASURE_MAX_SUMMARY_DEPTH", 3, 20),
+    maxSummaryDepth: readIntEnv("SOLARD_MEASURE_MAX_SUMMARY_DEPTH", 4, 20),
     maxSummaryStringLength: readIntEnv(
       "SOLARD_MEASURE_MAX_SUMMARY_STRING_LENGTH",
-      96,
+      160,
       2_000,
     ),
-    summaryArraySample: readIntEnv("SOLARD_MEASURE_ARRAY_SAMPLE", 1, 20),
-    summaryObjectKeys: readIntEnv("SOLARD_MEASURE_OBJECT_KEYS", 12, 200),
+    summaryArraySample: readIntEnv("SOLARD_MEASURE_ARRAY_SAMPLE", 2, 20),
+    summaryObjectKeys: readIntEnv("SOLARD_MEASURE_OBJECT_KEYS", 24, 200),
   });
 }
 
 configureSolardMeasure();
 
 export {
+  createMeasure,
   measure,
   measureSync,
   safeStringify,
   summarizeForMeasure,
-  createMeasure,
 };
 
 export const apiMeasure = createMeasure("solard:api");
@@ -164,58 +68,42 @@ export const workerMeasure = createMeasure("solard:worker");
 export const processMeasure = createMeasure("solard:process");
 
 export async function measureRetry<T>(
-  label: string | MeasureAction<T>,
+  label: string,
   opts: { attempts: number; delay: number; backoff: number },
   fn: () => Promise<T>,
 ): Promise<T> {
-  return await measure.retry(label as MeasureAction<T>, opts, fn);
-}
-
-export function summarizeError(error: unknown): unknown {
-  return summarizeForMeasure(error);
-}
-
-export function compactParams(
-  input: Record<string, unknown>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(input)) {
-    if (value == null || value === "" || value === false) continue;
-    out[key] = value;
-  }
-
-  return out;
+  return await measure.retry(label, opts, fn);
 }
 
 export function label(
   name: string,
-  params: Record<string, unknown> = {},
+  data: Record<string, unknown> = {},
 ): string {
-  const compact = compactParams(params);
-  const entries = Object.entries(compact);
+  const parts = Object.entries(data)
+    .filter(
+      ([, value]) => value !== undefined && value !== null && value !== "",
+    )
+    .map(([key, value]) => {
+      const normalized =
+        typeof value === "number" || typeof value === "boolean"
+          ? String(value)
+          : String(value).replace(/\s+/g, " ").slice(0, 120);
+      return `${key}=${normalized}`;
+    });
 
-  if (!entries.length) return name;
-
-  const text = entries
-    .map(([key, value]) => `${key}=${String(value)}`)
-    .join(" ");
-
-  return `${name} ${text}`;
+  return parts.length ? `${name} ${parts.join(" ")}` : name;
 }
 
 export function requestParams(request: Request): Record<string, unknown> {
-  const url = new URL(request.url);
-
-  return {
-    path: url.pathname,
-    source: url.searchParams.get("source") ?? undefined,
-    ensure: url.searchParams.get("ensure") === "1" ? 1 : undefined,
-    telegram: url.searchParams.get("telegram") === "1" ? 1 : undefined,
-    limit: url.searchParams.get("limit") ?? undefined,
-    sinceMs: url.searchParams.get("sinceMs") ?? undefined,
-    activeWindowMs: url.searchParams.get("activeWindowMs") ?? undefined,
-    includeUnpriced:
-      url.searchParams.get("includeUnpriced") === "1" ? 1 : undefined,
-  };
+  try {
+    const url = new URL(request.url);
+    const out: Record<string, unknown> = { path: url.pathname };
+    for (const [key, value] of url.searchParams.entries()) {
+      if (key.toLowerCase().includes("token")) continue;
+      out[key] = value;
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }

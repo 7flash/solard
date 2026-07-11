@@ -25,9 +25,17 @@ import {
   refreshTokenHolders,
   isLikelySolanaPublicKey,
   api,
-  runTerminalProbe,
+  mountPage,
 } from "../runtime";
 import type { AnyRow, PumpFeedRow, TokenHolder } from "../runtime";
+
+function sourceLabel(): string {
+  return state.pumpFeedSource === "both"
+    ? "Both"
+    : state.pumpFeedSource === "helius"
+      ? "Helius"
+      : "PumpPortal";
+}
 
 function sortPinnedFirst(rows: PumpFeedRow[]): PumpFeedRow[] {
   const pinned = new Set(state.terminalPinnedMints);
@@ -37,6 +45,50 @@ function sortPinnedFirst(rows: PumpFeedRow[]): PumpFeedRow[] {
     if (ap !== bp) return ap ? -1 : 1;
     return 0;
   });
+}
+
+function rowFreshnessMs(row: PumpFeedRow): number | null {
+  const raw = (row.raw ?? {}) as AnyRow;
+  for (const value of [
+    (row as any).priceUpdatedAtMs,
+    raw.priceUpdatedAtMs,
+    row.lastTradeAtMs,
+    row.updatedAtMs,
+    row.createdAtMs,
+  ]) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function priceStatus(
+  row: PumpFeedRow,
+): "live" | "stale" | "snapshot" | "missing" {
+  const direct = String((row as any).priceStatus ?? row.raw?.priceStatus ?? "");
+  if (["live", "stale", "snapshot", "missing"].includes(direct)) {
+    return direct as "live" | "stale" | "snapshot" | "missing";
+  }
+  if (latestMcap(row) == null && row.priceUsd == null) return "missing";
+  const fresh = rowFreshnessMs(row);
+  if (!fresh) return "missing";
+  if (Date.now() - fresh > 30_000) return "stale";
+  const source = String(
+    (row as any).priceSource ?? row.raw?.priceSource ?? row.source ?? "",
+  );
+  return source.includes("snapshot") ? "snapshot" : "live";
+}
+
+function priceClass(row: PumpFeedRow): string {
+  const status = priceStatus(row);
+  return status === "live" ? "good" : status === "missing" ? "bad" : "warn";
+}
+
+function tradeCount(row: PumpFeedRow | null | undefined): number {
+  if (!row) return 0;
+  const direct = Number((row as any).tradeCount ?? NaN);
+  if (Number.isFinite(direct)) return direct;
+  return row.trades?.length ?? 0;
 }
 
 function chooseInspector(rows: PumpFeedRow[]): PumpFeedRow | null {
@@ -52,30 +104,28 @@ function chooseInspector(rows: PumpFeedRow[]): PumpFeedRow | null {
   return rows[0] ?? state.pumpFeed[0] ?? null;
 }
 
-let holderHoverTimer: ReturnType<typeof setTimeout> | null = null;
-const holderAutoLoadedAt: Record<string, number> = {};
+async function reloadTerminalRows(
+  options: { health?: boolean } = {},
+): Promise<void> {
+  state.pumpFeedStatus = "connecting";
+  state.terminalLastError = null;
+  update();
 
-function autoLoadHolders(row: PumpFeedRow | null): void {
-  const mint = row?.mint ?? null;
-  if (!mint || !isLikelySolanaPublicKey(mint)) return;
-  if (
-    state.tokenHolders[mint]?.length ||
-    state.tokenHoldersLoadingMint === mint
-  )
-    return;
-  const last = holderAutoLoadedAt[mint] ?? 0;
-  if (Date.now() - last < 30_000) return;
-  holderAutoLoadedAt[mint] = Date.now();
-  void refreshTokenHolders(mint)
-    .then(update)
-    .catch(() => undefined);
-}
+  const payload = await api<{
+    rows: PumpFeedRow[];
+    rawRows?: AnyRow[];
+    health?: AnyRow | null;
+    stats?: AnyRow | null;
+    meta?: AnyRow;
+  }>(
+    `/api/terminal/feed?limit=300&activeWindowMs=${encodeURIComponent(String(5 * 60_000))}&includeUnpriced=${state.pumpFeedSource === "helius" ? "1" : "0"}&source=${encodeURIComponent(state.pumpFeedSource)}&hideMayhem=${state.hideMayhem ? "1" : "0"}&hideUsdc=${state.hideUsdc ? "1" : "0"}&stats=${options.health ? "1" : "0"}&health=${options.health ? "1" : "0"}`,
+  );
 
-function tradeCount(row: PumpFeedRow | null | undefined): number {
-  if (!row) return 0;
-  const direct = Number((row as any).tradeCount ?? NaN);
-  if (Number.isFinite(direct)) return direct;
-  return row.trades?.length ?? 0;
+  state.pumpFeed = payload.rows ?? [];
+  state.terminalLastPollAtMs = Date.now();
+  state.terminalLastRows = state.pumpFeed.length;
+  if (payload.health) state.terminalHealth = payload.health;
+  state.pumpFeedStatus = "connected";
 }
 
 function healthSummary() {
@@ -88,17 +138,16 @@ function healthSummary() {
     ? (health!.errors as AnyRow[])
     : [];
   const stale = processes.filter((row) => row.stale).length;
-  const probe = state.terminalProbe as AnyRow | null;
-  return { health, store, processes, errors, stale, probe };
+  return { health, store, processes, errors, stale };
 }
 
 function WorkerDiagnostics() {
-  const { health, store, processes, errors, stale, probe } = healthSummary();
+  const { health, store, processes, errors, stale } = healthSummary();
   const ok = health?.ok === true && stale === 0;
   return (
     <section className={`terminal-diagnostics ${ok ? "ok" : "warn"}`}>
       <div>
-        <b>{ok ? "workers ok" : "terminal not healthy"}</b>
+        <b>{ok ? "workers ok" : "terminal health"}</b>
         <span>
           rows={state.terminalLastRows} poll=
           {state.terminalLastPollAtMs
@@ -112,7 +161,7 @@ function WorkerDiagnostics() {
         ) : null}
       </div>
       <div className="terminal-worker-list">
-        {processes.slice(0, 5).map((proc) => (
+        {processes.slice(0, 6).map((proc) => (
           <span
             className={proc.stale || proc.error ? "bad" : "good"}
             title={proc.error ?? JSON.stringify(proc.data ?? {})}
@@ -126,48 +175,32 @@ function WorkerDiagnostics() {
           </span>
         ))}
         {!processes.length ? (
-          <span className="bad">no worker heartbeat yet</span>
+          <span className="warn">health not loaded</span>
         ) : null}
       </div>
-      {probe ? (
-        <div className={`terminal-probe-result ${probe.ok ? "ok" : "bad"}`}>
-          probe {String(probe.source ?? "?")} rows=
-          {Array.isArray(probe.rows) ? probe.rows.length : "?"} injected=
-          {probe.injected ? "yes" : "no"}
-        </div>
-      ) : null}
       <div className="terminal-diagnostic-actions">
         <button
           type="button"
           className="secondary compact"
-          title="Hard restart stream workers, clear stale client rows, then poll SQLite."
           onClick={() =>
-            void runAction(async () => {
-              await api("/api/workers/ensure", {
-                method: "POST",
-                body: JSON.stringify({
-                  action: "restart",
-                  worker: "all",
-                  telegram: true,
-                  source: state.pumpFeedSource,
-                  clearLive: true,
-                }),
-              });
-              await startPumpFeed({ hardRestart: true, clearRows: true });
+            void runAction(() => reloadTerminalRows({ health: true }), {
+              refreshAfter: false,
             })
           }
         >
-          restart + poll
+          refresh rows
         </button>
         <button
           type="button"
           className="secondary compact"
           onClick={() =>
-            void runAction(() =>
-              api("/api/terminal/health?errors=12").then((h) => {
-                state.terminalHealth = h as AnyRow;
-                update();
-              }),
+            void runAction(
+              async () => {
+                state.terminalHealth = await api<AnyRow>(
+                  `/api/terminal/health?errors=12&source=${encodeURIComponent(state.pumpFeedSource)}`,
+                );
+              },
+              { refreshAfter: false },
             )
           }
         >
@@ -176,18 +209,28 @@ function WorkerDiagnostics() {
         <button
           type="button"
           className="secondary compact"
-          title="Probe workers + DB without adding fake data."
-          onClick={() => void runAction(() => runTerminalProbe(false))}
+          onClick={() =>
+            void runAction(
+              async () => {
+                await api("/api/workers/ensure", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    action: "restart",
+                    worker: "all",
+                    all: true,
+                    telegram: true,
+                    restartStale: true,
+                    source: state.pumpFeedSource,
+                    clearLive: true,
+                  }),
+                });
+                await startPumpFeed({ hardRestart: true, clearRows: true });
+              },
+              { refreshAfter: false },
+            )
+          }
         >
-          probe
-        </button>
-        <button
-          type="button"
-          className="secondary compact"
-          title="Insert one synthetic probe row to prove the frontend reads SQLite."
-          onClick={() => void runAction(() => runTerminalProbe(true))}
-        >
-          inject test
+          restart workers
         </button>
       </div>
       {errors.length ? (
@@ -200,24 +243,6 @@ function WorkerDiagnostics() {
       ) : null}
     </section>
   );
-}
-
-function inspectRow(row: PumpFeedRow): void {
-  fixTerminalInspector(row);
-  if (holderHoverTimer) clearTimeout(holderHoverTimer);
-  if (!isLikelySolanaPublicKey(row.mint)) return;
-  const key = pumpRowKey(row);
-  const mint = row.mint!;
-  holderHoverTimer = setTimeout(() => {
-    if (
-      state.terminalInspectorKey === key ||
-      state.terminalInspectorKey === mint
-    ) {
-      void refreshTokenHolders(mint)
-        .then(update)
-        .catch(() => undefined);
-    }
-  }, 900);
 }
 
 function SocialLinks({ row }: { row: PumpFeedRow }) {
@@ -247,13 +272,9 @@ function HolderList({ mint }: { mint?: string | null }) {
   if (loading && !holders.length)
     return <p className="muted tiny">loading holders…</p>;
   if (error && !holders.length)
-    return <p className="muted tiny">holders indexing / not ready yet</p>;
+    return <p className="muted tiny">holders unavailable: {error}</p>;
   if (!holders.length)
-    return (
-      <p className="muted tiny">
-        loading holders automatically; click refresh if RPC is slow.
-      </p>
-    );
+    return <p className="muted tiny">click refresh to load holders.</p>;
   const maxPct = Math.max(
     0.000001,
     ...holders.map((holder) => Number(holder.pctSupply ?? 0)),
@@ -346,7 +367,6 @@ export function TerminalPage() {
   const rows = sortPinnedFirst(sortFeedRows(filteredRows));
   const inspector = chooseInspector(rows);
   const currentMcap = latestMcap(inspector ?? {});
-  autoLoadHolders(inspector);
 
   return (
     <div className="terminal-page-only">
@@ -357,13 +377,8 @@ export function TerminalPage() {
           />
           <h2>Pump</h2>
           <span className="muted tiny">
-            {state.pumpFeedSource === "both"
-              ? "Both"
-              : state.pumpFeedSource === "helius"
-                ? "Helius primary"
-                : "PumpPortal"}{" "}
-            · {state.pumpFeedStatus} · {rows.length}/{state.pumpFeed.length} ·{" "}
-            {state.terminalPinnedMints.length} pinned
+            {sourceLabel()} · {state.pumpFeedStatus} · {rows.length}/
+            {state.pumpFeed.length} · {state.terminalPinnedMints.length} pinned
           </span>
         </div>
         <div className="terminal-actions-compact">
@@ -375,6 +390,9 @@ export function TerminalPage() {
                 "solwal:pump-feed-source",
                 state.pumpFeedSource,
               );
+              void reloadTerminalRows()
+                .then(update)
+                .catch(() => undefined);
               update();
             }}
           >
@@ -392,7 +410,7 @@ export function TerminalPage() {
               })
             }
           >
-            {state.pumpFeedStatus === "connected" ? "restart" : "connect"}
+            {state.pumpFeedStatus === "connected" ? "restart poll" : "connect"}
           </button>
           <button
             type="button"
@@ -469,7 +487,7 @@ export function TerminalPage() {
       <section className="terminal-filterbar">
         <input
           value={state.pumpFeedFilter}
-          placeholder="filter symbol / name"
+          placeholder="filter symbol / name / mint"
           onInput={(event: any) => {
             state.pumpFeedFilter = event.currentTarget.value;
             update();
@@ -501,6 +519,9 @@ export function TerminalPage() {
                 "solwal:pump-hide-mayhem",
                 state.hideMayhem ? "1" : "0",
               );
+              void reloadTerminalRows()
+                .then(update)
+                .catch(() => undefined);
               update();
             }}
           />{" "}
@@ -516,6 +537,9 @@ export function TerminalPage() {
                 "solwal:pump-hide-usdc",
                 state.hideUsdc ? "1" : "0",
               );
+              void reloadTerminalRows()
+                .then(update)
+                .catch(() => undefined);
               update();
             }}
           />{" "}
@@ -541,6 +565,7 @@ export function TerminalPage() {
               <tr>
                 <th></th>
                 <th>token</th>
+                <th>price</th>
                 <th>mcap $</th>
                 <th>SMA 1/5/15</th>
                 <th>trd</th>
@@ -552,10 +577,12 @@ export function TerminalPage() {
                 const pinned = isTerminalPinned(row);
                 const inspected =
                   inspector && pumpRowKey(row) === pumpRowKey(inspector);
+                const fresh = rowFreshnessMs(row);
                 return (
                   <tr
                     className={`${pinned ? "pinned-row" : ""} ${inspected ? "inspected-row" : ""}`}
-                    onMouseEnter={() => inspectRow(row)}
+                    onMouseEnter={() => fixTerminalInspector(row)}
+                    onClick={() => fixTerminalInspector(row)}
                   >
                     <td>
                       <button
@@ -576,7 +603,6 @@ export function TerminalPage() {
                         href={tokenUrl(row.mint)}
                         target="_blank"
                         rel="noreferrer"
-                        onFocus={() => inspectRow(row)}
                       >
                         {tokenImage(row) ? (
                           <img src={tokenImage(row)!} loading="lazy" />
@@ -585,22 +611,23 @@ export function TerminalPage() {
                         )}
                         <span>
                           <b>{row.symbol ? `$${row.symbol}` : "—"}</b>
-                          <small>{row.name ?? "new token"}</small>
+                          <small>
+                            {row.name ??
+                              short(row.mint ?? "", 4, 4) ??
+                              "new token"}
+                          </small>
                         </span>
                       </a>
+                    </td>
+                    <td className={`num-cell ${priceClass(row)}`}>
+                      {row.priceUsd ? `$${row.priceUsd.toExponential(2)}` : "—"}
                     </td>
                     <td className="num-cell">{formatMcap(latestMcap(row))}</td>
                     <td>
                       <SmaInline row={row} />
                     </td>
                     <td>{tradeCount(row)}</td>
-                    <td>
-                      {row.lastTradeAtMs
-                        ? age(row.lastTradeAtMs)
-                        : row.createdAtMs
-                          ? age(row.createdAtMs)
-                          : "—"}
-                    </td>
+                    <td title={priceStatus(row)}>{fresh ? age(fresh) : "—"}</td>
                   </tr>
                 );
               })}
@@ -609,11 +636,13 @@ export function TerminalPage() {
           {!rows.length ? (
             <div className="empty-console">
               <b>No tokens visible.</b>
-              <span>Connect the stream or loosen filters.</span>
+              <span>
+                The shell loaded. Start workers, wait for trades, or loosen
+                filters.
+              </span>
             </div>
           ) : null}
         </div>
-
         <aside className="terminal-hover-inspector">
           <header>
             <span className="section-kicker">Inspector</span>
@@ -638,7 +667,7 @@ export function TerminalPage() {
                 )}
                 <div>
                   <h3>{inspector.symbol ? `$${inspector.symbol}` : "Token"}</h3>
-                  <p>{inspector.name ?? "latest feed token"}</p>
+                  <p>{inspector.name ?? short(inspector.mint ?? "", 5, 5)}</p>
                   <SocialLinks row={inspector} />
                 </div>
               </div>
@@ -659,7 +688,9 @@ export function TerminalPage() {
                   className="secondary compact"
                   disabled={!inspector.mint}
                   onClick={() =>
-                    void runAction(() => addToSelectedWatch(inspector))
+                    void runAction(() => addToSelectedWatch(inspector), {
+                      refreshAfter: false,
+                    })
                   }
                 >
                   watch
@@ -669,7 +700,9 @@ export function TerminalPage() {
                   className="primary compact"
                   disabled={!inspector.mint || !state.terminalDefaultWallet}
                   onClick={() =>
-                    void runAction(() => quickBuyPumpFeedRow(inspector))
+                    void runAction(() => quickBuyPumpFeedRow(inspector), {
+                      refreshAfter: false,
+                    })
                   }
                 >
                   {state.terminalQuickLive ? "LIVE BUY" : "SIM BUY"}
@@ -684,8 +717,18 @@ export function TerminalPage() {
                 </button>
               </div>
               <div className="terminal-kv">
+                <span>Status</span>
+                <b className={priceClass(inspector)}>
+                  {priceStatus(inspector)}
+                </b>
                 <span>MCap</span>
                 <b>{formatMcap(currentMcap)}</b>
+                <span>Price</span>
+                <b>
+                  {inspector.priceUsd
+                    ? `$${inspector.priceUsd.toExponential(4)}`
+                    : "—"}
+                </b>
                 <span>SMA 1m</span>
                 <b>{formatMcap(inspector.sma1m)}</b>
                 <span>SMA 5m</span>
@@ -737,4 +780,8 @@ export function TerminalPage() {
       </section>
     </div>
   );
+}
+
+export default function mount() {
+  return mountPage("terminal", TerminalPage);
 }
