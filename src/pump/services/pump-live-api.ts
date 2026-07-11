@@ -526,12 +526,34 @@ function retryAfterMs(response: Response, fallbackMs: number): number {
   return Number.isFinite(at) ? Math.max(250, at - Date.now()) : fallbackMs;
 }
 
+function rpcTimeoutMs(): number {
+  return Math.max(
+    500,
+    intEnv("SOLARD_RPC_TIMEOUT_MS", intEnv("SOLWAL_RPC_TIMEOUT_MS", 5_000)),
+  );
+}
+
 async function rawRpcFetch<T>(method: string, params: unknown[]): Promise<T> {
-  const response = await fetch(rpcHttpUrl(), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
-  });
+  const timeoutMs = rpcTimeoutMs();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(rpcHttpUrl(), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if ((error as { name?: unknown })?.name === "AbortError") {
+      throw new Error(`RPC ${method} timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+
   const text = await response.text();
   let payload: { result?: T; error?: unknown } = {};
   try {
@@ -1302,6 +1324,88 @@ async function refreshTerminalCurveRows(args: {
   return { checked: candidates.length, updated };
 }
 
+type TerminalCurveRefreshResult = {
+  checked: number;
+  updated: number;
+  skipped?: string;
+  error?: string;
+};
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), Math.max(1, timeoutMs));
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function terminalInlineCurveRefreshEnabled(url: URL): boolean {
+  return (
+    url.searchParams.get("curveRefresh") === "1" ||
+    process.env.SOLARD_TERMINAL_INLINE_CURVE_REFRESH === "1" ||
+    process.env.SOLWAL_TERMINAL_INLINE_CURVE_REFRESH === "1"
+  );
+}
+
+async function maybeRefreshTerminalCurveRows(args: {
+  url: URL;
+  sinceMs: number;
+  pinnedMints: string[];
+}): Promise<TerminalCurveRefreshResult> {
+  if (!terminalInlineCurveRefreshEnabled(args.url)) {
+    return { checked: 0, updated: 0, skipped: "inline-disabled" };
+  }
+
+  const timeoutMs = Math.max(
+    250,
+    intEnv(
+      "SOLARD_TERMINAL_CURVE_REFRESH_TIMEOUT_MS",
+      intEnv("SOLWAL_TERMINAL_CURVE_REFRESH_TIMEOUT_MS", 1_200),
+    ),
+  );
+
+  try {
+    return await withTimeout(
+      refreshTerminalCurveRows({
+        sinceMs: args.sinceMs,
+        pinnedMints: args.pinnedMints,
+        limit: Math.max(
+          1,
+          Math.min(
+            120,
+            intEnv("SOLARD_TERMINAL_INLINE_CURVE_REFRESH_LIMIT", 40),
+          ),
+        ),
+      }),
+      timeoutMs,
+      () => ({
+        checked: 0,
+        updated: 0,
+        skipped: `timeout:${timeoutMs}ms`,
+      }),
+    );
+  } catch (error) {
+    return {
+      checked: 0,
+      updated: 0,
+      skipped: "error",
+      error: errorMessage(error),
+    };
+  }
+}
+
 function filterPumpLiveForTerminal<
   T extends { newTokens: Raw[]; watchGroups: Raw[] },
 >(state: T, sinceMs: number): T {
@@ -1331,6 +1435,47 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
     if (url.searchParams.get("stream") !== "1") {
       const sinceMs = Number(url.searchParams.get("sinceMs") ?? "0");
       const terminal = url.searchParams.get("terminal") === "1";
+
+      // Break-glass fast path: the Terminal UI now polls /api/terminal/feed for
+      // SQLite rows. Keeping /api/pump-live?terminal=1 on the legacy snapshot path
+      // can block the server behind synchronous DB/RPC work before the browser ever
+      // reaches the terminal feed poll. Return a tiny compatibility envelope by
+      // default; opt back into the old heavyweight snapshot with legacySnapshot=1
+      // or SOLARD_PUMP_LIVE_TERMINAL_LEGACY_SNAPSHOT=1.
+      if (
+        terminal &&
+        url.searchParams.get("legacySnapshot") !== "1" &&
+        process.env.SOLARD_PUMP_LIVE_TERMINAL_LEGACY_SNAPSHOT !== "1" &&
+        process.env.SOLWAL_PUMP_LIVE_TERMINAL_LEGACY_SNAPSHOT !== "1"
+      ) {
+        return jsonResponse({
+          ok: true,
+          value: {
+            newTokens: [],
+            watchGroups: [],
+            watchedMints: [],
+            quote: { solUsdPrice: null },
+            curveRefresh: {
+              checked: 0,
+              updated: 0,
+              skipped: "terminal-fast-path",
+            },
+            db: { skipped: "terminal-fast-path" },
+            worker: {
+              status: "terminal-fast-path",
+              message: "Use /api/terminal/feed for terminal rows.",
+            },
+          },
+          meta: {
+            route: "/api/pump-live",
+            method: "GET",
+            scope: "terminal-fast-path",
+            tookMs: 0,
+            summary: { terminal, sinceMs, skipped: "legacy snapshot" },
+          },
+        });
+      }
+
       const measured = await measureSolard(
         "solard:api:GET:/api/pump-live",
         terminal ? "terminal-db-snapshot" : "list-state",
@@ -1345,11 +1490,21 @@ export async function handlePumpLiveGet(request: Request): Promise<Response> {
             .split(",")
             .map((item) => item.trim())
             .filter(Boolean);
-          const solUsdPrice = await resolveSolUsdPrice();
-          const curveRefresh = await refreshTerminalCurveRows({
+          const solUsdPrice = await withTimeout(
+            resolveSolUsdPrice(),
+            Math.max(
+              500,
+              intEnv(
+                "SOLARD_TERMINAL_SOL_USD_TIMEOUT_MS",
+                intEnv("SOLWAL_TERMINAL_SOL_USD_TIMEOUT_MS", 1_500),
+              ),
+            ),
+            () => null,
+          );
+          const curveRefresh = await maybeRefreshTerminalCurveRows({
+            url,
             sinceMs,
             pinnedMints,
-            limit: 120,
           });
           return {
             ...filterPumpLiveForTerminal(state, sinceMs),

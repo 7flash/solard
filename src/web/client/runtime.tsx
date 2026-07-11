@@ -505,6 +505,30 @@ function unwrapApiPayload<T>(payload: any, status: number): T {
   return payload as T;
 }
 
+function compactApiErrorText(text: string, status: number): string {
+  const raw = text.trim();
+  if (!raw) return `HTTP ${status}`;
+
+  const titleMatch = raw.match(/<h1[^>]*>(.*?)<\/h1>/i);
+  const preMatch = raw.match(/<pre[^>]*>(.*?)<\/pre>/is);
+  const htmlLike = /<!doctype|<html|<body|<pre|<h1/i.test(raw);
+  const source = htmlLike
+    ? [titleMatch?.[1], preMatch?.[1]].filter(Boolean).join(" — ") || raw
+    : raw;
+  const noTags = source
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  const clean = noTags || `HTTP ${status}`;
+  return clean.length > 360 ? `${clean.slice(0, 357)}...` : clean;
+}
+
 export async function api<T>(
   url: string,
   options: RequestInit = {},
@@ -534,11 +558,17 @@ export async function api<T>(
       try {
         payload = text ? JSON.parse(text) : {};
       } catch {
-        payload = { ok: false, error: text || `HTTP ${response.status}` };
+        payload = {
+          ok: false,
+          error: compactApiErrorText(text, response.status),
+        };
       }
       if (!response.ok)
         throw new Error(
-          payload?.error ?? payload?.message ?? `HTTP ${response.status}`,
+          compactApiErrorText(
+            String(payload?.error ?? payload?.message ?? text ?? ""),
+            response.status,
+          ),
         );
       return unwrapApiPayload<T>(payload, response.status);
     },

@@ -35,20 +35,7 @@ function sendHeartbeat(status: string, error: string | null = null) {
 
 // 1. Core HTTP Server Setup & Route Definitions
 try {
-  serverHandle = (await serve({
-    port: PORT,
-    routes: {
-      "/health": () =>
-        new Response(JSON.stringify({ status: "ok", time: Date.now() }), {
-          headers: { "Content-Type": "application/json" },
-        }),
-      "/metrics": () =>
-        new Response(
-          JSON.stringify({ pid: process.pid, memory: process.memoryUsage() }),
-          { headers: { "Content-Type": "application/json" } },
-        ),
-    },
-  })) as any;
+  serverHandle = (await serve()) as any;
 
   console.log(
     `[${WORKER_NAME}] Tradjs web server listening natively on port ${PORT}`,

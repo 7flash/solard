@@ -149,7 +149,13 @@ export function configureSolardMeasure(): void {
 
 configureSolardMeasure();
 
-export { measure, measureSync, safeStringify, summarizeForMeasure };
+export {
+  measure,
+  measureSync,
+  safeStringify,
+  summarizeForMeasure,
+  createMeasure,
+};
 
 export const apiMeasure = createMeasure("solard:api");
 export const cliMeasure = createMeasure("solard:cli");
@@ -163,4 +169,53 @@ export async function measureRetry<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   return await measure.retry(label as MeasureAction<T>, opts, fn);
+}
+
+export function summarizeError(error: unknown): unknown {
+  return summarizeForMeasure(error);
+}
+
+export function compactParams(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(input)) {
+    if (value == null || value === "" || value === false) continue;
+    out[key] = value;
+  }
+
+  return out;
+}
+
+export function label(
+  name: string,
+  params: Record<string, unknown> = {},
+): string {
+  const compact = compactParams(params);
+  const entries = Object.entries(compact);
+
+  if (!entries.length) return name;
+
+  const text = entries
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" ");
+
+  return `${name} ${text}`;
+}
+
+export function requestParams(request: Request): Record<string, unknown> {
+  const url = new URL(request.url);
+
+  return {
+    path: url.pathname,
+    source: url.searchParams.get("source") ?? undefined,
+    ensure: url.searchParams.get("ensure") === "1" ? 1 : undefined,
+    telegram: url.searchParams.get("telegram") === "1" ? 1 : undefined,
+    limit: url.searchParams.get("limit") ?? undefined,
+    sinceMs: url.searchParams.get("sinceMs") ?? undefined,
+    activeWindowMs: url.searchParams.get("activeWindowMs") ?? undefined,
+    includeUnpriced:
+      url.searchParams.get("includeUnpriced") === "1" ? 1 : undefined,
+  };
 }

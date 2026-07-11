@@ -891,6 +891,97 @@ export type TerminalFeedRow = TerminalToken & {
   priceAgeMs?: number | null;
 };
 
+function sqlPlaceholders(count: number): string {
+  return Array.from({ length: count }, () => "?").join(", ");
+}
+
+function feedSourceMatches(value: unknown, source: string): boolean {
+  if (!source || source.includes("both")) return true;
+
+  const text = String(value ?? "").toLowerCase();
+  if (!text) return false;
+
+  if (source.includes("helius")) {
+    return text.includes("helius") || text.startsWith("telegram");
+  }
+
+  if (source.includes("pump")) {
+    return (
+      text.includes("pumpportal") ||
+      text === "pump" ||
+      text.startsWith("telegram")
+    );
+  }
+
+  return true;
+}
+
+function tokenPassesFeedFilters(
+  token: TerminalToken,
+  args: {
+    includeUnpriced: boolean;
+    hideMayhem?: boolean;
+    hideUsdc?: boolean;
+  },
+): boolean {
+  if (
+    !args.includeUnpriced &&
+    !String(token.source ?? "")
+      .toLowerCase()
+      .startsWith("telegram") &&
+    token.marketCapUsd == null &&
+    token.priceUsd == null &&
+    !token.image
+  ) {
+    return false;
+  }
+
+  if (args.hideMayhem && Number((token as any).isMayhemMode ?? 0) !== 0) {
+    return false;
+  }
+
+  if (args.hideUsdc) {
+    const quoteAsset = String((token as any).quoteAsset ?? "").toLowerCase();
+    const quoteMint = String((token as any).quoteMint ?? "").toLowerCase();
+    if (
+      quoteAsset === "usdc" ||
+      quoteMint.includes("epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v")
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function latestTradeTime(trade: TerminalTrade | undefined): number {
+  if (!trade) return 0;
+  return Math.max(
+    Number(trade.createdAtMs || 0),
+    Number(trade.updatedAtMs || 0),
+  );
+}
+
+function tradeHasPrice(trade: TerminalTrade | undefined): boolean {
+  return Boolean(
+    trade &&
+    (trade.marketCapUsd != null ||
+      trade.priceUsd != null ||
+      trade.priceSol != null),
+  );
+}
+
+function listLatestPricedTrade(mint: string): TerminalTrade | undefined {
+  return terminalDb.raw<TerminalTrade>(
+    `SELECT * FROM terminalTradesLive
+     WHERE mint = ?
+       AND (marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL OR priceSol IS NOT NULL)
+     ORDER BY createdAtMs DESC, updatedAtMs DESC
+     LIMIT 1`,
+    mint,
+  )[0];
+}
+
 export function listTerminalFeed(
   args: {
     limit?: number;
@@ -916,110 +1007,195 @@ export function listTerminalFeed(
     args.includeUnpriced === true ||
     process.env.SOLARD_TERMINAL_INCLUDE_UNPRICED === "1";
   const source = String(args.source ?? "").toLowerCase();
-  const sourceClause =
-    source.includes("both") || !source
-      ? "1=1"
-      : source.includes("helius")
-        ? `(LOWER(terminalTokensLive.source) LIKE '%helius%'
-            OR LOWER(terminalTokensLive.source) LIKE 'telegram%'
-            OR EXISTS (
-              SELECT 1 FROM terminalTradesLive sourceTrades
-              WHERE sourceTrades.mint = terminalTokensLive.mint
-                AND LOWER(sourceTrades.source) LIKE '%helius%'
-            ))`
-        : `(LOWER(terminalTokensLive.source) LIKE '%pumpportal%'
-            OR LOWER(terminalTokensLive.source) = 'pump'
-            OR LOWER(terminalTokensLive.source) LIKE 'telegram%'
-            OR EXISTS (
-              SELECT 1 FROM terminalTradesLive sourceTrades
-              WHERE sourceTrades.mint = terminalTokensLive.mint
-                AND (LOWER(sourceTrades.source) LIKE '%pumpportal%' OR LOWER(sourceTrades.source) = 'pump')
-            ))`;
-  const priceClause = includeUnpriced
-    ? "1=1"
-    : "(source LIKE 'telegram%' OR marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL OR image IS NOT NULL)";
-  const mayhemClause = args.hideMayhem
-    ? "COALESCE(isMayhemMode, 0) = 0"
-    : "1=1";
-  const usdcClause = args.hideUsdc
-    ? "LOWER(COALESCE(quoteAsset, '')) != 'usdc' AND LOWER(COALESCE(quoteMint, '')) NOT LIKE '%epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v%'"
-    : "1=1";
-  const tokens = terminalDb.raw<TerminalToken>(
-    `SELECT * FROM terminalTokensLive
-     WHERE (
-         updatedAtMs >= ?
-         OR EXISTS (
-           SELECT 1 FROM terminalTradesLive recentTrades
-           WHERE recentTrades.mint = terminalTokensLive.mint
-             AND recentTrades.updatedAtMs >= ?
-         )
-       )
-       AND ${sourceClause}
-       AND ${priceClause}
-       AND ${mayhemClause}
-       AND ${usdcClause}
-     ORDER BY MAX(
-       updatedAtMs,
-       COALESCE((
-         SELECT MAX(recentTrades.updatedAtMs)
-         FROM terminalTradesLive recentTrades
-         WHERE recentTrades.mint = terminalTokensLive.mint
-       ), 0)
-     ) DESC
+
+  /**
+   * Keep this endpoint fast and deterministic.
+   *
+   * The terminal UI polls this function on page load. Avoid correlated EXISTS,
+   * LOWER(source) filters, ORDER BY subqueries, and exact COUNT(*) work here.
+   * Those are the kind of queries that can look fine on small DBs and then hang
+   * the entire page under Helius bursts or a large terminalTradesLive table.
+   */
+  const candidateLimit = Math.min(5000, Math.max(limit * 12, limit + 64));
+  const tradeScanLimit = Math.min(5000, Math.max(limit * 24, limit + 128));
+
+  const latestTradeByMint = new Map<string, TerminalTrade>();
+  const candidateMints = new Set<string>();
+
+  const recentTrades = terminalDb.raw<TerminalTrade>(
+    `SELECT * FROM terminalTradesLive
+     WHERE updatedAtMs >= ?
+     ORDER BY updatedAtMs DESC
      LIMIT ?`,
     minUpdatedAt,
-    minUpdatedAt,
-    limit,
+    tradeScanLimit,
   );
-  return tokens.map((token) => {
-    const indicators = terminalDb.raw<TerminalIndicator>(
-      "SELECT * FROM terminalIndicatorsLive WHERE mint = ?",
-      token.mint,
+
+  for (const trade of recentTrades) {
+    if (!trade.mint || !feedSourceMatches(trade.source, source)) continue;
+    const previous = latestTradeByMint.get(trade.mint);
+    if (!previous || latestTradeTime(trade) > latestTradeTime(previous)) {
+      latestTradeByMint.set(trade.mint, trade);
+    }
+    candidateMints.add(trade.mint);
+  }
+
+  const tokenRows = terminalDb.raw<TerminalToken>(
+    `SELECT * FROM terminalTokensLive
+     WHERE updatedAtMs >= ?
+     ORDER BY updatedAtMs DESC
+     LIMIT ?`,
+    minUpdatedAt,
+    candidateLimit,
+  );
+
+  const tokensByMint = new Map<string, TerminalToken>();
+  for (const token of tokenRows) {
+    if (!token.mint) continue;
+    if (
+      !feedSourceMatches(token.source, source) &&
+      !candidateMints.has(token.mint)
+    ) {
+      continue;
+    }
+    if (
+      !tokenPassesFeedFilters(token, {
+        includeUnpriced,
+        hideMayhem: args.hideMayhem,
+        hideUsdc: args.hideUsdc,
+      })
+    ) {
+      continue;
+    }
+    tokensByMint.set(token.mint, token);
+    candidateMints.add(token.mint);
+  }
+
+  const missingMints = [...candidateMints].filter(
+    (mint) => !tokensByMint.has(mint),
+  );
+  for (let i = 0; i < missingMints.length; i += 250) {
+    const chunk = missingMints.slice(i, i + 250);
+    if (!chunk.length) continue;
+    const fetched = terminalDb.raw<TerminalToken>(
+      `SELECT * FROM terminalTokensLive WHERE mint IN (${sqlPlaceholders(chunk.length)})`,
+      ...chunk,
     );
+    for (const token of fetched) {
+      if (!token.mint) continue;
+      if (
+        !tokenPassesFeedFilters(token, {
+          includeUnpriced,
+          hideMayhem: args.hideMayhem,
+          hideUsdc: args.hideUsdc,
+        })
+      ) {
+        continue;
+      }
+      tokensByMint.set(token.mint, token);
+    }
+  }
+
+  const sortedTokens = [...tokensByMint.values()]
+    .filter((token) => {
+      const latestTrade = latestTradeByMint.get(token.mint);
+      return (
+        feedSourceMatches(token.source, source) ||
+        feedSourceMatches(latestTrade?.source, source)
+      );
+    })
+    .sort((a, b) => {
+      const aTime = Math.max(
+        Number(a.updatedAtMs || 0),
+        latestTradeTime(latestTradeByMint.get(a.mint)),
+      );
+      const bTime = Math.max(
+        Number(b.updatedAtMs || 0),
+        latestTradeTime(latestTradeByMint.get(b.mint)),
+      );
+      return bTime - aTime;
+    })
+    .slice(0, limit);
+
+  const mints = sortedTokens.map((token) => token.mint).filter(Boolean);
+  const indicatorsByMint = new Map<string, TerminalIndicator[]>();
+  if (mints.length) {
+    const indicators = terminalDb.raw<TerminalIndicator>(
+      `SELECT * FROM terminalIndicatorsLive WHERE mint IN (${sqlPlaceholders(mints.length)})`,
+      ...mints,
+    );
+    for (const indicator of indicators) {
+      const list = indicatorsByMint.get(indicator.mint) ?? [];
+      list.push(indicator);
+      indicatorsByMint.set(indicator.mint, list);
+    }
+  }
+
+  const exactCounts = process.env.SOLARD_TERMINAL_FEED_EXACT_COUNTS === "1";
+  const exactTradeCounts = new Map<string, number>();
+  if (exactCounts && mints.length) {
+    const counts = terminalDb.raw<{ mint: string; count: number }>(
+      `SELECT mint, COUNT(*) as count
+       FROM terminalTradesLive
+       WHERE mint IN (${sqlPlaceholders(mints.length)})
+       GROUP BY mint`,
+      ...mints,
+    );
+    for (const row of counts)
+      exactTradeCounts.set(row.mint, Number(row.count || 0));
+  }
+
+  return sortedTokens.map((token) => {
+    const indicators = indicatorsByMint.get(token.mint) ?? [];
     const byInterval = new Map<number, TerminalIndicator>(
       indicators.map(
         (row) => [row.intervalSec, row] as [number, TerminalIndicator],
       ),
     );
-    const tradeCount =
-      terminalDb.raw<{ count: number }>(
-        "SELECT COUNT(*) as count FROM terminalTradesLive WHERE mint = ?",
-        token.mint,
-      )[0]?.count ?? 0;
-    const latestTrade = terminalDb.raw<TerminalTrade>(
-      `SELECT * FROM terminalTradesLive
-       WHERE mint = ? AND (marketCapUsd IS NOT NULL OR priceUsd IS NOT NULL OR priceSol IS NOT NULL)
-       ORDER BY createdAtMs DESC, updatedAtMs DESC
-       LIMIT 1`,
-      token.mint,
-    )[0];
-    const latestTradeAtMs = latestTrade
-      ? Math.max(
-          Number(latestTrade.createdAtMs || 0),
-          Number(latestTrade.updatedAtMs || 0),
-        )
+
+    const latestRecentTrade = latestTradeByMint.get(token.mint);
+    const latestPricedTrade = tradeHasPrice(latestRecentTrade)
+      ? latestRecentTrade
+      : listLatestPricedTrade(token.mint);
+    const latestTradeAtMs = latestRecentTrade
+      ? latestTradeTime(latestRecentTrade)
+      : latestPricedTrade
+        ? latestTradeTime(latestPricedTrade)
+        : null;
+    const latestPricedTradeAtMs = latestPricedTrade
+      ? latestTradeTime(latestPricedTrade)
       : null;
     const liveMarketCapUsd =
-      latestTrade?.marketCapUsd ?? token.marketCapUsd ?? null;
-    const livePriceUsd = latestTrade?.priceUsd ?? token.priceUsd ?? null;
-    const livePriceSol = latestTrade?.priceSol ?? token.priceSol ?? null;
+      latestPricedTrade?.marketCapUsd ?? token.marketCapUsd ?? null;
+    const livePriceUsd = latestPricedTrade?.priceUsd ?? token.priceUsd ?? null;
+    const livePriceSol = latestPricedTrade?.priceSol ?? token.priceSol ?? null;
     const priceUpdatedAtMs =
-      latestTradeAtMs ??
+      latestPricedTradeAtMs ??
       (liveMarketCapUsd != null || livePriceUsd != null || livePriceSol != null
         ? Number(token.updatedAtMs || 0) || null
         : null);
     const liveUpdatedAtMs = Math.max(
       Number(token.updatedAtMs || 0),
       Number(latestTradeAtMs || 0),
+      Number(latestPricedTradeAtMs || 0),
     );
+    const indicatorTradeCount =
+      byInterval.get(86400)?.tradeCount ??
+      byInterval.get(21600)?.tradeCount ??
+      byInterval.get(3600)?.tradeCount ??
+      byInterval.get(900)?.tradeCount ??
+      byInterval.get(300)?.tradeCount ??
+      byInterval.get(60)?.tradeCount ??
+      0;
+
     return {
       ...token,
       priceSol: livePriceSol,
       priceUsd: livePriceUsd,
       marketCapUsd: liveMarketCapUsd,
       marketCapSol:
-        latestTrade?.priceSol != null
-          ? latestTrade.priceSol * Number(token.supplyUi ?? 1_000_000_000)
+        latestPricedTrade?.priceSol != null
+          ? latestPricedTrade.priceSol * Number(token.supplyUi ?? 1_000_000_000)
           : (token.marketCapSol ?? null),
       updatedAtMs: liveUpdatedAtMs || token.updatedAtMs,
       lastTradeAtMs: latestTradeAtMs,
@@ -1032,7 +1208,8 @@ export function listTerminalFeed(
       sma1m: byInterval.get(60)?.smaMarketCapUsd ?? liveMarketCapUsd,
       sma5m: byInterval.get(300)?.smaMarketCapUsd ?? liveMarketCapUsd,
       sma15m: byInterval.get(900)?.smaMarketCapUsd ?? liveMarketCapUsd,
-      tradeCount: Number(tradeCount),
+      tradeCount:
+        exactTradeCounts.get(token.mint) ?? Number(indicatorTradeCount),
     };
   });
 }
