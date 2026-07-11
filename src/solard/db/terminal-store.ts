@@ -121,10 +121,9 @@ export type TelegramSignal = z.infer<typeof TelegramSignalSchema>;
 export const terminalDb = new Database(
   SOLARD_DB_PATH,
   {
-    // The live terminal tables are created below with explicit SQL.
-    // sqlite-zod-orm reserves some `id` shapes for row identity on older schemas;
-    // letting it create terminalTradesLive caused TEXT trade ids to be inserted into
-    // INTEGER id columns and produced SQLite `datatype mismatch` under live Helius.
+    terminalTokensLive: TerminalTokenSchema,
+    terminalTradesLive: TerminalTradeSchema,
+    terminalIndicatorsLive: TerminalIndicatorSchema,
     processStatus: ProcessStatusSchema,
     workerCursors: WorkerCursorSchema,
     telegramSignals: TelegramSignalSchema,
@@ -134,9 +133,33 @@ export const terminalDb = new Database(
     softDeletes: false,
     reactive: false,
     unique: {
+      terminalTokensLive: [["mint"]],
+      terminalTradesLive: [["id"]],
+      terminalIndicatorsLive: [["id"], ["mint", "intervalSec"]],
       processStatus: [["name"]],
       workerCursors: [["key"]],
       telegramSignals: [["id"]],
+    },
+    indexes: {
+      terminalTokensLive: [
+        "mint",
+        "updatedAtMs",
+        "marketCapUsd",
+        "source",
+        ["source", "updatedAtMs"],
+        ["isMayhemMode", "updatedAtMs"],
+      ],
+      terminalTradesLive: [
+        "id",
+        "signature",
+        "createdAtMs",
+        "updatedAtMs",
+        ["mint", "createdAtMs"],
+      ],
+      terminalIndicatorsLive: ["id", "updatedAtMs", ["mint", "intervalSec"]],
+      processStatus: ["heartbeatAtMs"],
+      workerCursors: ["key", "updatedAtMs"],
+      telegramSignals: ["id", "receivedAtMs"],
     },
   },
 );
@@ -569,6 +592,7 @@ export function upsertTerminalToken(
   input: Partial<TerminalToken> & { mint: string },
 ): TerminalToken {
   const now = Date.now();
+
   const row: TerminalToken = {
     mint: requiredText(input.mint),
     symbol: cleanDisplayText(input.symbol) ?? "",
@@ -581,10 +605,7 @@ export function upsertTerminalToken(
     telegram: nullableText((input as any).telegram),
     creator: nullableText(input.creator),
     bondingCurveKey: nullableText(input.bondingCurveKey),
-    // Empty source/unknown phase mean "do not overwrite existing value" on conflict.
-    // This matters for metadata-only hydration, which should not make a Helius
-    // token disappear from the Helius-filtered terminal feed.
-    source: cleanDisplayText(input.source) ?? "",
+    source: requiredText(input.source, "unknown"),
     phase: (input.phase ?? "unknown") as TerminalToken["phase"],
     isMayhemMode: finiteInteger((input as any).isMayhemMode ?? 0, 0),
     quoteAsset: nullableText((input as any).quoteAsset),
@@ -602,62 +623,42 @@ export function upsertTerminalToken(
     createdAtMs: finiteInteger(input.createdAtMs ?? now, now),
     updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
-  terminalDb.exec(
-    `INSERT INTO terminalTokensLive (mint, symbol, name, image, uri, description, website, twitter, telegram, creator, bondingCurveKey, source, phase, isMayhemMode, quoteAsset, quoteMint, supplyUi, priceSol, priceUsd, marketCapSol, marketCapUsd, initialMarketCapUsd, lastSlot, signature, createdAtMs, updatedAtMs)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(mint) DO UPDATE SET
-       symbol=COALESCE(NULLIF(excluded.symbol, ''), terminalTokensLive.symbol),
-       name=COALESCE(NULLIF(excluded.name, ''), terminalTokensLive.name),
-       image=COALESCE(NULLIF(excluded.image, ''), terminalTokensLive.image),
-       uri=COALESCE(NULLIF(excluded.uri, ''), terminalTokensLive.uri),
-       description=COALESCE(excluded.description, terminalTokensLive.description),
-       website=COALESCE(excluded.website, terminalTokensLive.website),
-       twitter=COALESCE(excluded.twitter, terminalTokensLive.twitter),
-       telegram=COALESCE(excluded.telegram, terminalTokensLive.telegram),
-       creator=COALESCE(excluded.creator, terminalTokensLive.creator),
-       bondingCurveKey=COALESCE(excluded.bondingCurveKey, terminalTokensLive.bondingCurveKey),
-       source=COALESCE(NULLIF(excluded.source, ''), terminalTokensLive.source, 'unknown'),
-       phase=CASE WHEN excluded.phase != 'unknown' THEN excluded.phase ELSE terminalTokensLive.phase END,
-       isMayhemMode=MAX(COALESCE(terminalTokensLive.isMayhemMode, 0), COALESCE(excluded.isMayhemMode, 0)),
-       quoteAsset=COALESCE(excluded.quoteAsset, terminalTokensLive.quoteAsset),
-       quoteMint=COALESCE(excluded.quoteMint, terminalTokensLive.quoteMint),
-       supplyUi=CASE WHEN excluded.supplyUi > 0 THEN excluded.supplyUi ELSE terminalTokensLive.supplyUi END,
-       priceSol=COALESCE(excluded.priceSol, terminalTokensLive.priceSol),
-       priceUsd=COALESCE(excluded.priceUsd, terminalTokensLive.priceUsd),
-       marketCapSol=COALESCE(excluded.marketCapSol, terminalTokensLive.marketCapSol),
-       marketCapUsd=COALESCE(excluded.marketCapUsd, terminalTokensLive.marketCapUsd),
-       initialMarketCapUsd=COALESCE(terminalTokensLive.initialMarketCapUsd, excluded.initialMarketCapUsd),
-       lastSlot=MAX(terminalTokensLive.lastSlot, excluded.lastSlot),
-       signature=COALESCE(excluded.signature, terminalTokensLive.signature),
-       updatedAtMs=MAX(terminalTokensLive.updatedAtMs, excluded.updatedAtMs)`,
-    row.mint,
-    row.symbol,
-    row.name,
-    row.image,
-    row.uri,
-    (row as any).description,
-    (row as any).website,
-    (row as any).twitter,
-    (row as any).telegram,
-    row.creator,
-    row.bondingCurveKey,
-    row.source,
-    row.phase,
-    (row as any).isMayhemMode,
-    (row as any).quoteAsset,
-    (row as any).quoteMint,
-    row.supplyUi,
-    row.priceSol,
-    row.priceUsd,
-    row.marketCapSol,
-    row.marketCapUsd,
-    row.initialMarketCapUsd,
-    row.lastSlot,
-    row.signature,
-    row.createdAtMs,
-    row.updatedAtMs,
-  );
-  return row;
+
+  return terminalDb.terminalTokensLive.upsertOnConflict(row, "mint", (t) => ({
+    symbol: t.excludedIfNotEmpty("symbol"),
+    name: t.excludedIfNotEmpty("name"),
+    image: t.excludedIfNotEmpty("image"),
+    uri: t.excludedIfNotEmpty("uri"),
+
+    description: t.excludedIfNotNull("description"),
+    website: t.excludedIfNotNull("website"),
+    twitter: t.excludedIfNotNull("twitter"),
+    telegram: t.excludedIfNotNull("telegram"),
+
+    creator: t.excluded("creator"),
+    bondingCurveKey: t.excluded("bondingCurveKey"),
+    source: t.excluded("source"),
+    phase: t.excluded("phase"),
+
+    isMayhemMode: t.max("isMayhemMode"),
+
+    quoteAsset: t.excludedIfNotNull("quoteAsset"),
+    quoteMint: t.excludedIfNotNull("quoteMint"),
+
+    supplyUi: t.excluded("supplyUi"),
+
+    priceSol: t.excludedIfNotNull("priceSol"),
+    priceUsd: t.excludedIfNotNull("priceUsd"),
+    marketCapSol: t.excludedIfNotNull("marketCapSol"),
+    marketCapUsd: t.excludedIfNotNull("marketCapUsd"),
+
+    initialMarketCapUsd: t.keepFirst("initialMarketCapUsd"),
+
+    lastSlot: t.max("lastSlot"),
+    signature: t.excludedIfNotNull("signature"),
+    createdAtMs: t.keepFirst("createdAtMs"),
+    updatedAtMs: t.excluded("updatedAtMs"),
+  })) as TerminalToken;
 }
 
 export function insertTerminalTrade(
@@ -674,6 +675,7 @@ export function insertTerminalTrade(
   const confidenceValue: TerminalConfidence = parsedConfidence.success
     ? parsedConfidence.data
     : "processed";
+
   const row: TerminalTrade = {
     id: requiredText(input.id),
     mint: requiredText(input.mint),
@@ -695,39 +697,24 @@ export function insertTerminalTrade(
     createdAtMs: finiteInteger(input.createdAtMs ?? now, now),
     updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
-  terminalDb.exec(
-    `INSERT INTO terminalTradesLive (id, mint, signature, slot, owner, side, tokenDeltaUi, solDeltaUi, priceSol, priceUsd, marketCapUsd, confidence, source, rawJson, createdAtMs, updatedAtMs)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       owner=COALESCE(excluded.owner, terminalTradesLive.owner),
-       side=CASE WHEN excluded.side != 'unknown' THEN excluded.side ELSE terminalTradesLive.side END,
-       tokenDeltaUi=CASE WHEN excluded.tokenDeltaUi > 0 THEN excluded.tokenDeltaUi ELSE terminalTradesLive.tokenDeltaUi END,
-       solDeltaUi=CASE WHEN excluded.solDeltaUi > 0 THEN excluded.solDeltaUi ELSE terminalTradesLive.solDeltaUi END,
-       priceSol=COALESCE(excluded.priceSol, terminalTradesLive.priceSol),
-       priceUsd=COALESCE(excluded.priceUsd, terminalTradesLive.priceUsd),
-       marketCapUsd=COALESCE(excluded.marketCapUsd, terminalTradesLive.marketCapUsd),
-       confidence=excluded.confidence,
-       source=COALESCE(NULLIF(excluded.source, ''), terminalTradesLive.source),
-       rawJson=COALESCE(NULLIF(excluded.rawJson, '{}'), terminalTradesLive.rawJson),
-       updatedAtMs=excluded.updatedAtMs`,
-    row.id,
-    row.mint,
-    row.signature,
-    row.slot,
-    row.owner,
-    row.side,
-    row.tokenDeltaUi,
-    row.solDeltaUi,
-    row.priceSol,
-    row.priceUsd,
-    row.marketCapUsd,
-    row.confidence,
-    row.source,
-    row.rawJson,
-    row.createdAtMs,
-    row.updatedAtMs,
-  );
-  return row;
+
+  return terminalDb.terminalTradesLive.upsertOnConflict(row, "id", (t) => ({
+    mint: t.excluded("mint"),
+    signature: t.excluded("signature"),
+    slot: t.max("slot"),
+    owner: t.excludedIfNotNull("owner"),
+    side: t.excluded("side"),
+    tokenDeltaUi: t.excluded("tokenDeltaUi"),
+    solDeltaUi: t.excluded("solDeltaUi"),
+    priceSol: t.excludedIfNotNull("priceSol"),
+    priceUsd: t.excludedIfNotNull("priceUsd"),
+    marketCapUsd: t.excludedIfNotNull("marketCapUsd"),
+    confidence: t.excluded("confidence"),
+    source: t.excluded("source"),
+    rawJson: t.excludedIfNotEmpty("rawJson"),
+    createdAtMs: t.keepFirst("createdAtMs"),
+    updatedAtMs: t.excluded("updatedAtMs"),
+  })) as TerminalTrade;
 }
 
 function median(values: number[]): number | null {
@@ -825,27 +812,20 @@ function writeTerminalIndicators(
   indicators: readonly TerminalIndicator[],
 ): void {
   for (const indicator of indicators) {
-    terminalDb.exec(
-      `INSERT INTO terminalIndicatorsLive (id, mint, intervalSec, smaPriceUsd, smaMarketCapUsd, vwmaPriceUsd, medianPriceUsd, tradeCount, volumeSol, updatedAtMs)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(mint, intervalSec) DO UPDATE SET
-         smaPriceUsd=excluded.smaPriceUsd,
-         smaMarketCapUsd=excluded.smaMarketCapUsd,
-         vwmaPriceUsd=excluded.vwmaPriceUsd,
-         medianPriceUsd=excluded.medianPriceUsd,
-         tradeCount=excluded.tradeCount,
-         volumeSol=excluded.volumeSol,
-         updatedAtMs=excluded.updatedAtMs`,
-      indicator.id,
-      indicator.mint,
-      indicator.intervalSec,
-      indicator.smaPriceUsd,
-      indicator.smaMarketCapUsd,
-      indicator.vwmaPriceUsd,
-      indicator.medianPriceUsd,
-      indicator.tradeCount,
-      indicator.volumeSol,
-      indicator.updatedAtMs,
+    terminalDb.terminalIndicatorsLive.upsertOnConflict(
+      indicator,
+      "id",
+      (t) => ({
+        mint: t.excluded("mint"),
+        intervalSec: t.excluded("intervalSec"),
+        smaPriceUsd: t.excludedIfNotNull("smaPriceUsd"),
+        smaMarketCapUsd: t.excludedIfNotNull("smaMarketCapUsd"),
+        vwmaPriceUsd: t.excludedIfNotNull("vwmaPriceUsd"),
+        medianPriceUsd: t.excludedIfNotNull("medianPriceUsd"),
+        tradeCount: t.excluded("tradeCount"),
+        volumeSol: t.excluded("volumeSol"),
+        updatedAtMs: t.excluded("updatedAtMs"),
+      }),
     );
   }
 }
