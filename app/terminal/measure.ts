@@ -20,9 +20,31 @@ export function compactId(value: string, head = 6, tail = 4): string {
 
 export function summarizeError(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
+    const stack = String(error.stack ?? `${error.name}: ${error.message}`)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 10);
+
     return {
       name: error.name,
+
       message: error.message,
+
+      location: stack.find(
+        (line, index) => index > 0 && !line.includes("node_modules/measure-fn"),
+      ),
+
+      stack,
+
+      cause:
+        error.cause instanceof Error
+          ? {
+              name: error.cause.name,
+
+              message: error.cause.message,
+            }
+          : error.cause,
     };
   }
 

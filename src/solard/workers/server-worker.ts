@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-import { upsertProcessStatus } from "../../../shared/db.js";
+import { isSqliteBusyError, upsertProcessStatus } from "../../../shared/db.js";
 import {
-  DB_RETRY,
+  compactId,
   dbMeasure,
   processMeasure,
   summarizeError,
@@ -19,6 +19,12 @@ const HEARTBEAT_MS = Math.max(
 let stopping = false;
 let heartbeatInFlight = false;
 
+const STATUS_WRITE_ATTEMPTS = 5;
+
+function statusWriteDelayMs(attempt: number): number {
+  return Math.min(500, 20 * 2 ** Math.max(0, attempt - 1));
+}
+
 async function sendHeartbeat(
   status = "running",
   error: string | null = null,
@@ -30,40 +36,59 @@ async function sendHeartbeat(
   heartbeatInFlight = true;
 
   try {
-    await dbMeasure.retry(
-      {
-        start: () => `db.process_status name=${NAME}`,
+    for (let attempt = 1; attempt <= STATUS_WRITE_ATTEMPTS; attempt++) {
+      try {
+        dbMeasure.sync(
+          {
+            start: () =>
+              `db.upsert_process_status name=${compactId(NAME)} status=${status}`,
 
-        end: (result: any) => ({
-          updated: result != null,
-        }),
+            end: (result: any) => ({
+              updated: result != null,
 
-        catch: summarizeError,
-      },
-      DB_RETRY,
-      async () =>
-        upsertProcessStatus({
-          name: NAME,
+              status: result?.status ?? status,
+            }),
 
-          kind: "server",
+            catch: summarizeError,
+          },
+          () =>
+            upsertProcessStatus({
+              name: NAME,
 
-          status,
+              kind: "server",
 
-          buildId: BUILD_ID,
+              status,
 
-          error,
+              buildId: BUILD_ID,
 
-          dataJson: JSON.stringify({
-            heartbeatMs: HEARTBEAT_MS,
+              error,
 
-            source: "shared/db.ts",
-          }),
+              dataJson: JSON.stringify({
+                heartbeatMs: HEARTBEAT_MS,
 
-          heartbeatAtMs: Date.now(),
+                source: "shared/db.ts",
+              }),
 
-          updatedAtMs: Date.now(),
-        }),
-    );
+              heartbeatAtMs: Date.now(),
+
+              updatedAtMs: Date.now(),
+            }),
+        );
+
+        return;
+      } catch (writeError) {
+        if (
+          !isSqliteBusyError(writeError) ||
+          attempt >= STATUS_WRITE_ATTEMPTS
+        ) {
+          throw writeError;
+        }
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, statusWriteDelayMs(attempt)),
+        );
+      }
+    }
   } finally {
     heartbeatInFlight = false;
   }

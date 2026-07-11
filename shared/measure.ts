@@ -95,17 +95,81 @@ export function compactId(value: string, head = 6, tail = 4): string {
   return `${value.slice(0, head)}…${value.slice(-tail)}`;
 }
 
-export function summarizeError(error: unknown): Record<string, unknown> {
+type ErrorWithSqliteFields = Error & {
+  code?: unknown;
+  errno?: unknown;
+  byteOffset?: unknown;
+};
+
+function stackLines(error: Error, limit = 10): string[] {
+  return String(error.stack ?? `${error.name}: ${error.message}`)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, Math.max(1, limit));
+}
+
+function firstApplicationFrame(stack: readonly string[]): string | undefined {
+  return stack.find(
+    (line, index) =>
+      index > 0 &&
+      !line.includes("node_modules/measure-fn") &&
+      !line.includes("node:internal") &&
+      !line.includes("bun:sqlite"),
+  );
+}
+
+function summarizeCause(cause: unknown, depth: number): unknown {
+  if (cause == null) {
+    return undefined;
+  }
+
+  if (cause instanceof Error && depth < 2) {
+    return summarizeErrorInternal(cause, depth + 1);
+  }
+
+  return cause instanceof Error
+    ? {
+        name: cause.name,
+
+        message: cause.message,
+      }
+    : cause;
+}
+
+function summarizeErrorInternal(
+  error: unknown,
+  depth: number,
+): Record<string, unknown> {
   if (error instanceof Error) {
+    const sqlite = error as ErrorWithSqliteFields;
+
+    const stack = stackLines(error);
+
     return {
       name: error.name,
+
       message: error.message,
 
-      cause: error.cause == null ? undefined : summarizeError(error.cause),
+      code: sqlite.code,
+
+      errno: sqlite.errno,
+
+      byteOffset: sqlite.byteOffset,
+
+      location: firstApplicationFrame(stack),
+
+      stack,
+
+      cause: summarizeCause(error.cause, depth),
     };
   }
 
   return {
     message: String(error),
   };
+}
+
+export function summarizeError(error: unknown): Record<string, unknown> {
+  return summarizeErrorInternal(error, 0);
 }

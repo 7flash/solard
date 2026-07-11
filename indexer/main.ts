@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 import {
   SOLARD_DB_PATH,
+  isSqliteBusyError,
   recordWorkerError,
   upsertProcessStatus,
 } from "../shared/db.js";
 import { loadConfig } from "./config.js";
 import { runHeliusWsSession } from "./helius-ws.js";
 import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
-import { DB_RETRY, dbMeasure } from "../shared/measure.js";
+import { compactId, dbMeasure } from "../shared/measure.js";
 import { startMetadataHydrator } from "./metadata.js";
 import { startMayhemHydrator } from "./mayhem.js";
 import { refreshSolUsd } from "./sol-usd.js";
@@ -17,22 +18,42 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const STATUS_WRITE_ATTEMPTS = 5;
+
+function statusWriteDelayMs(attempt: number): number {
+  return Math.min(500, 20 * 2 ** Math.max(0, attempt - 1));
+}
+
 async function writeProcessStatus(
   input: Parameters<typeof upsertProcessStatus>[0],
 ): Promise<void> {
-  await dbMeasure.retry(
-    {
-      start: () => `db.process_status name=${input.name}`,
+  for (let attempt = 1; attempt <= STATUS_WRITE_ATTEMPTS; attempt++) {
+    try {
+      dbMeasure.sync(
+        {
+          start: () =>
+            `db.upsert_process_status name=${compactId(input.name)} status=${input.status}`,
 
-      end: (result: any) => ({
-        updated: result != null,
-      }),
+          end: (result: any) => ({
+            updated: result != null,
 
-      catch: summarizeError,
-    },
-    DB_RETRY,
-    async () => upsertProcessStatus(input),
-  );
+            status: result?.status ?? input.status,
+          }),
+
+          catch: summarizeError,
+        },
+        () => upsertProcessStatus(input),
+      );
+
+      return;
+    } catch (error) {
+      if (!isSqliteBusyError(error) || attempt >= STATUS_WRITE_ATTEMPTS) {
+        throw error;
+      }
+
+      await sleep(statusWriteDelayMs(attempt));
+    }
+  }
 }
 
 function createCounters(): Counters {

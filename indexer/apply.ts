@@ -1,7 +1,6 @@
 import { appendTokenTradeOnce, upsertTerminalToken } from "../shared/db.js";
 import {
   compactId,
-  DB_RETRY,
   dbMeasure,
   indexerMeasure,
   summarizeError,
@@ -54,7 +53,7 @@ export async function applyIndexedEvents(
 
       for (const event of events) {
         if (event.kind === "create") {
-          await dbMeasure.retry(
+          dbMeasure.sync(
             {
               start: () => `db.upsert_token mint=${compactId(event.mint)}`,
 
@@ -64,8 +63,7 @@ export async function applyIndexedEvents(
 
               catch: summarizeError,
             },
-            DB_RETRY,
-            async () =>
+            () =>
               upsertTerminalToken({
                 mint: event.mint,
 
@@ -123,18 +121,20 @@ export async function applyIndexedEvents(
            * windows are read from tokenPriceWindows; no token-state update or
            * aggregation runs here.
            */
-          const tradeWrite = await dbMeasure.retry(
+          const tradeWrite = dbMeasure.sync(
             {
-              start: () => `db.append_trade mint=${compactId(event.mint)}`,
+              start: () =>
+                `db.insert_trade mint=${compactId(event.mint)} event=${compactId(event.eventKey)}`,
 
               end: (result: any) => ({
+                event: compactId(result?.row?.eventKey ?? event.eventKey),
+
                 inserted: result?.inserted === true,
               }),
 
               catch: summarizeError,
             },
-            DB_RETRY,
-            async () =>
+            () =>
               appendTokenTradeOnce({
                 eventKey: event.eventKey,
 
@@ -185,7 +185,7 @@ export async function applyIndexedEvents(
 
           applied++;
         } else {
-          await dbMeasure.retry(
+          dbMeasure.sync(
             {
               start: () => `db.complete_token mint=${compactId(event.mint)}`,
 
@@ -195,8 +195,7 @@ export async function applyIndexedEvents(
 
               catch: summarizeError,
             },
-            DB_RETRY,
-            async () =>
+            () =>
               upsertTerminalToken({
                 mint: event.mint,
 

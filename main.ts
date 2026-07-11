@@ -1,5 +1,10 @@
 import bgrun from "bgrun";
-import { listProcessStatus, upsertProcessStatus } from "./shared/db.js";
+import {
+  isSqliteBusyError,
+  listProcessStatus,
+  upsertProcessStatus,
+} from "./shared/db.js";
+import { compactId, dbMeasure, summarizeError } from "./shared/measure.js";
 
 type WorkerName =
   "solard-server-worker" | "solard-helius-logs-v1" | "solard-telegram-signals";
@@ -125,45 +130,104 @@ function commandMatches(name: WorkerName): boolean {
   return actual === expected;
 }
 
+let supervisorStatusQueue: Promise<void> = Promise.resolve();
+
+const STATUS_WRITE_ATTEMPTS = 5;
+
+function statusWriteDelayMs(attempt: number): number {
+  return Math.min(500, 20 * 2 ** Math.max(0, attempt - 1));
+}
+
+async function persistSupervisorStatus(
+  spec: WorkerSpec,
+  status: string,
+  error: unknown,
+): Promise<void> {
+  const now = Date.now();
+
+  for (let attempt = 1; attempt <= STATUS_WRITE_ATTEMPTS; attempt++) {
+    try {
+      dbMeasure.sync(
+        {
+          start: () =>
+            `db.upsert_process_status name=${compactId(spec.name)} status=${status} source=supervisor`,
+
+          end: (result: any) => ({
+            updated: result != null,
+
+            status: result?.status ?? status,
+          }),
+
+          catch: summarizeError,
+        },
+        () =>
+          upsertProcessStatus({
+            name: spec.name,
+
+            kind: spec.kind,
+
+            status,
+
+            heartbeatAtMs: now,
+
+            pid: Number(bgrun.getProcess(spec.name)?.pid ?? 0),
+
+            buildId: spec.buildId,
+
+            error:
+              error == null
+                ? null
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
+
+            dataJson: JSON.stringify({
+              command: spec.command,
+
+              buildId: spec.buildId,
+
+              supervisor: "bgrun-sdk",
+
+              parent: PARENT_NAME,
+            }),
+
+            updatedAtMs: now,
+          }),
+      );
+
+      return;
+    } catch (writeError) {
+      if (!isSqliteBusyError(writeError) || attempt >= STATUS_WRITE_ATTEMPTS) {
+        throw writeError;
+      }
+
+      await Bun.sleep(statusWriteDelayMs(attempt));
+    }
+  }
+}
+
 function writeSupervisorStatus(
   spec: WorkerSpec,
   status: string,
   error: unknown = null,
 ): void {
-  const now = Date.now();
+  /**
+   * Status persistence is telemetry. Keep writes ordered, retry SQLITE_BUSY,
+   * and report failure without terminating the supervisor.
+   */
+  supervisorStatusQueue = supervisorStatusQueue
+    .catch(() => undefined)
+    .then(() => persistSupervisorStatus(spec, status, error))
+    .catch((writeError) => {
+      console.error(
+        `[solard:supervisor] unable to persist ${spec.name} status=${status}`,
+        writeError,
+      );
+    });
+}
 
-  upsertProcessStatus({
-    name: spec.name,
-
-    kind: spec.kind,
-
-    status,
-
-    heartbeatAtMs: now,
-
-    pid: Number(bgrun.getProcess(spec.name)?.pid ?? 0),
-
-    buildId: spec.buildId,
-
-    error:
-      error == null
-        ? null
-        : error instanceof Error
-          ? error.message
-          : String(error),
-
-    dataJson: JSON.stringify({
-      command: spec.command,
-
-      buildId: spec.buildId,
-
-      supervisor: "bgrun-sdk",
-
-      parent: PARENT_NAME,
-    }),
-
-    updatedAtMs: now,
-  });
+async function flushSupervisorStatus(): Promise<void> {
+  await supervisorStatusQueue.catch(() => undefined);
 }
 
 async function stopWorker(name: WorkerName): Promise<void> {
@@ -314,6 +378,8 @@ try {
       await stopWorker(name).catch(() => undefined);
     }
   }
+
+  await flushSupervisorStatus();
 
   setTimeout(() => process.exit(exitCode), 50).unref();
 }
