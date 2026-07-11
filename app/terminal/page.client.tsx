@@ -80,10 +80,10 @@ type PageState = {
   logs: ClientMeasureEntry[];
 };
 
-const SCOPE = "solard:web:terminal";
+const SCOPE = "solard:web:terminal-direct";
 const FEED_LIMIT = 160;
 const FEED_WINDOW_MS = Number(
-  storageGet("solard:terminal-feed-window-ms", "180000"),
+  storageGet("solard:terminal-feed-window-ms", "300000"),
 );
 
 const state: PageState = {
@@ -127,10 +127,10 @@ let pollInFlight = false;
 let unsubscribeLogs: (() => void) | null = null;
 
 function pollMs(): number {
-  const parsed = Number(storageGet("solard:terminal-poll-ms", "2500"));
+  const parsed = Number(storageGet("solard:terminal-poll-ms", "1000"));
   return Number.isFinite(parsed)
-    ? Math.max(1500, Math.min(parsed, 30000))
-    : 2500;
+    ? Math.max(1000, Math.min(parsed, 30000))
+    : 1000;
 }
 
 function rootElement(): HTMLElement {
@@ -139,14 +139,92 @@ function rootElement(): HTMLElement {
   return root;
 }
 
-function rerender(): void {
-  if (unmounted) return;
-  render(<TerminalPage />, rootElement());
+let renderQueued = false;
+let renderAgain = false;
+
+function renderTerminalPage(): void {
+  let root = rootElement();
+
+  try {
+    /**
+     * Terminal owns its renderer directly. Never remove children from a root
+     * already tracked by TradJS because that leaves the stored fiber tree
+     * pointing at detached nodes. Sequential reconciliation also avoids keyed
+     * row moves while Newest/mcap sorting changes table order every second.
+     */
+    render(<TerminalPage />, root, {
+      reconciler: "sequential",
+    });
+  } catch (error) {
+    if (
+      error instanceof DOMException &&
+      error.name === "NotFoundError" &&
+      root.parentNode
+    ) {
+      /**
+       * Recover only from a root that was already corrupted by an older page
+       * build. Replacing the root element gives TradJS a new untracked mount
+       * target without mutating children behind its reconciler.
+       */
+      const replacement = root.cloneNode(false) as HTMLElement;
+
+      root.parentNode.replaceChild(replacement, root);
+
+      root = replacement;
+
+      render(<TerminalPage />, root, {
+        reconciler: "sequential",
+      });
+
+      measureEvent(SCOPE, "recovered terminal render root", {
+        error: error.message,
+      });
+
+      return;
+    }
+
+    throw error;
+  }
+
   document
     .querySelectorAll<HTMLAnchorElement>("#main-nav a")
     .forEach((link) =>
       link.classList.toggle("active", link.dataset.page === "terminal"),
     );
+}
+
+function rerender(): void {
+  if (unmounted) return;
+
+  if (renderQueued) {
+    renderAgain = true;
+    return;
+  }
+
+  renderQueued = true;
+
+  queueMicrotask(() => {
+    try {
+      do {
+        renderAgain = false;
+
+        if (!unmounted) {
+          renderTerminalPage();
+        }
+      } while (renderAgain && !unmounted);
+    } catch (error) {
+      state.status = "error";
+      state.error = error instanceof Error ? error.message : String(error);
+
+      console.error("[solard:terminal] render failed", error);
+    } finally {
+      renderQueued = false;
+
+      if (renderAgain && !unmounted) {
+        rerender();
+      }
+    }
+  });
 }
 
 function clearPollTimer(): void {

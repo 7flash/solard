@@ -26,31 +26,39 @@ class Reader {
   take(length: number): Buffer {
     if (this.offset + length > this.bytes.length) {
       throw new Error(
-        `Event buffer underflow at ${this.offset}, need ${length}, len=${this.bytes.length}`,
+        `Event buffer underflow at ${this.offset}; need ${length}; length=${this.bytes.length}`,
       );
     }
 
-    const value = this.bytes.subarray(this.offset, this.offset + length);
+    const result = this.bytes.subarray(this.offset, this.offset + length);
+
     this.offset += length;
-    return value;
+
+    return result;
   }
 
   u32(): number {
-    const value = this.bytes.readUInt32LE(this.offset);
+    const result = this.bytes.readUInt32LE(this.offset);
+
     this.offset += 4;
-    return value;
+
+    return result;
   }
 
   u64(): bigint {
-    const value = this.bytes.readBigUInt64LE(this.offset);
+    const result = this.bytes.readBigUInt64LE(this.offset);
+
     this.offset += 8;
-    return value;
+
+    return result;
   }
 
   i64(): bigint {
-    const value = this.bytes.readBigInt64LE(this.offset);
+    const result = this.bytes.readBigInt64LE(this.offset);
+
     this.offset += 8;
-    return value;
+
+    return result;
   }
 
   bool(): boolean {
@@ -66,7 +74,7 @@ class Reader {
   }
 }
 
-function uiAmount(value: bigint, decimals: number): number {
+function tokenAmount(value: bigint, decimals: number): number {
   return Number(value) / 10 ** decimals;
 }
 
@@ -80,20 +88,29 @@ function finite(value: number): number | null {
 
 function timestampMs(value: bigint, fallback: number): number {
   const seconds = Number(value);
+
   return Number.isFinite(seconds) && seconds > 1_000_000_000
-    ? seconds * 1000
+    ? seconds * 1_000
     : fallback;
 }
 
 function parseCreate(reader: Reader, job: LogJob, raw: unknown): IndexedCreate {
+  const name = reader.string();
+  const symbol = reader.string();
+  const uri = reader.string();
+
+  const mint = reader.pubkey();
+  const bondingCurveKey = reader.pubkey();
+  const creator = reader.pubkey();
+
   return {
     kind: "create",
-    name: reader.string(),
-    symbol: reader.string(),
-    uri: reader.string(),
-    mint: reader.pubkey(),
-    bondingCurveKey: reader.pubkey(),
-    creator: reader.pubkey(),
+    mint,
+    bondingCurveKey,
+    creator,
+    name,
+    symbol,
+    uri,
     signature: job.signature,
     slot: job.slot,
     createdAtMs: job.receivedAtMs,
@@ -112,33 +129,48 @@ function parseTrade(
   },
 ): IndexedTrade {
   const mint = reader.pubkey();
+
   const solRaw = reader.u64();
+
   const tokenRaw = reader.u64();
+
   const isBuy = reader.bool();
+
   const owner = reader.pubkey();
+
   const timestamp = reader.i64();
+
   const virtualSolRaw = reader.u64();
+
   const virtualTokenRaw = reader.u64();
 
-  // Remaining real reserve fields are read when present.
+  // Current Pump event includes real reserves after virtual reserves.
+  // Older variants may omit them, so they are intentionally optional here.
   try {
     reader.u64();
     reader.u64();
   } catch {}
 
-  const tokenDeltaUi = uiAmount(tokenRaw, input.tokenDecimals);
+  const tokenDeltaUi = tokenAmount(tokenRaw, input.tokenDecimals);
+
   const solDeltaUi = solAmount(solRaw);
+
   const virtualSolUi = solAmount(virtualSolRaw);
-  const virtualTokenUi = uiAmount(virtualTokenRaw, input.tokenDecimals);
+
+  const virtualTokenUi = tokenAmount(virtualTokenRaw, input.tokenDecimals);
 
   const tradePrice = tokenDeltaUi > 0 ? solDeltaUi / tokenDeltaUi : Number.NaN;
+
   const curvePrice =
     virtualTokenUi > 0 ? virtualSolUi / virtualTokenUi : Number.NaN;
 
   const priceSol = finite(tradePrice) ?? finite(curvePrice);
+
   const priceUsd =
     priceSol != null && input.solUsd != null ? priceSol * input.solUsd : null;
+
   const marketCapSol = priceSol != null ? priceSol * input.pumpSupplyUi : null;
+
   const marketCapUsd =
     marketCapSol != null && input.solUsd != null
       ? marketCapSol * input.solUsd
@@ -148,6 +180,7 @@ function parseTrade(
 
   return {
     kind: "trade",
+
     eventKey: [
       "helius",
       job.signature,
@@ -155,17 +188,23 @@ function parseTrade(
       isBuy ? "buy" : "sell",
       createdAtMs,
     ].join(":"),
+
     mint,
     signature: job.signature,
     slot: job.slot,
     owner,
+
     side: isBuy ? "buy" : "sell",
+
     tokenDeltaUi,
     solDeltaUi,
+
     priceSol,
     priceUsd,
+
     marketCapSol,
     marketCapUsd,
+
     createdAtMs,
     raw,
   };
@@ -177,19 +216,22 @@ function parseComplete(
   raw: unknown,
 ): IndexedComplete {
   const owner = reader.pubkey();
+
   const mint = reader.pubkey();
+
   const bondingCurveKey = reader.pubkey();
 
   let createdAtMs = job.receivedAtMs;
+
   try {
     createdAtMs = timestampMs(reader.i64(), job.receivedAtMs);
   } catch {}
 
   return {
     kind: "complete",
-    owner,
     mint,
     bondingCurveKey,
+    owner,
     signature: job.signature,
     slot: job.slot,
     createdAtMs,
@@ -209,15 +251,25 @@ export function parsePumpLogs(
 
   for (const line of job.logs) {
     const match = line.match(/Program data:\s*([A-Za-z0-9+/=]+)/);
-    if (!match) continue;
+
+    if (!match) {
+      continue;
+    }
 
     const data = Buffer.from(match[1]!, "base64");
-    if (data.length < 8) continue;
+
+    if (data.length < 8) {
+      continue;
+    }
 
     const eventName = DISCRIMINATORS.get(data.subarray(0, 8).toString("hex"));
-    if (!eventName) continue;
+
+    if (!eventName) {
+      continue;
+    }
 
     const reader = new Reader(data.subarray(8));
+
     const raw = {
       eventName,
       line,

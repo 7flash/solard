@@ -1,9 +1,9 @@
-import { assertWebAuth } from "../../../../src/web/http.js";
 import {
   listProcessStatus,
   listTerminalFeed,
   terminalStoreStats,
-} from "../../../../shared/terminal-repo.js";
+} from "../../../../shared/db.js";
+import { assertWebAuth } from "../../../../src/web/http.js";
 import {
   errorResponse,
   intParam,
@@ -12,8 +12,9 @@ import {
   summarizeError,
 } from "../../../_server/measure.js";
 
-function boolParam(url: URL, name: string): boolean {
+function enabled(url: URL, name: string): boolean {
   const value = url.searchParams.get(name);
+
   return value === "1" || value === "true" || value === "yes";
 }
 
@@ -22,10 +23,14 @@ export async function GET(request: Request): Promise<Response> {
     assertWebAuth(request);
 
     const url = new URL(request.url);
+
     const source =
       resolveTerminalSource(url.searchParams.get("source")) ?? "both";
+
     const limit = intParam(url, "limit", 160, 1, 500);
+
     const sinceMs = intParam(url, "sinceMs", 0, 0, Number.MAX_SAFE_INTEGER);
+
     const activeWindowMs = intParam(
       url,
       "activeWindowMs",
@@ -34,66 +39,80 @@ export async function GET(request: Request): Promise<Response> {
       24 * 60 * 60_000,
     );
 
-    const payload = await m(
+    const rows = await m(
       {
         start: () =>
-          `terminal_feed:orm source=${source} limit=${limit} activeWindowMs=${activeWindowMs}`,
-        end: (value: any) => ({
-          rows: value.rows?.length ?? 0,
-          priced: value.meta?.priced ?? 0,
-          reads: value.meta?.reads,
+          `terminal_feed:shared_db source=${source} limit=${limit} activeWindowMs=${activeWindowMs}`,
+
+        end: (value) => ({
+          rows: Array.isArray(value) ? value.length : 0,
         }),
+
         catch: summarizeError,
       },
-      async () => {
-        const rows = listTerminalFeed({
+      async () =>
+        listTerminalFeed({
           source,
           limit,
           sinceMs,
           activeWindowMs,
-          includeUnpriced: boolParam(url, "includeUnpriced"),
-          hideMayhem: boolParam(url, "hideMayhem"),
-          hideUsdc: boolParam(url, "hideUsdc"),
-        });
 
-        const priced = rows.filter(
-          (row) =>
-            row.marketCapUsd != null ||
-            row.marketCapSol != null ||
-            row.priceUsd != null ||
-            row.priceSol != null,
-        ).length;
+          includeUnpriced: enabled(url, "includeUnpriced"),
 
-        return {
-          rows,
-          rawRows: rows,
-          stats:
-            url.searchParams.get("stats") === "1" ? terminalStoreStats() : null,
-          health:
-            url.searchParams.get("health") === "1"
-              ? {
-                  ok: true,
-                  processes: listProcessStatus(50),
-                  store: terminalStoreStats(),
-                }
-              : null,
-          meta: {
-            source,
-            limit,
-            sinceMs,
-            activeWindowMs,
-            count: rows.length,
-            mapped: rows.length,
-            priced,
-            reads: ["terminalTokens", "terminalIndicators"],
-            orm: "sqlite-zod-orm",
-            rawSql: false,
-          },
-        };
-      },
+          hideMayhem: enabled(url, "hideMayhem"),
+
+          hideUsdc: enabled(url, "hideUsdc"),
+
+          priceWindowTtlMs: 1_000,
+        }),
     );
 
-    return Response.json(payload);
+    const stats = enabled(url, "stats") ? terminalStoreStats() : null;
+
+    const health = enabled(url, "health")
+      ? {
+          ok: true,
+          processes: listProcessStatus(),
+          store: stats ?? terminalStoreStats(),
+        }
+      : null;
+
+    const priced = rows.filter(
+      (row) =>
+        row.marketCapUsd != null ||
+        row.marketCapSol != null ||
+        row.priceUsd != null ||
+        row.priceSol != null,
+    ).length;
+
+    return Response.json({
+      rows,
+      rawRows: rows,
+      stats,
+      health,
+
+      meta: {
+        source,
+        limit,
+        sinceMs,
+        activeWindowMs,
+
+        count: rows.length,
+        mapped: rows.length,
+        priced,
+
+        priceWindowTtlMs: 1_000,
+
+        reads: ["terminalTokensLive", "tokenPriceWindows"],
+
+        writes: [],
+        appendOnlyTrades: true,
+
+        databaseModule: "shared/db.ts",
+
+        pageRuntime: "app/terminal/page.client.tsx",
+      },
+    });
   } catch (error) {
     return errorResponse(error);
   }

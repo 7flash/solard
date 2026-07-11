@@ -1,13 +1,4 @@
-import type {
-  TerminalDatabase,
-  TerminalTradeData,
-} from "../shared/terminal-db.js";
-import {
-  recomputeIndicators,
-  rememberIngestionKey,
-  upsertTerminalToken,
-  upsertTerminalTrade,
-} from "../shared/terminal-repo.js";
+import { appendTokenTradeOnce, upsertTerminalToken } from "../shared/db.js";
 import type { IndexerConfig } from "./config.js";
 import { enqueueMetadata } from "./metadata.js";
 import type { Counters, IndexedEvent } from "./types.js";
@@ -19,145 +10,172 @@ function json(value: unknown): string {
 }
 
 export function applyIndexedEvents(
-  db: TerminalDatabase,
-  events: IndexedEvent[],
+  events: readonly IndexedEvent[],
   input: {
-    signature: string;
-    supplyUi: number;
     config: IndexerConfig;
     counters: Counters;
   },
 ): {
   applied: number;
-  duplicate: boolean;
+  duplicateTrades: number;
 } {
   if (!events.length) {
     input.counters.skipped++;
-    return { applied: 0, duplicate: false };
+
+    return {
+      applied: 0,
+      duplicateTrades: 0,
+    };
   }
 
-  const fresh = rememberIngestionKey(
-    `helius-indexer:${input.signature}`,
-    "helius-indexer",
-    db,
-  );
-
-  if (!fresh) {
-    input.counters.duplicates++;
-    return { applied: 0, duplicate: true };
-  }
-
-  const touched = new Set<string>();
   let applied = 0;
+  let duplicateTrades = 0;
 
   for (const event of events) {
     if (event.kind === "create") {
-      upsertTerminalToken(
-        {
-          mint: event.mint,
-          name: event.name,
-          symbol: event.symbol,
-          uri: event.uri,
-          creator: event.creator,
-          bondingCurveKey: event.bondingCurveKey,
-          source: "helius-indexer-create",
-          phase: "pump",
-          supplyUi: input.supplyUi,
-          signature: event.signature,
-          lastSlot: event.slot,
-          rawJson: json(event.raw),
-          createdAtMs: event.createdAtMs,
-          updatedAtMs: Date.now(),
-        },
-        db,
-      );
+      upsertTerminalToken({
+        mint: event.mint,
 
-      enqueueMetadata(
-        {
-          db,
-          config: input.config,
-          counters: input.counters,
-        },
-        {
-          mint: event.mint,
-          uri: event.uri ?? "",
-          name: event.name,
-          symbol: event.symbol,
-        },
-      );
+        name: event.name,
+
+        symbol: event.symbol,
+
+        uri: event.uri,
+
+        creator: event.creator,
+
+        bondingCurveKey: event.bondingCurveKey,
+
+        source: "helius-indexer-create",
+
+        phase: "pump",
+
+        supplyUi: input.config.pumpSupplyUi,
+
+        signature: event.signature,
+
+        lastSlot: event.slot,
+
+        createdAtMs: event.createdAtMs,
+
+        updatedAtMs: Date.now(),
+      });
+
+      enqueueMetadata(input.config, input.counters, {
+        mint: event.mint,
+
+        uri: event.uri ?? "",
+
+        name: event.name,
+
+        symbol: event.symbol,
+      });
 
       input.counters.creates++;
+      applied++;
     } else if (event.kind === "trade") {
-      const trade: TerminalTradeData = {
+      const result = appendTokenTradeOnce({
         eventKey: event.eventKey,
+
         mint: event.mint,
+
         signature: event.signature,
+
         slot: event.slot,
-        owner: event.owner ?? null,
+
+        owner: event.owner,
+
         side: event.side,
-        tokenDeltaUi: event.tokenDeltaUi ?? 0,
-        solDeltaUi: event.solDeltaUi ?? 0,
+
+        tokenDeltaUi: event.tokenDeltaUi,
+
+        solDeltaUi: event.solDeltaUi,
+
         priceSol: event.priceSol,
+
         priceUsd: event.priceUsd,
+
         marketCapUsd: event.marketCapUsd,
+
         confidence: "processed",
+
         source: "helius-indexer-trade",
+
         rawJson: json(event.raw),
-        createdAtMs: event.createdAtMs,
+
+        tradedAtMs: event.createdAtMs,
+
         updatedAtMs: Date.now(),
-      };
+      });
 
-      upsertTerminalTrade(trade, db);
-
-      upsertTerminalToken(
-        {
+      if (result.inserted) {
+        upsertTerminalToken({
           mint: event.mint,
+
           source: "helius-indexer-trade",
-          phase: "pump",
-          supplyUi: input.supplyUi,
-          priceSol: event.priceSol,
-          priceUsd: event.priceUsd,
-          marketCapSol: event.marketCapSol,
-          marketCapUsd: event.marketCapUsd,
-          lastSlot: event.slot,
-          signature: event.signature,
-          priceUpdatedAtMs: Date.now(),
-          updatedAtMs: Date.now(),
-        },
-        db,
-      );
 
-      input.counters.trades++;
-      input.counters.lastMcapUsd =
-        event.marketCapUsd ?? input.counters.lastMcapUsd;
-    } else {
-      upsertTerminalToken(
-        {
-          mint: event.mint,
-          bondingCurveKey: event.bondingCurveKey,
-          source: "helius-indexer-complete",
-          phase: "migrated",
+          phase: "pump",
+
+          supplyUi: input.config.pumpSupplyUi,
+
+          priceSol: event.priceSol,
+
+          priceUsd: event.priceUsd,
+
+          marketCapSol: event.marketCapSol,
+
+          marketCapUsd: event.marketCapUsd,
+
           lastSlot: event.slot,
+
           signature: event.signature,
+
+          priceUpdatedAtMs: event.createdAtMs,
+
           updatedAtMs: Date.now(),
-        },
-        db,
-      );
+        });
+
+        input.counters.trades++;
+
+        input.counters.lastMcapUsd =
+          event.marketCapUsd ?? input.counters.lastMcapUsd;
+
+        applied++;
+      } else {
+        duplicateTrades++;
+
+        input.counters.duplicateTrades++;
+      }
+    } else {
+      upsertTerminalToken({
+        mint: event.mint,
+
+        bondingCurveKey: event.bondingCurveKey,
+
+        source: "helius-indexer-complete",
+
+        phase: "migrated",
+
+        lastSlot: event.slot,
+
+        signature: event.signature,
+
+        updatedAtMs: Date.now(),
+      });
 
       input.counters.completes++;
+      applied++;
     }
 
-    touched.add(event.mint);
     input.counters.lastMint = event.mint;
-    applied++;
   }
 
-  for (const mint of touched) {
-    recomputeIndicators(mint, Date.now(), db);
-  }
+  input.counters.lastSignature = events[events.length - 1]?.signature ?? null;
 
-  input.counters.lastSignature = input.signature;
   input.counters.lastEventAtMs = Date.now();
 
-  return { applied, duplicate: false };
+  return {
+    applied,
+    duplicateTrades,
+  };
 }

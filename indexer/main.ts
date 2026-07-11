@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 import {
-  pruneIngestionKeys,
+  SOLARD_DB_PATH,
   recordWorkerError,
   upsertProcessStatus,
-} from "../shared/terminal-repo.js";
+} from "../shared/db.js";
 import { loadConfig } from "./config.js";
-import { openIndexerDb } from "./db.js";
 import { runHeliusWsSession } from "./helius-ws.js";
 import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
 import { startMetadataHydrator } from "./metadata.js";
@@ -20,19 +19,25 @@ function createCounters(): Counters {
   return {
     sessions: 0,
     messages: 0,
+
     creates: 0,
     trades: 0,
     completes: 0,
+
+    duplicateTrades: 0,
+
     metadataQueued: 0,
     metadataHydrated: 0,
     metadataFailed: 0,
+
     skipped: 0,
-    duplicates: 0,
     errors: 0,
+
     lastSignature: null,
     lastMint: null,
     lastMcapUsd: null,
     lastEventAtMs: null,
+
     solUsd: null,
     solUsdAtMs: null,
   };
@@ -40,68 +45,88 @@ function createCounters(): Counters {
 
 export async function runIndexer(): Promise<void> {
   const config = loadConfig();
-  const store = openIndexerDb();
+
   const counters = createCounters();
+
   const controller = new AbortController();
 
   let stopping = false;
 
   const stop = (reason: string) => {
-    if (stopping) return;
+    if (stopping) {
+      return;
+    }
+
     stopping = true;
+
     controller.abort();
 
-    upsertProcessStatus(
-      {
-        name: config.name,
-        kind: "indexer",
-        status: "stopped",
-        buildId: config.buildId,
-        data: {
-          reason,
-          dbPath: store.path,
-          ...counters,
-        },
-      },
-      store.db,
-    );
+    upsertProcessStatus({
+      name: config.name,
 
-    setTimeout(() => process.exit(0), 50);
+      kind: "indexer",
+
+      status: "stopped",
+
+      buildId: config.buildId,
+
+      dataJson: JSON.stringify({
+        reason,
+        dbPath: SOLARD_DB_PATH,
+        ...counters,
+      }),
+
+      updatedAtMs: Date.now(),
+    });
   };
 
   process.on("SIGINT", () => stop("SIGINT"));
+
   process.on("SIGTERM", () => stop("SIGTERM"));
 
   const sol = await refreshSolUsd({
     fallback: config.solUsd,
+
     force: true,
+
+    timeoutMs: 2_500,
   }).catch(() => ({
     value: config.solUsd,
   }));
 
   counters.solUsd = sol.value ?? null;
+
   counters.solUsdAtMs = Date.now();
 
-  startMetadataHydrator({
-    db: store.db,
-    config,
-    counters,
-  });
+  startMetadataHydrator(config, counters);
 
-  upsertProcessStatus(
-    {
-      name: config.name,
-      kind: "indexer",
-      status: "starting",
-      buildId: config.buildId,
-      data: {
-        dbPath: store.path,
-        source: "helius",
-        solUsd: counters.solUsd,
-      },
-    },
-    store.db,
-  );
+  upsertProcessStatus({
+    name: config.name,
+
+    kind: "indexer",
+
+    status: "starting",
+
+    buildId: config.buildId,
+
+    dataJson: JSON.stringify({
+      source: "helius",
+
+      mode: "logsSubscribe",
+
+      dbPath: SOLARD_DB_PATH,
+
+      programId: config.programId,
+
+      commitment: config.commitment,
+
+      solUsd: counters.solUsd,
+
+      metadataFetch: config.metadataFetch,
+    }),
+
+    updatedAtMs: Date.now(),
+  });
 
   let attempt = 0;
 
@@ -111,88 +136,85 @@ export async function runIndexer(): Promise<void> {
     await indexerMeasure.measure(
       {
         start: () => `indexer loop attempt=${attempt}`,
+
         end: summarizeValue,
+
         catch: (error) => {
           counters.errors++;
 
-          recordWorkerError(
-            config.name,
-            error,
-            {
-              phase: "session",
-              attempt,
-            },
-            store.db,
-          );
+          recordWorkerError(config.name, error, {
+            phase: "session",
 
-          upsertProcessStatus(
-            {
-              name: config.name,
-              kind: "indexer",
-              status: "error",
-              buildId: config.buildId,
-              error,
-              data: {
-                attempt,
-                ...counters,
-              },
-            },
-            store.db,
-          );
+            attempt,
+          });
+
+          upsertProcessStatus({
+            name: config.name,
+
+            kind: "indexer",
+
+            status: "error",
+
+            buildId: config.buildId,
+
+            error: error instanceof Error ? error.message : String(error),
+
+            dataJson: JSON.stringify({
+              attempt,
+              ...counters,
+            }),
+
+            updatedAtMs: Date.now(),
+          });
 
           return summarizeError(error);
         },
       },
-      async () => {
-        const result = await runHeliusWsSession({
-          db: store.db,
+      async () =>
+        await runHeliusWsSession({
           config,
           counters,
           attempt,
           signal: controller.signal,
-        });
-
-        const pruned = pruneIngestionKeys(
-          "helius-indexer",
-          Number(process.env.SOLARD_INDEXER_SEEN_RETENTION_MS ?? 21_600_000),
-          store.db,
-        );
-
-        return { ...result, pruned };
-      },
+        }),
     );
 
-    if (stopping) break;
+    if (stopping) {
+      break;
+    }
 
     const delay = Math.min(
       config.reconnectMaxMs,
+
       config.reconnectMinMs * 2 ** Math.min(attempt, 6),
     );
 
-    upsertProcessStatus(
-      {
-        name: config.name,
-        kind: "indexer",
-        status: "reconnecting",
-        buildId: config.buildId,
-        data: {
-          delay,
-          attempt,
-          ...counters,
-        },
-      },
-      store.db,
-    );
+    upsertProcessStatus({
+      name: config.name,
+
+      kind: "indexer",
+
+      status: "reconnecting",
+
+      buildId: config.buildId,
+
+      dataJson: JSON.stringify({
+        delay,
+        attempt,
+        ...counters,
+      }),
+
+      updatedAtMs: Date.now(),
+    });
 
     await sleep(delay);
   }
-
-  store.close();
 }
 
 if (import.meta.main) {
   runIndexer().catch((error) => {
     console.error("[solard:indexer] fatal", error);
+
     process.exitCode = 1;
   });
 }

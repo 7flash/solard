@@ -1,8 +1,4 @@
-import type { TerminalDatabase } from "../shared/terminal-db.js";
-import {
-  recordWorkerError,
-  upsertProcessStatus,
-} from "../shared/terminal-repo.js";
+import { recordWorkerError, upsertProcessStatus } from "../shared/db.js";
 import { applyIndexedEvents } from "./apply.js";
 import type { IndexerConfig } from "./config.js";
 import { redactedUrl } from "./config.js";
@@ -11,10 +7,13 @@ import { parsePumpLogs } from "./pump-events.js";
 import { refreshSolUsd } from "./sol-usd.js";
 import type { Counters, LogJob } from "./types.js";
 
-type Notification = {
+type HeliusNotification = {
   params?: {
     result?: {
-      context?: { slot?: number };
+      context?: {
+        slot?: number;
+      };
+
       value?: {
         signature?: string;
         err?: unknown;
@@ -24,8 +23,9 @@ type Notification = {
   };
 };
 
-function notification(raw: string, receivedAtMs: number): LogJob | null {
-  const message = JSON.parse(raw) as Notification;
+function parseNotification(raw: string, receivedAtMs: number): LogJob | null {
+  const message = JSON.parse(raw) as HeliusNotification;
+
   const value = message.params?.result?.value;
 
   if (!value?.signature || !Array.isArray(value.logs) || value.err) {
@@ -34,194 +34,270 @@ function notification(raw: string, receivedAtMs: number): LogJob | null {
 
   return {
     signature: value.signature,
+
     slot: Number(message.params?.result?.context?.slot ?? 0),
+
     logs: value.logs,
+
     receivedAtMs,
   };
 }
 
+function statusData(
+  config: IndexerConfig,
+  counters: Counters,
+  attempt: number,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    source: "helius",
+
+    mode: "logsSubscribe",
+
+    url: redactedUrl(config.wsUrl),
+
+    programId: config.programId,
+
+    commitment: config.commitment,
+
+    attempt,
+
+    ...counters,
+
+    ...extra,
+  };
+}
+
 export async function runHeliusWsSession(input: {
-  db: TerminalDatabase;
   config: IndexerConfig;
   counters: Counters;
   attempt: number;
   signal: AbortSignal;
 }): Promise<Record<string, unknown>> {
+  const { config, counters, attempt, signal } = input;
+
   return await indexerMeasure.measure(
     {
-      start: () => `helius ws session attempt=${input.attempt}`,
+      start: () => `helius ws session attempt=${attempt}`,
+
       end: summarizeValue,
+
       catch: summarizeError,
     },
     async () => {
-      input.counters.sessions++;
+      counters.sessions++;
 
-      const socket = new WebSocket(input.config.wsUrl);
+      const socket = new WebSocket(config.wsUrl);
+
       let subscribed = false;
-      let openedAtMs = Date.now();
+
       let heartbeat: ReturnType<typeof setInterval> | null = null;
 
+      let messageQueue: Promise<void> = Promise.resolve();
+
+      const openedAtMs = Date.now();
+
       const close = () => {
-        if (heartbeat) clearInterval(heartbeat);
+        if (heartbeat) {
+          clearInterval(heartbeat);
+        }
+
         try {
           socket.close();
         } catch {}
       };
 
       const abort = () => close();
-      input.signal.addEventListener("abort", abort, { once: true });
+
+      signal.addEventListener("abort", abort, {
+        once: true,
+      });
 
       try {
         await new Promise<void>((resolve, reject) => {
           socket.addEventListener("open", () => {
-            openedAtMs = Date.now();
-
             socket.send(
               JSON.stringify({
                 jsonrpc: "2.0",
+
                 id: 1,
+
                 method: "logsSubscribe",
+
                 params: [
                   {
-                    mentions: [input.config.programId],
+                    mentions: [config.programId],
                   },
+
                   {
-                    commitment: input.config.commitment,
+                    commitment: config.commitment,
                   },
                 ],
               }),
             );
 
+            upsertProcessStatus({
+              name: config.name,
+
+              kind: "indexer",
+
+              status: "subscribing",
+
+              buildId: config.buildId,
+
+              dataJson: JSON.stringify(statusData(config, counters, attempt)),
+
+              updatedAtMs: Date.now(),
+            });
+
             heartbeat = setInterval(() => {
-              upsertProcessStatus(
-                {
-                  name: input.config.name,
-                  kind: "indexer",
-                  status: subscribed ? "ok" : "subscribing",
-                  buildId: input.config.buildId,
-                  data: {
-                    source: "helius",
-                    url: redactedUrl(input.config.wsUrl),
-                    attempt: input.attempt,
-                    ...input.counters,
-                  },
-                },
-                input.db,
-              );
-            }, input.config.heartbeatMs);
+              upsertProcessStatus({
+                name: config.name,
+
+                kind: "indexer",
+
+                status: subscribed ? "ok" : "subscribing",
+
+                buildId: config.buildId,
+
+                dataJson: JSON.stringify(statusData(config, counters, attempt)),
+
+                updatedAtMs: Date.now(),
+              });
+            }, config.heartbeatMs);
           });
 
           socket.addEventListener("message", (message) => {
-            void (async () => {
-              const raw = String(message.data);
+            const raw = String(message.data);
 
-              if (raw.includes('"result"') && raw.includes('"id":1')) {
-                subscribed = true;
-                return;
-              }
+            if (raw.includes('"result"') && raw.includes('"id":1')) {
+              subscribed = true;
+              return;
+            }
 
-              const job = notification(raw, Date.now());
-              if (!job) return;
+            messageQueue = messageQueue
+              .then(async () => {
+                const job = parseNotification(raw, Date.now());
 
-              input.counters.messages++;
+                if (!job) {
+                  return;
+                }
 
-              await indexerMeasure.measure(
-                {
-                  start: () =>
-                    `log:${job.signature.slice(0, 8)} slot=${job.slot}`,
-                  end: summarizeValue,
-                  catch: summarizeError,
-                },
-                async () => {
-                  const sol = await refreshSolUsd({
-                    fallback: input.config.solUsd,
-                    maxAgeMs: input.config.solUsdRefreshMs,
-                    timeoutMs: 2_000,
-                  }).catch(() => ({
-                    value: input.config.solUsd,
-                  }));
+                counters.messages++;
 
-                  input.counters.solUsd = sol.value ?? null;
-                  input.counters.solUsdAtMs = Date.now();
+                await indexerMeasure.measure(
+                  {
+                    start: () =>
+                      `log:${job.signature.slice(0, 8)} slot=${job.slot}`,
 
-                  const events = parsePumpLogs(job, {
-                    solUsd: input.counters.solUsd,
-                    tokenDecimals: input.config.tokenDecimals,
-                    pumpSupplyUi: input.config.pumpSupplyUi,
-                  });
+                    end: summarizeValue,
 
-                  const applied = applyIndexedEvents(input.db, events, {
-                    signature: job.signature,
-                    supplyUi: input.config.pumpSupplyUi,
-                    config: input.config,
-                    counters: input.counters,
-                  });
+                    catch: summarizeError,
+                  },
+                  async () => {
+                    const sol = await refreshSolUsd({
+                      fallback: config.solUsd,
 
-                  upsertProcessStatus(
-                    {
-                      name: input.config.name,
+                      maxAgeMs: config.solUsdRefreshMs,
+
+                      timeoutMs: 2_000,
+                    }).catch(() => ({
+                      value: config.solUsd,
+                    }));
+
+                    counters.solUsd = sol.value ?? null;
+
+                    counters.solUsdAtMs = Date.now();
+
+                    const events = parsePumpLogs(job, {
+                      solUsd: counters.solUsd,
+
+                      tokenDecimals: config.tokenDecimals,
+
+                      pumpSupplyUi: config.pumpSupplyUi,
+                    });
+
+                    const applied = applyIndexedEvents(events, {
+                      config,
+                      counters,
+                    });
+
+                    upsertProcessStatus({
+                      name: config.name,
+
                       kind: "indexer",
-                      status: "ok",
-                      buildId: input.config.buildId,
-                      data: {
-                        source: "helius",
-                        phase: "message",
-                        eventCount: events.length,
-                        applied: applied.applied,
-                        duplicate: applied.duplicate,
-                        ...input.counters,
-                      },
-                    },
-                    input.db,
-                  );
 
-                  return {
-                    signature: job.signature,
-                    events: events.length,
-                    ...applied,
-                  };
-                },
-              );
-            })().catch((error) => {
-              input.counters.errors++;
-              recordWorkerError(
-                input.config.name,
-                error,
-                { phase: "message" },
-                input.db,
-              );
-            });
+                      status: "ok",
+
+                      buildId: config.buildId,
+
+                      dataJson: JSON.stringify(
+                        statusData(config, counters, attempt, {
+                          phase: "message",
+
+                          eventCount: events.length,
+
+                          applied: applied.applied,
+
+                          duplicateTrades: applied.duplicateTrades,
+                        }),
+                      ),
+
+                      updatedAtMs: Date.now(),
+                    });
+
+                    return {
+                      signature: job.signature,
+
+                      slot: job.slot,
+
+                      eventCount: events.length,
+
+                      ...applied,
+
+                      mints: events.map((event) => event.mint),
+                    };
+                  },
+                );
+              })
+              .catch((error) => {
+                counters.errors++;
+
+                recordWorkerError(config.name, error, {
+                  phase: "message",
+                });
+              });
           });
 
           socket.addEventListener("close", () => {
-            close();
-            resolve();
+            void messageQueue.finally(resolve);
           });
 
           socket.addEventListener("error", () => {
             const error = new Error("Helius websocket error");
-            recordWorkerError(
-              input.config.name,
-              error,
-              {
-                attempt: input.attempt,
-                url: redactedUrl(input.config.wsUrl),
-              },
-              input.db,
-            );
+
+            recordWorkerError(config.name, error, {
+              attempt,
+
+              url: redactedUrl(config.wsUrl),
+            });
+
             close();
             reject(error);
           });
         });
       } finally {
-        input.signal.removeEventListener("abort", abort);
+        signal.removeEventListener("abort", abort);
+
         close();
       }
 
       return {
         subscribed,
+
         uptimeMs: Date.now() - openedAtMs,
-        ...input.counters,
+
+        ...counters,
       };
     },
   );
