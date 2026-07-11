@@ -1,0 +1,65 @@
+export type IndexedCreate = {
+  kind: "create";
+  mint: string;
+  bondingCurveKey?: string | null;
+  creator?: string | null;
+  name?: string | null;
+  symbol?: string | null;
+  uri?: string | null;
+  signature: string;
+  slot: number;
+  createdAtMs: number;
+  raw: unknown;
+};
+export type IndexedTrade = {
+  kind: "trade";
+  id: string;
+  mint: string;
+  signature: string;
+  slot: number;
+  owner?: string | null;
+  side: "buy" | "sell";
+  tokenDeltaUi: number | null;
+  solDeltaUi: number | null;
+  priceSol: number | null;
+  priceUsd: number | null;
+  marketCapSol: number | null;
+  marketCapUsd: number | null;
+  virtualSolReservesUi?: number | null;
+  virtualTokenReservesUi?: number | null;
+  realSolReservesUi?: number | null;
+  realTokenReservesUi?: number | null;
+  createdAtMs: number;
+  raw: unknown;
+};
+export type IndexedComplete = {
+  kind: "complete";
+  mint: string;
+  bondingCurveKey?: string | null;
+  owner?: string | null;
+  signature: string;
+  slot: number;
+  createdAtMs: number;
+  raw: unknown;
+};
+export type IndexedEvent = IndexedCreate | IndexedTrade | IndexedComplete;
+export type LogJob = {
+  signature: string;
+  slot: number;
+  logs: string[];
+  receivedAtMs: number;
+};
+export type Counters = {
+  sessions: number;
+  messages: number;
+  creates: number;
+  trades: number;
+  completes: number;
+  skipped: number;
+  duplicates: number;
+  errors: number;
+  lastSignature: string | null;
+  lastMint: string | null;
+  lastMcapUsd: number | null;
+  lastEventAtMs: number | null;
+};
