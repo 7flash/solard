@@ -1,8 +1,11 @@
 import type { TerminalDatabase } from "../shared/terminal-db.js";
-import { mergeTokenMetadata, recordWorkerError } from "./db.js";
+import {
+  recordWorkerError,
+  upsertTerminalToken,
+} from "../shared/terminal-repo.js";
+import type { IndexerConfig } from "./config.js";
 import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
 import type { Counters, TokenMetadataPatch } from "./types.js";
-import type { IndexerConfig } from "./config.js";
 
 type QueueItem = {
   mint: string;
@@ -11,19 +14,21 @@ type QueueItem = {
   symbol?: string | null;
 };
 
+const queue: QueueItem[] = [];
 const queued = new Set<string>();
 const seen = new Map<string, number>();
-const queue: QueueItem[] = [];
 let running = 0;
 let started = false;
 
-function normalizedUri(value: string | null | undefined): string | null {
+function normalizeUri(value: string | null | undefined): string | null {
   const uri = value?.trim();
   if (!uri) return null;
-  if (uri.startsWith("ipfs://"))
+
+  if (uri.startsWith("ipfs://")) {
     return `https://ipfs.io/ipfs/${uri.slice("ipfs://".length)}`;
-  if (/^https?:\/\//i.test(uri)) return uri;
-  return null;
+  }
+
+  return /^https?:\/\//i.test(uri) ? uri : null;
 }
 
 function text(value: unknown): string | null {
@@ -32,26 +37,48 @@ function text(value: unknown): string | null {
 
 function firstUrl(...values: unknown[]): string | null {
   for (const value of values) {
-    const normalized = normalizedUri(text(value));
-    if (normalized) return normalized;
+    const result = normalizeUri(text(value));
+    if (result) return result;
   }
   return null;
 }
 
-function patchFromJson(
-  mint: string,
-  uri: string,
-  data: any,
-  fallback: Partial<TokenMetadataPatch>,
-): TokenMetadataPatch {
+async function fetchMetadata(uri: string, config: IndexerConfig): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.metadataTimeoutMs);
+
+  try {
+    const response = await fetch(uri, {
+      signal: controller.signal,
+      headers: {
+        accept: "application/json,text/plain,*/*",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+
+    const body = await response.text();
+    if (body.length > config.metadataMaxBytes) {
+      throw new Error(`metadata too large: ${body.length}`);
+    }
+
+    return JSON.parse(body);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function metadataPatch(item: QueueItem, data: any): TokenMetadataPatch {
   const extensions = data?.extensions ?? {};
   const links = data?.links ?? data?.content?.links ?? {};
 
   return {
-    mint,
-    uri,
-    name: text(data?.name) ?? fallback.name ?? null,
-    symbol: text(data?.symbol) ?? fallback.symbol ?? null,
+    mint: item.mint,
+    uri: item.uri,
+    name: text(data?.name) ?? item.name ?? null,
+    symbol: text(data?.symbol) ?? item.symbol ?? null,
     image: firstUrl(data?.image, data?.image_url, data?.imageUrl, links?.image),
     description: text(data?.description),
     website: firstUrl(
@@ -67,33 +94,10 @@ function patchFromJson(
       links?.twitter,
     ),
     telegram: firstUrl(data?.telegram, extensions?.telegram, links?.telegram),
-    rawJson: JSON.stringify(data).slice(0, 16_000),
   };
 }
 
-async function fetchMetadata(uri: string, config: IndexerConfig): Promise<any> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.metadataTimeoutMs);
-  try {
-    const response = await fetch(uri, {
-      signal: controller.signal,
-      headers: { accept: "application/json,text/plain,*/*" },
-    });
-    if (!response.ok)
-      throw new Error(`HTTP ${response.status} ${response.statusText}`);
-    const contentLength = Number(response.headers.get("content-length") ?? 0);
-    if (contentLength && contentLength > config.metadataMaxBytes)
-      throw new Error(`metadata too large: ${contentLength}`);
-    const text = await response.text();
-    if (text.length > config.metadataMaxBytes)
-      throw new Error(`metadata too large: ${text.length}`);
-    return JSON.parse(text);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function worker(args: {
+async function consume(input: {
   db: TerminalDatabase;
   config: IndexerConfig;
   counters: Counters;
@@ -106,87 +110,104 @@ async function worker(args: {
     try {
       await indexerMeasure.measure(
         {
-          start: () =>
-            `metadata:hydrate mint=${item.mint.slice(0, 6)} uri=${item.uri.slice(0, 48)}`,
-          end: (value) => summarizeValue(value),
+          start: () => `metadata:hydrate mint=${item.mint.slice(0, 6)}`,
+          end: summarizeValue,
           catch: summarizeError,
         },
         async () => {
-          const data = await fetchMetadata(item.uri, args.config);
-          const patch = patchFromJson(item.mint, item.uri, data, {
-            name: item.name,
-            symbol: item.symbol,
-          });
-          mergeTokenMetadata(args.db, patch);
-          args.counters.metadataHydrated++;
+          const data = await fetchMetadata(item.uri, input.config);
+          const patch = metadataPatch(item, data);
+
+          upsertTerminalToken(
+            {
+              mint: patch.mint,
+              name: patch.name,
+              symbol: patch.symbol,
+              image: patch.image,
+              description: patch.description,
+              website: patch.website,
+              twitter: patch.twitter,
+              telegram: patch.telegram,
+              uri: patch.uri,
+              updatedAtMs: Date.now(),
+            },
+            input.db,
+          );
+
+          input.counters.metadataHydrated++;
+
           return {
             mint: item.mint,
             hasImage: Boolean(patch.image),
-            hasSocials: Boolean(
-              patch.website || patch.twitter || patch.telegram,
-            ),
           };
         },
       );
     } catch (error) {
-      args.counters.metadataFailed++;
-      recordWorkerError(args.db, args.config.name, error, {
-        phase: "metadata",
-        mint: item.mint,
-        uri: item.uri,
-      });
+      input.counters.metadataFailed++;
+      recordWorkerError(
+        input.config.name,
+        error,
+        {
+          phase: "metadata",
+          mint: item.mint,
+          uri: item.uri,
+        },
+        input.db,
+      );
     } finally {
       running--;
     }
   }
 }
 
-function pump(args: {
+function pump(input: {
   db: TerminalDatabase;
   config: IndexerConfig;
   counters: Counters;
 }): void {
   if (!started) return;
+
   while (
-    running < Math.max(1, args.config.metadataConcurrency) &&
+    running < Math.max(1, input.config.metadataConcurrency) &&
     queue.length
   ) {
-    void worker(args).finally(() => {
-      if (queue.length) pump(args);
+    void consume(input).finally(() => {
+      if (queue.length) pump(input);
     });
   }
 }
 
-export function startMetadataHydrator(args: {
+export function startMetadataHydrator(input: {
   db: TerminalDatabase;
   config: IndexerConfig;
   counters: Counters;
 }): void {
-  if (started) return;
   started = true;
-  pump(args);
+  pump(input);
 }
 
 export function enqueueMetadata(
-  args: {
+  input: {
     db: TerminalDatabase;
     config: IndexerConfig;
     counters: Counters;
   },
   item: QueueItem,
 ): void {
-  if (!args.config.metadataFetch) return;
-  const uri = normalizedUri(item.uri);
+  if (!input.config.metadataFetch) return;
+
+  const uri = normalizeUri(item.uri);
   if (!uri) return;
 
   const now = Date.now();
-  const last = seen.get(item.mint) ?? 0;
-  if (now - last < 30 * 60_000) return;
-
+  if (now - (seen.get(item.mint) ?? 0) < 30 * 60_000) {
+    return;
+  }
   if (queued.has(item.mint)) return;
-  queued.add(item.mint);
+
   seen.set(item.mint, now);
+  queued.add(item.mint);
   queue.push({ ...item, uri });
-  args.counters.metadataQueued++;
-  pump(args);
+  input.counters.metadataQueued++;
+  pump(input);
 }

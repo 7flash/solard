@@ -14,7 +14,7 @@ export type IndexedCreate = {
 
 export type IndexedTrade = {
   kind: "trade";
-  id: string;
+  eventKey: string;
   mint: string;
   signature: string;
   slot: number;
@@ -26,10 +26,6 @@ export type IndexedTrade = {
   priceUsd: number | null;
   marketCapSol: number | null;
   marketCapUsd: number | null;
-  virtualSolReservesUi?: number | null;
-  virtualTokenReservesUi?: number | null;
-  realSolReservesUi?: number | null;
-  realTokenReservesUi?: number | null;
   createdAtMs: number;
   raw: unknown;
 };
@@ -84,5 +80,4 @@ export type TokenMetadataPatch = {
   twitter?: string | null;
   telegram?: string | null;
   uri?: string | null;
-  rawJson?: string | null;
 };

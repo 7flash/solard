@@ -1,14 +1,14 @@
 #!/usr/bin/env bun
-import { loadConfig, redactedUrl } from "./config.js";
 import {
-  openIndexerDb,
   pruneIngestionKeys,
   recordWorkerError,
   upsertProcessStatus,
-} from "./db.js";
+} from "../shared/terminal-repo.js";
+import { loadConfig } from "./config.js";
+import { openIndexerDb } from "./db.js";
 import { runHeliusWsSession } from "./helius-ws.js";
-import { startMetadataHydrator } from "./metadata.js";
 import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
+import { startMetadataHydrator } from "./metadata.js";
 import { refreshSolUsd } from "./sol-usd.js";
 import type { Counters } from "./types.js";
 
@@ -16,7 +16,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function counters(): Counters {
+function createCounters(): Counters {
   return {
     sessions: 0,
     messages: 0,
@@ -41,21 +41,31 @@ function counters(): Counters {
 export async function runIndexer(): Promise<void> {
   const config = loadConfig();
   const store = openIndexerDb();
-  const count = counters();
+  const counters = createCounters();
   const controller = new AbortController();
 
   let stopping = false;
+
   const stop = (reason: string) => {
     if (stopping) return;
     stopping = true;
     controller.abort();
-    upsertProcessStatus(store.db, {
-      name: config.name,
-      kind: "indexer",
-      status: "stopped",
-      buildId: config.buildId,
-      data: { reason, ...count },
-    });
+
+    upsertProcessStatus(
+      {
+        name: config.name,
+        kind: "indexer",
+        status: "stopped",
+        buildId: config.buildId,
+        data: {
+          reason,
+          dbPath: store.path,
+          ...counters,
+        },
+      },
+      store.db,
+    );
+
     setTimeout(() => process.exit(0), 50);
   };
 
@@ -65,34 +75,33 @@ export async function runIndexer(): Promise<void> {
   const sol = await refreshSolUsd({
     fallback: config.solUsd,
     force: true,
-    timeoutMs: 2500,
-  }).catch(() => ({ value: config.solUsd, source: "fallback" }));
-  count.solUsd = sol.value ?? config.solUsd ?? null;
-  count.solUsdAtMs = Date.now();
+  }).catch(() => ({
+    value: config.solUsd,
+  }));
+
+  counters.solUsd = sol.value ?? null;
+  counters.solUsdAtMs = Date.now();
 
   startMetadataHydrator({
     db: store.db,
     config,
-    counters: count,
+    counters,
   });
 
-  upsertProcessStatus(store.db, {
-    name: config.name,
-    kind: "indexer",
-    status: "starting",
-    buildId: config.buildId,
-    data: {
-      source: "helius",
-      mode: "logsSubscribe",
-      dbPath: store.path,
-      url: redactedUrl(config.wsUrl),
-      programId: config.programId,
-      commitment: config.commitment,
-      solUsd: count.solUsd,
-      metadataFetch: config.metadataFetch,
-      metadataConcurrency: config.metadataConcurrency,
+  upsertProcessStatus(
+    {
+      name: config.name,
+      kind: "indexer",
+      status: "starting",
+      buildId: config.buildId,
+      data: {
+        dbPath: store.path,
+        source: "helius",
+        solUsd: counters.solUsd,
+      },
     },
-  });
+    store.db,
+  );
 
   let attempt = 0;
 
@@ -102,21 +111,35 @@ export async function runIndexer(): Promise<void> {
     await indexerMeasure.measure(
       {
         start: () => `indexer loop attempt=${attempt}`,
-        end: (value) => summarizeValue(value),
+        end: summarizeValue,
         catch: (error) => {
-          count.errors++;
-          recordWorkerError(store.db, config.name, error, {
-            phase: "session",
-            attempt,
-          });
-          upsertProcessStatus(store.db, {
-            name: config.name,
-            kind: "indexer",
-            status: "error",
-            buildId: config.buildId,
+          counters.errors++;
+
+          recordWorkerError(
+            config.name,
             error,
-            data: { attempt, ...count },
-          });
+            {
+              phase: "session",
+              attempt,
+            },
+            store.db,
+          );
+
+          upsertProcessStatus(
+            {
+              name: config.name,
+              kind: "indexer",
+              status: "error",
+              buildId: config.buildId,
+              error,
+              data: {
+                attempt,
+                ...counters,
+              },
+            },
+            store.db,
+          );
+
           return summarizeError(error);
         },
       },
@@ -124,15 +147,15 @@ export async function runIndexer(): Promise<void> {
         const result = await runHeliusWsSession({
           db: store.db,
           config,
-          counters: count,
+          counters,
           attempt,
           signal: controller.signal,
         });
 
         const pruned = pruneIngestionKeys(
-          store.db,
           "helius-indexer",
-          Number(process.env.SOLARD_INDEXER_SEEN_RETENTION_MS ?? "21600000"),
+          Number(process.env.SOLARD_INDEXER_SEEN_RETENTION_MS ?? 21_600_000),
+          store.db,
         );
 
         return { ...result, pruned };
@@ -146,13 +169,20 @@ export async function runIndexer(): Promise<void> {
       config.reconnectMinMs * 2 ** Math.min(attempt, 6),
     );
 
-    upsertProcessStatus(store.db, {
-      name: config.name,
-      kind: "indexer",
-      status: "reconnecting",
-      buildId: config.buildId,
-      data: { delay, attempt, ...count },
-    });
+    upsertProcessStatus(
+      {
+        name: config.name,
+        kind: "indexer",
+        status: "reconnecting",
+        buildId: config.buildId,
+        data: {
+          delay,
+          attempt,
+          ...counters,
+        },
+      },
+      store.db,
+    );
 
     await sleep(delay);
   }

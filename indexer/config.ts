@@ -1,4 +1,5 @@
 import { SOLARD_DB_PATH } from "../shared/terminal-db.js";
+
 export type IndexerConfig = {
   name: string;
   buildId: string;
@@ -21,7 +22,7 @@ export type IndexerConfig = {
 
 function env(name: string): string | undefined {
   const value = process.env[name]?.trim();
-  return value ? value : undefined;
+  return value || undefined;
 }
 
 function numberEnv(name: string, fallback: number): number {
@@ -36,11 +37,15 @@ function boolEnv(name: string, fallback = false): boolean {
 }
 
 function rpcToWs(value: string): string {
-  if (value.startsWith("wss://") || value.startsWith("ws://")) return value;
-  if (value.startsWith("https://"))
+  if (value.startsWith("wss://") || value.startsWith("ws://")) {
+    return value;
+  }
+  if (value.startsWith("https://")) {
     return `wss://${value.slice("https://".length)}`;
-  if (value.startsWith("http://"))
+  }
+  if (value.startsWith("http://")) {
     return `ws://${value.slice("http://".length)}`;
+  }
   return value;
 }
 
@@ -48,8 +53,9 @@ export function redactedUrl(value: string): string {
   try {
     const url = new URL(value);
     for (const key of [...url.searchParams.keys()]) {
-      if (/key|token|secret|auth|jwt/i.test(key))
+      if (/key|token|secret|auth|jwt/i.test(key)) {
         url.searchParams.set(key, "***");
+      }
     }
     if (url.password) url.password = "***";
     return url.toString();
@@ -74,12 +80,11 @@ export function loadConfig(): IndexerConfig {
     );
   }
 
-  const solUsd = env("SOLARD_SOL_USD");
-  const parsedSolUsd = solUsd == null ? null : Number(solUsd);
+  const parsedSolUsd = Number(env("SOLARD_SOL_USD") ?? "");
 
   return {
     name: env("SOLARD_INDEXER_NAME") ?? "solard-indexer-helius",
-    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v2-standalone",
+    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v4-orm-only",
     dbPath: SOLARD_DB_PATH,
     programId:
       env("SOLARD_PUMPFUN_PROGRAM_ID") ??
@@ -89,15 +94,13 @@ export function loadConfig(): IndexerConfig {
     reconnectMinMs: numberEnv("SOLARD_INDEXER_RECONNECT_MIN_MS", 750),
     reconnectMaxMs: numberEnv("SOLARD_INDEXER_RECONNECT_MAX_MS", 30_000),
     heartbeatMs: numberEnv("SOLARD_INDEXER_HEARTBEAT_MS", 5_000),
-
     metadataFetch: boolEnv("SOLARD_INDEXER_METADATA", true),
     metadataTimeoutMs: numberEnv("SOLARD_INDEXER_METADATA_TIMEOUT_MS", 3_500),
     metadataMaxBytes: numberEnv("SOLARD_INDEXER_METADATA_MAX_BYTES", 1_000_000),
     metadataConcurrency: numberEnv("SOLARD_INDEXER_METADATA_CONCURRENCY", 4),
-
-    solUsd: Number.isFinite(parsedSolUsd) ? parsedSolUsd : null,
+    solUsd:
+      Number.isFinite(parsedSolUsd) && parsedSolUsd > 0 ? parsedSolUsd : null,
     solUsdRefreshMs: numberEnv("SOLARD_SOL_USD_REFRESH_MS", 30_000),
-
     tokenDecimals: numberEnv("SOLARD_PUMP_TOKEN_DECIMALS", 6),
     pumpSupplyUi: numberEnv("SOLARD_PUMP_SUPPLY_UI", 1_000_000_000),
   };
