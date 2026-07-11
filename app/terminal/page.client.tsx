@@ -25,16 +25,17 @@ import type {
   WalletRow,
 } from "../_client/types";
 
-type SortKey =
-  | "newest"
-  | "mcap-desc"
-  | "mcap-asc"
-  | "sma1m-desc"
-  | "sma1m-asc"
-  | "sma5m-desc"
-  | "sma5m-asc"
-  | "sma15m-desc"
-  | "sma15m-asc";
+type SortBase =
+  | "age"
+  | "mcap"
+  | "sma1m"
+  | "sma5m"
+  | "sma15m"
+  | "trades"
+  | "trades1m"
+  | "volume1m";
+
+type SortKey = `${SortBase}-asc` | `${SortBase}-desc`;
 
 type HolderRow = {
   owner?: string | null;
@@ -101,7 +102,11 @@ const state: PageState = {
   filter: storageGet("solwal:pump-feed-filter", ""),
   hideMayhem: storageFlag("solwal:pump-hide-mayhem"),
   hideUsdc: storageFlag("solwal:pump-hide-usdc"),
-  sort: (storageGet("solwal:pump-feed-sort", "newest") as SortKey) || "newest",
+  sort: (() => {
+    const saved = storageGet("solwal:pump-feed-sort", "age-asc");
+
+    return (saved === "newest" ? "age-asc" : saved) as SortKey;
+  })(),
   selectedKey: storageGet("solard:terminal-inspector-key", "") || null,
   pinned: storageJson<string[]>("solard:terminal-pinned-mints", []).filter(
     (x) => typeof x === "string",
@@ -367,7 +372,26 @@ function passesFilters(row: PumpFeedRow): boolean {
     .includes(q);
 }
 
+function trades15m(row: PumpFeedRow): number {
+  return (
+    numberValue((row as any).trades15m) ?? numberValue(row.tradeCount) ?? 0
+  );
+}
+
+function trades1m(row: PumpFeedRow): number {
+  return numberValue((row as any).trades1m) ?? 0;
+}
+
+function volumeSol1m(row: PumpFeedRow): number {
+  return numberValue((row as any).volumeSol1m) ?? 0;
+}
+
+function ageMs(row: PumpFeedRow): number {
+  return Math.max(0, Date.now() - latestTime(row));
+}
+
 function sortValue(row: PumpFeedRow): number {
+  if (state.sort.startsWith("age")) return ageMs(row);
   if (state.sort.startsWith("mcap")) return latestMcap(row) ?? -Infinity;
   if (state.sort.startsWith("sma1m"))
     return numberValue(row.sma1m) ?? -Infinity;
@@ -375,7 +399,10 @@ function sortValue(row: PumpFeedRow): number {
     return numberValue(row.sma5m) ?? -Infinity;
   if (state.sort.startsWith("sma15m"))
     return numberValue(row.sma15m) ?? -Infinity;
-  return latestTime(row);
+  if (state.sort.startsWith("trades1m")) return trades1m(row);
+  if (state.sort.startsWith("trades")) return trades15m(row);
+  if (state.sort.startsWith("volume1m")) return volumeSol1m(row);
+  return ageMs(row);
 }
 
 function visibleRows(): PumpFeedRow[] {
@@ -400,11 +427,21 @@ function selectedRow(rows: PumpFeedRow[]): PumpFeedRow | null {
   );
 }
 
-function setSort(base: "mcap" | "sma1m" | "sma5m" | "sma15m"): void {
-  const desc = `${base}-desc` as SortKey;
-  state.sort = state.sort === desc ? (`${base}-asc` as SortKey) : desc;
+function setSort(base: SortBase): void {
+  const defaultKey = (base === "age" ? "age-asc" : `${base}-desc`) as SortKey;
+
+  const alternateKey = (
+    defaultKey.endsWith("-asc") ? `${base}-desc` : `${base}-asc`
+  ) as SortKey;
+
+  state.sort = state.sort === defaultKey ? alternateKey : defaultKey;
+
   storageSet("solwal:pump-feed-sort", state.sort);
-  measureEvent(SCOPE, "sort", { sort: state.sort });
+
+  measureEvent(SCOPE, "sort", {
+    sort: state.sort,
+  });
+
   rerender();
 }
 
@@ -713,6 +750,30 @@ function tokenMeta(row: PumpFeedRow): AnyRow {
   };
 }
 
+function apiErrorMessage(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const row = value as AnyRow;
+
+  const nested =
+    row.error && typeof row.error === "object" ? (row.error as AnyRow) : null;
+
+  if (
+    row.ok === false ||
+    row.success === false ||
+    row.name === "Error" ||
+    nested
+  ) {
+    return String(
+      nested?.message ?? row.message ?? row.error ?? "Request failed",
+    );
+  }
+
+  return null;
+}
+
 async function tradeSelected(
   row: PumpFeedRow,
   side: "buy" | "sell",
@@ -778,6 +839,12 @@ async function tradeSelected(
         });
       },
     );
+    const responseError = apiErrorMessage(result);
+
+    if (responseError) {
+      throw new Error(responseError);
+    }
+
     state.tradeMessage = `${side.toUpperCase()} ${state.liveTrade ? "live" : "sim"} ok: ${JSON.stringify(result).slice(0, 220)}`;
   } catch (error) {
     state.tradeError = error instanceof Error ? error.message : String(error);
@@ -832,33 +899,125 @@ async function refreshHolders(row: PumpFeedRow): Promise<void> {
   }
 }
 
-function linksFor(row: PumpFeedRow): Array<{ label: string; href: string }> {
-  const links: Array<{ label: string; href: string }> = [];
+function formatVolumeSol(value: unknown): string {
+  const number = numberValue(value);
+
+  if (number == null) {
+    return "—";
+  }
+
+  const formatted = new Intl.NumberFormat("en-US", {
+    notation: Math.abs(number) >= 1_000 ? "compact" : "standard",
+
+    maximumFractionDigits: Math.abs(number) < 10 ? 2 : 1,
+  }).format(number);
+
+  return `${formatted} SOL`;
+}
+
+function normalizedExternalUrl(
+  kind: "site" | "x" | "tg",
+  value: unknown,
+): string | null {
+  const raw = typeof value === "string" ? value.trim() : "";
+
+  if (!raw) return null;
+
+  if (/^https?:\/\//i.test(raw)) {
+    return raw;
+  }
+
+  if (
+    kind === "site" &&
+    /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i.test(raw)
+  ) {
+    return `https://${raw}`;
+  }
+
+  const handle = raw
+    .replace(/^@/, "")
+    .replace(/^(?:x|twitter|telegram|tg):/i, "")
+    .trim();
+
+  if (!/^[a-z0-9_]{2,64}$/i.test(handle)) {
+    return null;
+  }
+
+  if (kind === "x") {
+    return `https://x.com/${handle}`;
+  }
+
+  if (kind === "tg") {
+    return `https://t.me/${handle}`;
+  }
+
+  return null;
+}
+
+function linksFor(row: PumpFeedRow): Array<{
+  label: string;
+  href: string;
+}> {
+  const links: Array<{
+    label: string;
+    href: string;
+  }> = [];
+
   if (row.mint) {
     links.push({
       label: "solscan",
       href: `https://solscan.io/token/${row.mint}`,
     });
-    links.push({ label: "pump", href: `https://pump.fun/${row.mint}` });
+
+    links.push({
+      label: "pump",
+      href: `https://pump.fun/${row.mint}`,
+    });
   }
-  for (const [label, value] of [
-    ["site", row.website],
-    ["x", row.twitter],
-    ["tg", row.telegram],
-  ] as Array<[string, unknown]>) {
-    const href = typeof value === "string" ? value.trim() : "";
-    if (href.startsWith("http")) links.push({ label, href });
+
+  const candidates: Array<["site" | "x" | "tg", unknown[]]> = [
+    [
+      "site",
+      [
+        row.website,
+        row.raw?.website,
+        row.raw?.metadata?.website,
+        row.raw?.metadata?.external_url,
+      ],
+    ],
+
+    [
+      "x",
+      [
+        row.twitter,
+        row.raw?.twitter,
+        row.raw?.x,
+        row.raw?.metadata?.twitter,
+        row.raw?.metadata?.x,
+      ],
+    ],
+
+    ["tg", [row.telegram, row.raw?.telegram, row.raw?.metadata?.telegram]],
+  ];
+
+  for (const [label, values] of candidates) {
+    const href =
+      values
+        .map((value) => normalizedExternalUrl(label, value))
+        .find(Boolean) ?? null;
+
+    if (href) {
+      links.push({
+        label,
+        href,
+      });
+    }
   }
+
   return links;
 }
 
-function SortButton({
-  base,
-  label,
-}: {
-  base: "mcap" | "sma1m" | "sma5m" | "sma15m";
-  label: string;
-}) {
+function SortButton({ base, label }: { base: SortBase; label: string }) {
   return (
     <button
       type="button"
@@ -898,17 +1057,51 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
                 : row.name || short(row.mint, 5, 5)}
             </div>
             <div className="terminal-v10-name">{row.name || "unnamed"}</div>
+
+            <div className="terminal-v10-links">
+              {linksFor(row)
+                .filter((link) => link.label !== "solscan")
+                .map((link) => (
+                  <a
+                    href={link.href}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(event: any) => event.stopPropagation()}
+                  >
+                    {link.label}
+                  </a>
+                ))}
+            </div>
           </div>
         </div>
       </td>
+
       <td className="terminal-v10-num">{formatMcap(latestMcap(row))}</td>
       <td className="terminal-v10-num">{formatMcap(row.sma1m)}</td>
       <td className="terminal-v10-num">{formatMcap(row.sma5m)}</td>
       <td className="terminal-v10-num">{formatMcap(row.sma15m)}</td>
-      <td className="terminal-v10-num">{row.tradeCount ?? "—"}</td>
+
+      <td className="terminal-v10-num">{trades15m(row)}</td>
+      <td className="terminal-v10-num">{trades1m(row)}</td>
+      <td className="terminal-v10-num">{formatVolumeSol(volumeSol1m(row))}</td>
+
+      <td className="terminal-v10-num">{age(latestTime(row))}</td>
+
       <td>
-        <div className="terminal-v10-small">{age(latestTime(row))}</div>
-        <div className="terminal-v10-small">{short(row.mint, 4, 4)}</div>
+        {row.mint ? (
+          <a
+            className="terminal-v10-small code"
+            href={`https://pump.fun/${row.mint}`}
+            target="_blank"
+            rel="noreferrer"
+            title={row.mint}
+            onClick={(event: any) => event.stopPropagation()}
+          >
+            {short(row.mint, 5, 5)}
+          </a>
+        ) : (
+          <span className="terminal-v10-small">—</span>
+        )}
       </td>
     </tr>
   );
@@ -978,6 +1171,14 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
         <div>
           <span>SMA 15m</span>
           <b>{formatMcap(row.sma15m)}</b>
+        </div>
+        <div>
+          <span>Trades 1m</span>
+          <b>{trades1m(row)}</b>
+        </div>
+        <div>
+          <span>Volume 1m</span>
+          <b>{formatVolumeSol(volumeSol1m(row))}</b>
         </div>
       </div>
 
@@ -1308,15 +1509,10 @@ function TerminalPage() {
         </button>
         <button
           type="button"
-          className={`terminal-v10-sort ${state.sort === "newest" ? "active" : ""}`}
-          onClick={() => {
-            state.sort = "newest";
-            storageSet("solwal:pump-feed-sort", state.sort);
-            measureEvent(SCOPE, "sort", { sort: state.sort });
-            rerender();
-          }}
+          className={`terminal-v10-sort ${state.sort.startsWith("age") ? "active" : ""}`}
+          onClick={() => setSort("age")}
         >
-          Newest
+          Age {sortMark("age")}
         </button>
       </section>
 
@@ -1360,8 +1556,19 @@ function TerminalPage() {
                 <th>
                   <SortButton base="sma15m" label="SMA 15m" />
                 </th>
-                <th>Trades</th>
-                <th>Age / Mint</th>
+                <th>
+                  <SortButton base="trades" label="Trades 15m" />
+                </th>
+                <th>
+                  <SortButton base="trades1m" label="Trades 1m" />
+                </th>
+                <th>
+                  <SortButton base="volume1m" label="Vol 1m" />
+                </th>
+                <th>
+                  <SortButton base="age" label="Age" />
+                </th>
+                <th>Mint</th>
               </tr>
             </thead>
             <tbody>

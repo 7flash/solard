@@ -140,6 +140,10 @@ export const TokenPriceWindowsSchema = z.object({
   trades5m: z.number(),
   trades15m: z.number(),
 
+  volumeSol1m: z.number(),
+  volumeSol5m: z.number(),
+  volumeSol15m: z.number(),
+
   latestPriceSol: z.number().nullable(),
   latestPriceUsd: z.number().nullable(),
   latestMarketCapUsd: z.number().nullable(),
@@ -171,6 +175,10 @@ export type TerminalFeedRow = TerminalToken & {
   trades1m: number;
   trades5m: number;
   trades15m: number;
+
+  volumeSol1m: number;
+  volumeSol5m: number;
+  volumeSol15m: number;
 
   lastTradeAtMs: number | null;
   priceAgeMs: number | null;
@@ -230,7 +238,7 @@ export const db = new Database(
     },
 
     views: {
-      tokenPriceWindows: defineView(
+      tokenPriceWindowsV2: defineView(
         TokenPriceWindowsSchema,
         `
         WITH recent AS (
@@ -240,6 +248,7 @@ export const db = new Database(
             priceSol,
             priceUsd,
             marketCapUsd,
+            solDeltaUi,
             tradedAtMs,
 
             ROW_NUMBER() OVER (
@@ -319,6 +328,24 @@ export const db = new Database(
             WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000
             THEN 1
           END) AS trades15m,
+
+          SUM(CASE
+            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000
+            THEN ABS(solDeltaUi)
+            ELSE 0
+          END) AS volumeSol1m,
+
+          SUM(CASE
+            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000
+            THEN ABS(solDeltaUi)
+            ELSE 0
+          END) AS volumeSol5m,
+
+          SUM(CASE
+            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000
+            THEN ABS(solDeltaUi)
+            ELSE 0
+          END) AS volumeSol15m,
 
           MAX(CASE
             WHEN latestPriceSolRank = 1
@@ -674,7 +701,7 @@ export function getTokenPriceWindows(
   if (!key) return null;
 
   return (
-    (db.tokenPriceWindows
+    (db.tokenPriceWindowsV2
       .select()
       .where({ mint: key })
       .cache({
@@ -687,7 +714,7 @@ export function getTokenPriceWindows(
 export function listTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows[] {
-  return db.tokenPriceWindows
+  return db.tokenPriceWindowsV2
     .select()
     .orderBy("latestTradeAtMs", "DESC")
     .cache({
@@ -901,7 +928,11 @@ export function listTerminalFeed(
 
       const marketCapUsd =
         windows?.latestMarketCapUsd ??
-        (priceUsd != null ? priceUsd * token.supplyUi : token.marketCapUsd);
+        (priceUsd != null ? priceUsd * token.supplyUi : token.marketCapUsd) ??
+        windows?.avgMarketCapUsd1m ??
+        windows?.avgMarketCapUsd5m ??
+        windows?.avgMarketCapUsd15m ??
+        null;
 
       const marketCapSol =
         priceSol != null ? priceSol * token.supplyUi : token.marketCapSol;
@@ -949,6 +980,12 @@ export function listTerminalFeed(
         trades5m: windows?.trades5m ?? 0,
 
         trades15m: windows?.trades15m ?? 0,
+
+        volumeSol1m: windows?.volumeSol1m ?? 0,
+
+        volumeSol5m: windows?.volumeSol5m ?? 0,
+
+        volumeSol15m: windows?.volumeSol15m ?? 0,
 
         lastTradeAtMs: latestTradeAtMs ?? (priceUpdatedAtMs || null),
 
@@ -1119,7 +1156,11 @@ export function terminalStoreStats(
         (window) =>
           window.latestPriceSol != null ||
           window.latestPriceUsd != null ||
-          window.latestMarketCapUsd != null,
+          window.latestMarketCapUsd != null ||
+          window.avgPriceUsd1m != null ||
+          window.avgMarketCapUsd1m != null ||
+          window.avgMarketCapUsd5m != null ||
+          window.avgMarketCapUsd15m != null,
       )
       .map((window) => window.mint),
   );

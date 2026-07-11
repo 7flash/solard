@@ -36,12 +36,60 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function firstUrl(...values: unknown[]): string | null {
-  for (const value of values) {
-    const normalized = normalizeUri(text(value));
+function httpUrl(value: unknown): string | null {
+  const raw = text(value);
+  if (!raw) return null;
 
-    if (normalized) {
-      return normalized;
+  const normalized = normalizeUri(raw);
+
+  if (normalized) {
+    return normalized;
+  }
+
+  if (/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i.test(raw)) {
+    return `https://${raw}`;
+  }
+
+  return null;
+}
+
+function socialUrl(
+  kind: "twitter" | "telegram",
+  value: unknown,
+): string | null {
+  const raw = text(value);
+  if (!raw) return null;
+
+  const direct = httpUrl(raw);
+
+  if (direct) {
+    return direct;
+  }
+
+  const handle = raw
+    .replace(/^@/, "")
+    .replace(/^(?:x|twitter|telegram|tg):/i, "")
+    .trim();
+
+  if (!/^[a-z0-9_]{2,64}$/i.test(handle)) {
+    return null;
+  }
+
+  return kind === "twitter"
+    ? `https://x.com/${handle}`
+    : `https://t.me/${handle}`;
+}
+
+function objectValue(value: unknown, ...keys: string[]): unknown {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+
+  for (const key of keys) {
+    if (record[key] != null) {
+      return record[key];
     }
   }
 
@@ -89,6 +137,9 @@ function makePatch(item: QueueItem, data: any): TokenMetadataPatch {
 
   const links = data?.links ?? data?.content?.links ?? {};
 
+  const socials =
+    data?.socials ?? data?.social ?? data?.properties?.socials ?? {};
+
   return {
     mint: item.mint,
 
@@ -98,25 +149,44 @@ function makePatch(item: QueueItem, data: any): TokenMetadataPatch {
 
     symbol: text(data?.symbol) ?? item.symbol ?? null,
 
-    image: firstUrl(data?.image, data?.image_url, data?.imageUrl, links?.image),
+    image: httpUrl(
+      data?.image ??
+        data?.image_url ??
+        data?.imageUrl ??
+        links?.image ??
+        data?.properties?.files?.[0]?.uri,
+    ),
 
     description: text(data?.description),
 
-    website: firstUrl(
-      data?.website,
-      data?.external_url,
-      extensions?.website,
-      links?.external_url,
+    website: httpUrl(
+      data?.website ??
+        data?.external_url ??
+        extensions?.website ??
+        links?.external_url ??
+        links?.website ??
+        objectValue(socials, "website", "site"),
     ),
 
-    twitter: firstUrl(
-      data?.twitter,
-      data?.x,
-      extensions?.twitter,
-      links?.twitter,
+    twitter: socialUrl(
+      "twitter",
+      data?.twitter ??
+        data?.x ??
+        extensions?.twitter ??
+        extensions?.x ??
+        links?.twitter ??
+        links?.x ??
+        objectValue(socials, "twitter", "x"),
     ),
 
-    telegram: firstUrl(data?.telegram, extensions?.telegram, links?.telegram),
+    telegram: socialUrl(
+      "telegram",
+      data?.telegram ??
+        extensions?.telegram ??
+        links?.telegram ??
+        links?.tg ??
+        objectValue(socials, "telegram", "tg"),
+    ),
   };
 }
 
