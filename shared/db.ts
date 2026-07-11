@@ -742,22 +742,19 @@ export function appendTokenTradeOnce(
   };
 
   try {
-    const inserted = db.tokenTrades
-      .insert(row)
-      .onConflict("eventKey")
-      .doNothing() as TokenTrade | null;
+    /**
+     * sqlite-zod-orm insert() executes synchronously.
+     *
+     * tokenTrades is append-only. A duplicate eventKey is normal websocket
+     * redelivery and is handled by the UNIQUE exception below.
+     */
+    const inserted = db.tokenTrades.insert(row) as TokenTrade;
 
     return {
-      row: inserted ?? row,
-
-      inserted: inserted != null,
+      row: inserted,
+      inserted: true,
     };
   } catch (error) {
-    /**
-     * Some sqlite-zod-orm/SQLite combinations can still surface the UNIQUE
-     * exception instead of returning null from DO NOTHING. A duplicate Helius
-     * delivery is normal idempotency, not a parser/write failure.
-     */
     if (isDuplicateTradeError(error)) {
       return {
         row,
@@ -939,19 +936,24 @@ export function getTerminalFeedState(
     updatedAtMs: now,
   };
 
-  const inserted = db.terminalFeedState
-    .insert(row)
-    .onConflict("scope")
-    .doNothing() as TerminalFeedState | null;
-
-  return (
-    inserted ??
-    (db.terminalFeedState
+  try {
+    /**
+     * Initialization is a plain synchronous insert.
+     * If another process wins the race, return the row it inserted.
+     */
+    return db.terminalFeedState.insert(row) as TerminalFeedState;
+  } catch (error) {
+    const existingAfterRace = db.terminalFeedState
       .select()
       .where({ scope })
-      .get() as TerminalFeedState | null) ??
-    row
-  );
+      .get() as TerminalFeedState | null;
+
+    if (existingAfterRace) {
+      return existingAfterRace;
+    }
+
+    throw error;
+  }
 }
 
 /**

@@ -166,296 +166,77 @@ function rootElement(): HTMLElement {
 
 let renderFrame: number | null = null;
 
-let renderGeneration = 0;
+let renderActive = false;
+let renderPending = false;
 
-type TerminalUiMemory = {
-  windowX: number;
-  windowY: number;
-
-  tableLeft: number;
-  tableTop: number;
-
-  activityLeft: number;
-  activityTop: number;
-
-  focusKey: string | null;
-  selectionStart: number | null;
-  selectionEnd: number | null;
-};
-
-const uiMemory: TerminalUiMemory = {
-  windowX: 0,
-  windowY: 0,
-
-  tableLeft: 0,
-  tableTop: 0,
-
-  activityLeft: 0,
-  activityTop: 0,
-
-  focusKey: null,
-  selectionStart: null,
-  selectionEnd: null,
-};
-
-function rememberTerminalUi(root: HTMLElement): void {
-  uiMemory.windowX = window.scrollX;
-
-  uiMemory.windowY = window.scrollY;
-
-  const table = root.querySelector<HTMLElement>(".terminal-v10-table-wrap");
-
-  if (table) {
-    uiMemory.tableLeft = table.scrollLeft;
-
-    uiMemory.tableTop = table.scrollTop;
-  }
-
-  const activity = root.querySelector<HTMLElement>(".terminal-v10-log-rows");
-
-  if (activity) {
-    uiMemory.activityLeft = activity.scrollLeft;
-
-    uiMemory.activityTop = activity.scrollTop;
-  }
-
-  const active =
-    document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-
-  uiMemory.focusKey = active?.dataset.terminalFocus ?? null;
-
-  const input =
-    active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
-      ? active
-      : null;
-
-  uiMemory.selectionStart = input?.selectionStart ?? null;
-
-  uiMemory.selectionEnd = input?.selectionEnd ?? null;
-}
-
-function observeTerminalUi(root: HTMLElement): void {
-  const table = root.querySelector<HTMLElement>(".terminal-v10-table-wrap");
-
-  table?.addEventListener(
-    "scroll",
-    () => {
-      uiMemory.tableLeft = table.scrollLeft;
-
-      uiMemory.tableTop = table.scrollTop;
-    },
-    {
-      passive: true,
-    },
-  );
-
-  const activity = root.querySelector<HTMLElement>(".terminal-v10-log-rows");
-
-  activity?.addEventListener(
-    "scroll",
-    () => {
-      uiMemory.activityLeft = activity.scrollLeft;
-
-      uiMemory.activityTop = activity.scrollTop;
-    },
-    {
-      passive: true,
-    },
-  );
-
-  root.addEventListener("focusin", (event) => {
-    const target = event.target;
-
-    if (target instanceof HTMLElement) {
-      uiMemory.focusKey = target.dataset.terminalFocus ?? null;
-    }
-  });
-
-  root.addEventListener("input", (event) => {
-    const target = event.target;
-
-    if (
-      target instanceof HTMLInputElement ||
-      target instanceof HTMLTextAreaElement
-    ) {
-      uiMemory.focusKey = target.dataset.terminalFocus ?? null;
-
-      uiMemory.selectionStart = target.selectionStart;
-
-      uiMemory.selectionEnd = target.selectionEnd;
-    }
-  });
-}
-
-function restoreTerminalUi(root: HTMLElement, generation: number): void {
-  const restore = () => {
-    if (
-      unmounted ||
-      generation !== renderGeneration ||
-      root !== document.getElementById("app-root")
-    ) {
-      return;
-    }
-
-    const table = root.querySelector<HTMLElement>(".terminal-v10-table-wrap");
-
-    if (table) {
-      table.scrollLeft = Math.min(
-        uiMemory.tableLeft,
-        Math.max(0, table.scrollWidth - table.clientWidth),
-      );
-
-      table.scrollTop = Math.min(
-        uiMemory.tableTop,
-        Math.max(0, table.scrollHeight - table.clientHeight),
-      );
-    }
-
-    const activity = root.querySelector<HTMLElement>(".terminal-v10-log-rows");
-
-    if (activity) {
-      activity.scrollLeft = Math.min(
-        uiMemory.activityLeft,
-        Math.max(0, activity.scrollWidth - activity.clientWidth),
-      );
-
-      activity.scrollTop = Math.min(
-        uiMemory.activityTop,
-        Math.max(0, activity.scrollHeight - activity.clientHeight),
-      );
-    }
-
-    if (uiMemory.focusKey) {
-      const target = root.querySelector<HTMLElement>(
-        `[data-terminal-focus="${uiMemory.focusKey}"]`,
-      );
-
-      target?.focus({
-        preventScroll: true,
-      });
-
-      if (
-        (target instanceof HTMLInputElement ||
-          target instanceof HTMLTextAreaElement) &&
-        uiMemory.selectionStart != null &&
-        uiMemory.selectionEnd != null
-      ) {
-        try {
-          target.setSelectionRange(
-            uiMemory.selectionStart,
-            uiMemory.selectionEnd,
-          );
-        } catch {}
-      }
-    }
-
-    window.scrollTo(uiMemory.windowX, uiMemory.windowY);
-  };
-
-  /**
-   * Restore once immediately and again after layout settles. Generation checks
-   * prevent an older render from resetting a newer root.
-   */
-  restore();
-
-  requestAnimationFrame(restore);
-
-  setTimeout(restore, 40);
-}
-
-function copyRootAttributes(source: HTMLElement, target: HTMLElement): void {
-  for (const attribute of [...source.attributes]) {
-    if (
-      attribute.name === "id" ||
-      attribute.name === "data-terminal-render-generation"
-    ) {
-      continue;
-    }
-
-    target.setAttribute(attribute.name, attribute.value);
-  }
-}
-
-function renderTerminalPage(): void {
-  const current = rootElement();
-
-  const parent = current.parentNode;
-
-  if (!parent) {
-    throw new Error("Terminal root is detached");
-  }
-
-  rememberTerminalUi(current);
-
-  const generation = ++renderGeneration;
-
-  /**
-   * Render into a completely detached, uniquely named element first.
-   *
-   * The live #app-root remains untouched while TradJS builds the new tree, so
-   * no renderer state can refer to children that another refresh has removed.
-   * Only after a successful mount do we atomically swap the finished root into
-   * the document.
-   */
-  const staged = document.createElement(current.tagName.toLowerCase());
-
-  copyRootAttributes(current, staged);
-
-  staged.id = `terminal-stage-${generation}`;
-
-  staged.dataset.terminalRenderGeneration = String(generation);
-
-  render(<TerminalPage />, staged, {
-    reconciler: "sequential",
-  });
-
-  /**
-   * Avoid duplicate #app-root ids during the swap.
-   */
-  current.removeAttribute("id");
-
-  staged.id = "app-root";
-
-  parent.replaceChild(staged, current);
-
-  observeTerminalUi(staged);
-
+function updateActiveNavigation(): void {
   document
     .querySelectorAll<HTMLAnchorElement>("#main-nav a")
     .forEach((link) =>
       link.classList.toggle("active", link.dataset.page === "terminal"),
     );
+}
 
-  restoreTerminalUi(staged, generation);
+function renderTerminalPage(): void {
+  if (unmounted) {
+    return;
+  }
+
+  if (renderActive) {
+    renderPending = true;
+    return;
+  }
+
+  renderActive = true;
+
+  try {
+    /**
+     * TradJS owns #app-root and performs normal reconciliation.
+     * Never clone, replace, detach, clear, or manually rewrite this root.
+     */
+    render(<TerminalPage />, rootElement(), {
+      reconciler: "sequential",
+    });
+
+    updateActiveNavigation();
+  } catch (error) {
+    state.status = "error";
+
+    state.error = error instanceof Error ? error.message : String(error);
+
+    console.error("[solard:terminal] render failed", error);
+  } finally {
+    renderActive = false;
+
+    if (renderPending && !unmounted) {
+      renderPending = false;
+      rerender();
+    }
+  }
 }
 
 function rerender(): void {
-  if (unmounted || renderFrame != null) {
+  if (unmounted) {
+    return;
+  }
+
+  if (renderActive) {
+    renderPending = true;
+    return;
+  }
+
+  if (renderFrame != null) {
     return;
   }
 
   /**
-   * One render per animation frame. Feed completion, activity updates, and
-   * state changes in the same frame collapse into a single detached mount.
+   * Feed polling, activity events, and user actions can request updates in the
+   * same frame. Collapse them into one TradJS render.
    */
   renderFrame = requestAnimationFrame(() => {
     renderFrame = null;
 
-    if (unmounted) {
-      return;
-    }
-
-    try {
-      renderTerminalPage();
-    } catch (error) {
-      state.status = "error";
-
-      state.error = error instanceof Error ? error.message : String(error);
-
-      console.error("[solard:terminal] render failed", error);
-    }
+    renderTerminalPage();
   });
 }
 
@@ -1437,7 +1218,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
           <div className="terminal-v10-links">
             {linksFor(row).map((link) => (
               <a
-                key={link.label}
+                key={`${link.label}:${link.href}`}
                 href={link.href}
                 target="_blank"
                 rel="noreferrer"
@@ -1520,11 +1301,15 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
               }
             >
               <option value="">Select wallet…</option>
-              {state.wallets.map((wallet) => (
-                <option value={wallet.address ?? wallet.name ?? ""}>
-                  {walletLabel(wallet)}
-                </option>
-              ))}
+              {state.wallets.map((wallet) => {
+                const value = wallet.address ?? wallet.name ?? "";
+
+                return (
+                  <option key={value} value={value}>
+                    {walletLabel(wallet)}
+                  </option>
+                );
+              })}
             </select>
             <input
               data-terminal-focus="buy-sol"
@@ -1628,7 +1413,9 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
               </thead>
               <tbody>
                 {holders.slice(0, 20).map((holder, index) => (
-                  <tr>
+                  <tr
+                    key={String(holder.owner ?? holder.tokenAccount ?? index)}
+                  >
                     <td>{index + 1}</td>
                     <td className="code">
                       {short(holder.owner ?? holder.tokenAccount, 5, 5)}
@@ -1899,6 +1686,7 @@ function LogsPanel() {
 
           return (
             <details
+              key={entry.id}
               className={`terminal-v10-log-row ${status} ${selected ? "selected" : ""}`}
               data-log-id={entry.id}
               open={selected}
@@ -2164,6 +1952,7 @@ function TerminalPage() {
             <tbody>
               {rows.map((row) => (
                 <TokenRow
+                  key={rowKey(row)}
                   row={row}
                   selected={selected ? rowKey(row) === rowKey(selected) : false}
                 />
@@ -2215,6 +2004,8 @@ export default function mount() {
 
       renderFrame = null;
     }
+
+    renderPending = false;
 
     clearPollTimer();
     pollInFlight = false;

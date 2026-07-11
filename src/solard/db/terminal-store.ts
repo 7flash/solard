@@ -777,10 +777,8 @@ export function insertTerminalTrade(
     updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
 
-  const inserted = terminalDb.tokenTrades
-    .insert(row)
-    .onConflict("eventKey")
-    .doNothing() as StoredTerminalTrade | null;
+  const inserted = dbMeasure('insert', () => terminalDb.tokenTrades
+    .insert(row));
 
   return toTerminalTrade(inserted ?? row);
 }
