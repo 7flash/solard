@@ -1085,6 +1085,22 @@ function LogsPanel() {
   );
 }
 
+function processData(row: AnyRow | null | undefined): AnyRow {
+  if (!row) return {};
+
+  if (row.data && typeof row.data === "object") {
+    return row.data;
+  }
+
+  try {
+    const parsed = JSON.parse(String(row.dataJson ?? "{}"));
+
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function TerminalPage() {
   const rows = visibleRows();
   const selected = selectedRow(rows);
@@ -1092,6 +1108,16 @@ function TerminalPage() {
     ? state.health!.processes!
     : [];
   const stale = processes.filter((row) => row.stale || row.error).length;
+
+  const indexerProcess =
+    processes.find((row: AnyRow) =>
+      String(row.name ?? "").includes("indexer"),
+    ) ?? null;
+
+  const indexer =
+    state.health?.indexer && typeof state.health.indexer === "object"
+      ? state.health.indexer
+      : processData(indexerProcess);
 
   return (
     <div className="terminal-v10">
@@ -1189,6 +1215,13 @@ function TerminalPage() {
           tokens={state.health?.store?.tokens ?? "?"} · priced=
           {state.health?.store?.pricedTokens ?? "?"} · trades=
           {state.health?.store?.trades ?? "?"} · stale={stale}
+        </span>
+        <span className="muted small">
+          ws={indexer.messages ?? "?"} · events=
+          {indexer.recognizedEventLines ?? "?"} · parsed-trades=
+          {indexer.parsedTrades ?? "?"} · unknown=
+          {indexer.unknownEventLines ?? "?"} · parse-errors=
+          {indexer.eventParseErrors ?? "?"}
         </span>
       </section>
 

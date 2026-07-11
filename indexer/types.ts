@@ -71,6 +71,18 @@ export type Counters = {
 
   duplicateTrades: number;
 
+  programDataLines: number;
+  recognizedEventLines: number;
+  unknownEventLines: number;
+  eventParseErrors: number;
+
+  parsedCreates: number;
+  parsedTrades: number;
+  parsedCompletes: number;
+
+  lastUnknownDiscriminator: string | null;
+  lastProgramDataLength: number | null;
+
   metadataQueued: number;
   metadataHydrated: number;
   metadataFailed: number;

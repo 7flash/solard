@@ -1,11 +1,24 @@
 import { SOLARD_DB_PATH } from "../shared/db.js";
 
+export const OFFICIAL_PUMP_PROGRAM_ID =
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+
+/**
+ * This value shipped in an earlier Solard patch but is not the Pump program.
+ * Auto-correct it so an old .env does not silently subscribe to an inactive
+ * address forever.
+ */
+export const KNOWN_BAD_PUMP_PROGRAM_ID =
+  "6EF8rrecthR5DkL6sKJGWMWYg32R56HsZ6uC9h8Cqd5";
+
 export type IndexerConfig = {
   name: string;
   buildId: string;
   dbPath: string;
 
   programId: string;
+  programIdCorrected: boolean;
+  programIdSource: "env" | "default" | "corrected";
   wsUrl: string;
   commitment: string;
 
@@ -107,13 +120,31 @@ export function loadConfig(): IndexerConfig {
   return {
     name: env("SOLARD_INDEXER_NAME") ?? "solard-indexer-helius",
 
-    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v8-shared-db",
+    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v9-pump-trade-stream",
 
     dbPath: SOLARD_DB_PATH,
 
-    programId:
-      env("SOLARD_PUMPFUN_PROGRAM_ID") ??
-      "6EF8rrecthR5DkL6sKJGWMWYg32R56HsZ6uC9h8Cqd5",
+    ...(() => {
+      const configured = env("SOLARD_PUMPFUN_PROGRAM_ID");
+
+      if (configured === KNOWN_BAD_PUMP_PROGRAM_ID) {
+        console.warn(
+          `[solard:indexer] replacing invalid Pump program ${configured} with ${OFFICIAL_PUMP_PROGRAM_ID}`,
+        );
+
+        return {
+          programId: OFFICIAL_PUMP_PROGRAM_ID,
+          programIdCorrected: true,
+          programIdSource: "corrected" as const,
+        };
+      }
+
+      return {
+        programId: configured ?? OFFICIAL_PUMP_PROGRAM_ID,
+        programIdCorrected: false,
+        programIdSource: configured ? ("env" as const) : ("default" as const),
+      };
+    })(),
 
     wsUrl,
 

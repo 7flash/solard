@@ -125,6 +125,9 @@ export const TokenPriceWindowsSchema = z.object({
   trades5m: z.number(),
   trades15m: z.number(),
 
+  latestPriceSol: z.number().nullable(),
+  latestPriceUsd: z.number().nullable(),
+  latestMarketCapUsd: z.number().nullable(),
   latestTradeAtMs: z.number().nullable(),
 });
 
@@ -207,6 +210,26 @@ export const db = new Database(
       tokenPriceWindows: defineView(
         TokenPriceWindowsSchema,
         `
+        WITH recent AS (
+          SELECT
+            id,
+            mint,
+            priceSol,
+            priceUsd,
+            marketCapUsd,
+            tradedAtMs,
+
+            ROW_NUMBER() OVER (
+              PARTITION BY mint
+              ORDER BY tradedAtMs DESC, id DESC
+            ) AS latestRank
+
+          FROM tokenTrades
+
+          WHERE
+            tradedAtMs >= unixepoch('subsec') * 1000 - 900000
+        )
+
         SELECT
           mint,
 
@@ -255,12 +278,24 @@ export const db = new Database(
             THEN 1
           END) AS trades15m,
 
+          MAX(CASE
+            WHEN latestRank = 1
+            THEN priceSol
+          END) AS latestPriceSol,
+
+          MAX(CASE
+            WHEN latestRank = 1
+            THEN priceUsd
+          END) AS latestPriceUsd,
+
+          MAX(CASE
+            WHEN latestRank = 1
+            THEN marketCapUsd
+          END) AS latestMarketCapUsd,
+
           MAX(tradedAtMs) AS latestTradeAtMs
 
-        FROM tokenTrades
-
-        WHERE
-          tradedAtMs >= unixepoch('subsec') * 1000 - 900000
+        FROM recent
 
         GROUP BY mint
         `,
@@ -596,6 +631,18 @@ export function getTokenPriceWindows(
   );
 }
 
+export function listTokenPriceWindows(
+  ttlMs = PRICE_WINDOW_TTL_MS,
+): TokenPriceWindows[] {
+  return db.tokenPriceWindows
+    .select()
+    .orderBy("latestTradeAtMs", "DESC")
+    .cache({
+      ttlMs: Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS)),
+    })
+    .all() as TokenPriceWindows[];
+}
+
 export function listTerminalFeed(
   input: {
     limit?: number;
@@ -624,7 +671,23 @@ export function listTerminalFeed(
 
   const candidateLimit = Math.min(2_000, Math.max(limit * 4, 300));
 
-  const candidates = db.terminalTokensLive
+  /**
+   * One cached view query scans the 15-minute trade candidate set once,
+   * groups once, and supplies both latest prices and all SMA windows.
+   */
+  const allWindows = listTokenPriceWindows(
+    input.priceWindowTtlMs ?? PRICE_WINDOW_TTL_MS,
+  );
+
+  const activeWindows = allWindows
+    .filter((window) => Number(window.latestTradeAtMs ?? 0) >= minUpdatedAt)
+    .slice(0, candidateLimit);
+
+  const windowsByMint = new Map(
+    allWindows.map((window) => [window.mint, window]),
+  );
+
+  const recentTokens = db.terminalTokensLive
     .select()
     .where({
       updatedAtMs: {
@@ -635,69 +698,106 @@ export function listTerminalFeed(
     .limit(candidateLimit)
     .all() as TerminalToken[];
 
-  const tokens = candidates
+  const activeTradeMints = activeWindows.map((window) => window.mint);
+
+  const tradedTokens = activeTradeMints.length
+    ? (db.terminalTokensLive
+        .select()
+        .whereIn("mint", activeTradeMints)
+        .all() as TerminalToken[])
+    : [];
+
+  const tokensByMint = new Map<string, TerminalToken>();
+
+  for (const token of [...recentTokens, ...tradedTokens]) {
+    tokensByMint.set(token.mint, token);
+  }
+
+  const rows = [...tokensByMint.values()]
     .filter((token) => sourceMatches(input.source, token.source))
     .filter((token) => !input.hideMayhem || token.isMayhemMode === 0)
     .filter((token) => !input.hideUsdc || !isUsdc(token))
+    .map((token) => {
+      const windows = windowsByMint.get(token.mint) ?? null;
+
+      const priceSol = windows?.latestPriceSol ?? token.priceSol;
+
+      const priceUsd = windows?.latestPriceUsd ?? token.priceUsd;
+
+      const marketCapUsd = windows?.latestMarketCapUsd ?? token.marketCapUsd;
+
+      const marketCapSol =
+        priceSol != null ? priceSol * token.supplyUi : token.marketCapSol;
+
+      const latestTradeAtMs = windows?.latestTradeAtMs ?? null;
+
+      const priceUpdatedAtMs =
+        latestTradeAtMs ??
+        (token.priceUpdatedAtMs > 0
+          ? token.priceUpdatedAtMs
+          : priceSol != null ||
+              priceUsd != null ||
+              marketCapSol != null ||
+              marketCapUsd != null
+            ? token.updatedAtMs
+            : 0);
+
+      const priceAgeMs =
+        priceUpdatedAtMs > 0 ? Math.max(0, now - priceUpdatedAtMs) : null;
+
+      return {
+        ...token,
+
+        priceSol,
+        priceUsd,
+        marketCapSol,
+        marketCapUsd,
+
+        sma1m: windows?.avgMarketCapUsd1m ?? marketCapUsd,
+
+        sma5m: windows?.avgMarketCapUsd5m ?? marketCapUsd,
+
+        sma15m: windows?.avgMarketCapUsd15m ?? marketCapUsd,
+
+        avgPriceUsd1m: windows?.avgPriceUsd1m ?? null,
+
+        avgPriceUsd5m: windows?.avgPriceUsd5m ?? null,
+
+        avgPriceUsd15m: windows?.avgPriceUsd15m ?? null,
+
+        tradeCount: windows?.trades15m ?? 0,
+
+        trades1m: windows?.trades1m ?? 0,
+
+        trades5m: windows?.trades5m ?? 0,
+
+        trades15m: windows?.trades15m ?? 0,
+
+        lastTradeAtMs: latestTradeAtMs ?? (priceUpdatedAtMs || null),
+
+        priceAgeMs,
+
+        priceStatus:
+          priceUpdatedAtMs <= 0
+            ? "missing"
+            : priceAgeMs != null && priceAgeMs > 30_000
+              ? "stale"
+              : "live",
+
+        raw: token,
+      } satisfies TerminalFeedRow;
+    })
     .filter(
-      (token) =>
-        input.includeUnpriced || hasPrice(token) || Boolean(token.image),
+      (row) => input.includeUnpriced || hasPrice(row) || Boolean(row.image),
+    )
+    .sort(
+      (left, right) =>
+        Math.max(right.updatedAtMs, right.lastTradeAtMs ?? 0) -
+        Math.max(left.updatedAtMs, left.lastTradeAtMs ?? 0),
     )
     .slice(0, limit);
 
-  return tokens.map((token) => {
-    const windows = getTokenPriceWindows(
-      token.mint,
-      input.priceWindowTtlMs ?? PRICE_WINDOW_TTL_MS,
-    );
-
-    const priceUpdatedAtMs =
-      token.priceUpdatedAtMs > 0
-        ? token.priceUpdatedAtMs
-        : hasPrice(token)
-          ? token.updatedAtMs
-          : 0;
-
-    const priceAgeMs =
-      priceUpdatedAtMs > 0 ? Math.max(0, now - priceUpdatedAtMs) : null;
-
-    return {
-      ...token,
-
-      sma1m: windows?.avgMarketCapUsd1m ?? token.marketCapUsd,
-
-      sma5m: windows?.avgMarketCapUsd5m ?? token.marketCapUsd,
-
-      sma15m: windows?.avgMarketCapUsd15m ?? token.marketCapUsd,
-
-      avgPriceUsd1m: windows?.avgPriceUsd1m ?? null,
-
-      avgPriceUsd5m: windows?.avgPriceUsd5m ?? null,
-
-      avgPriceUsd15m: windows?.avgPriceUsd15m ?? null,
-
-      tradeCount: windows?.trades15m ?? 0,
-
-      trades1m: windows?.trades1m ?? 0,
-
-      trades5m: windows?.trades5m ?? 0,
-
-      trades15m: windows?.trades15m ?? 0,
-
-      lastTradeAtMs: windows?.latestTradeAtMs ?? (priceUpdatedAtMs || null),
-
-      priceAgeMs,
-
-      priceStatus:
-        priceUpdatedAtMs <= 0
-          ? "missing"
-          : priceAgeMs != null && priceAgeMs > 30_000
-            ? "stale"
-            : "live",
-
-      raw: token,
-    };
-  });
+  return rows;
 }
 
 export function upsertProcessStatus(
@@ -815,16 +915,12 @@ export function terminalStoreStats(): {
 } {
   const tokens = db.terminalTokensLive.count();
 
-  const pricedTokens = (
-    db.terminalTokensLive
-      .select("priceSol", "priceUsd", "marketCapSol", "marketCapUsd")
-      .all() as Array<
-      Pick<
-        TerminalToken,
-        "priceSol" | "priceUsd" | "marketCapSol" | "marketCapUsd"
-      >
-    >
-  ).filter((token) => hasPrice(token as TerminalToken)).length;
+  const pricedTokens = listTokenPriceWindows(PRICE_WINDOW_TTL_MS).filter(
+    (window) =>
+      window.latestPriceSol != null ||
+      window.latestPriceUsd != null ||
+      window.latestMarketCapUsd != null,
+  ).length;
 
   return {
     tokens,

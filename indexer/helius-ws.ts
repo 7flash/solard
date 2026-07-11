@@ -58,6 +58,10 @@ function statusData(
 
     programId: config.programId,
 
+    programIdSource: config.programIdSource,
+
+    programIdCorrected: config.programIdCorrected,
+
     commitment: config.commitment,
 
     attempt,
@@ -209,15 +213,48 @@ export async function runHeliusWsSession(input: {
 
                     counters.solUsdAtMs = Date.now();
 
-                    const events = parsePumpLogs(job, {
+                    const parsed = parsePumpLogs(job, {
                       solUsd: counters.solUsd,
 
                       tokenDecimals: config.tokenDecimals,
 
                       pumpSupplyUi: config.pumpSupplyUi,
+
+                      programId: config.programId,
                     });
 
-                    const applied = applyIndexedEvents(events, {
+                    counters.programDataLines +=
+                      parsed.diagnostics.programDataLines;
+
+                    counters.recognizedEventLines +=
+                      parsed.diagnostics.recognizedEventLines;
+
+                    counters.unknownEventLines +=
+                      parsed.diagnostics.unknownEventLines;
+
+                    counters.eventParseErrors += parsed.diagnostics.parseErrors;
+
+                    counters.lastUnknownDiscriminator =
+                      parsed.diagnostics.lastUnknownDiscriminator ??
+                      counters.lastUnknownDiscriminator;
+
+                    counters.lastProgramDataLength =
+                      parsed.diagnostics.lastProgramDataLength ??
+                      counters.lastProgramDataLength;
+
+                    counters.parsedCreates += parsed.events.filter(
+                      (event) => event.kind === "create",
+                    ).length;
+
+                    counters.parsedTrades += parsed.events.filter(
+                      (event) => event.kind === "trade",
+                    ).length;
+
+                    counters.parsedCompletes += parsed.events.filter(
+                      (event) => event.kind === "complete",
+                    ).length;
+
+                    const applied = applyIndexedEvents(parsed.events, {
                       config,
                       counters,
                     });
@@ -235,7 +272,7 @@ export async function runHeliusWsSession(input: {
                         statusData(config, counters, attempt, {
                           phase: "message",
 
-                          eventCount: events.length,
+                          eventCount: parsed.events.length,
 
                           applied: applied.applied,
 
@@ -251,11 +288,11 @@ export async function runHeliusWsSession(input: {
 
                       slot: job.slot,
 
-                      eventCount: events.length,
+                      eventCount: parsed.events.length,
 
                       ...applied,
 
-                      mints: events.map((event) => event.mint),
+                      mints: parsed.events.map((event) => event.mint),
                     };
                   },
                 );

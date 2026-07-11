@@ -74,7 +74,12 @@ export function applyIndexedEvents(
       input.counters.creates++;
       applied++;
     } else if (event.kind === "trade") {
-      const result = appendTokenTradeOnce({
+      /**
+       * The trade hot path is append-only. Current price, market cap, and SMA
+       * windows are read from tokenPriceWindows; no token-state update or
+       * aggregation runs here.
+       */
+      appendTokenTradeOnce({
         eventKey: event.eventKey,
 
         mint: event.mint,
@@ -108,44 +113,12 @@ export function applyIndexedEvents(
         updatedAtMs: Date.now(),
       });
 
-      if (result.inserted) {
-        upsertTerminalToken({
-          mint: event.mint,
+      input.counters.trades++;
 
-          source: "helius-indexer-trade",
+      input.counters.lastMcapUsd =
+        event.marketCapUsd ?? input.counters.lastMcapUsd;
 
-          phase: "pump",
-
-          supplyUi: input.config.pumpSupplyUi,
-
-          priceSol: event.priceSol,
-
-          priceUsd: event.priceUsd,
-
-          marketCapSol: event.marketCapSol,
-
-          marketCapUsd: event.marketCapUsd,
-
-          lastSlot: event.slot,
-
-          signature: event.signature,
-
-          priceUpdatedAtMs: event.createdAtMs,
-
-          updatedAtMs: Date.now(),
-        });
-
-        input.counters.trades++;
-
-        input.counters.lastMcapUsd =
-          event.marketCapUsd ?? input.counters.lastMcapUsd;
-
-        applied++;
-      } else {
-        duplicateTrades++;
-
-        input.counters.duplicateTrades++;
-      }
+      applied++;
     } else {
       upsertTerminalToken({
         mint: event.mint,

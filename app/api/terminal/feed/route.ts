@@ -12,6 +12,24 @@ import {
   summarizeError,
 } from "../../../_server/measure.js";
 
+function processData(
+  row: Record<string, any> | null | undefined,
+): Record<string, unknown> {
+  if (!row) return {};
+
+  if (row.data && typeof row.data === "object") {
+    return row.data;
+  }
+
+  try {
+    const parsed = JSON.parse(String(row.dataJson ?? "{}"));
+
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function enabled(url: URL, name: string): boolean {
   const value = url.searchParams.get(name);
 
@@ -70,11 +88,28 @@ export async function GET(request: Request): Promise<Response> {
     const stats = enabled(url, "stats") ? terminalStoreStats() : null;
 
     const health = enabled(url, "health")
-      ? {
-          ok: true,
-          processes: listProcessStatus(),
-          store: stats ?? terminalStoreStats(),
-        }
+      ? (() => {
+          const processes = listProcessStatus();
+
+          const indexerProcess =
+            processes.find((row: any) => row.kind === "indexer") ??
+            processes.find((row: any) => {
+              const data = processData(row);
+
+              return (
+                data.parsedTrades != null || data.recognizedEventLines != null
+              );
+            }) ??
+            null;
+
+          return {
+            ok: true,
+            processes,
+            indexerProcess,
+            indexer: processData(indexerProcess),
+            store: stats ?? terminalStoreStats(),
+          };
+        })()
       : null;
 
     const priced = rows.filter(

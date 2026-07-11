@@ -26,6 +26,19 @@ function createCounters(): Counters {
 
     duplicateTrades: 0,
 
+    programDataLines: 0,
+    recognizedEventLines: 0,
+    unknownEventLines: 0,
+    eventParseErrors: 0,
+
+    parsedCreates: 0,
+    parsedTrades: 0,
+    parsedCompletes: 0,
+
+    lastUnknownDiscriminator: null,
+
+    lastProgramDataLength: null,
+
     metadataQueued: 0,
     metadataHydrated: 0,
     metadataFailed: 0,
@@ -117,6 +130,10 @@ export async function runIndexer(): Promise<void> {
       dbPath: SOLARD_DB_PATH,
 
       programId: config.programId,
+
+      programIdSource: config.programIdSource,
+
+      programIdCorrected: config.programIdCorrected,
 
       commitment: config.commitment,
 

@@ -10,55 +10,72 @@ import type {
 
 const EVENT_NAMES = ["CreateEvent", "TradeEvent", "CompleteEvent"] as const;
 
+type EventName = (typeof EVENT_NAMES)[number];
+
 function discriminator(name: string): Buffer {
   return createHash("sha256").update(`event:${name}`).digest().subarray(0, 8);
 }
 
-const DISCRIMINATORS = new Map<string, (typeof EVENT_NAMES)[number]>(
+const DISCRIMINATORS = new Map<string, EventName>(
   EVENT_NAMES.map((name) => [discriminator(name).toString("hex"), name]),
 );
+
+export type PumpLogDiagnostics = {
+  programDataLines: number;
+  recognizedEventLines: number;
+  unknownEventLines: number;
+  parseErrors: number;
+  lastUnknownDiscriminator: string | null;
+  lastProgramDataLength: number | null;
+};
+
+export type PumpLogParseResult = {
+  events: IndexedEvent[];
+  diagnostics: PumpLogDiagnostics;
+};
 
 class Reader {
   offset = 0;
 
   constructor(private readonly bytes: Buffer) {}
 
+  get remaining(): number {
+    return this.bytes.length - this.offset;
+  }
+
   take(length: number): Buffer {
-    if (this.offset + length > this.bytes.length) {
+    if (length < 0 || this.offset + length > this.bytes.length) {
       throw new Error(
-        `Event buffer underflow at ${this.offset}; need ${length}; length=${this.bytes.length}`,
+        `event buffer underflow offset=${this.offset} need=${length} length=${this.bytes.length}`,
       );
     }
 
-    const result = this.bytes.subarray(this.offset, this.offset + length);
+    const value = this.bytes.subarray(this.offset, this.offset + length);
 
     this.offset += length;
 
-    return result;
+    return value;
   }
 
   u32(): number {
-    const result = this.bytes.readUInt32LE(this.offset);
+    const value = this.bytes.readUInt32LE(this.offset);
 
     this.offset += 4;
-
-    return result;
+    return value;
   }
 
   u64(): bigint {
-    const result = this.bytes.readBigUInt64LE(this.offset);
+    const value = this.bytes.readBigUInt64LE(this.offset);
 
     this.offset += 8;
-
-    return result;
+    return value;
   }
 
   i64(): bigint {
-    const result = this.bytes.readBigInt64LE(this.offset);
+    const value = this.bytes.readBigInt64LE(this.offset);
 
     this.offset += 8;
-
-    return result;
+    return value;
   }
 
   bool(): boolean {
@@ -66,7 +83,16 @@ class Reader {
   }
 
   string(): string {
-    return this.take(this.u32()).toString("utf8");
+    const length = this.u32();
+
+    // Reject a corrupt/misaligned string before allocating or slicing.
+    if (length > this.remaining) {
+      throw new Error(
+        `invalid event string length=${length} remaining=${this.remaining}`,
+      );
+    }
+
+    return this.take(length).toString("utf8");
   }
 
   pubkey(): string {
@@ -78,7 +104,7 @@ function tokenAmount(value: bigint, decimals: number): number {
   return Number(value) / 10 ** decimals;
 }
 
-function solAmount(value: bigint): number {
+function quoteAmount(value: bigint): number {
   return Number(value) / 1_000_000_000;
 }
 
@@ -96,11 +122,15 @@ function timestampMs(value: bigint, fallback: number): number {
 
 function parseCreate(reader: Reader, job: LogJob, raw: unknown): IndexedCreate {
   const name = reader.string();
+
   const symbol = reader.string();
+
   const uri = reader.string();
 
   const mint = reader.pubkey();
+
   const bondingCurveKey = reader.pubkey();
+
   const creator = reader.pubkey();
 
   return {
@@ -127,10 +157,15 @@ function parseTrade(
     tokenDecimals: number;
     pumpSupplyUi: number;
   },
+  eventIndex: number,
 ): IndexedTrade {
+  /**
+   * The current Pump TradeEvent keeps the legacy prefix below. New protocol
+   * fields can be appended without breaking this reader.
+   */
   const mint = reader.pubkey();
 
-  const solRaw = reader.u64();
+  const quoteRaw = reader.u64();
 
   const tokenRaw = reader.u64();
 
@@ -140,31 +175,32 @@ function parseTrade(
 
   const timestamp = reader.i64();
 
-  const virtualSolRaw = reader.u64();
+  const virtualQuoteRaw = reader.u64();
 
   const virtualTokenRaw = reader.u64();
 
-  // Current Pump event includes real reserves after virtual reserves.
-  // Older variants may omit them, so they are intentionally optional here.
-  try {
+  // Legacy real reserve fields remain part of the stable prefix. Read them
+  // only when present so an older or shorter event remains parseable.
+  if (reader.remaining >= 16) {
     reader.u64();
     reader.u64();
-  } catch {}
+  }
 
   const tokenDeltaUi = tokenAmount(tokenRaw, input.tokenDecimals);
 
-  const solDeltaUi = solAmount(solRaw);
+  const quoteDeltaUi = quoteAmount(quoteRaw);
 
-  const virtualSolUi = solAmount(virtualSolRaw);
+  const virtualQuoteUi = quoteAmount(virtualQuoteRaw);
 
   const virtualTokenUi = tokenAmount(virtualTokenRaw, input.tokenDecimals);
 
-  const tradePrice = tokenDeltaUi > 0 ? solDeltaUi / tokenDeltaUi : Number.NaN;
+  const executionPrice =
+    tokenDeltaUi > 0 ? quoteDeltaUi / tokenDeltaUi : Number.NaN;
 
   const curvePrice =
-    virtualTokenUi > 0 ? virtualSolUi / virtualTokenUi : Number.NaN;
+    virtualTokenUi > 0 ? virtualQuoteUi / virtualTokenUi : Number.NaN;
 
-  const priceSol = finite(tradePrice) ?? finite(curvePrice);
+  const priceSol = finite(executionPrice) ?? finite(curvePrice);
 
   const priceUsd =
     priceSol != null && input.solUsd != null ? priceSol * input.solUsd : null;
@@ -181,23 +217,25 @@ function parseTrade(
   return {
     kind: "trade",
 
-    eventKey: [
-      "helius",
-      job.signature,
-      mint,
-      isBuy ? "buy" : "sell",
-      createdAtMs,
-    ].join(":"),
+    /**
+     * A transaction can emit more than one trade for the same mint, side, and
+     * second. Include the Program-data ordinal to avoid collapsing them.
+     */
+    eventKey: ["helius", job.signature, eventIndex, mint].join(":"),
 
     mint,
+
     signature: job.signature,
+
     slot: job.slot,
+
     owner,
 
     side: isBuy ? "buy" : "sell",
 
     tokenDeltaUi,
-    solDeltaUi,
+
+    solDeltaUi: quoteDeltaUi,
 
     priceSol,
     priceUsd,
@@ -223,9 +261,9 @@ function parseComplete(
 
   let createdAtMs = job.receivedAtMs;
 
-  try {
+  if (reader.remaining >= 8) {
     createdAtMs = timestampMs(reader.i64(), job.receivedAtMs);
-  } catch {}
+  }
 
   return {
     kind: "complete",
@@ -239,52 +277,168 @@ function parseComplete(
   };
 }
 
+function decodeProgramData(line: string): Buffer | null {
+  const match = line.match(/^Program data:\s*([A-Za-z0-9+/=]+)\s*$/);
+
+  if (!match) {
+    return null;
+  }
+
+  try {
+    return Buffer.from(match[1]!, "base64");
+  } catch {
+    return null;
+  }
+}
+
+function eventAtOffset(data: Buffer): {
+  name: EventName;
+  offset: number;
+} | null {
+  /**
+   * Normal Anchor logs place the event discriminator at offset 0. Checking
+   * offsets 8 and 16 also tolerates an event-CPI wrapper without scanning the
+   * whole payload or accepting random field bytes.
+   */
+  for (const offset of [0, 8, 16]) {
+    if (data.length < offset + 8) {
+      continue;
+    }
+
+    const name = DISCRIMINATORS.get(
+      data.subarray(offset, offset + 8).toString("hex"),
+    );
+
+    if (name) {
+      return {
+        name,
+        offset,
+      };
+    }
+  }
+
+  return null;
+}
+
 export function parsePumpLogs(
   job: LogJob,
   input: {
     solUsd: number | null;
     tokenDecimals: number;
     pumpSupplyUi: number;
+    programId: string;
   },
-): IndexedEvent[] {
+): PumpLogParseResult {
   const events: IndexedEvent[] = [];
 
+  const diagnostics: PumpLogDiagnostics = {
+    programDataLines: 0,
+    recognizedEventLines: 0,
+    unknownEventLines: 0,
+    parseErrors: 0,
+    lastUnknownDiscriminator: null,
+    lastProgramDataLength: null,
+  };
+
+  const programStack: string[] = [];
+
+  let eventIndex = 0;
+
   for (const line of job.logs) {
-    const match = line.match(/Program data:\s*([A-Za-z0-9+/=]+)/);
+    const invoke = line.match(
+      /^Program ([1-9A-HJ-NP-Za-km-z]+) invoke \[\d+\]$/,
+    );
 
-    if (!match) {
+    if (invoke) {
+      programStack.push(invoke[1]!);
       continue;
     }
 
-    const data = Buffer.from(match[1]!, "base64");
+    const exit = line.match(
+      /^Program ([1-9A-HJ-NP-Za-km-z]+) (?:success|failed:.*)$/,
+    );
 
-    if (data.length < 8) {
+    if (exit) {
+      const index = programStack.lastIndexOf(exit[1]!);
+
+      if (index >= 0) {
+        programStack.splice(index);
+      }
+
       continue;
     }
 
-    const eventName = DISCRIMINATORS.get(data.subarray(0, 8).toString("hex"));
+    const data = decodeProgramData(line);
 
-    if (!eventName) {
+    if (!data) {
       continue;
     }
 
-    const reader = new Reader(data.subarray(8));
+    const activeProgram = programStack[programStack.length - 1] ?? null;
+
+    const located = eventAtOffset(data);
+
+    /**
+     * Ignore nested programs' unrelated Program-data lines. Still accept a
+     * recognized Pump discriminator when an RPC provider omitted invocation
+     * stack lines.
+     */
+    if (activeProgram !== input.programId && !located) {
+      continue;
+    }
+
+    diagnostics.programDataLines++;
+
+    diagnostics.lastProgramDataLength = data.length;
+
+    if (!located) {
+      diagnostics.unknownEventLines++;
+
+      diagnostics.lastUnknownDiscriminator =
+        data.length >= 8
+          ? data.subarray(0, 8).toString("hex")
+          : `short:${data.length}`;
+
+      continue;
+    }
+
+    diagnostics.recognizedEventLines++;
+
+    const payload = data.subarray(located.offset + 8);
+
+    const reader = new Reader(payload);
 
     const raw = {
-      eventName,
-      line,
+      eventName: located.name,
+
+      eventOffset: located.offset,
+
+      eventIndex,
+
+      dataLength: data.length,
+
       signature: job.signature,
+
       slot: job.slot,
     };
 
-    if (eventName === "CreateEvent") {
-      events.push(parseCreate(reader, job, raw));
-    } else if (eventName === "TradeEvent") {
-      events.push(parseTrade(reader, job, raw, input));
-    } else {
-      events.push(parseComplete(reader, job, raw));
+    try {
+      if (located.name === "CreateEvent") {
+        events.push(parseCreate(reader, job, raw));
+      } else if (located.name === "TradeEvent") {
+        events.push(parseTrade(reader, job, raw, input, eventIndex));
+      } else {
+        events.push(parseComplete(reader, job, raw));
+      }
+
+      eventIndex++;
+    } catch {
+      diagnostics.parseErrors++;
     }
   }
 
-  return events;
+  return {
+    events,
+    diagnostics,
+  };
 }
