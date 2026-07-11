@@ -221,8 +221,27 @@ export const db = new Database(
 
             ROW_NUMBER() OVER (
               PARTITION BY mint
-              ORDER BY tradedAtMs DESC, id DESC
-            ) AS latestRank
+              ORDER BY
+                CASE WHEN priceSol IS NULL THEN 1 ELSE 0 END,
+                tradedAtMs DESC,
+                id DESC
+            ) AS latestPriceSolRank,
+
+            ROW_NUMBER() OVER (
+              PARTITION BY mint
+              ORDER BY
+                CASE WHEN priceUsd IS NULL THEN 1 ELSE 0 END,
+                tradedAtMs DESC,
+                id DESC
+            ) AS latestPriceUsdRank,
+
+            ROW_NUMBER() OVER (
+              PARTITION BY mint
+              ORDER BY
+                CASE WHEN marketCapUsd IS NULL THEN 1 ELSE 0 END,
+                tradedAtMs DESC,
+                id DESC
+            ) AS latestMarketCapUsdRank
 
           FROM tokenTrades
 
@@ -279,17 +298,17 @@ export const db = new Database(
           END) AS trades15m,
 
           MAX(CASE
-            WHEN latestRank = 1
+            WHEN latestPriceSolRank = 1
             THEN priceSol
           END) AS latestPriceSol,
 
           MAX(CASE
-            WHEN latestRank = 1
+            WHEN latestPriceUsdRank = 1
             THEN priceUsd
           END) AS latestPriceUsd,
 
           MAX(CASE
-            WHEN latestRank = 1
+            WHEN latestMarketCapUsdRank = 1
             THEN marketCapUsd
           END) AS latestMarketCapUsd,
 
@@ -724,7 +743,9 @@ export function listTerminalFeed(
 
       const priceUsd = windows?.latestPriceUsd ?? token.priceUsd;
 
-      const marketCapUsd = windows?.latestMarketCapUsd ?? token.marketCapUsd;
+      const marketCapUsd =
+        windows?.latestMarketCapUsd ??
+        (priceUsd != null ? priceUsd * token.supplyUi : token.marketCapUsd);
 
       const marketCapSol =
         priceSol != null ? priceSol * token.supplyUi : token.marketCapSol;
