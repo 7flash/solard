@@ -83,6 +83,9 @@ type PageState = {
   holdersError: string | null;
   showLogs: boolean;
   logs: ClientMeasureEntry[];
+
+  selectedLogId: string | number | null;
+  copiedLogId: string | number | null;
 };
 
 const SCOPE = "solard:web:terminal-direct";
@@ -132,12 +135,17 @@ const state: PageState = {
   holdersError: null,
   showLogs: storageGet("solard:terminal-show-logs", "1") !== "0",
   logs: getClientMeasureEntries(),
+
+  selectedLogId: null,
+  copiedLogId: null,
 };
 
 let unmounted = false;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollInFlight = false;
 let unsubscribeLogs: (() => void) | null = null;
+let logRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let renderGeneration = 0;
 
 function pollMs(): number {
   const parsed = Number(storageGet("solard:terminal-poll-ms", "1000"));
@@ -155,55 +163,147 @@ function rootElement(): HTMLElement {
 let renderQueued = false;
 let renderAgain = false;
 
-function renderTerminalPage(): void {
-  let root = rootElement();
+type TerminalUiSnapshot = {
+  windowX: number;
+  windowY: number;
 
-  try {
-    /**
-     * Terminal owns its renderer directly. Never remove children from a root
-     * already tracked by TradJS because that leaves the stored fiber tree
-     * pointing at detached nodes. Sequential reconciliation also avoids keyed
-     * row moves while Newest/mcap sorting changes table order every second.
-     */
-    render(<TerminalPage />, root, {
-      reconciler: "sequential",
-    });
-  } catch (error) {
-    if (
-      error instanceof DOMException &&
-      error.name === "NotFoundError" &&
-      root.parentNode
-    ) {
-      /**
-       * Recover only from a root that was already corrupted by an older page
-       * build. Replacing the root element gives TradJS a new untracked mount
-       * target without mutating children behind its reconciler.
-       */
-      const replacement = root.cloneNode(false) as HTMLElement;
+  tableLeft: number;
+  tableTop: number;
 
-      root.parentNode.replaceChild(replacement, root);
+  activityLeft: number;
+  activityTop: number;
 
-      root = replacement;
+  focusKey: string | null;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+};
 
-      render(<TerminalPage />, root, {
-        reconciler: "sequential",
-      });
+function terminalUiSnapshot(root: HTMLElement): TerminalUiSnapshot {
+  const table = root.querySelector<HTMLElement>(".terminal-v10-table-wrap");
 
-      measureEvent(SCOPE, "recovered terminal render root", {
-        error: error.message,
-      });
+  const activity = root.querySelector<HTMLElement>(".terminal-v10-log-rows");
 
-      return;
+  const active =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+
+  const input =
+    active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
+      ? active
+      : null;
+
+  return {
+    windowX: window.scrollX,
+
+    windowY: window.scrollY,
+
+    tableLeft: table?.scrollLeft ?? 0,
+
+    tableTop: table?.scrollTop ?? 0,
+
+    activityLeft: activity?.scrollLeft ?? 0,
+
+    activityTop: activity?.scrollTop ?? 0,
+
+    focusKey: active?.dataset.terminalFocus ?? null,
+
+    selectionStart: input?.selectionStart ?? null,
+
+    selectionEnd: input?.selectionEnd ?? null,
+  };
+}
+
+function restoreTerminalUi(
+  root: HTMLElement,
+  snapshot: TerminalUiSnapshot,
+): void {
+  const restore = () => {
+    const table = root.querySelector<HTMLElement>(".terminal-v10-table-wrap");
+
+    if (table) {
+      table.scrollLeft = snapshot.tableLeft;
+
+      table.scrollTop = snapshot.tableTop;
     }
 
-    throw error;
+    const activity = root.querySelector<HTMLElement>(".terminal-v10-log-rows");
+
+    if (activity) {
+      activity.scrollLeft = snapshot.activityLeft;
+
+      activity.scrollTop = snapshot.activityTop;
+    }
+
+    if (snapshot.focusKey) {
+      const target = root.querySelector<HTMLElement>(
+        `[data-terminal-focus="${snapshot.focusKey}"]`,
+      );
+
+      target?.focus({
+        preventScroll: true,
+      });
+
+      if (
+        (target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement) &&
+        snapshot.selectionStart != null &&
+        snapshot.selectionEnd != null
+      ) {
+        try {
+          target.setSelectionRange(
+            snapshot.selectionStart,
+            snapshot.selectionEnd,
+          );
+        } catch {}
+      }
+    }
+
+    window.scrollTo(snapshot.windowX, snapshot.windowY);
+  };
+
+  restore();
+
+  requestAnimationFrame(restore);
+}
+
+function renderTerminalPage(): void {
+  const current = rootElement();
+
+  const parent = current.parentNode;
+
+  if (!parent) {
+    throw new Error("Terminal root is detached");
   }
+
+  const snapshot = terminalUiSnapshot(current);
+
+  /**
+   * Terminal is a high-churn market screen. Replacing the root element gives
+   * every update a fresh TradJS mount target. No previous fiber can reference
+   * a stale row, log entry, selected panel, or insertBefore anchor.
+   *
+   * Do not call replaceChildren() on a root already tracked by TradJS.
+   */
+  const replacement = current.cloneNode(false) as HTMLElement;
+
+  renderGeneration++;
+
+  replacement.dataset.terminalRenderGeneration = String(renderGeneration);
+
+  parent.replaceChild(replacement, current);
+
+  render(<TerminalPage />, replacement, {
+    reconciler: "sequential",
+  });
 
   document
     .querySelectorAll<HTMLAnchorElement>("#main-nav a")
     .forEach((link) =>
       link.classList.toggle("active", link.dataset.page === "terminal"),
     );
+
+  restoreTerminalUi(replacement, snapshot);
 }
 
 function rerender(): void {
@@ -227,6 +327,7 @@ function rerender(): void {
       } while (renderAgain && !unmounted);
     } catch (error) {
       state.status = "error";
+
       state.error = error instanceof Error ? error.message : String(error);
 
       console.error("[solard:terminal] render failed", error);
@@ -1187,6 +1288,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
           <h3>Trade</h3>
           <div className="terminal-v10-trade-form">
             <select
+              data-terminal-focus="wallet"
               value={state.selectedWallet}
               title={selectedWalletLabel()}
               onInput={(event: any) =>
@@ -1201,6 +1303,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
               ))}
             </select>
             <input
+              data-terminal-focus="buy-sol"
               value={state.buySol}
               placeholder="Buy SOL"
               onInput={(event: any) =>
@@ -1208,6 +1311,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
               }
             />
             <input
+              data-terminal-focus="sell-pct"
               value={state.sellPct}
               placeholder="Sell %"
               onInput={(event: any) =>
@@ -1215,6 +1319,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
               }
             />
             <input
+              data-terminal-focus="slippage-bps"
               value={state.slippageBps}
               placeholder="Slippage bps"
               onInput={(event: any) =>
@@ -1224,6 +1329,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
           </div>
           <div className="terminal-v10-trade-form">
             <select
+              data-terminal-focus="sender"
               value={state.sender}
               onInput={(event: any) =>
                 updateTradeField("sender", event.currentTarget.value)
@@ -1235,6 +1341,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
             </select>
             <label className="check">
               <input
+                data-terminal-focus="live-trade"
                 type="checkbox"
                 checked={state.liveTrade}
                 onChange={(event: any) =>
@@ -1330,59 +1437,309 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
   );
 }
 
+function logPayload(entry: ClientMeasureEntry): unknown {
+  return entry.error ?? entry.summary ?? {};
+}
+
+function nestedErrorMessage(value: unknown, depth = 0): string | null {
+  if (value == null || depth > 5) {
+    return null;
+  }
+
+  if (value instanceof Error) {
+    return value.message;
+  }
+
+  if (typeof value === "string") {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = nestedErrorMessage(item, depth + 1);
+
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  }
+
+  if (typeof value === "object") {
+    const row = value as Record<string, unknown>;
+
+    const direct = row.error ?? (row.name === "Error" ? row.message : null);
+
+    if (typeof direct === "string" && direct.trim()) {
+      return direct.trim();
+    }
+
+    if (direct && typeof direct === "object") {
+      const nested = nestedErrorMessage(direct, depth + 1);
+
+      if (nested) {
+        return nested;
+      }
+    }
+
+    for (const item of Object.values(row)) {
+      const found = nestedErrorMessage(item, depth + 1);
+
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+function logErrorMessage(entry: ClientMeasureEntry): string | null {
+  if (entry.error) {
+    return nestedErrorMessage(entry.error) ?? String(entry.error);
+  }
+
+  return nestedErrorMessage(entry.summary);
+}
+
+function logStatus(entry: ClientMeasureEntry): "ok" | "error" {
+  return entry.status === "error" || logErrorMessage(entry) ? "error" : "ok";
+}
+
+function friendlyLogLabel(entry: ClientMeasureEntry): string {
+  const error = logErrorMessage(entry);
+
+  if (error?.includes("insertBefore")) {
+    return "Terminal render error";
+  }
+
+  let label = String(entry.label ?? "Terminal activity")
+    .replace(/^solard:web:terminal-direct(?::[a-z0-9_-]+)?/i, "")
+    .replace(/^[:\s-]+/, "")
+    .trim();
+
+  if (!label || /^[a-z]{1,3}$/i.test(label)) {
+    label = error ? "Terminal error" : "Terminal activity";
+  }
+
+  return label
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function displayedLogs(): ClientMeasureEntry[] {
+  const recent = state.logs.slice(0, 40);
+
+  if (
+    !state.selectedLogId ||
+    recent.some((entry) => entry.id === state.selectedLogId)
+  ) {
+    return recent;
+  }
+
+  const selected = state.logs.find((entry) => entry.id === state.selectedLogId);
+
+  return selected ? [selected, ...recent] : recent;
+}
+
+function selectLog(entry: ClientMeasureEntry): void {
+  state.selectedLogId = entry.id;
+
+  state.copiedLogId = null;
+
+  rerender();
+}
+
+function closeLog(): void {
+  state.selectedLogId = null;
+
+  state.copiedLogId = null;
+
+  rerender();
+}
+
+async function copyLog(
+  entry: ClientMeasureEntry,
+  errorOnly = false,
+): Promise<void> {
+  const error = logErrorMessage(entry);
+
+  const text =
+    errorOnly && error
+      ? error
+      : JSON.stringify(
+          {
+            status: logStatus(entry),
+
+            label: friendlyLogLabel(entry),
+
+            tookMs: entry.tookMs,
+
+            at: new Date(entry.atMs).toISOString(),
+
+            error,
+
+            details: logPayload(entry),
+          },
+          null,
+          2,
+        );
+
+  try {
+    await navigator.clipboard.writeText(text);
+
+    state.copiedLogId = entry.id;
+  } catch {
+    const textarea = document.createElement("textarea");
+
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+
+    document.body.appendChild(textarea);
+
+    textarea.select();
+
+    document.execCommand("copy");
+
+    textarea.remove();
+
+    state.copiedLogId = entry.id;
+  }
+
+  rerender();
+}
+
 function LogsPanel() {
-  if (!state.showLogs) return null;
+  if (!state.showLogs) {
+    return null;
+  }
+
+  const entries = displayedLogs();
+
   return (
     <section className="terminal-v10-logs">
       <div className="terminal-v10-logs-head">
         <div>
-          <b>Browser measure-fn</b>
+          <b>Activity log</b>
+
           <span className="muted small">
-            {state.logs.length} events · also in DevTools console
+            {state.logs.length} recent events · select an entry to inspect or
+            copy it
           </span>
         </div>
+
         <div className="terminal-v10-links">
           <button
             type="button"
             className="secondary compact"
             onClick={() => {
               clearClientMeasureEntries();
+
               state.logs = [];
+
+              state.selectedLogId = null;
+
+              state.copiedLogId = null;
+
               rerender();
             }}
           >
             Clear
           </button>
+
           <button
             type="button"
             className="secondary compact"
             onClick={() => {
               state.showLogs = false;
+
               storageSet("solard:terminal-show-logs", "0");
+
               rerender();
             }}
           >
-            Hide logs
+            Hide activity
           </button>
         </div>
       </div>
+
       <div className="terminal-v10-log-rows">
-        {state.logs.slice(0, 40).map((entry) => (
-          <details
-            className={`terminal-v10-log-row ${entry.status}`}
-            key={entry.id}
-          >
-            <summary>
-              <span>{entry.status}</span>
-              <span>{entry.tookMs.toFixed(1)}ms</span>
-              <b>{entry.label}</b>
-              <small>{new Date(entry.atMs).toLocaleTimeString()}</small>
-            </summary>
-            <pre>
-              {JSON.stringify(entry.error ?? entry.summary ?? {}, null, 2)}
-            </pre>
-          </details>
-        ))}
+        {entries.map((entry) => {
+          const status = logStatus(entry);
+
+          const error = logErrorMessage(entry);
+
+          const selected = state.selectedLogId === entry.id;
+
+          return (
+            <details
+              className={`terminal-v10-log-row ${status} ${selected ? "selected" : ""}`}
+              data-log-id={entry.id}
+              open={selected}
+            >
+              <summary
+                onClick={(event: any) => {
+                  event.preventDefault();
+
+                  selectLog(entry);
+                }}
+              >
+                <span>{status}</span>
+
+                <span>
+                  {entry.tookMs.toFixed(1)}
+                  ms
+                </span>
+
+                <b>{friendlyLogLabel(entry)}</b>
+
+                <small>{new Date(entry.atMs).toLocaleTimeString()}</small>
+              </summary>
+
+              {selected ? (
+                <div className="terminal-v10-log-detail">
+                  {error ? <div className="pill bad">{error}</div> : null}
+
+                  <pre>{JSON.stringify(logPayload(entry), null, 2)}</pre>
+
+                  <div className="terminal-v10-links">
+                    {error ? (
+                      <button
+                        type="button"
+                        className="secondary compact"
+                        onClick={() => void copyLog(entry, true)}
+                      >
+                        Copy error
+                      </button>
+                    ) : null}
+
+                    <button
+                      type="button"
+                      className="secondary compact"
+                      onClick={() => void copyLog(entry)}
+                    >
+                      Copy details
+                    </button>
+
+                    <button
+                      type="button"
+                      className="secondary compact"
+                      onClick={closeLog}
+                    >
+                      Close
+                    </button>
+
+                    {state.copiedLogId === entry.id ? (
+                      <span className="pill ok">Copied</span>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+            </details>
+          );
+        })}
       </div>
     </section>
   );
@@ -1476,7 +1833,7 @@ function TerminalPage() {
               rerender();
             }}
           >
-            {state.showLogs ? "Hide logs" : "Show logs"}
+            {state.showLogs ? "Hide activity" : "Show activity"}
           </button>
         </div>
       </section>
@@ -1489,6 +1846,7 @@ function TerminalPage() {
 
       <section className="terminal-v10-controls">
         <input
+          data-terminal-focus="filter"
           placeholder="filter symbol, mint, creator"
           value={state.filter}
           onInput={(event: any) => setFilter(event.currentTarget.value)}
@@ -1600,7 +1958,16 @@ export default function mount() {
   state.logs = getClientMeasureEntries();
   unsubscribeLogs = subscribeClientMeasure(() => {
     state.logs = getClientMeasureEntries();
-    rerender();
+
+    if (logRefreshTimer != null) {
+      return;
+    }
+
+    logRefreshTimer = setTimeout(() => {
+      logRefreshTimer = null;
+
+      rerender();
+    }, 250);
   });
   measureEvent(SCOPE, "mount", { path: window.location.pathname });
   rerender();
@@ -1614,5 +1981,11 @@ export default function mount() {
     pollInFlight = false;
     unsubscribeLogs?.();
     unsubscribeLogs = null;
+
+    if (logRefreshTimer != null) {
+      clearTimeout(logRefreshTimer);
+
+      logRefreshTimer = null;
+    }
   };
 }
