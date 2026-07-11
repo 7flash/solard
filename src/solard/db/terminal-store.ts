@@ -777,8 +777,9 @@ export function insertTerminalTrade(
     updatedAtMs: finiteInteger(input.updatedAtMs ?? now, now),
   };
 
-  const inserted = dbMeasure('insert', () => terminalDb.tokenTrades
-    .insert(row));
+  const inserted = dbMeasure("insert", () =>
+    terminalDb.tokenTrades.insert(row),
+  );
 
   return toTerminalTrade(inserted ?? row);
 }

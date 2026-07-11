@@ -10,12 +10,17 @@ import {
 import {
   clearClientMeasureEntries,
   getClientMeasureEntries,
-  measureClient,
-  measureEvent,
   subscribeClientMeasure,
-  summarizeError,
   type ClientMeasureEntry,
 } from "../_client/measure";
+import {
+  compactId,
+  summarizeError,
+  terminalFeedMeasure,
+  terminalHoldersMeasure,
+  terminalTradeMeasure,
+  terminalUiMeasure,
+} from "./measure";
 import type {
   AnyRow,
   OverviewPayload,
@@ -29,12 +34,17 @@ type SortBase =
   | "created"
   | "lastTrade"
   | "mcap"
+  | "ath"
+  | "atl"
+  | "volume1m"
+  | "volume5m"
+  | "volume15m"
   | "sma1m"
   | "sma5m"
   | "sma15m"
-  | "trades"
   | "trades1m"
-  | "volume1m";
+  | "trades5m"
+  | "trades15m";
 
 type SortKey = `${SortBase}-asc` | `${SortBase}-desc`;
 
@@ -89,7 +99,6 @@ type PageState = {
   copiedLogId: string | number | null;
 };
 
-const SCOPE = "solard:web:terminal-direct";
 const FEED_LIMIT = 160;
 const FEED_WINDOW_MS = Number(
   storageGet("solard:terminal-feed-window-ms", "300000"),
@@ -427,18 +436,32 @@ function passesFilters(row: PumpFeedRow): boolean {
     .includes(q);
 }
 
-function trades15m(row: PumpFeedRow): number {
+type MetricWindow = "1m" | "5m" | "15m";
+
+function tradesFor(row: PumpFeedRow, window: MetricWindow): number {
+  const field = `trades${window}`;
+
   return (
-    numberValue((row as any).trades15m) ?? numberValue(row.tradeCount) ?? 0
+    numberValue((row as any)[field]) ??
+    (window === "15m" ? numberValue(row.tradeCount) : null) ??
+    0
   );
 }
 
-function trades1m(row: PumpFeedRow): number {
-  return numberValue((row as any).trades1m) ?? 0;
+function volumeFor(row: PumpFeedRow, window: MetricWindow): number {
+  return numberValue((row as any)[`volumeSol${window}`]) ?? 0;
 }
 
-function volumeSol1m(row: PumpFeedRow): number {
-  return numberValue((row as any).volumeSol1m) ?? 0;
+function smaFor(row: PumpFeedRow, window: MetricWindow): number | null {
+  return numberValue((row as any)[`sma${window}`]);
+}
+
+function athMcap(row: PumpFeedRow): number | null {
+  return numberValue((row as any).athMarketCapUsd);
+}
+
+function atlMcap(row: PumpFeedRow): number | null {
+  return numberValue((row as any).atlMarketCapUsd);
 }
 
 function sortValue(row: PumpFeedRow): number {
@@ -450,16 +473,31 @@ function sortValue(row: PumpFeedRow): number {
     return lastTradeTime(row) ?? -Infinity;
   }
 
-  if (state.sort.startsWith("mcap")) return latestMcap(row) ?? -Infinity;
-  if (state.sort.startsWith("sma1m"))
-    return numberValue(row.sma1m) ?? -Infinity;
-  if (state.sort.startsWith("sma5m"))
-    return numberValue(row.sma5m) ?? -Infinity;
-  if (state.sort.startsWith("sma15m"))
-    return numberValue(row.sma15m) ?? -Infinity;
-  if (state.sort.startsWith("trades1m")) return trades1m(row);
-  if (state.sort.startsWith("trades")) return trades15m(row);
-  if (state.sort.startsWith("volume1m")) return volumeSol1m(row);
+  if (state.sort.startsWith("mcap")) {
+    return latestMcap(row) ?? -Infinity;
+  }
+
+  if (state.sort.startsWith("ath")) {
+    return athMcap(row) ?? -Infinity;
+  }
+
+  if (state.sort.startsWith("atl")) {
+    return atlMcap(row) ?? -Infinity;
+  }
+
+  for (const window of ["1m", "5m", "15m"] as const) {
+    if (state.sort.startsWith(`volume${window}`)) {
+      return volumeFor(row, window);
+    }
+
+    if (state.sort.startsWith(`sma${window}`)) {
+      return smaFor(row, window) ?? -Infinity;
+    }
+
+    if (state.sort.startsWith(`trades${window}`)) {
+      return tradesFor(row, window);
+    }
+  }
 
   return createdTime(row) ?? -Infinity;
 }
@@ -497,9 +535,20 @@ function setSort(base: SortBase): void {
 
   storageSet("solwal:pump-feed-sort", state.sort);
 
-  measureEvent(SCOPE, "sort", {
-    sort: state.sort,
-  });
+  terminalUiMeasure.measureSync(
+    {
+      start: () => `ui.sort key=${state.sort}`,
+
+      end: () => ({
+        sort: state.sort,
+      }),
+
+      catch: summarizeError,
+    },
+    () => ({
+      sort: state.sort,
+    }),
+  );
 
   rerender();
 }
@@ -521,7 +570,22 @@ function setFilter(value: string): void {
 function toggleHide(field: "hideMayhem" | "hideUsdc", key: string): void {
   state[field] = !state[field];
   storageSet(key, state[field] ? "1" : "0");
-  measureEvent(SCOPE, "toggle filter", { field, value: state[field] });
+  terminalUiMeasure.measureSync(
+    {
+      start: () => `ui.filter field=${field} enabled=${state[field] ? 1 : 0}`,
+
+      end: () => ({
+        field,
+        enabled: state[field],
+      }),
+
+      catch: summarizeError,
+    },
+    () => ({
+      field,
+      enabled: state[field],
+    }),
+  );
   void reloadFeed();
   rerender();
 }
@@ -532,7 +596,20 @@ function togglePinned(row: PumpFeedRow): void {
     ? state.pinned.filter((mint) => mint !== row.mint)
     : [row.mint, ...state.pinned];
   storageSet("solard:terminal-pinned-mints", JSON.stringify(state.pinned));
-  measureEvent(SCOPE, "pin token", { mint: row.mint, pinned: isPinned(row) });
+  terminalUiMeasure.measureSync(
+    {
+      start: () => `ui.pin mint=${compactId(row.mint)}`,
+
+      end: () => ({
+        pinned: isPinned(row),
+      }),
+
+      catch: summarizeError,
+    },
+    () => ({
+      pinned: isPinned(row),
+    }),
+  );
   rerender();
 }
 
@@ -542,36 +619,54 @@ function selectRow(row: PumpFeedRow): void {
   storageSet("solard:terminal-inspector-key", key);
   state.tradeError = null;
   state.tradeMessage = null;
-  measureEvent(SCOPE, "select token", {
-    mint: row.mint,
-    symbol: row.symbol,
-    mcap: latestMcap(row),
-  });
+  terminalUiMeasure.measureSync(
+    {
+      start: () => `ui.select mint=${compactId(row.mint)}`,
+
+      end: () => ({
+        symbol: row.symbol ?? null,
+
+        mcap: latestMcap(row),
+      }),
+
+      catch: summarizeError,
+    },
+    () => ({
+      symbol: row.symbol ?? null,
+
+      mcap: latestMcap(row),
+    }),
+  );
   rerender();
 }
 
 async function loadWallets(): Promise<void> {
-  await measureClient(
-    {
-      scope: SCOPE,
-      start: () => "load wallets",
-      end: (overview: OverviewPayload) => ({
-        wallets: overview.wallets?.length ?? 0,
-      }),
-      catch: summarizeError,
-    },
-    async () => {
-      const overview = await api<OverviewPayload>(
-        "/api/overview?fast=1&balances=none&tokenLimit=0&executionLimit=0",
-      );
-      state.wallets = overview.wallets ?? [];
-      if (!state.selectedWallet && state.wallets[0]?.address) {
-        state.selectedWallet = state.wallets[0].address;
-        storageSet("solwal:terminal-default-wallet", state.selectedWallet);
-      }
-      return overview;
-    },
-  ).catch(() => undefined);
+  await terminalUiMeasure
+    .measure(
+      {
+        start: () => "wallets.load",
+
+        end: (overview: any) => ({
+          wallets: Array.isArray(overview?.wallets)
+            ? overview.wallets.length
+            : 0,
+        }),
+
+        catch: summarizeError,
+      },
+      async () => {
+        const overview = await api<OverviewPayload>(
+          "/api/overview?fast=1&balances=none&tokenLimit=0&executionLimit=0",
+        );
+        state.wallets = overview.wallets ?? [];
+        if (!state.selectedWallet && state.wallets[0]?.address) {
+          state.selectedWallet = state.wallets[0].address;
+          storageSet("solwal:terminal-default-wallet", state.selectedWallet);
+        }
+        return overview;
+      },
+    )
+    .catch(() => undefined);
   rerender();
 }
 
@@ -589,18 +684,17 @@ async function reloadFeed(
   }
 
   try {
-    const payload = await measureClient(
+    const payload = await terminalFeedMeasure.measure(
       {
-        scope: SCOPE,
         start: () =>
-          `feed refresh limit=${FEED_LIMIT} window=${FEED_WINDOW_MS} health=${options.includeHealth ? 1 : 0}`,
-        end: (payload: TerminalFeedPayload) => ({
-          rows: payload.rows?.length ?? 0,
-          raw: payload.meta?.count ?? null,
-          priced: payload.meta?.priced ?? null,
-          latestPriceAgeMs: payload.meta?.latestPriceAgeMs ?? null,
-          activeWindowMs: payload.meta?.activeWindowMs ?? null,
+          `poll limit=${FEED_LIMIT} windowMs=${FEED_WINDOW_MS} health=${options.includeHealth ? 1 : 0}`,
+
+        end: (payload: any) => ({
+          rows: Array.isArray(payload?.rows) ? payload.rows.length : 0,
+
+          priced: Number(payload?.meta?.priced ?? 0),
         }),
+
         catch: summarizeError,
       },
       async () => {
@@ -666,16 +760,14 @@ async function resetFeed(): Promise<void> {
 
     clearPollTimer();
 
-    const result = await measureClient(
+    const result = await terminalFeedMeasure.measure(
       {
-        scope: SCOPE,
+        start: () => `reset pinned=${state.pinned.length}`,
 
-        start: () => `reset feed pinned=${state.pinned.length}`,
+        end: (value: any) => ({
+          resetAtMs: value?.resetAtMs ?? null,
 
-        end: (value: AnyRow) => ({
-          resetAtMs: value.resetAtMs ?? null,
-
-          pinned: Array.isArray(value.pinned) ? value.pinned.length : 0,
+          pinned: Array.isArray(value?.pinned) ? value.pinned.length : 0,
         }),
 
         catch: summarizeError,
@@ -706,11 +798,20 @@ async function resetFeed(): Promise<void> {
 
     state.resetMessage = `Feed reset · kept ${state.pinned.length} pinned`;
 
-    measureEvent(SCOPE, "feed reset", {
-      resetAtMs: result.resetAtMs ?? null,
+    terminalUiMeasure.measureSync(
+      {
+        start: () => `ui.reset_complete pinned=${state.pinned.length}`,
 
-      pinned: state.pinned.length,
-    });
+        end: () => ({
+          resetAtMs: result?.resetAtMs ?? null,
+        }),
+
+        catch: summarizeError,
+      },
+      () => ({
+        resetAtMs: result?.resetAtMs ?? null,
+      }),
+    );
 
     await reloadFeed({
       includeHealth: true,
@@ -729,27 +830,31 @@ async function resetFeed(): Promise<void> {
 }
 
 function restartWorkers(): void {
-  void measureClient(
-    {
-      scope: SCOPE,
-      start: () => "restart workers",
-      end: (value) => value,
-      catch: summarizeError,
-    },
-    async () =>
-      await api("/api/workers/ensure", {
-        method: "POST",
-        body: JSON.stringify({
-          action: "restart",
-          worker: "all",
-          all: true,
-          telegram: true,
-          restartStale: true,
-          source: "both",
-          clearLive: false,
+  void terminalUiMeasure
+    .measure(
+      {
+        start: () => "workers.restart",
+
+        end: (value: any) => ({
+          ok: value?.ok !== false,
         }),
-      }),
-  )
+
+        catch: summarizeError,
+      },
+      async () =>
+        await api("/api/workers/ensure", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "restart",
+            worker: "all",
+            all: true,
+            telegram: true,
+            restartStale: true,
+            source: "both",
+            clearLive: false,
+          }),
+        }),
+    )
     .then(() => reloadFeed({ includeHealth: true }))
     .catch((error) => {
       state.error = error instanceof Error ? error.message : String(error);
@@ -857,12 +962,15 @@ async function tradeSelected(
   rerender();
 
   try {
-    const result = await measureClient(
+    const result = await terminalTradeMeasure.measure(
       {
-        scope: SCOPE,
         start: () =>
-          `${side} token live=${state.liveTrade ? 1 : 0} mint=${short(row.mint, 4, 4)} wallet=${selectedWalletLabel()}`,
-        end: (value) => ({ ok: true, value }),
+          `${side} mint=${compactId(row.mint)} live=${state.liveTrade ? 1 : 0}`,
+
+        end: (value: any) => ({
+          ok: value?.ok !== false && value?.success !== false,
+        }),
+
         catch: summarizeError,
       },
       async () => {
@@ -895,18 +1003,20 @@ async function tradeSelected(
                 skipSimulation: false,
                 skipPreflight: true,
               };
-        return await api<AnyRow>(`/api/trade/${side}`, {
+        const response = await api<AnyRow>(`/api/trade/${side}`, {
           method: "POST",
           body: JSON.stringify(body),
         });
+
+        const responseError = apiErrorMessage(response);
+
+        if (responseError) {
+          throw new Error(responseError);
+        }
+
+        return response;
       },
     );
-    const responseError = apiErrorMessage(result);
-
-    if (responseError) {
-      throw new Error(responseError);
-    }
-
     state.tradeMessage = `${side.toUpperCase()} ${state.liveTrade ? "live" : "sim"} ok: ${JSON.stringify(result).slice(0, 220)}`;
   } catch (error) {
     state.tradeError = error instanceof Error ? error.message : String(error);
@@ -925,14 +1035,16 @@ async function refreshHolders(row: PumpFeedRow): Promise<void> {
   rerender();
 
   try {
-    const result = await measureClient(
+    const result = await terminalHoldersMeasure.measure(
       {
-        scope: SCOPE,
-        start: () => `refresh holders mint=${short(row.mint, 4, 4)}`,
-        end: (value: AnyRow) => ({
-          holders: Array.isArray(value.holders) ? value.holders.length : 0,
-          ok: value.ok,
+        start: () => `refresh mint=${compactId(row.mint)}`,
+
+        end: (value: any) => ({
+          holders: Array.isArray(value?.holders) ? value.holders.length : 0,
+
+          ok: value?.ok !== false,
         }),
+
         catch: summarizeError,
       },
       async () => {
@@ -1111,16 +1223,72 @@ function SortButton({ base, label }: { base: SortBase; label: string }) {
   );
 }
 
+function WindowSortHeader({
+  label,
+  prefix,
+}: {
+  label: string;
+  prefix: "volume" | "sma" | "trades";
+}) {
+  return (
+    <div className="terminal-v22-metric-head">
+      <b>{label}</b>
+
+      <div>
+        {(["1m", "5m", "15m"] as const).map((window) => {
+          const base = `${prefix}${window}` as SortBase;
+
+          return (
+            <button
+              key={window}
+              type="button"
+              className={state.sort.startsWith(base) ? "active" : ""}
+              title={`Sort by ${label} ${window}`}
+              onClick={() => setSort(base)}
+            >
+              {window.replace("m", "")}
+              {sortMark(base)}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MetricStack({
+  values,
+}: {
+  values: Array<{
+    label: string;
+    value: string;
+  }>;
+}) {
+  return (
+    <div className="terminal-v22-stack">
+      {values.map((item) => (
+        <div key={item.label}>
+          <span>{item.label}</span>
+          <b>{item.value}</b>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
+  const pumpHref = row.mint ? `https://pump.fun/${row.mint}` : null;
+
   return (
     <tr
       className={`${selected ? "selected" : ""} ${isPinned(row) ? "pinned" : ""}`}
       onClick={() => selectRow(row)}
     >
-      <td>
+      <td className="terminal-v22-token">
         <button
           type="button"
           className={`terminal-v10-pin ${isPinned(row) ? "active" : ""}`}
+          title={isPinned(row) ? "Unpin" : "Pin"}
           onClick={(event: any) => {
             event.stopPropagation();
             togglePinned(row);
@@ -1128,33 +1296,102 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
         >
           ★
         </button>
-      </td>
-      <td>
-        <div className="terminal-v10-token-cell">
-          <TokenAvatar row={row} />
+
+        {pumpHref ? (
+          <a
+            href={pumpHref}
+            target="_blank"
+            rel="noreferrer"
+            title={`Open ${row.mint} on Pump.fun`}
+            onClick={(event: any) => event.stopPropagation()}
+          >
+            <TokenAvatar row={row} />
+
+            <span>
+              <b>
+                {row.symbol
+                  ? `$${row.symbol}`
+                  : row.name || short(row.mint, 5, 5)}
+              </b>
+
+              <small>{row.name || "unnamed"}</small>
+            </span>
+          </a>
+        ) : (
           <div>
-            <div className="terminal-v10-symbol">
-              {row.symbol
-                ? `$${row.symbol}`
-                : row.name || short(row.mint, 5, 5)}
-            </div>
-            <div className="terminal-v10-name">{row.name || "unnamed"}</div>
+            <TokenAvatar row={row} />
+
+            <span>
+              <b>{row.symbol || row.name || "token"}</b>
+
+              <small>{row.name || "unnamed"}</small>
+            </span>
           </div>
-        </div>
+        )}
       </td>
 
       <td className="terminal-v10-num">{formatMcap(latestMcap(row))}</td>
-      <td className="terminal-v10-num">{formatMcap(row.sma1m)}</td>
-      <td className="terminal-v10-num">{formatMcap(row.sma5m)}</td>
-      <td className="terminal-v10-num">{formatMcap(row.sma15m)}</td>
 
-      <td className="terminal-v10-num">{trades15m(row)}</td>
-      <td className="terminal-v10-num">{trades1m(row)}</td>
-      <td className="terminal-v10-num">{formatVolumeSol(volumeSol1m(row))}</td>
+      <td className="terminal-v10-num">{formatMcap(athMcap(row))}</td>
 
-      <td className="terminal-v10-num">{displayAge(createdTime(row))}</td>
+      <td className="terminal-v10-num">{formatMcap(atlMcap(row))}</td>
 
-      <td className="terminal-v10-num">{displayAge(lastTradeTime(row))}</td>
+      <td>
+        <MetricStack
+          values={[
+            {
+              label: "1m",
+              value: formatVolumeSol(volumeFor(row, "1m")),
+            },
+            {
+              label: "5m",
+              value: formatVolumeSol(volumeFor(row, "5m")),
+            },
+            {
+              label: "15m",
+              value: formatVolumeSol(volumeFor(row, "15m")),
+            },
+          ]}
+        />
+      </td>
+
+      <td>
+        <MetricStack
+          values={[
+            {
+              label: "1m",
+              value: formatMcap(smaFor(row, "1m")),
+            },
+            {
+              label: "5m",
+              value: formatMcap(smaFor(row, "5m")),
+            },
+            {
+              label: "15m",
+              value: formatMcap(smaFor(row, "15m")),
+            },
+          ]}
+        />
+      </td>
+
+      <td>
+        <MetricStack
+          values={[
+            {
+              label: "1m",
+              value: String(tradesFor(row, "1m")),
+            },
+            {
+              label: "5m",
+              value: String(tradesFor(row, "5m")),
+            },
+            {
+              label: "15m",
+              value: String(tradesFor(row, "15m")),
+            },
+          ]}
+        />
+      </td>
 
       <td
         className="terminal-v10-mint-cell"
@@ -1162,37 +1399,19 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
           padding: 0,
         }}
       >
-        {row.mint ? (
+        {pumpHref ? (
           <a
-            className="terminal-v10-small code"
-            href={`https://pump.fun/${row.mint}`}
+            className="terminal-v22-mint code"
+            href={pumpHref}
             target="_blank"
             rel="noreferrer"
             title={`Open ${row.mint} on Pump.fun`}
             onClick={(event: any) => event.stopPropagation()}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              width: "100%",
-              minHeight: "44px",
-              padding: "0 10px",
-              boxSizing: "border-box",
-            }}
           >
-            {short(row.mint, 5, 5)}
+            {short(row.mint, 6, 5)}
           </a>
         ) : (
-          <span
-            className="terminal-v10-small"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              minHeight: "44px",
-              padding: "0 10px",
-            }}
-          >
-            —
-          </span>
+          <span className="terminal-v22-mint">—</span>
         )}
       </td>
     </tr>
@@ -1253,25 +1472,26 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
           <b>{formatMcap(latestMcap(row))}</b>
         </div>
         <div>
-          <span>SMA 1m</span>
-          <b>{formatMcap(row.sma1m)}</b>
+          <span>ATH</span>
+          <b>{formatMcap(athMcap(row))}</b>
         </div>
         <div>
-          <span>SMA 5m</span>
-          <b>{formatMcap(row.sma5m)}</b>
+          <span>ATL</span>
+          <b>{formatMcap(atlMcap(row))}</b>
         </div>
-        <div>
-          <span>SMA 15m</span>
-          <b>{formatMcap(row.sma15m)}</b>
-        </div>
-        <div>
-          <span>Trades 1m</span>
-          <b>{trades1m(row)}</b>
-        </div>
-        <div>
-          <span>Volume 1m</span>
-          <b>{formatVolumeSol(volumeSol1m(row))}</b>
-        </div>
+
+        {(["1m", "5m", "15m"] as const).map((window) => (
+          <div key={`window:${window}`}>
+            <span>{window}</span>
+
+            <b>
+              V {formatVolumeSol(volumeFor(row, window))}
+              {" · "}S {formatMcap(smaFor(row, window))}
+              {" · "}T {tradesFor(row, window)}
+            </b>
+          </div>
+        ))}
+
         <div>
           <span>Created</span>
           <b>{displayAge(createdTime(row))}</b>
@@ -1280,14 +1500,15 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
           <span>Last trade</span>
           <b>{displayAge(lastTradeTime(row))}</b>
         </div>
+
         <div>
           <span>Mayhem</span>
+
           <b>
             {isMayhemKnown(row) ? (isMayhem(row) ? "yes" : "no") : "checking"}
           </b>
         </div>
       </div>
-
       <div className="terminal-v10-selected-grid">
         <div className="terminal-v10-panel">
           <h3>Trade</h3>
@@ -1526,7 +1747,7 @@ function friendlyLogLabel(entry: ClientMeasureEntry): string {
   }
 
   let label = String(entry.label ?? "Terminal activity")
-    .replace(/^solard:web:terminal-direct(?::[a-z0-9_-]+)?/i, "")
+    .replace(/^solard:web:terminal(?::[a-z0-9_-]+)*/i, "")
     .replace(/^[:\s-]+/, "")
     .trim();
 
@@ -1803,6 +2024,141 @@ function TerminalPage() {
 
   return (
     <div className="terminal-v10">
+      <style>{`
+        .terminal-v22-table {
+          min-width: 1020px;
+          table-layout: fixed;
+          font-size: 10px;
+        }
+
+        .terminal-v22-table th,
+        .terminal-v22-table td {
+          padding: 5px 7px;
+          vertical-align: middle;
+        }
+
+        .terminal-v22-table th:nth-child(1) {
+          width: 235px;
+        }
+
+        .terminal-v22-table th:nth-child(2),
+        .terminal-v22-table th:nth-child(3),
+        .terminal-v22-table th:nth-child(4) {
+          width: 88px;
+        }
+
+        .terminal-v22-table th:nth-child(5),
+        .terminal-v22-table th:nth-child(6) {
+          width: 132px;
+        }
+
+        .terminal-v22-table th:nth-child(7) {
+          width: 92px;
+        }
+
+        .terminal-v22-table th:nth-child(8) {
+          width: 118px;
+        }
+
+        .terminal-v22-token {
+          display: grid;
+          grid-template-columns: 24px minmax(0, 1fr);
+          gap: 6px;
+          align-items: center;
+          height: 58px;
+        }
+
+        .terminal-v22-token > a,
+        .terminal-v22-token > div {
+          display: grid;
+          grid-template-columns: 30px minmax(0, 1fr);
+          gap: 7px;
+          align-items: center;
+          min-width: 0;
+          height: 100%;
+        }
+
+        .terminal-v22-token span {
+          display: grid;
+          min-width: 0;
+        }
+
+        .terminal-v22-token b,
+        .terminal-v22-token small {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .terminal-v22-token small {
+          color: var(--muted);
+          font-size: 9px;
+        }
+
+        .terminal-v22-stack {
+          display: grid;
+          gap: 1px;
+          line-height: 1.12;
+        }
+
+        .terminal-v22-stack > div {
+          display: grid;
+          grid-template-columns: 22px minmax(0, 1fr);
+          gap: 4px;
+          min-height: 14px;
+          align-items: center;
+        }
+
+        .terminal-v22-stack span {
+          color: var(--dim);
+          font-size: 8px;
+          text-transform: uppercase;
+        }
+
+        .terminal-v22-stack b {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 9px;
+          font-variant-numeric: tabular-nums;
+        }
+
+        .terminal-v22-metric-head {
+          display: grid;
+          gap: 3px;
+        }
+
+        .terminal-v22-metric-head > div {
+          display: flex;
+          gap: 2px;
+        }
+
+        .terminal-v22-metric-head button {
+          min-width: 25px;
+          padding: 1px 3px;
+          border: 1px solid var(--line);
+          background: transparent;
+          color: var(--muted);
+          font-size: 8px;
+        }
+
+        .terminal-v22-metric-head button.active {
+          color: var(--green);
+          border-color: var(--green);
+        }
+
+        .terminal-v22-mint {
+          display: flex;
+          width: 100%;
+          height: 58px;
+          align-items: center;
+          padding: 0 8px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 9px;
+        }
+      `}</style>
       <section className="terminal-v10-top">
         <div className="terminal-v10-title">
           <h2>Pump</h2>
@@ -1914,38 +2270,32 @@ function TerminalPage() {
 
       <section className="terminal-v10-table-card">
         <div className="terminal-v10-table-wrap">
-          <table className="terminal-v10-table">
+          <table className="terminal-v10-table terminal-v22-table">
             <thead>
               <tr>
-                <th className="terminal-v10-pin-col">Pin</th>
                 <th>Token</th>
                 <th>
-                  <SortButton base="mcap" label="MCap" />
+                  <SortButton base="mcap" label="MC" />
                 </th>
                 <th>
-                  <SortButton base="sma1m" label="SMA 1m" />
+                  <SortButton base="ath" label="ATH" />
                 </th>
                 <th>
-                  <SortButton base="sma5m" label="SMA 5m" />
+                  <SortButton base="atl" label="ATL" />
                 </th>
+
                 <th>
-                  <SortButton base="sma15m" label="SMA 15m" />
+                  <WindowSortHeader label="VOL" prefix="volume" />
                 </th>
+
                 <th>
-                  <SortButton base="trades" label="Trades 15m" />
+                  <WindowSortHeader label="SMA" prefix="sma" />
                 </th>
+
                 <th>
-                  <SortButton base="trades1m" label="Trades 1m" />
+                  <WindowSortHeader label="TRX" prefix="trades" />
                 </th>
-                <th>
-                  <SortButton base="volume1m" label="Vol 1m" />
-                </th>
-                <th>
-                  <SortButton base="created" label="Created" />
-                </th>
-                <th>
-                  <SortButton base="lastTrade" label="Last trade" />
-                </th>
+
                 <th>Mint</th>
               </tr>
             </thead>
@@ -1990,13 +2340,39 @@ export default function mount() {
       rerender();
     }, 250);
   });
-  measureEvent(SCOPE, "mount", { path: window.location.pathname });
+  terminalUiMeasure.measureSync(
+    {
+      start: () => `mount path=${window.location.pathname}`,
+
+      end: () => ({
+        mounted: true,
+      }),
+
+      catch: summarizeError,
+    },
+    () => ({
+      mounted: true,
+    }),
+  );
   rerender();
   void loadWallets();
   void reloadFeed({ includeHealth: true, scheduleNext: true });
 
   return () => {
-    measureEvent(SCOPE, "unmount", { path: window.location.pathname });
+    terminalUiMeasure.measureSync(
+      {
+        start: () => `unmount path=${window.location.pathname}`,
+
+        end: () => ({
+          mounted: false,
+        }),
+
+        catch: summarizeError,
+      },
+      () => ({
+        mounted: false,
+      }),
+    );
     unmounted = true;
 
     if (renderFrame != null) {

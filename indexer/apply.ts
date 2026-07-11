@@ -1,8 +1,11 @@
+import { appendTokenTradeOnce, upsertTerminalToken } from "../shared/db.js";
 import {
-  appendTokenTradeOnce,
-  isSqliteBusyError,
-  upsertTerminalToken,
-} from "../shared/db.js";
+  compactId,
+  DB_RETRY,
+  dbMeasure,
+  indexerMeasure,
+  summarizeError,
+} from "../shared/measure.js";
 import type { IndexerConfig } from "./config.js";
 import { enqueueMetadata } from "./metadata.js";
 import { enqueueMayhemCheck } from "./mayhem.js";
@@ -12,34 +15,6 @@ function json(value: unknown): string {
   return JSON.stringify(value, (_key, item) =>
     typeof item === "bigint" ? item.toString() : item,
   );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function sqliteWrite<T>(label: string, operation: () => T): Promise<T> {
-  let attempt = 0;
-
-  while (true) {
-    try {
-      return operation();
-    } catch (error) {
-      if (!isSqliteBusyError(error) || attempt >= 7) {
-        throw error;
-      }
-
-      attempt++;
-
-      const delay = Math.min(250, 5 * 2 ** attempt);
-
-      console.warn(
-        `[solard:indexer] SQLite busy during ${label}; retry ${attempt} in ${delay}ms`,
-      );
-
-      await sleep(delay);
-    }
-  }
 }
 
 export async function applyIndexedEvents(
@@ -52,160 +27,209 @@ export async function applyIndexedEvents(
   applied: number;
   duplicateTrades: number;
 }> {
-  if (!events.length) {
-    input.counters.skipped++;
+  return await indexerMeasure.measure(
+    {
+      start: () => `apply_events count=${events.length}`,
 
-    return {
-      applied: 0,
-      duplicateTrades: 0,
-    };
-  }
+      end: (result: any) => ({
+        applied: Number(result?.applied ?? 0),
 
-  let applied = 0;
-  let duplicateTrades = 0;
+        duplicateTrades: Number(result?.duplicateTrades ?? 0),
+      }),
 
-  for (const event of events) {
-    if (event.kind === "create") {
-      await sqliteWrite("create token", () =>
-        upsertTerminalToken({
-          mint: event.mint,
+      catch: summarizeError,
+    },
+    async () => {
+      if (!events.length) {
+        input.counters.skipped++;
 
-          name: event.name,
-
-          symbol: event.symbol,
-
-          uri: event.uri,
-
-          creator: event.creator,
-
-          bondingCurveKey: event.bondingCurveKey,
-
-          source: "helius-indexer-create",
-
-          phase: "pump",
-
-          supplyUi: input.config.pumpSupplyUi,
-
-          signature: event.signature,
-
-          lastSlot: event.slot,
-
-          createdAtMs: event.createdAtMs,
-
-          observedAtMs: event.createdAtMs,
-
-          updatedAtMs: Date.now(),
-        }),
-      );
-
-      enqueueMayhemCheck(input.config, input.counters, {
-        mint: event.mint,
-
-        bondingCurveKey: event.bondingCurveKey ?? null,
-
-        attempt: 0,
-      });
-
-      enqueueMetadata(input.config, input.counters, {
-        mint: event.mint,
-
-        uri: event.uri ?? "",
-
-        name: event.name,
-
-        symbol: event.symbol,
-      });
-
-      input.counters.creates++;
-      applied++;
-    } else if (event.kind === "trade") {
-      /**
-       * The trade hot path is append-only. Current price, market cap, and SMA
-       * windows are read from tokenPriceWindows; no token-state update or
-       * aggregation runs here.
-       */
-      const tradeWrite = await sqliteWrite("append trade", () =>
-        appendTokenTradeOnce({
-          eventKey: event.eventKey,
-
-          mint: event.mint,
-
-          signature: event.signature,
-
-          slot: event.slot,
-
-          owner: event.owner,
-
-          side: event.side,
-
-          tokenDeltaUi: event.tokenDeltaUi,
-
-          solDeltaUi: event.solDeltaUi,
-
-          priceSol: event.priceSol,
-
-          priceUsd: event.priceUsd,
-
-          marketCapUsd: event.marketCapUsd,
-
-          confidence: "processed",
-
-          source: "helius-indexer-trade",
-
-          rawJson: json(event.raw),
-
-          tradedAtMs: event.createdAtMs,
-
-          updatedAtMs: Date.now(),
-        }),
-      );
-
-      if (!tradeWrite.inserted) {
-        duplicateTrades++;
-
-        input.counters.duplicateTrades++;
-
-        continue;
+        return {
+          applied: 0,
+          duplicateTrades: 0,
+        };
       }
 
-      input.counters.trades++;
+      let applied = 0;
+      let duplicateTrades = 0;
 
-      input.counters.lastMcapUsd =
-        event.marketCapUsd ?? input.counters.lastMcapUsd;
+      for (const event of events) {
+        if (event.kind === "create") {
+          await dbMeasure.retry(
+            {
+              start: () => `db.upsert_token mint=${compactId(event.mint)}`,
 
-      applied++;
-    } else {
-      await sqliteWrite("complete token", () =>
-        upsertTerminalToken({
-          mint: event.mint,
+              end: (result: any) => ({
+                updated: result != null,
+              }),
 
-          bondingCurveKey: event.bondingCurveKey,
+              catch: summarizeError,
+            },
+            DB_RETRY,
+            async () =>
+              upsertTerminalToken({
+                mint: event.mint,
 
-          source: "helius-indexer-complete",
+                name: event.name,
 
-          phase: "migrated",
+                symbol: event.symbol,
 
-          lastSlot: event.slot,
+                uri: event.uri,
 
-          signature: event.signature,
+                creator: event.creator,
 
-          updatedAtMs: Date.now(),
-        }),
-      );
+                bondingCurveKey: event.bondingCurveKey,
 
-      input.counters.completes++;
-      applied++;
-    }
+                source: "helius-indexer-create",
 
-    input.counters.lastMint = event.mint;
-  }
+                phase: "pump",
 
-  input.counters.lastSignature = events[events.length - 1]?.signature ?? null;
+                supplyUi: input.config.pumpSupplyUi,
 
-  input.counters.lastEventAtMs = Date.now();
+                signature: event.signature,
 
-  return {
-    applied,
-    duplicateTrades,
-  };
+                lastSlot: event.slot,
+
+                createdAtMs: event.createdAtMs,
+
+                observedAtMs: event.createdAtMs,
+
+                updatedAtMs: Date.now(),
+              }),
+          );
+
+          enqueueMayhemCheck(input.config, input.counters, {
+            mint: event.mint,
+
+            bondingCurveKey: event.bondingCurveKey ?? null,
+
+            attempt: 0,
+          });
+
+          enqueueMetadata(input.config, input.counters, {
+            mint: event.mint,
+
+            uri: event.uri ?? "",
+
+            name: event.name,
+
+            symbol: event.symbol,
+          });
+
+          input.counters.creates++;
+          applied++;
+        } else if (event.kind === "trade") {
+          /**
+           * The trade hot path is append-only. Current price, market cap, and SMA
+           * windows are read from tokenPriceWindows; no token-state update or
+           * aggregation runs here.
+           */
+          const tradeWrite = await dbMeasure.retry(
+            {
+              start: () => `db.append_trade mint=${compactId(event.mint)}`,
+
+              end: (result: any) => ({
+                inserted: result?.inserted === true,
+              }),
+
+              catch: summarizeError,
+            },
+            DB_RETRY,
+            async () =>
+              appendTokenTradeOnce({
+                eventKey: event.eventKey,
+
+                mint: event.mint,
+
+                signature: event.signature,
+
+                slot: event.slot,
+
+                owner: event.owner,
+
+                side: event.side,
+
+                tokenDeltaUi: event.tokenDeltaUi,
+
+                solDeltaUi: event.solDeltaUi,
+
+                priceSol: event.priceSol,
+
+                priceUsd: event.priceUsd,
+
+                marketCapUsd: event.marketCapUsd,
+
+                confidence: "processed",
+
+                source: "helius-indexer-trade",
+
+                rawJson: json(event.raw),
+
+                tradedAtMs: event.createdAtMs,
+
+                updatedAtMs: Date.now(),
+              }),
+          );
+
+          if (!tradeWrite.inserted) {
+            duplicateTrades++;
+
+            input.counters.duplicateTrades++;
+
+            continue;
+          }
+
+          input.counters.trades++;
+
+          input.counters.lastMcapUsd =
+            event.marketCapUsd ?? input.counters.lastMcapUsd;
+
+          applied++;
+        } else {
+          await dbMeasure.retry(
+            {
+              start: () => `db.complete_token mint=${compactId(event.mint)}`,
+
+              end: (result: any) => ({
+                updated: result != null,
+              }),
+
+              catch: summarizeError,
+            },
+            DB_RETRY,
+            async () =>
+              upsertTerminalToken({
+                mint: event.mint,
+
+                bondingCurveKey: event.bondingCurveKey,
+
+                source: "helius-indexer-complete",
+
+                phase: "migrated",
+
+                lastSlot: event.slot,
+
+                signature: event.signature,
+
+                updatedAtMs: Date.now(),
+              }),
+          );
+
+          input.counters.completes++;
+          applied++;
+        }
+
+        input.counters.lastMint = event.mint;
+      }
+
+      input.counters.lastSignature =
+        events[events.length - 1]?.signature ?? null;
+
+      input.counters.lastEventAtMs = Date.now();
+
+      return {
+        applied,
+        duplicateTrades,
+      };
+    },
+  );
 }

@@ -131,6 +131,12 @@ export const TerminalFeedStateSchema = z.object({
   updatedAtMs: z.number(),
 });
 
+export const TokenMarketExtremaSchema = z.object({
+  mint: z.string(),
+  athMarketCapUsd: z.number().nullable(),
+  atlMarketCapUsd: z.number().nullable(),
+});
+
 export const TokenPriceWindowsSchema = z.object({
   mint: z.string(),
 
@@ -171,6 +177,8 @@ export type ProcessStatus = z.infer<typeof ProcessStatusSchema>;
 
 export type TokenPriceWindows = z.infer<typeof TokenPriceWindowsSchema>;
 
+export type TokenMarketExtrema = z.infer<typeof TokenMarketExtremaSchema>;
+
 export type WorkerError = z.infer<typeof WorkerErrorSchema>;
 
 export type TerminalFeedState = z.infer<typeof TerminalFeedStateSchema>;
@@ -192,6 +200,9 @@ export type TerminalFeedRow = TerminalToken & {
   volumeSol1m: number;
   volumeSol5m: number;
   volumeSol15m: number;
+
+  athMarketCapUsd: number | null;
+  atlMarketCapUsd: number | null;
 
   lastTradeAtMs: number | null;
   priceAgeMs: number | null;
@@ -242,6 +253,7 @@ export const db = new Database(
         ["source", "tradedAtMs"],
         ["signature"],
         ["eventKey"],
+        ["mint", "marketCapUsd"],
       ],
 
       processStatus: [["heartbeatAtMs"], ["updatedAtMs"]],
@@ -403,6 +415,24 @@ export const db = new Database(
 
         SELECT *
         FROM resolved
+        `,
+      ),
+
+      tokenMarketExtremaV1: defineView(
+        TokenMarketExtremaSchema,
+        `
+        SELECT
+          mint,
+          MAX(marketCapUsd) AS athMarketCapUsd,
+          MIN(marketCapUsd) AS atlMarketCapUsd
+
+        FROM tokenTrades
+
+        WHERE
+          marketCapUsd IS NOT NULL
+          AND marketCapUsd > 0
+
+        GROUP BY mint
         `,
       ),
     },
@@ -617,63 +647,66 @@ export function upsertTerminalToken(
     updatedAtMs: integer(input.updatedAtMs, now),
   };
 
-  return db.terminalTokensLive.upsertOnConflict(row, "mint", (t) => ({
-    symbol: t.excludedIfNotEmpty("symbol"),
+  return db.terminalTokensLive.upsert(row, {
+    on: "mint",
+    merge: (t) => ({
+      symbol: t.excludedIfNotEmpty("symbol"),
 
-    name: t.excludedIfNotEmpty("name"),
+      name: t.excludedIfNotEmpty("name"),
 
-    image: t.excludedIfNotEmpty("image"),
+      image: t.excludedIfNotEmpty("image"),
 
-    uri: t.excludedIfNotEmpty("uri"),
+      uri: t.excludedIfNotEmpty("uri"),
 
-    description: t.excludedIfNotNull("description"),
+      description: t.excludedIfNotNull("description"),
 
-    website: t.excludedIfNotNull("website"),
+      website: t.excludedIfNotNull("website"),
 
-    twitter: t.excludedIfNotNull("twitter"),
+      twitter: t.excludedIfNotNull("twitter"),
 
-    telegram: t.excludedIfNotNull("telegram"),
+      telegram: t.excludedIfNotNull("telegram"),
 
-    creator: t.excludedIfNotNull("creator"),
+      creator: t.excludedIfNotNull("creator"),
 
-    bondingCurveKey: t.excludedIfNotNull("bondingCurveKey"),
+      bondingCurveKey: t.excludedIfNotNull("bondingCurveKey"),
 
-    source: t.excluded("source"),
+      source: t.excluded("source"),
 
-    phase: t.excluded("phase"),
+      phase: t.excluded("phase"),
 
-    isMayhemMode: t.max("isMayhemMode"),
+      isMayhemMode: t.max("isMayhemMode"),
 
-    mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
+      mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
 
-    quoteAsset: t.excludedIfNotNull("quoteAsset"),
+      quoteAsset: t.excludedIfNotNull("quoteAsset"),
 
-    quoteMint: t.excludedIfNotNull("quoteMint"),
+      quoteMint: t.excludedIfNotNull("quoteMint"),
 
-    supplyUi: t.excluded("supplyUi"),
+      supplyUi: t.excluded("supplyUi"),
 
-    priceSol: t.excludedIfNotNull("priceSol"),
+      priceSol: t.excludedIfNotNull("priceSol"),
 
-    priceUsd: t.excludedIfNotNull("priceUsd"),
+      priceUsd: t.excludedIfNotNull("priceUsd"),
 
-    marketCapSol: t.excludedIfNotNull("marketCapSol"),
+      marketCapSol: t.excludedIfNotNull("marketCapSol"),
 
-    marketCapUsd: t.excludedIfNotNull("marketCapUsd"),
+      marketCapUsd: t.excludedIfNotNull("marketCapUsd"),
 
-    initialMarketCapUsd: t.keepFirst("initialMarketCapUsd"),
+      initialMarketCapUsd: t.keepFirst("initialMarketCapUsd"),
 
-    lastSlot: t.max("lastSlot"),
+      lastSlot: t.max("lastSlot"),
 
-    signature: t.excludedIfNotNull("signature"),
+      signature: t.excludedIfNotNull("signature"),
 
-    createdAtMs: t.keepFirst("createdAtMs"),
+      createdAtMs: t.keepFirst("createdAtMs"),
 
-    observedAtMs: t.max("observedAtMs"),
+      observedAtMs: t.max("observedAtMs"),
 
-    priceUpdatedAtMs: t.max("priceUpdatedAtMs"),
+      priceUpdatedAtMs: t.max("priceUpdatedAtMs"),
 
-    updatedAtMs: t.excluded("updatedAtMs"),
-  })) as TerminalToken;
+      updatedAtMs: t.excluded("updatedAtMs"),
+    }),
+  }) as TerminalToken;
 }
 
 /**
@@ -880,11 +913,14 @@ export function setTerminalTokenMayhem(input: {
     mayhemCheckedAtMs: integer(input.checkedAtMs, Date.now()),
   };
 
-  return db.terminalTokensLive.upsertOnConflict(row, "mint", (t) => ({
-    isMayhemMode: t.max("isMayhemMode"),
+  return db.terminalTokensLive.upsert(row, {
+    on: "mint",
+    merge: (t) => ({
+      isMayhemMode: t.max("isMayhemMode"),
 
-    mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
-  })) as TerminalToken;
+      mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
+    }),
+  }) as TerminalToken;
 }
 
 function terminalTokenIsMayhem(token: TerminalToken): boolean {
@@ -976,17 +1012,19 @@ export function resetTerminalFeed(
 
   const pinnedMints = cleanPinnedMints(input.pinnedMints);
 
-  const state = db.terminalFeedState.upsertOnConflict(
+  const state = db.terminalFeedState.upsert(
     {
       scope,
       resetAtMs: now,
       updatedAtMs: now,
     },
-    "scope",
-    (t) => ({
-      resetAtMs: t.excluded("resetAtMs"),
-      updatedAtMs: t.excluded("updatedAtMs"),
-    }),
+    {
+      on: "scope",
+      merge: (t) => ({
+        resetAtMs: t.excluded("resetAtMs"),
+        updatedAtMs: t.excluded("updatedAtMs"),
+      }),
+    },
   ) as TerminalFeedState;
 
   return {
@@ -1003,6 +1041,15 @@ function isTerminalFeedMember(
   return (
     pinnedMints.has(token.mint) || Number(token.observedAtMs ?? 0) >= resetAtMs
   );
+}
+
+export function listTokenMarketExtrema(ttlMs = 2_000): TokenMarketExtrema[] {
+  return db.tokenMarketExtremaV1
+    .select()
+    .cache({
+      ttlMs: Math.max(0, integer(ttlMs, 2_000)),
+    })
+    .all() as TokenMarketExtrema[];
 }
 
 export function listTerminalFeed(
@@ -1056,6 +1103,10 @@ export function listTerminalFeed(
     allWindows.map((window) => [window.mint, window]),
   );
 
+  const extremaByMint = new Map(
+    listTokenMarketExtrema(2_000).map((extrema) => [extrema.mint, extrema]),
+  );
+
   const recentTokens = db.terminalTokensLive
     .select()
     .where({
@@ -1102,6 +1153,8 @@ export function listTerminalFeed(
     .filter((token) => !input.hideUsdc || !isUsdc(token))
     .map((token) => {
       const windows = windowsByMint.get(token.mint) ?? null;
+
+      const extrema = extremaByMint.get(token.mint) ?? null;
 
       const priceSol = windows?.latestPriceSol ?? token.priceSol;
 
@@ -1165,6 +1218,10 @@ export function listTerminalFeed(
 
         volumeSol15m: windows?.volumeSol15m ?? 0,
 
+        athMarketCapUsd: extrema?.athMarketCapUsd ?? null,
+
+        atlMarketCapUsd: extrema?.atlMarketCapUsd ?? null,
+
         lastTradeAtMs: latestTradeAtMs,
 
         priceAgeMs,
@@ -1225,23 +1282,26 @@ export function upsertProcessStatus(
   };
 
   try {
-    return db.processStatus.upsertOnConflict(row, "name", (t) => ({
-      kind: t.excluded("kind"),
+    return db.processStatus.upsert(row, {
+      on: "name",
+      merge: (t) => ({
+        kind: t.excluded("kind"),
 
-      status: t.excluded("status"),
+        status: t.excluded("status"),
 
-      heartbeatAtMs: t.excluded("heartbeatAtMs"),
+        heartbeatAtMs: t.excluded("heartbeatAtMs"),
 
-      pid: t.excluded("pid"),
+        pid: t.excluded("pid"),
 
-      buildId: t.excludedIfNotNull("buildId"),
+        buildId: t.excludedIfNotNull("buildId"),
 
-      error: t.excluded("error"),
+        error: t.excluded("error"),
 
-      dataJson: t.excluded("dataJson"),
+        dataJson: t.excluded("dataJson"),
 
-      updatedAtMs: t.excluded("updatedAtMs"),
-    })) as ProcessStatus;
+        updatedAtMs: t.excluded("updatedAtMs"),
+      }),
+    }) as ProcessStatus;
   } catch (error) {
     if (isSqliteBusyError(error)) {
       console.warn(

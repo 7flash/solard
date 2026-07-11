@@ -7,10 +7,13 @@ import { assertWebAuth } from "../../../../src/web/http.js";
 import {
   errorResponse,
   intParam,
-  m,
   resolveTerminalSource,
-  summarizeError,
 } from "../../../_server/measure.js";
+import {
+  apiMeasure,
+  dbMeasure,
+  summarizeError,
+} from "../../../../shared/measure.js";
 import { getSolardRuntimeHealth } from "../../../_server/process-health.js";
 
 function enabled(url: URL, name: string): boolean {
@@ -25,139 +28,156 @@ export async function GET(request: Request): Promise<Response> {
 
     const url = new URL(request.url);
 
-    const source =
-      resolveTerminalSource(url.searchParams.get("source")) ?? "both";
-
-    const limit = intParam(url, "limit", 160, 1, 500);
-
-    const sinceMs = intParam(url, "sinceMs", 0, 0, Number.MAX_SAFE_INTEGER);
-
-    const activeWindowMs = intParam(
-      url,
-      "activeWindowMs",
-      300_000,
-      1_000,
-      24 * 60 * 60_000,
-    );
-
-    const pinnedMints = String(url.searchParams.get("pinned") ?? "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .slice(0, 250);
-
-    const feedState = getTerminalFeedState();
-
-    const rows = await m(
+    return await apiMeasure.measure(
       {
-        start: () =>
-          `terminal_feed:shared_db source=${source} limit=${limit} activeWindowMs=${activeWindowMs}`,
+        start: () => `terminal.feed ${url.search}`,
 
-        end: (value) => ({
-          rows: Array.isArray(value) ? value.length : 0,
+        end: (response: any) => ({
+          status: Number(response?.status ?? 200),
         }),
 
         catch: summarizeError,
       },
-      async () =>
-        listTerminalFeed({
-          source,
-          limit,
-          sinceMs,
-          activeWindowMs,
+      async () => {
+        const source =
+          resolveTerminalSource(url.searchParams.get("source")) ?? "both";
 
-          includeUnpriced: enabled(url, "includeUnpriced"),
+        const limit = intParam(url, "limit", 160, 1, 500);
 
-          hideMayhem: enabled(url, "hideMayhem"),
+        const sinceMs = intParam(url, "sinceMs", 0, 0, Number.MAX_SAFE_INTEGER);
 
-          hideUsdc: enabled(url, "hideUsdc"),
+        const activeWindowMs = intParam(
+          url,
+          "activeWindowMs",
+          300_000,
+          1_000,
+          24 * 60 * 60_000,
+        );
 
-          priceWindowTtlMs: 1_000,
+        const pinnedMints = String(url.searchParams.get("pinned") ?? "")
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .slice(0, 250);
 
-          pinnedMints,
-        }),
-    );
+        const feedState = getTerminalFeedState();
 
-    const stats = enabled(url, "stats")
-      ? terminalStoreStats({
-          pinnedMints,
-        })
-      : null;
+        const rows = await dbMeasure.measure(
+          {
+            start: () =>
+              `db.list_terminal_feed source=${source} limit=${limit}`,
 
-    const health = enabled(url, "health")
-      ? {
-          ...(await getSolardRuntimeHealth()),
+            end: (value: any) => ({
+              rows: Array.isArray(value) ? value.length : 0,
+            }),
 
-          store:
-            stats ??
-            terminalStoreStats({
+            catch: summarizeError,
+          },
+          async () =>
+            listTerminalFeed({
+              source,
+              limit,
+              sinceMs,
+              activeWindowMs,
+
+              includeUnpriced: enabled(url, "includeUnpriced"),
+
+              hideMayhem: enabled(url, "hideMayhem"),
+
+              hideUsdc: enabled(url, "hideUsdc"),
+
+              priceWindowTtlMs: 1_000,
+
               pinnedMints,
             }),
+        );
+
+        const stats = enabled(url, "stats")
+          ? terminalStoreStats({
+              pinnedMints,
+            })
+          : null;
+
+        const health = enabled(url, "health")
+          ? {
+              ...(await getSolardRuntimeHealth()),
+
+              store:
+                stats ??
+                terminalStoreStats({
+                  pinnedMints,
+                }),
+            }
+          : null;
+
+        const priced = rows.filter(
+          (row: any) =>
+            row.marketCapUsd != null ||
+            row.marketCapSol != null ||
+            row.priceUsd != null ||
+            row.priceSol != null,
+        ).length;
+
+        if (health?.store && typeof health.store === "object") {
+          health.store = {
+            ...health.store,
+
+            /**
+             * Displayed-feed priced count. The stored-history count remains
+             * available as storedPricedTokens when supplied by the repository.
+             */
+            storedPricedTokens: (health.store as any).pricedTokens ?? null,
+
+            pricedTokens: priced,
+          };
         }
-      : null;
 
-    const priced = rows.filter(
-      (row: any) =>
-        row.marketCapUsd != null ||
-        row.marketCapSol != null ||
-        row.priceUsd != null ||
-        row.priceSol != null,
-    ).length;
+        return Response.json({
+          rows,
+          rawRows: rows,
+          stats,
+          health,
 
-    if (health?.store && typeof health.store === "object") {
-      health.store = {
-        ...health.store,
+          meta: {
+            source,
+            limit,
+            sinceMs,
+            activeWindowMs,
 
-        /**
-         * Displayed-feed priced count. The stored-history count remains
-         * available as storedPricedTokens when supplied by the repository.
-         */
-        storedPricedTokens: (health.store as any).pricedTokens ?? null,
+            count: rows.length,
+            mapped: rows.length,
+            priced,
 
-        pricedTokens: priced,
-      };
-    }
+            priceWindowTtlMs: 1_000,
 
-    return Response.json({
-      rows,
-      rawRows: rows,
-      stats,
-      health,
+            feedResetAtMs: feedState.resetAtMs,
 
-      meta: {
-        source,
-        limit,
-        sinceMs,
-        activeWindowMs,
+            pinned: pinnedMints.length,
 
-        count: rows.length,
-        mapped: rows.length,
-        priced,
+            membership: "observed-after-reset-or-pinned",
 
-        priceWindowTtlMs: 1_000,
+            hideMayhem: enabled(url, "hideMayhem"),
 
-        feedResetAtMs: feedState.resetAtMs,
+            mayhemPolicy: enabled(url, "hideMayhem")
+              ? "hide-verified-mayhem-show-unknown"
+              : "all",
 
-        pinned: pinnedMints.length,
+            reads: [
+              "terminalTokensLive",
+              "tokenPriceWindowsV4",
+              "tokenMarketExtremaV1",
+            ],
 
-        membership: "observed-after-reset-or-pinned",
+            writes: [],
+            appendOnlyTrades: true,
 
-        hideMayhem: enabled(url, "hideMayhem"),
+            databaseModule: "shared/db.ts",
 
-        mayhemPolicy: enabled(url, "hideMayhem")
-          ? "hide-verified-mayhem-show-unknown"
-          : "all",
-
-        reads: ["terminalTokensLive", "tokenPriceWindowsV4"],
-
-        writes: [],
-        appendOnlyTrades: true,
-
-        databaseModule: "shared/db.ts",
-
-        pageRuntime: "app/terminal/page.client.tsx",
+            pageRuntime: "app/terminal/page.client.tsx",
+          },
+        });
       },
-    });
+    );
   } catch (error) {
     return errorResponse(error);
   }
