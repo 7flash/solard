@@ -107,3 +107,7 @@ export function requestParams(request: Request): Record<string, unknown> {
     return {};
   }
 }
+
+export function summarizeError(error: unknown): unknown {
+  return summarizeForMeasure(error);
+}

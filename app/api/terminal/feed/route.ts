@@ -5,50 +5,19 @@ import {
 } from "../../../../src/solard/db/terminal-store.js";
 import { terminalHealthAction } from "../../../../src/solard/actions/terminal-health.js";
 import { terminalFeedRowsToPumpRows } from "../../../../src/solard/terminal/api-map.js";
+import { terminalProbeAction } from "../../../../src/solard/actions/terminal-probe.js";
 import {
-  apiMeasure as m,
-  label,
-  requestParams,
-} from "../../../../src/solard/measure.js";
+  errorResponse,
+  intParam,
+  m,
+  resolveTerminalSource,
+  summarizeError,
+  type TerminalSource,
+} from "../../../_server/measure.js";
 
-type Source = "both" | "helius" | "pumpportal" | undefined;
 type Row = Record<string, any>;
-function resolveSource(value: unknown): Source {
-  const text = String(value ?? "").toLowerCase();
-  if (text.includes("both")) return "both";
-  if (text.includes("helius")) return "helius";
-  if (text.includes("pump")) return "pumpportal";
-  return undefined;
-}
-function compactError(error: unknown) {
-  if (error instanceof Error)
-    return { name: error.name, message: error.message };
-  return { message: String(error) };
-}
-function errorStatus(error: unknown): number {
-  const maybe = error as any;
-  if (typeof maybe?.status === "number") return maybe.status;
-  if (typeof maybe?.statusCode === "number") return maybe.statusCode;
-  return 500;
-}
-function errorResponse(error: unknown): Response {
-  return Response.json(
-    { ok: false, error: compactError(error) },
-    { status: errorStatus(error) },
-  );
-}
-function intParam(
-  url: URL,
-  name: string,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  const parsed = Number(url.searchParams.get(name) ?? fallback);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(parsed)));
-}
-function matchesSource(row: Row, source: Source): boolean {
+
+function matchesSource(row: Row, source: TerminalSource): boolean {
   if (!source || source === "both") return true;
   const text = String(row.source ?? "").toLowerCase();
   if (source === "helius")
@@ -57,14 +26,17 @@ function matchesSource(row: Row, source: Source): boolean {
     text.includes("pumpportal") || text === "pump" || text.includes("telegram")
   );
 }
+
 function hasPrice(row: Row): boolean {
   return (
     row.marketCapUsd != null || row.priceUsd != null || row.priceSol != null
   );
 }
+
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(",");
 }
+
 function latestTime(row: Row): number {
   return Math.max(
     Number(row.lastTradeAtMs ?? 0),
@@ -74,52 +46,57 @@ function latestTime(row: Row): number {
   );
 }
 
-function listFastTerminalRows(args: {
+function queryCandidates(args: {
+  minUpdatedAt: number;
+  candidateLimit: number;
+}): { tokens: Row[]; trades: Row[] } {
+  return {
+    tokens: terminalDb.raw<Row>(
+      `SELECT * FROM terminalTokensLive WHERE updatedAtMs >= ? ORDER BY updatedAtMs DESC LIMIT ?`,
+      args.minUpdatedAt,
+      args.candidateLimit,
+    ),
+    trades: terminalDb.raw<Row>(
+      `SELECT mint, source, priceSol, priceUsd, marketCapUsd, createdAtMs, updatedAtMs FROM terminalTradesLive WHERE createdAtMs >= ? ORDER BY createdAtMs DESC LIMIT ?`,
+      args.minUpdatedAt,
+      args.candidateLimit * 3,
+    ),
+  };
+}
+
+function buildRows(args: {
   limit: number;
-  sinceMs: number;
-  activeWindowMs: number;
   includeUnpriced: boolean;
-  source: Source;
+  source: TerminalSource;
   hideMayhem: boolean;
   hideUsdc: boolean;
+  minUpdatedAt: number;
+  candidateLimit: number;
 }): Row[] {
   const now = Date.now();
-  const minUpdatedAt = Math.max(
-    args.sinceMs,
-    args.activeWindowMs > 0 ? now - args.activeWindowMs : 0,
-  );
-  const candidateLimit = Math.max(args.limit * 4, 80);
-  const tokens = m.sync(
-    label("terminal_feed:tokens", { minUpdatedAt, candidateLimit }),
-    () =>
-      terminalDb.raw<Row>(
-        `SELECT * FROM terminalTokensLive WHERE updatedAtMs >= ? ORDER BY updatedAtMs DESC LIMIT ?`,
-        minUpdatedAt,
-        candidateLimit,
-      ),
-  );
-  const trades = m.sync(
-    label("terminal_feed:trades", { minUpdatedAt, candidateLimit }),
-    () =>
-      terminalDb.raw<Row>(
-        `SELECT mint, source, priceSol, priceUsd, marketCapUsd, createdAtMs, updatedAtMs FROM terminalTradesLive WHERE createdAtMs >= ? ORDER BY createdAtMs DESC LIMIT ?`,
-        minUpdatedAt,
-        candidateLimit * 3,
-      ),
-  );
+  const { tokens, trades } = queryCandidates({
+    minUpdatedAt: args.minUpdatedAt,
+    candidateLimit: args.candidateLimit,
+  });
+
   const byMint = new Map<string, Row>();
+
   for (const token of tokens) {
     if (!token.mint || !matchesSource(token, args.source)) continue;
     if (args.hideMayhem && Number(token.isMayhemMode ?? 0) !== 0) continue;
+
     const quoteText =
       `${token.quoteAsset ?? ""} ${token.quoteMint ?? ""}`.toLowerCase();
+
     if (
       args.hideUsdc &&
       (quoteText.includes("usdc") ||
         quoteText.includes("epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v"))
     )
       continue;
+
     if (!args.includeUnpriced && !hasPrice(token) && !token.image) continue;
+
     byMint.set(String(token.mint), {
       ...token,
       kind: String(token.source ?? "").startsWith("telegram")
@@ -129,14 +106,17 @@ function listFastTerminalRows(args: {
       priceSource: hasPrice(token) ? token.source : null,
     });
   }
+
   for (const trade of trades) {
     if (!trade.mint || !matchesSource(trade, args.source)) continue;
+
     const mint = String(trade.mint);
     const existing = byMint.get(mint);
     const tradeAt = Math.max(
       Number(trade.createdAtMs ?? 0),
       Number(trade.updatedAtMs ?? 0),
     );
+
     const base = existing ?? {
       mint,
       symbol: "",
@@ -162,6 +142,7 @@ function listFastTerminalRows(args: {
       updatedAtMs: tradeAt,
       kind: "pump",
     };
+
     byMint.set(mint, {
       ...base,
       priceSol: trade.priceSol ?? base.priceSol ?? null,
@@ -175,18 +156,20 @@ function listFastTerminalRows(args: {
       priceSource: hasPrice(trade) ? trade.source : (base.priceSource ?? null),
     });
   }
+
   const mints = Array.from(byMint.keys()).slice(
     0,
     Math.min(500, Math.max(args.limit * 2, args.limit)),
   );
+
   if (mints.length) {
     const params = placeholders(mints.length);
-    const indicators = m.sync("terminal_feed:indicators", () =>
-      terminalDb.raw<Row>(
-        `SELECT * FROM terminalIndicatorsLive WHERE mint IN (${params}) AND intervalSec IN (60,300,900)`,
-        ...mints,
-      ),
+
+    const indicators = terminalDb.raw<Row>(
+      `SELECT * FROM terminalIndicatorsLive WHERE mint IN (${params}) AND intervalSec IN (60,300,900)`,
+      ...mints,
     );
+
     for (const indicator of indicators) {
       const row = byMint.get(String(indicator.mint));
       if (!row) continue;
@@ -201,18 +184,20 @@ function listFastTerminalRows(args: {
         Number(indicator.tradeCount ?? 0),
       );
     }
-    const counts = m.sync("terminal_feed:counts", () =>
-      terminalDb.raw<Row>(
-        `SELECT mint, COUNT(*) as tradeCount FROM terminalTradesLive WHERE createdAtMs >= ? AND mint IN (${params}) GROUP BY mint`,
-        minUpdatedAt,
-        ...mints,
-      ),
+
+    const countSinceMs = args.minUpdatedAt > 0 ? args.minUpdatedAt : 0;
+    const counts = terminalDb.raw<Row>(
+      `SELECT mint, COUNT(*) as tradeCount FROM terminalTradesLive WHERE createdAtMs >= ? AND mint IN (${params}) GROUP BY mint`,
+      countSinceMs,
+      ...mints,
     );
+
     for (const count of counts) {
       const row = byMint.get(String(count.mint));
       if (row) row.tradeCount = Number(count.tradeCount ?? row.tradeCount ?? 0);
     }
   }
+
   return Array.from(byMint.values())
     .filter((row) => args.includeUnpriced || hasPrice(row) || row.image)
     .map((row) => {
@@ -220,6 +205,7 @@ function listFastTerminalRows(args: {
         row.priceUpdatedAtMs == null ? null : Number(row.priceUpdatedAtMs);
       const priceAgeMs =
         priceUpdatedAtMs == null ? null : Math.max(0, now - priceUpdatedAtMs);
+
       return {
         ...row,
         sma1m: row.sma1m ?? row.marketCapUsd ?? null,
@@ -242,30 +228,87 @@ function listFastTerminalRows(args: {
     .slice(0, args.limit);
 }
 
+function listFastTerminalRows(args: {
+  limit: number;
+  sinceMs: number;
+  activeWindowMs: number;
+  includeUnpriced: boolean;
+  source: TerminalSource;
+  hideMayhem: boolean;
+  hideUsdc: boolean;
+  fallback: boolean;
+}): { rows: Row[]; fallbackUsed: boolean; minUpdatedAt: number } {
+  const now = Date.now();
+  const minUpdatedAt = Math.max(
+    args.sinceMs,
+    args.activeWindowMs > 0 ? now - args.activeWindowMs : 0,
+  );
+  const candidateLimit = Math.max(args.limit * 4, 80);
+
+  const rows = buildRows({
+    ...args,
+    minUpdatedAt,
+    candidateLimit,
+  });
+
+  if (rows.length || !args.fallback) {
+    return { rows, fallbackUsed: false, minUpdatedAt };
+  }
+
+  const fallbackRows = buildRows({
+    ...args,
+    source: "both",
+    includeUnpriced: true,
+    minUpdatedAt: 0,
+    candidateLimit: Math.max(args.limit * 8, 500),
+  });
+
+  return { rows: fallbackRows, fallbackUsed: true, minUpdatedAt: 0 };
+}
+
 export async function GET(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
+
+    const url = new URL(request.url);
+    const source = resolveTerminalSource(url.searchParams.get("source"));
+    const limit = intParam(url, "limit", 300, 1, 500);
+    const sinceMs = intParam(url, "sinceMs", 0, 0, Number.MAX_SAFE_INTEGER);
+    const activeWindowMs = intParam(
+      url,
+      "activeWindowMs",
+      Number(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "0"),
+      0,
+      24 * 60 * 60 * 1000,
+    );
+    const includeUnpriced =
+      url.searchParams.get("includeUnpriced") === "1" ||
+      source === "helius" ||
+      source === "both";
+
     const payload = await m(
-      label("terminal_feed:get", requestParams(request)),
+      {
+        start: () =>
+          `terminal_feed:get source=${source ?? "auto"} limit=${limit} activeWindowMs=${activeWindowMs}`,
+        end: (value: any) => ({
+          rows: Array.isArray(value.rows) ? value.rows.length : 0,
+          raw: Array.isArray(value.rawRows) ? value.rawRows.length : 0,
+          stats: value.stats ? "yes" : "no",
+          health:
+            value.health == null
+              ? "none"
+              : value.health?.ok === true
+                ? "ok"
+                : "bad",
+          source: value.meta?.source ?? "auto",
+          fallback: value.meta?.fallbackUsed === true ? "yes" : "no",
+          probeFallback: value.meta?.probeFallbackUsed === true ? "yes" : "no",
+          minUpdatedAt: value.meta?.minUpdatedAt,
+        }),
+        catch: summarizeError,
+      },
       async () => {
-        m.sync("terminal_feed:auth", () => {
-          assertWebAuth(request);
-          return "ok";
-        });
-        const url = new URL(request.url);
-        const source = resolveSource(url.searchParams.get("source"));
-        const limit = intParam(url, "limit", 300, 1, 500);
-        const sinceMs = intParam(url, "sinceMs", 0, 0, Number.MAX_SAFE_INTEGER);
-        const activeWindowMs = intParam(
-          url,
-          "activeWindowMs",
-          Number(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS ?? "300000"),
-          0,
-          24 * 60 * 60 * 1000,
-        );
-        const includeUnpriced =
-          url.searchParams.get("includeUnpriced") === "1" ||
-          source === "helius";
-        const rawRows = listFastTerminalRows({
+        const listed = listFastTerminalRows({
           limit,
           sinceMs,
           activeWindowMs,
@@ -273,10 +316,35 @@ export async function GET(request: Request): Promise<Response> {
           source,
           hideMayhem: url.searchParams.get("hideMayhem") === "1",
           hideUsdc: url.searchParams.get("hideUsdc") === "1",
+          fallback: url.searchParams.get("fallback") !== "0",
         });
+
+        const mappedRows = terminalFeedRowsToPumpRows(listed.rows);
+        let rows = mappedRows;
+        let probeRows: any[] = [];
+        let probeFallbackUsed = false;
+
+        if (!rows.length && url.searchParams.get("probeFallback") !== "0") {
+          const probe = await terminalProbeAction({
+            source: "both",
+            inject: false,
+            ensure: false,
+            restartStale: false,
+            limit,
+          });
+          probeRows = Array.isArray((probe as any)?.rows)
+            ? ((probe as any).rows as any[])
+            : [];
+          if (probeRows.length) {
+            rows = probeRows;
+            probeFallbackUsed = true;
+          }
+        }
+
         return {
-          rows: terminalFeedRowsToPumpRows(rawRows),
-          rawRows,
+          rows,
+          rawRows: listed.rows,
+          probeRows,
           stats:
             url.searchParams.get("stats") === "1" ? terminalStoreStats() : null,
           health:
@@ -288,14 +356,19 @@ export async function GET(request: Request): Promise<Response> {
             limit,
             activeWindowMs,
             includeUnpriced,
-            count: rawRows.length,
+            count: listed.rows.length,
+            mapped: mappedRows.length,
+            probe: probeRows.length,
+            fallbackUsed: listed.fallbackUsed,
+            probeFallbackUsed,
+            minUpdatedAt: listed.minUpdatedAt,
           },
         };
       },
     );
+
     return Response.json(payload);
   } catch (error) {
-    m.sync("terminal_feed:get_error", () => error);
     return errorResponse(error);
   }
 }
