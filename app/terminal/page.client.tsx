@@ -1,3 +1,4 @@
+import "./page.css";
 import { render } from "tradjs/client";
 import { api } from "../_client/api";
 import { age, formatMcap, numberValue, short } from "../_client/format";
@@ -423,14 +424,14 @@ function TokenAvatar({
       .toUpperCase() || "?";
   return src ? (
     <img
-      className={`terminal-v10-avatar ${large ? "large" : ""}`}
+      className={`terminal-token-avatar ${large ? "large" : ""}`}
       src={src}
       loading="lazy"
       alt={String(row.symbol ?? row.name ?? "token")}
     />
   ) : (
     <div
-      className={`terminal-v10-avatar terminal-v10-avatar-fallback ${large ? "large" : ""}`}
+      className={`terminal-token-avatar terminal-token-avatar-fallback ${large ? "large" : ""}`}
     >
       {initial}
     </div>
@@ -1505,7 +1506,7 @@ function SortButton({ base, label }: { base: SortBase; label: string }) {
   return (
     <button
       type="button"
-      className={`terminal-v10-sort ${state.sort.startsWith(base) ? "active" : ""}`}
+      className={`terminal-sort-button ${state.sort.startsWith(base) ? "active" : ""}`}
       onClick={() => setSort(base)}
     >
       {label} {sortMark(base)}
@@ -1521,7 +1522,7 @@ function WindowSortHeader({
   prefix: "volume" | "sma" | "trades";
 }) {
   return (
-    <div className="terminal-v22-metric-head">
+    <div className="terminal-metric-header">
       <b>{label}</b>
 
       <div>
@@ -1555,7 +1556,7 @@ function MetricStack({
   }>;
 }) {
   return (
-    <div className="terminal-v22-stack">
+    <div className="terminal-metric-stack">
       {values.map((item) => (
         <div key={item.label}>
           <span>{item.label}</span>
@@ -1599,7 +1600,7 @@ function TokenFlags({ row }: { row: PumpFeedRow }) {
   const mayhem = isMayhem(row);
 
   return (
-    <span className="terminal-v23-flags">
+    <span className="terminal-token-flags">
       <span
         className={mayhem ? "bad" : known ? "ok" : "pending"}
         title={
@@ -1631,10 +1632,10 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
       className={`${selected ? "selected" : ""} ${isPinned(row) ? "pinned" : ""}`}
       onClick={() => selectRow(row)}
     >
-      <td className="terminal-v22-token">
+      <td className="terminal-token-cell">
         <button
           type="button"
-          className={`terminal-v10-pin ${isPinned(row) ? "active" : ""}`}
+          className={`terminal-pin-button ${isPinned(row) ? "active" : ""}`}
           title={isPinned(row) ? "Unpin" : "Pin"}
           onClick={(event: any) => {
             event.stopPropagation();
@@ -1679,11 +1680,11 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
         )}
       </td>
 
-      <td className="terminal-v10-num">{formatMcap(latestMcap(row))}</td>
+      <td className="terminal-number">{formatMcap(latestMcap(row))}</td>
 
-      <td className="terminal-v10-num">{formatMcap(athMcap(row))}</td>
+      <td className="terminal-number">{formatMcap(athMcap(row))}</td>
 
-      <td className="terminal-v10-num">{formatMcap(atlMcap(row))}</td>
+      <td className="terminal-number">{formatMcap(atlMcap(row))}</td>
 
       <td>
         <MetricStack
@@ -1743,14 +1744,14 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
       </td>
 
       <td
-        className="terminal-v10-mint-cell"
+        className="terminal-mint-cell"
         style={{
           padding: 0,
         }}
       >
         {pumpHref ? (
           <a
-            className="terminal-v22-mint code"
+            className="terminal-mint-link code"
             href={pumpHref}
             target="_blank"
             rel="noreferrer"
@@ -1760,7 +1761,7 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
             {short(row.mint, 6, 5)}
           </a>
         ) : (
-          <span className="terminal-v22-mint">—</span>
+          <span className="terminal-mint-link">—</span>
         )}
       </td>
     </tr>
@@ -1770,20 +1771,20 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
 function SelectedToken({ row }: { row: PumpFeedRow | null }) {
   if (!row)
     return (
-      <section className="terminal-v10-selected">
+      <section className="terminal-inspector">
         <p className="muted">Select a token.</p>
       </section>
     );
   const holders = state.holdersMint === row.mint ? state.holders : [];
 
   return (
-    <section className="terminal-v10-selected">
-      <div className="terminal-v10-selected-head">
+    <section className="terminal-inspector">
+      <div className="terminal-inspector-header">
         <TokenAvatar row={row} large />
         <div>
           <h3>{row.symbol ? `$${row.symbol}` : row.name || "Token"}</h3>
           <div className="muted">{row.name || short(row.mint, 8, 8)}</div>
-          <div className="terminal-v10-links">
+          <div className="terminal-links">
             {linksFor(row).map((link) => (
               <a
                 key={`${link.label}:${link.href}`}
@@ -1796,7 +1797,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
             ))}
           </div>
         </div>
-        <div className="terminal-v10-links">
+        <div className="terminal-links">
           <button
             type="button"
             className="secondary compact"
@@ -1815,7 +1816,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
         </div>
       </div>
 
-      <div className="terminal-v10-stats">
+      <div className="terminal-stats">
         <div>
           <span>MCap</span>
           <b>{formatMcap(latestMcap(row))}</b>
@@ -1863,10 +1864,10 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
           <b>{quoteLabel(row)}</b>
         </div>
       </div>
-      <div className="terminal-v10-selected-grid">
-        <div className="terminal-v10-panel">
+      <div className="terminal-inspector-grid">
+        <div className="terminal-panel">
           <h3>Trade</h3>
-          <div className="terminal-v10-trade-form">
+          <div className="terminal-trade-form">
             <select
               data-terminal-focus="wallet"
               value={state.selectedWallet}
@@ -1911,7 +1912,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
               }
             />
           </div>
-          <div className="terminal-v10-trade-form">
+          <div className="terminal-trade-form">
             <select
               data-terminal-focus="sender"
               value={state.sender}
@@ -1939,7 +1940,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
             </span>
             <span className="muted small">Wallet: {selectedWalletLabel()}</span>
           </div>
-          <div className="terminal-v10-trade-actions">
+          <div className="terminal-trade-actions">
             <button
               type="button"
               disabled={state.tradeBusy || !row.mint}
@@ -1964,7 +1965,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
           ) : null}
         </div>
 
-        <div className="terminal-v10-panel">
+        <div className="terminal-panel">
           <div className="row between">
             <h3>Holders</h3>
             <span className="muted small">
@@ -1977,7 +1978,7 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
             <div className="pill bad">{state.holdersError}</div>
           ) : null}
           {holders.length ? (
-            <table className="terminal-v10-holders">
+            <table className="terminal-holders-table">
               <thead>
                 <tr>
                   <th>#</th>
@@ -2210,7 +2211,7 @@ function ErrorDock() {
   const errors = state.uiErrors;
 
   return (
-    <aside className="terminal-v23-error-dock">
+    <aside className="terminal-error-dock">
       <button
         type="button"
         className={errors.length ? "has-errors" : ""}
@@ -2229,11 +2230,11 @@ function ErrorDock() {
       </button>
 
       {state.errorDockOpen ? (
-        <div className="terminal-v23-error-panel">
+        <div className="terminal-error-panel">
           <div className="row between">
             <b>Terminal errors</b>
 
-            <div className="terminal-v10-links">
+            <div className="terminal-links">
               <button
                 type="button"
                 className="secondary compact"
@@ -2262,7 +2263,7 @@ function ErrorDock() {
 
           {errors.length ? (
             errors.map((entry) => (
-              <div key={entry.id} className="terminal-v23-error-entry">
+              <div key={entry.id} className="terminal-error-entry">
                 <div className="row between">
                   <b>{entry.source}</b>
 
@@ -2300,8 +2301,8 @@ function LogsPanel() {
   const entries = displayedLogs();
 
   return (
-    <section className="terminal-v10-logs">
-      <div className="terminal-v10-logs-head">
+    <section className="terminal-activity">
+      <div className="terminal-activity-header">
         <div>
           <b>Activity log</b>
 
@@ -2311,7 +2312,7 @@ function LogsPanel() {
           </span>
         </div>
 
-        <div className="terminal-v10-links">
+        <div className="terminal-links">
           <button
             type="button"
             className="secondary compact"
@@ -2346,7 +2347,7 @@ function LogsPanel() {
         </div>
       </div>
 
-      <div className="terminal-v10-log-rows">
+      <div className="terminal-activity-list">
         {entries.map((entry) => {
           const status = logStatus(entry);
 
@@ -2357,7 +2358,7 @@ function LogsPanel() {
           return (
             <details
               key={entry.id}
-              className={`terminal-v10-log-row ${status} ${selected ? "selected" : ""}`}
+              className={`terminal-activity-entry ${status} ${selected ? "selected" : ""}`}
               data-log-id={entry.id}
               open={selected}
             >
@@ -2381,12 +2382,12 @@ function LogsPanel() {
               </summary>
 
               {selected ? (
-                <div className="terminal-v10-log-detail">
+                <div className="terminal-activity-detail">
                   {error ? <div className="pill bad">{error}</div> : null}
 
                   <pre>{JSON.stringify(logPayload(entry), null, 2)}</pre>
 
-                  <div className="terminal-v10-links">
+                  <div className="terminal-links">
                     {error ? (
                       <button
                         type="button"
@@ -2472,243 +2473,9 @@ function TerminalPage() {
   const pricedRows = state.rows.filter((row) => latestMcap(row) != null).length;
 
   return (
-    <div className="terminal-v10">
-      <style>{`
-        .terminal-v22-table {
-          min-width: 1020px;
-          table-layout: fixed;
-          font-size: 10px;
-        }
-
-        .terminal-v22-table th,
-        .terminal-v22-table td {
-          padding: 5px 7px;
-          vertical-align: middle;
-        }
-
-        .terminal-v22-table th:nth-child(1) {
-          width: 235px;
-        }
-
-        .terminal-v22-table th:nth-child(2),
-        .terminal-v22-table th:nth-child(3),
-        .terminal-v22-table th:nth-child(4) {
-          width: 88px;
-        }
-
-        .terminal-v22-table th:nth-child(5),
-        .terminal-v22-table th:nth-child(6) {
-          width: 132px;
-        }
-
-        .terminal-v22-table th:nth-child(7) {
-          width: 92px;
-        }
-
-        .terminal-v22-table th:nth-child(8) {
-          width: 118px;
-        }
-
-        .terminal-v22-token {
-          display: grid;
-          grid-template-columns: 24px minmax(0, 1fr);
-          gap: 6px;
-          align-items: center;
-          height: 58px;
-        }
-
-        .terminal-v22-token > a,
-        .terminal-v22-token > div {
-          display: grid;
-          grid-template-columns: 30px minmax(0, 1fr);
-          gap: 7px;
-          align-items: center;
-          min-width: 0;
-          height: 100%;
-        }
-
-        .terminal-v22-token span {
-          display: grid;
-          min-width: 0;
-        }
-
-        .terminal-v22-token b,
-        .terminal-v22-token small {
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .terminal-v22-token small {
-          color: var(--muted);
-          font-size: 9px;
-        }
-
-        .terminal-v22-stack {
-          display: grid;
-          gap: 1px;
-          line-height: 1.12;
-        }
-
-        .terminal-v22-stack > div {
-          display: grid;
-          grid-template-columns: 22px minmax(0, 1fr);
-          gap: 4px;
-          min-height: 14px;
-          align-items: center;
-        }
-
-        .terminal-v22-stack span {
-          color: var(--dim);
-          font-size: 8px;
-          text-transform: uppercase;
-        }
-
-        .terminal-v22-stack b {
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          font-size: 9px;
-          font-variant-numeric: tabular-nums;
-        }
-
-        .terminal-v22-metric-head {
-          display: grid;
-          gap: 3px;
-        }
-
-        .terminal-v22-metric-head > div {
-          display: flex;
-          gap: 2px;
-        }
-
-        .terminal-v22-metric-head button {
-          min-width: 25px;
-          padding: 1px 3px;
-          border: 1px solid var(--line);
-          background: transparent;
-          color: var(--muted);
-          font-size: 8px;
-        }
-
-        .terminal-v22-metric-head button.active {
-          color: var(--green);
-          border-color: var(--green);
-        }
-
-        .terminal-v22-mint {
-          display: flex;
-          width: 100%;
-          height: 58px;
-          align-items: center;
-          padding: 0 8px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          font-size: 9px;
-        }
-
-        .terminal-v23-flags {
-          display: flex;
-          gap: 3px;
-          margin-top: 2px;
-          min-height: 13px;
-        }
-
-        .terminal-v23-flags > span {
-          border: 1px solid var(--line);
-          border-radius: 3px;
-          padding: 0 3px;
-          font-size: 7px;
-          line-height: 11px;
-          color: var(--muted);
-        }
-
-        .terminal-v23-flags > .bad {
-          border-color: var(--red);
-          color: var(--red);
-        }
-
-        .terminal-v23-flags > .ok {
-          border-color: var(--green);
-          color: var(--green);
-        }
-
-        .terminal-v23-flags > .warn {
-          border-color: #f0b44c;
-          color: #f0b44c;
-        }
-
-        .terminal-v23-flags > .pending {
-          border-style: dashed;
-        }
-
-        .terminal-v23-error-dock {
-          position: fixed;
-          right: 14px;
-          bottom: 14px;
-          z-index: 1000;
-        }
-
-        .terminal-v23-error-dock > button {
-          position: relative;
-          width: 34px;
-          height: 34px;
-          border-radius: 50%;
-          border: 1px solid var(--line);
-          background: var(--panel);
-          color: var(--muted);
-          font-weight: 800;
-        }
-
-        .terminal-v23-error-dock > button.has-errors {
-          border-color: var(--red);
-          color: var(--red);
-        }
-
-        .terminal-v23-error-dock > button span {
-          position: absolute;
-          right: -5px;
-          top: -5px;
-          min-width: 16px;
-          height: 16px;
-          padding: 0 3px;
-          border-radius: 9px;
-          background: var(--red);
-          color: white;
-          font-size: 9px;
-          line-height: 16px;
-        }
-
-        .terminal-v23-error-panel {
-          position: absolute;
-          right: 0;
-          bottom: 42px;
-          width: min(430px, calc(100vw - 28px));
-          max-height: 55vh;
-          overflow: auto;
-          border: 1px solid var(--line);
-          background: var(--panel);
-          box-shadow: 0 14px 40px rgba(0, 0, 0, .42);
-          padding: 10px;
-        }
-
-        .terminal-v23-error-entry {
-          border-top: 1px solid var(--line);
-          margin-top: 8px;
-          padding-top: 8px;
-        }
-
-        .terminal-v23-error-entry pre {
-          max-height: 130px;
-          overflow: auto;
-          white-space: pre-wrap;
-          overflow-wrap: anywhere;
-          font-size: 10px;
-        }
-      `}</style>
-      <section className="terminal-v10-top">
-        <div className="terminal-v10-title">
+    <div className="terminal-page">
+      <section className="terminal-header">
+        <div className="terminal-header-title">
           <h2>Pump</h2>
           <span className="muted small">feed={state.status}</span>
           <span className="muted small">
@@ -2718,7 +2485,7 @@ function TerminalPage() {
             {pollMs()}ms
           </span>
         </div>
-        <div className="terminal-v10-actions">
+        <div className="terminal-actions">
           <button
             type="button"
             className="secondary compact"
@@ -2768,7 +2535,7 @@ function TerminalPage() {
         <div className="pill ok">{state.resetMessage}</div>
       ) : null}
 
-      <section className="terminal-v10-controls">
+      <section className="terminal-controls">
         <input
           data-terminal-focus="filter"
           placeholder="filter symbol, mint, creator"
@@ -2798,21 +2565,21 @@ function TerminalPage() {
         </select>
         <button
           type="button"
-          className={`terminal-v10-toggle ${state.hideMayhem ? "active" : ""}`}
+          className={`terminal-filter-toggle ${state.hideMayhem ? "active" : ""}`}
           onClick={() => toggleHide("hideMayhem", "solwal:pump-hide-mayhem")}
         >
           {state.hideMayhem ? "Mayhem hidden" : "Hide mayhem"}
         </button>
         <button
           type="button"
-          className={`terminal-v10-toggle ${state.hideUsdc ? "active" : ""}`}
+          className={`terminal-filter-toggle ${state.hideUsdc ? "active" : ""}`}
           onClick={() => toggleHide("hideUsdc", "solwal:pump-hide-usdc")}
         >
           Hide USDC
         </button>
         <button
           type="button"
-          className={`terminal-v10-sort ${state.sort.startsWith("created") ? "active" : ""}`}
+          className={`terminal-sort-button ${state.sort.startsWith("created") ? "active" : ""}`}
           onClick={() => setSort("created")}
         >
           Created {sortMark("created")}
@@ -2820,7 +2587,7 @@ function TerminalPage() {
       </section>
 
       {(state.health as AnyRow | null)?.status !== "ok" ? (
-        <section className="terminal-v10-health">
+        <section className="terminal-health">
           <b>System {(state.health as AnyRow | null)?.status ?? "checking"}</b>
 
           {(state.health as AnyRow | null)?.indexerError ? (
@@ -2835,9 +2602,9 @@ function TerminalPage() {
         </section>
       ) : null}
 
-      <section className="terminal-v10-table-card">
-        <div className="terminal-v10-table-wrap">
-          <table className="terminal-v10-table terminal-v22-table">
+      <section className="terminal-table-card">
+        <div className="terminal-table-scroll">
+          <table className="terminal-table terminal-market-table">
             <thead>
               <tr>
                 <th>Token</th>
@@ -2877,7 +2644,7 @@ function TerminalPage() {
             </tbody>
           </table>
           {!rows.length ? (
-            <div className="terminal-v10-empty">
+            <div className="terminal-empty">
               No rows in the live window yet. The route no longer full-scans
               history during polling.
             </div>
