@@ -417,7 +417,14 @@ async function runAction<T>(action: () => Promise<T>): Promise<T | undefined> {
   try {
     return await action();
   } catch (error) {
-    state.error = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+
+    state.error =
+      /database is locked|database is busy|sqlite_busy|sqlite_locked/i.test(
+        message,
+      )
+        ? "Launch storage remained busy after automatic retries. Press Start launch again."
+        : message;
 
     return undefined;
   } finally {
@@ -504,6 +511,12 @@ async function loadLaunchPage(): Promise<void> {
 
 const BUYER_RESERVE_SOL = "0.02";
 
+/**
+ * The current Helius Sender dual-route endpoint requires this minimum tip.
+ * It is owned by the sender choice rather than entered as a generic fee.
+ */
+const HELIUS_SENDER_TIP_SOL = "0.0002";
+
 const BUYER_CU_LIMIT = 600_000;
 
 type FollowerWallet = {
@@ -542,6 +555,127 @@ type FollowerSettingsGroup = {
   maxFailedAttempts: string;
 };
 
+type LaunchDraft = {
+  name: string;
+  symbol: string;
+  description: string;
+  website: string;
+  twitter: string;
+  telegram: string;
+
+  creator: string;
+  creatorBuySol: string;
+  mintSuffix: string;
+
+  live: boolean;
+  skipSimulation: boolean;
+  cashback: boolean;
+};
+
+type ExportedFollowerGroup = {
+  name: string;
+  sourceGroup: string | null;
+  wallets: string[];
+
+  sender: FollowerSender;
+
+  strategy: FollowerStrategy;
+
+  minPct: string;
+  maxPct: string;
+
+  tipSol: string;
+  priorityFeeSol: string;
+  slippagePct: string;
+
+  retryIntervalMs: string;
+  recompileIntervalMs: string;
+  freshQuoteDelayMs: string;
+  maxFailedAttempts: string;
+};
+
+type LaunchConfigV1 = {
+  schema: "solard.pump-launch-config";
+
+  version: 1;
+
+  exportedAt: string;
+
+  image: {
+    included: false;
+
+    fileName: string | null;
+  };
+
+  token: {
+    name: string;
+
+    symbol: string;
+
+    description: string;
+
+    website: string;
+
+    twitter: string;
+
+    telegram: string;
+  };
+
+  deployment: {
+    creator: string;
+
+    creatorBuySol: string;
+
+    mintSuffix: string;
+
+    live: boolean;
+
+    skipSimulation: boolean;
+
+    cashback: boolean;
+  };
+
+  followers: ExportedFollowerGroup[];
+};
+
+const LAUNCH_CONFIG_SCHEMA = "solard.pump-launch-config";
+
+const LAUNCH_CONFIG_VERSION = 1;
+
+const MAX_LAUNCH_CONFIG_BYTES = 1_000_000;
+
+let launchDraft: LaunchDraft = {
+  name: "",
+
+  symbol: "",
+
+  description: "",
+
+  website: "",
+
+  twitter: "",
+
+  telegram: "",
+
+  creator: "",
+
+  creatorBuySol: "0",
+
+  mintSuffix: "pump",
+
+  live: true,
+
+  skipSimulation: false,
+
+  cashback: true,
+};
+
+let launchConfigNotice: string | null = null;
+
+let imageInputRevision = 0;
+
+let configInputRevision = 0;
+
 let followerGroups: FollowerSettingsGroup[] = [];
 
 let selectedImage: File | null = null;
@@ -554,6 +688,362 @@ function id(prefix: string): string {
     `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   return `${prefix}:${suffix}`;
+}
+
+function mutateLaunchDraft(patch: Partial<LaunchDraft>): void {
+  launchDraft = {
+    ...launchDraft,
+    ...patch,
+  };
+
+  launchConfigNotice = null;
+
+  update();
+}
+
+function jsonString(value: unknown, fallback = "", maximum = 10_000): string {
+  const text =
+    typeof value === "string"
+      ? value
+      : value == null
+        ? fallback
+        : String(value);
+
+  return text.slice(0, maximum);
+}
+
+function jsonBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (value === "true" || value === 1) {
+    return true;
+  }
+
+  if (value === "false" || value === 0) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function automaticSenderTip(sender: FollowerSender): string {
+  return sender === "helius-fast" ? HELIUS_SENDER_TIP_SOL : "0";
+}
+
+function followerSender(value: unknown): FollowerSender {
+  return value === "helius-rpc" ? "helius-rpc" : "helius-fast";
+}
+
+function followerStrategy(value: unknown): FollowerStrategy {
+  if (
+    value === "spam-after-market-ready" ||
+    value === "after-deploy-processed" ||
+    value === "after-deploy-confirmed"
+  ) {
+    return value;
+  }
+
+  return "fast-spam";
+}
+
+function exportFollowerGroup(
+  group: FollowerSettingsGroup,
+): ExportedFollowerGroup {
+  return {
+    name: group.name,
+
+    sourceGroup: group.sourceGroup,
+
+    wallets: group.wallets.map((wallet) => wallet.wallet),
+
+    sender: group.sender,
+
+    strategy: group.strategy,
+
+    minPct: group.minPct,
+
+    maxPct: group.maxPct,
+
+    tipSol: automaticSenderTip(group.sender),
+
+    priorityFeeSol: group.priorityFeeSol,
+
+    slippagePct: group.slippagePct,
+
+    retryIntervalMs: group.retryIntervalMs,
+
+    recompileIntervalMs: group.recompileIntervalMs,
+
+    freshQuoteDelayMs: group.freshQuoteDelayMs,
+
+    maxFailedAttempts: group.maxFailedAttempts,
+  };
+}
+
+function launchConfig(): LaunchConfigV1 {
+  return {
+    schema: LAUNCH_CONFIG_SCHEMA,
+
+    version: LAUNCH_CONFIG_VERSION,
+
+    exportedAt: new Date().toISOString(),
+
+    image: {
+      included: false,
+
+      fileName: selectedImage?.name ?? null,
+    },
+
+    token: {
+      name: launchDraft.name,
+
+      symbol: launchDraft.symbol,
+
+      description: launchDraft.description,
+
+      website: launchDraft.website,
+
+      twitter: launchDraft.twitter,
+
+      telegram: launchDraft.telegram,
+    },
+
+    deployment: {
+      creator: launchDraft.creator,
+
+      creatorBuySol: launchDraft.creatorBuySol,
+
+      mintSuffix: launchDraft.mintSuffix,
+
+      live: true,
+
+      skipSimulation: launchDraft.skipSimulation,
+
+      cashback: launchDraft.cashback,
+    },
+
+    followers: followerGroups.map(exportFollowerGroup),
+  };
+}
+
+function safePresetName(): string {
+  const source = launchDraft.symbol || launchDraft.name || "pump-launch";
+
+  const clean = source
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+
+  return clean || "pump-launch";
+}
+
+function exportLaunchJson(): void {
+  const blob = new Blob([JSON.stringify(launchConfig(), null, 2), "\n"], {
+    type: "application/json",
+  });
+
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+
+  link.href = url;
+
+  link.download = `${safePresetName()}.solard-launch.json`;
+
+  link.style.display = "none";
+
+  document.body.append(link);
+
+  link.click();
+  link.remove();
+
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+
+  launchConfigNotice =
+    "Exported the launch preset. Token image data is not included.";
+
+  update();
+}
+
+function importedFollowerGroup(
+  value: unknown,
+  index: number,
+): FollowerSettingsGroup {
+  const row = value && typeof value === "object" ? (value as AnyRow) : {};
+
+  const rawWallets = Array.isArray(row.wallets) ? row.wallets : [];
+
+  const addresses = rawWallets
+    .map(walletAddress)
+    .filter((address) => Boolean(address));
+
+  const sourceGroup = jsonString(row.sourceGroup, "", 120).trim() || null;
+
+  return newFollowerGroup({
+    name:
+      jsonString(row.name, `Imported set ${index + 1}`, 120) ||
+      `Imported set ${index + 1}`,
+
+    sourceGroup: sourceGroup && addresses.length ? sourceGroup : null,
+
+    wallets: addresses.length
+      ? addresses.map((address) => newFollowerWallet(address))
+      : [newFollowerWallet()],
+
+    sender: followerSender(row.sender),
+
+    strategy: followerStrategy(row.strategy),
+
+    minPct: jsonString(row.minPct, "50", 32),
+
+    maxPct: jsonString(row.maxPct, "80", 32),
+
+    tipSol: automaticSenderTip(followerSender(row.sender)),
+
+    priorityFeeSol: jsonString(row.priorityFeeSol, "0.0009", 32),
+
+    slippagePct: jsonString(row.slippagePct, "2.5", 32),
+
+    retryIntervalMs: jsonString(row.retryIntervalMs, "75", 32),
+
+    recompileIntervalMs: jsonString(row.recompileIntervalMs, "750", 32),
+
+    freshQuoteDelayMs: jsonString(row.freshQuoteDelayMs, "-1", 32),
+
+    maxFailedAttempts: jsonString(row.maxFailedAttempts, "0", 32),
+  });
+}
+
+function clearSelectedImage(): void {
+  if (selectedImagePreview) {
+    URL.revokeObjectURL(selectedImagePreview);
+  }
+
+  selectedImage = null;
+
+  selectedImagePreview = null;
+
+  imageInputRevision++;
+}
+
+function applyLaunchConfig(raw: unknown): void {
+  const root = raw && typeof raw === "object" ? (raw as AnyRow) : null;
+
+  if (!root) {
+    throw new Error("Launch preset must be a JSON object.");
+  }
+
+  if (root.schema != null && root.schema !== LAUNCH_CONFIG_SCHEMA) {
+    throw new Error(
+      `Unsupported launch preset schema: ${String(root.schema)}.`,
+    );
+  }
+
+  if (root.version != null && Number(root.version) !== LAUNCH_CONFIG_VERSION) {
+    throw new Error(
+      `Unsupported launch preset version: ${String(root.version)}.`,
+    );
+  }
+
+  const token =
+    root.token && typeof root.token === "object" ? (root.token as AnyRow) : {};
+
+  const deployment =
+    root.deployment && typeof root.deployment === "object"
+      ? (root.deployment as AnyRow)
+      : {};
+
+  /**
+   * A direct followers array is also accepted for older hand-written presets.
+   */
+  const followers = Array.isArray(raw)
+    ? raw
+    : Array.isArray(root.followers)
+      ? root.followers
+      : [];
+
+  launchDraft = {
+    name: jsonString(token.name ?? root.name, "", 32),
+
+    symbol: jsonString(token.symbol ?? root.symbol, "", 10),
+
+    description: jsonString(token.description ?? root.description, "", 500),
+
+    website: jsonString(token.website ?? root.website, "", 2_000),
+
+    twitter: jsonString(token.twitter ?? root.twitter, "", 2_000),
+
+    telegram: jsonString(token.telegram ?? root.telegram, "", 2_000),
+
+    creator: walletAddress(deployment.creator ?? root.creator),
+
+    creatorBuySol: jsonString(
+      deployment.creatorBuySol ?? root.creatorBuySol,
+      "0",
+      32,
+    ),
+
+    mintSuffix:
+      jsonString(deployment.mintSuffix ?? root.mintSuffix, "pump", 12) ||
+      "pump",
+
+    live: true,
+
+    skipSimulation: jsonBoolean(
+      deployment.skipSimulation ?? root.skipSimulation,
+      false,
+    ),
+
+    cashback: jsonBoolean(deployment.cashback ?? root.cashback, true),
+  };
+
+  followerGroups = followers.map(importedFollowerGroup);
+
+  clearSelectedImage();
+
+  state.error = null;
+
+  launchConfigNotice = `Imported ${followerGroups.length} follower ${followerGroups.length === 1 ? "set" : "sets"}. Choose the token image before launching.`;
+
+  update();
+}
+
+async function importLaunchJson(event: Event): Promise<void> {
+  const input = event.currentTarget as HTMLInputElement;
+
+  const file = input.files?.[0] ?? null;
+
+  configInputRevision++;
+
+  if (!file) {
+    update();
+    return;
+  }
+
+  if (file.size <= 0 || file.size > MAX_LAUNCH_CONFIG_BYTES) {
+    state.error = "Launch preset JSON must be between 1 byte and 1 MB.";
+
+    update();
+    return;
+  }
+
+  try {
+    const text = await file.text();
+
+    const parsed = JSON.parse(text);
+
+    applyLaunchConfig(parsed);
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+
+    launchConfigNotice = null;
+
+    update();
+  }
 }
 
 function newFollowerWallet(wallet = ""): FollowerWallet {
@@ -584,7 +1074,7 @@ function newFollowerGroup(
 
     maxPct: "80",
 
-    tipSol: "0.001",
+    tipSol: HELIUS_SENDER_TIP_SOL,
 
     /**
      * 0.0009 SOL over a 600K CU budget equals 1,500,000 micro-lamports/CU.
@@ -709,14 +1199,22 @@ function mutateFollowerGroup(
   groupId: string,
   patch: Partial<FollowerSettingsGroup>,
 ): void {
-  followerGroups = followerGroups.map((group) =>
-    group.id === groupId
-      ? {
-          ...group,
-          ...patch,
-        }
-      : group,
-  );
+  followerGroups = followerGroups.map((group) => {
+    if (group.id !== groupId) {
+      return group;
+    }
+
+    const next = {
+      ...group,
+      ...patch,
+    };
+
+    if (patch.sender) {
+      next.tipSol = automaticSenderTip(patch.sender);
+    }
+
+    return next;
+  });
 
   update();
 }
@@ -741,6 +1239,60 @@ function addIndividualGroup(): void {
 
       wallets: [newFollowerWallet()],
     }),
+  ];
+
+  update();
+}
+
+function cloneFollowerSettings(groupId: string): void {
+  const source = followerGroups.find((group) => group.id === groupId);
+
+  if (!source) {
+    return;
+  }
+
+  const copy = newFollowerGroup({
+    name: `${source.name} copy`,
+
+    /**
+     * A clone is always an independent one-wallet set, even when the source
+     * was loaded from a saved group.
+     */
+    sourceGroup: null,
+
+    wallets: [newFollowerWallet()],
+
+    sender: source.sender,
+
+    strategy: source.strategy,
+
+    minPct: source.minPct,
+
+    maxPct: source.maxPct,
+
+    tipSol: automaticSenderTip(source.sender),
+
+    priorityFeeSol: source.priorityFeeSol,
+
+    slippagePct: source.slippagePct,
+
+    retryIntervalMs: source.retryIntervalMs,
+
+    recompileIntervalMs: source.recompileIntervalMs,
+
+    freshQuoteDelayMs: source.freshQuoteDelayMs,
+
+    maxFailedAttempts: source.maxFailedAttempts,
+  });
+
+  const sourceIndex = followerGroups.findIndex((group) => group.id === groupId);
+
+  followerGroups = [
+    ...followerGroups.slice(0, sourceIndex + 1),
+
+    copy,
+
+    ...followerGroups.slice(sourceIndex + 1),
   ];
 
   update();
@@ -912,14 +1464,24 @@ function followerPlanPayload(): AnyRow[] {
       );
     }
 
-    const tipSol = String(
-      numberValue(group.tipSol, `${group.name} tip SOL`, {
+    const tipSol = automaticSenderTip(group.sender);
+
+    const prioritySol = numberValue(
+      group.priorityFeeSol,
+      `${group.name} priority SOL`,
+      {
         minimum: 0,
-      }),
+      },
     );
 
+    if (group.sender === "helius-fast" && prioritySol <= 0) {
+      throw new Error(
+        `${group.name}: Helius Sender requires a positive priority fee.`,
+      );
+    }
+
     const priorityMicroLamports = priorityFeeSolToMicroLamports(
-      group.priorityFeeSol,
+      String(prioritySol),
     );
 
     const slippageBps = percentToBps(
@@ -1052,6 +1614,8 @@ function onImageSelected(event: Event): void {
 
   if (file) {
     state.error = null;
+
+    launchConfigNotice = null;
   }
 
   if (selectedImagePreview) {
@@ -1109,6 +1673,14 @@ function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
         <div className="launch-follower-actions">
           <button
             type="button"
+            className="secondary compact"
+            onClick={() => cloneFollowerSettings(group.id)}
+          >
+            Clone settings
+          </button>
+
+          <button
+            type="button"
             className="danger compact"
             onClick={() => removeFollowerGroup(group.id)}
           >
@@ -1161,29 +1733,29 @@ function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
         <fieldset>
           <legend>Fees & slippage</legend>
 
-          <label>
-            <span>Tip SOL</span>
+          <div className="launch-auto-fee">
+            <span>Sender tip</span>
 
-            <input
-              type="number"
-              min="0"
-              step="0.0001"
-              value={group.tipSol}
-              onInput={(event: any) =>
-                mutateFollowerGroup(group.id, {
-                  tipSol: event.currentTarget.value,
-                })
-              }
-            />
-          </label>
+            <b>
+              {group.sender === "helius-fast"
+                ? `${HELIUS_SENDER_TIP_SOL} SOL`
+                : "None"}
+            </b>
+
+            <small>
+              {group.sender === "helius-fast"
+                ? "Automatic Helius Sender dual-route minimum."
+                : "Ordinary RPC does not use a Sender tip."}
+            </small>
+          </div>
 
           <label>
             <span>Priority SOL</span>
 
             <input
               type="number"
-              min="0"
-              step="0.0001"
+              min={group.sender === "helius-fast" ? "0.000000001" : "0"}
+              step="0.000000001"
               value={group.priorityFeeSol}
               onInput={(event: any) =>
                 mutateFollowerGroup(group.id, {
@@ -1211,8 +1783,8 @@ function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
           </label>
 
           <small>
-            Priority SOL is the total per-buy priority budget, converted with
-            the launcher's 600K compute-unit cap.
+            Priority SOL is the total per-buy budget and accepts values down to
+            one lamport. Helius Sender requires a positive priority fee.
           </small>
         </fieldset>
 
@@ -1247,23 +1819,21 @@ function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
                 })
               }
             >
-              <option value="fast-spam">Fast spam</option>
-
-              <option value="spam-after-market-ready">
-                After market ready
-              </option>
+              <option value="fast-spam">1 · Fast spam</option>
 
               <option value="after-deploy-processed">
-                After deploy processed
+                2 · After deploy processed
+              </option>
+
+              <option value="spam-after-market-ready">
+                3 · After market ready
               </option>
 
               <option value="after-deploy-confirmed">
-                After deploy confirmed
+                4 · After deploy confirmed
               </option>
             </select>
           </label>
-
-          <small>Applied to every wallet listed in this set.</small>
         </fieldset>
       </div>
 
@@ -1410,9 +1980,9 @@ function FollowersBuilder() {
           <h3>Follower buyers</h3>
 
           <p>
-            Each set shares amount, fees, sender, buy timing, slippage, and
-            retry behavior. A saved group lists its wallets read-only. An
-            individual wallet gets its own independent settings set.
+            Each set shares amount, fees, sender, timing, slippage, and retry
+            behavior. Clone settings creates a new blank-wallet set with the
+            same configuration.
           </p>
         </div>
 
@@ -1448,6 +2018,87 @@ function FollowersBuilder() {
           <button type="button" onClick={addIndividualGroup}>
             Add wallet
           </button>
+
+          <details className="launch-execution-help">
+            <summary>Sender & timing guide</summary>
+
+            <div className="launch-execution-help-panel">
+              <section>
+                <h4>Sender</h4>
+
+                <dl>
+                  <div>
+                    <dt>Helius Sender</dt>
+
+                    <dd>
+                      Fastest submission route. The page automatically adds the
+                      0.0002 SOL dual-route Sender tip, requires a positive
+                      priority fee, and sends without preflight.
+                    </dd>
+                  </div>
+
+                  <div>
+                    <dt>Helius RPC</dt>
+
+                    <dd>
+                      Standard RPC route with no Sender tip. Usually slower and
+                      less aggressive, but useful when ultra-low-latency routing
+                      is not required.
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+
+              <section>
+                <h4>Buy timing · fastest to slowest</h4>
+
+                <ol>
+                  <li>
+                    <b>Fast spam</b>
+
+                    <span>
+                      Fastest · lowest startup reliability. Sends immediately
+                      and relies on retries while deployment/market accounts may
+                      still be unavailable.
+                    </span>
+                  </li>
+
+                  <li>
+                    <b>After deploy processed</b>
+
+                    <span>
+                      Very fast · medium startup reliability. Waits for
+                      processed status, but some market accounts may still need
+                      a moment to become readable.
+                    </span>
+                  </li>
+
+                  <li>
+                    <b>After market ready</b>
+
+                    <span>
+                      Slightly slower · high startup reliability. Waits for the
+                      required Pump market accounts to be visible before buying.
+                    </span>
+                  </li>
+
+                  <li>
+                    <b>After deploy confirmed</b>
+
+                    <span>
+                      Slowest · highest startup reliability. Waits for confirmed
+                      deployment before the follower loop starts.
+                    </span>
+                  </li>
+                </ol>
+
+                <p>
+                  Reliability here means avoiding early “market not ready”
+                  attempts. It does not guarantee that a transaction lands.
+                </p>
+              </section>
+            </div>
+          </details>
         </div>
       </header>
 
@@ -1504,27 +2155,14 @@ function LaunchBuilder() {
 
           body.set("buyPlanJson", JSON.stringify(followerPlanPayload()));
 
-          body.set(
-            "live",
-            form.querySelector<HTMLInputElement>("[name=live]")?.checked
-              ? "true"
-              : "false",
-          );
+          body.set("live", "true");
 
           body.set(
             "skipSimulation",
-            form.querySelector<HTMLInputElement>("[name=skipSimulation]")
-              ?.checked
-              ? "true"
-              : "false",
+            launchDraft.skipSimulation ? "true" : "false",
           );
 
-          body.set(
-            "cashback",
-            form.querySelector<HTMLInputElement>("[name=cashback]")?.checked
-              ? "true"
-              : "false",
-          );
+          body.set("cashback", launchDraft.cashback ? "true" : "false");
 
           const started = await api<{
             id: string;
@@ -1553,23 +2191,29 @@ function LaunchBuilder() {
         </div>
 
         <div className="launch-actions">
-          <label className="toggle-card">
-            <span>Live</span>
+          <div className="launch-json-actions">
+            <label className="secondary compact launch-json-import">
+              Import JSON
+              <input
+                key={`launch-config-import:${configInputRevision}`}
+                type="file"
+                accept="application/json,.json"
+                onInput={(event: Event) => {
+                  void importLaunchJson(event);
+                }}
+              />
+            </label>
 
-            <input type="checkbox" name="live" />
-          </label>
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={exportLaunchJson}
+            >
+              Export JSON
+            </button>
+          </div>
 
-          <label className="toggle-card">
-            <span>Skip simulation (live)</span>
-
-            <input type="checkbox" name="skipSimulation" />
-          </label>
-
-          <label className="toggle-card">
-            <span>Cashback</span>
-
-            <input type="checkbox" name="cashback" defaultChecked />
-          </label>
+          <span className="launch-live-badge">Live execution</span>
 
           <button type="submit" className="primary-large" disabled={state.busy}>
             {state.busy ? "Starting…" : "Start launch"}
@@ -1577,7 +2221,64 @@ function LaunchBuilder() {
         </div>
       </section>
 
+      {launchConfigNotice ? (
+        <section className="launch-config-notice" role="status">
+          <span>{launchConfigNotice}</span>
+
+          <button
+            type="button"
+            className="secondary compact"
+            onClick={() => {
+              launchConfigNotice = null;
+
+              update();
+            }}
+          >
+            Dismiss
+          </button>
+        </section>
+      ) : null}
+
       <LaunchRunSummary job={latestJob()} />
+
+      <details className="launch-global-advanced">
+        <summary>Advanced launch behavior</summary>
+
+        <div>
+          <p>
+            This page always submits a live launch. These options are rarely
+            needed.
+          </p>
+
+          <label className="toggle-card">
+            <span>Skip simulation</span>
+
+            <input
+              type="checkbox"
+              checked={launchDraft.skipSimulation}
+              onInput={(event: any) =>
+                mutateLaunchDraft({
+                  skipSimulation: event.currentTarget.checked,
+                })
+              }
+            />
+          </label>
+
+          <label className="toggle-card">
+            <span>Cashback</span>
+
+            <input
+              type="checkbox"
+              checked={launchDraft.cashback}
+              onInput={(event: any) =>
+                mutateLaunchDraft({
+                  cashback: event.currentTarget.checked,
+                })
+              }
+            />
+          </label>
+        </div>
+      </details>
 
       <div className="launch-primary-grid">
         <section className="launch-panel launch-metadata">
@@ -1600,22 +2301,27 @@ function LaunchBuilder() {
 
               <span className="launch-image-picker">
                 <input
+                  key={`launch-image:${imageInputRevision}`}
                   type="file"
                   name="image"
                   accept="image/png,image/jpeg,image/webp,image/gif"
-                  required
                   onInput={onImageSelected}
                 />
 
-                {selectedImagePreview ? (
-                  <img src={selectedImagePreview} alt="Selected token" />
-                ) : (
-                  <span className="launch-image-empty">
-                    Upload PNG, JPG, WEBP, or GIF
-                  </span>
-                )}
+                <img
+                  className={selectedImagePreview ? "visible" : ""}
+                  src={selectedImagePreview ?? undefined}
+                  alt=""
+                  aria-hidden="true"
+                />
 
-                {selectedImage ? <small>{selectedImage.name}</small> : null}
+                <span
+                  className={`launch-image-empty ${selectedImagePreview ? "hidden" : ""}`}
+                >
+                  Upload PNG, JPG, WEBP, or GIF
+                </span>
+
+                <small>{selectedImage?.name ?? "No image selected"}</small>
               </span>
             </label>
 
@@ -1628,6 +2334,12 @@ function LaunchBuilder() {
                   required
                   maxLength={32}
                   placeholder="Token name"
+                  value={launchDraft.name}
+                  onInput={(event: any) =>
+                    mutateLaunchDraft({
+                      name: event.currentTarget.value,
+                    })
+                  }
                 />
               </label>
 
@@ -1639,6 +2351,12 @@ function LaunchBuilder() {
                   required
                   maxLength={10}
                   placeholder="TOKEN"
+                  value={launchDraft.symbol}
+                  onInput={(event: any) =>
+                    mutateLaunchDraft({
+                      symbol: event.currentTarget.value,
+                    })
+                  }
                 />
               </label>
             </div>
@@ -1652,6 +2370,12 @@ function LaunchBuilder() {
                 maxLength={500}
                 required
                 placeholder="What is this token?"
+                value={launchDraft.description}
+                onInput={(event: any) =>
+                  mutateLaunchDraft({
+                    description: event.currentTarget.value,
+                  })
+                }
               />
             </label>
 
@@ -1659,19 +2383,47 @@ function LaunchBuilder() {
               <label>
                 <span>Website</span>
 
-                <input type="url" name="website" placeholder="https://" />
+                <input
+                  type="url"
+                  name="website"
+                  placeholder="https://"
+                  value={launchDraft.website}
+                  onInput={(event: any) =>
+                    mutateLaunchDraft({
+                      website: event.currentTarget.value,
+                    })
+                  }
+                />
               </label>
 
               <label>
                 <span>X / Twitter</span>
 
-                <input name="twitter" placeholder="https://x.com/…" />
+                <input
+                  name="twitter"
+                  placeholder="https://x.com/…"
+                  value={launchDraft.twitter}
+                  onInput={(event: any) =>
+                    mutateLaunchDraft({
+                      twitter: event.currentTarget.value,
+                    })
+                  }
+                />
               </label>
 
               <label>
                 <span>Telegram</span>
 
-                <input name="telegram" placeholder="https://t.me/…" />
+                <input
+                  name="telegram"
+                  placeholder="https://t.me/…"
+                  value={launchDraft.telegram}
+                  onInput={(event: any) =>
+                    mutateLaunchDraft({
+                      telegram: event.currentTarget.value,
+                    })
+                  }
+                />
               </label>
             </div>
           </div>
@@ -1692,8 +2444,27 @@ function LaunchBuilder() {
             <label>
               <span>Deployer wallet</span>
 
-              <select name="creator" required>
+              <select
+                name="creator"
+                required
+                value={launchDraft.creator}
+                onInput={(event: any) =>
+                  mutateLaunchDraft({
+                    creator: event.currentTarget.value,
+                  })
+                }
+              >
                 <option value="">Select deployer…</option>
+
+                {launchDraft.creator &&
+                !deployerWallets.some(
+                  (wallet) =>
+                    String(wallet.address ?? "") === launchDraft.creator,
+                ) ? (
+                  <option value={launchDraft.creator}>
+                    Unlisted · {displayWallet(launchDraft.creator)}
+                  </option>
+                ) : null}
 
                 {deployerWallets.map((wallet) => (
                   <option key={wallet.address} value={wallet.address}>
@@ -1711,7 +2482,12 @@ function LaunchBuilder() {
                 name="creatorBuySol"
                 min="0"
                 step="0.001"
-                defaultValue="0"
+                value={launchDraft.creatorBuySol}
+                onInput={(event: any) =>
+                  mutateLaunchDraft({
+                    creatorBuySol: event.currentTarget.value,
+                  })
+                }
               />
             </label>
 
@@ -1720,9 +2496,21 @@ function LaunchBuilder() {
 
               <input
                 name="mintSuffix"
-                defaultValue="pump"
+                value={launchDraft.mintSuffix}
                 maxLength={12}
                 autoComplete="off"
+                onInput={(event: any) =>
+                  mutateLaunchDraft({
+                    mintSuffix: event.currentTarget.value,
+                  })
+                }
+                onBlur={() => {
+                  if (!launchDraft.mintSuffix.trim()) {
+                    mutateLaunchDraft({
+                      mintSuffix: "pump",
+                    });
+                  }
+                }}
               />
             </label>
 

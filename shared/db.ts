@@ -131,6 +131,28 @@ export const TerminalFeedStateSchema = z.object({
   updatedAtMs: z.number(),
 });
 
+export const LaunchJobDbSchema = z.object({
+  jobId: z.string(),
+  kind: z.string().default("launch:pump"),
+  status: z.string().default("queued"),
+
+  inputJson: z.string().default("{}"),
+  argvJson: z.string().default("[]"),
+  resultJson: z.string().nullable().default(null),
+  error: z.string().nullable().default(null),
+
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
+export const LaunchJobLogDbSchema = z.object({
+  logId: z.string(),
+  jobId: z.string(),
+  atMs: z.number(),
+  label: z.string(),
+  valueJson: z.string().default("null"),
+});
+
 export const TokenMarketExtremaSchema = z.object({
   mint: z.string(),
   athMarketCapUsd: z.number().nullable(),
@@ -211,6 +233,10 @@ export type TokenHolderWindows = z.infer<typeof TokenHolderWindowsSchema>;
 export type WorkerError = z.infer<typeof WorkerErrorSchema>;
 
 export type TerminalFeedState = z.infer<typeof TerminalFeedStateSchema>;
+
+export type LaunchJobDbRow = z.infer<typeof LaunchJobDbSchema>;
+
+export type LaunchJobLogDbRow = z.infer<typeof LaunchJobLogDbSchema>;
 
 export type TerminalFeedRow = TerminalToken & {
   sma1m: number | null;
@@ -432,6 +458,8 @@ export const db = await openDatabaseWithRetry(
         processStatus: ProcessStatusSchema,
         workerErrors: WorkerErrorSchema,
         terminalFeedState: TerminalFeedStateSchema,
+        launchJobsV2: LaunchJobDbSchema,
+        launchJobLogsV2: LaunchJobLogDbSchema,
       },
       {
         timestamps: false,
@@ -445,6 +473,8 @@ export const db = await openDatabaseWithRetry(
           processStatus: [["name"]],
           workerErrors: [["errorKey"]],
           terminalFeedState: [["scope"]],
+          launchJobsV2: [["jobId"]],
+          launchJobLogsV2: [["logId"]],
         },
 
         indexes: {
@@ -474,6 +504,14 @@ export const db = await openDatabaseWithRetry(
           workerErrors: [["createdAtMs"], ["worker", "createdAtMs"]],
 
           terminalFeedState: [["resetAtMs"], ["updatedAtMs"]],
+
+          launchJobsV2: [
+            ["createdAtMs"],
+            ["status", "createdAtMs"],
+            ["updatedAtMs"],
+          ],
+
+          launchJobLogsV2: [["jobId", "atMs"], ["atMs"]],
         },
 
         views: {

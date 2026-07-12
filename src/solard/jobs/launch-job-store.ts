@@ -1,13 +1,24 @@
-import { unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { unlink } from "node:fs/promises";
+
 import {
   launchPumpTokenAction,
   pumpLaunchArgsFromInput,
   type PumpLaunchInput,
 } from "../actions/launches.js";
 import type { PumpTokenLaunchCliResult } from "../../launches/pump/token-launch-cli.js";
-import { terminalDb } from "../db/terminal-store.js";
-import { dbMeasure, summarizeForMeasure } from "../measure.js";
+import {
+  db,
+  isSqliteBusyError,
+  type LaunchJobDbRow,
+  type LaunchJobLogDbRow,
+} from "../../../shared/db.js";
+import {
+  compactId,
+  dbMeasure,
+  summarizeError,
+  summarizeForMeasure,
+} from "../../../shared/measure.js";
 
 export type LaunchJobStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -19,7 +30,11 @@ export type LaunchJob = {
   updatedAtMs: number;
   input: PumpLaunchInput;
   argv: string[];
-  logs: Array<{ atMs: number; label: string; value: unknown }>;
+  logs: Array<{
+    atMs: number;
+    label: string;
+    value: unknown;
+  }>;
   result?: PumpTokenLaunchCliResult;
   error?: string;
 };
@@ -30,31 +45,13 @@ export type ListLaunchJobsOptions = {
   includeLogs?: boolean | null;
 };
 
-type LaunchJobRow = {
-  jobId: string;
-  kind: "launch:pump";
-  status: LaunchJobStatus;
-  inputJson: string;
-  argvJson: string;
-  resultJson: string | null;
-  error: string | null;
-  createdAtMs: number;
-  updatedAtMs: number;
-};
-
-type LaunchJobLogRow = {
-  id?: number | string;
-  jobId: string;
-  atMs: number;
-  label: string;
-  valueJson: string;
-};
-
-type PragmaColumn = { name: string; type?: string | null; pk?: number | null };
-
 const MAX_LOGS_PER_JOB = 500;
+
 const DEFAULT_JOB_LIMIT = 100;
-let initialized = false;
+
+const LAUNCH_DB_RETRY_MS = 2_500;
+
+const RETRY_SLEEP_ARRAY = new Int32Array(new SharedArrayBuffer(4));
 
 function jsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
@@ -65,7 +62,10 @@ function json(value: unknown): string {
 }
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
-  if (!value) return fallback;
+  if (!value) {
+    return fallback;
+  }
+
   try {
     return JSON.parse(value) as T;
   } catch {
@@ -78,109 +78,92 @@ function clampLimit(
   fallback: number,
 ): number {
   const parsed = Number(value ?? fallback);
-  if (!Number.isFinite(parsed)) return fallback;
+
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
   return Math.max(1, Math.min(500, Math.trunc(parsed)));
 }
 
-function tableColumns(table: string): PragmaColumn[] {
-  return terminalDb.raw<PragmaColumn>(`PRAGMA table_info(${table})`);
-}
-
-function columnType(cols: PragmaColumn[], name: string): string {
-  return String(
-    cols.find((col) => col.name === name)?.type ?? "",
-  ).toUpperCase();
-}
-
-function hasTextColumn(cols: PragmaColumn[], name: string): boolean {
-  return columnType(cols, name).includes("TEXT");
-}
-
-function hasIntegerColumn(cols: PragmaColumn[], name: string): boolean {
-  const type = columnType(cols, name);
-  return type.includes("INT") || type === "";
-}
-
-function safeBackupName(table: string): string {
-  return `${table}_bad_${Date.now()}`;
-}
-
-function recreateIfIncompatible(
-  table: string,
-  ddl: string,
-  compatible: (columns: PragmaColumn[]) => boolean,
-): void {
-  const columns = tableColumns(table);
-  if (!columns.length) {
-    terminalDb.exec(ddl);
-    return;
-  }
-  if (compatible(columns)) return;
-  const backup = safeBackupName(table);
-  terminalDb.exec(`ALTER TABLE ${table} RENAME TO ${backup}`);
-  terminalDb.exec(ddl);
-}
-
-export function initLaunchJobStore(): void {
-  if (initialized) return;
-  initialized = true;
-  dbMeasure.measureSync(
-    {
-      start: () => "init launch job sqlite tables",
-      end: () => "ready",
-    },
-    () => {
-      recreateIfIncompatible(
-        "launchJobs",
-        `CREATE TABLE IF NOT EXISTS launchJobs (
-          jobId TEXT PRIMARY KEY,
-          kind TEXT NOT NULL DEFAULT 'launch:pump',
-          status TEXT NOT NULL DEFAULT 'queued',
-          inputJson TEXT NOT NULL DEFAULT '{}',
-          argvJson TEXT NOT NULL DEFAULT '[]',
-          resultJson TEXT,
-          error TEXT,
-          createdAtMs INTEGER NOT NULL DEFAULT 0,
-          updatedAtMs INTEGER NOT NULL DEFAULT 0
-        )`,
-        (cols) =>
-          hasTextColumn(cols, "jobId") &&
-          hasTextColumn(cols, "kind") &&
-          hasTextColumn(cols, "status") &&
-          hasTextColumn(cols, "inputJson") &&
-          hasTextColumn(cols, "argvJson"),
-      );
-
-      recreateIfIncompatible(
-        "launchJobLogs",
-        `CREATE TABLE IF NOT EXISTS launchJobLogs (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          jobId TEXT NOT NULL,
-          atMs INTEGER NOT NULL,
-          label TEXT NOT NULL,
-          valueJson TEXT NOT NULL DEFAULT 'null'
-        )`,
-        (cols) =>
-          hasIntegerColumn(cols, "id") &&
-          hasTextColumn(cols, "jobId") &&
-          hasTextColumn(cols, "label") &&
-          hasTextColumn(cols, "valueJson"),
-      );
-
-      terminalDb.exec(
-        "CREATE INDEX IF NOT EXISTS idx_launch_jobs_created ON launchJobs(createdAtMs DESC)",
-      );
-      terminalDb.exec(
-        "CREATE INDEX IF NOT EXISTS idx_launch_jobs_status ON launchJobs(status, createdAtMs DESC)",
-      );
-      terminalDb.exec(
-        "CREATE INDEX IF NOT EXISTS idx_launch_job_logs_job_at ON launchJobLogs(jobId, atMs DESC)",
-      );
-    },
+function busyDelayMs(attempt: number): number {
+  return Math.min(
+    350,
+    12 * 2 ** Math.min(attempt, 5) + Math.floor(Math.random() * 17),
   );
 }
 
-initLaunchJobStore();
+function sleepSync(delayMs: number): void {
+  Atomics.wait(RETRY_SLEEP_ARRAY, 0, 0, delayMs);
+}
+
+function launchDbOperation<T>(action: string, operation: () => T): T {
+  const startedAtMs = Date.now();
+
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return dbMeasure.sync(
+        {
+          start: () => `${action} attempt=${attempt + 1}`,
+
+          end: (result: any) => ({
+            ok: result != null,
+          }),
+
+          catch: summarizeError,
+        },
+        operation,
+      );
+    } catch (error) {
+      if (!isSqliteBusyError(error)) {
+        throw error;
+      }
+
+      attempt++;
+
+      const elapsedMs = Date.now() - startedAtMs;
+
+      if (elapsedMs >= LAUNCH_DB_RETRY_MS) {
+        const wrapped = new Error(
+          `Launch storage remained busy after ${elapsedMs}ms. Please retry the launch.`,
+          {
+            cause: error,
+          },
+        );
+
+        Object.assign(wrapped, {
+          code: "SOLARD_LAUNCH_DB_BUSY",
+
+          attempts: attempt,
+        });
+
+        throw wrapped;
+      }
+
+      const delayMs = Math.min(
+        busyDelayMs(attempt),
+        LAUNCH_DB_RETRY_MS - elapsedMs,
+      );
+
+      if (attempt === 1 || attempt % 4 === 0) {
+        console.warn(
+          `[solard:launch-db] ${action} busy; retrying in ${delayMs}ms`,
+        );
+      }
+
+      sleepSync(delayMs);
+    }
+  }
+}
+
+export function initLaunchJobStore(): void {
+  /**
+   * sqlite-zod-orm creates the typed V2 tables from shared/db.ts.
+   * Kept for compatibility with existing callers.
+   */
+}
 
 export function launchJobStatus(
   value: string | null | undefined,
@@ -193,25 +176,49 @@ export function launchJobStatus(
   ) {
     return value;
   }
+
   return null;
 }
 
-function rowToJob(row: LaunchJobRow, logs?: LaunchJob["logs"]): LaunchJob {
+function rowToJob(
+  row: LaunchJobDbRow,
+  logs: LaunchJob["logs"] = [],
+): LaunchJob {
   const result = parseJson<PumpTokenLaunchCliResult | null>(
     row.resultJson,
     null,
   );
+
   return {
     id: row.jobId,
+
     kind: "launch:pump",
+
     status: launchJobStatus(row.status) ?? "queued",
+
     createdAtMs: Number(row.createdAtMs) || 0,
+
     updatedAtMs: Number(row.updatedAtMs) || 0,
-    input: parseJson<PumpLaunchInput>(row.inputJson, { creator: "" }),
+
+    input: parseJson<PumpLaunchInput>(row.inputJson, {
+      creator: "",
+    }),
+
     argv: parseJson<string[]>(row.argvJson, []),
-    logs: logs ?? [],
-    ...(result ? { result } : {}),
-    ...(row.error ? { error: row.error } : {}),
+
+    logs,
+
+    ...(result
+      ? {
+          result,
+        }
+      : {}),
+
+    ...(row.error
+      ? {
+          error: row.error,
+        }
+      : {}),
   };
 }
 
@@ -219,19 +226,24 @@ export function listLaunchJobLogs(
   jobId: string,
   limit = MAX_LOGS_PER_JOB,
 ): LaunchJob["logs"] {
-  initLaunchJobStore();
-  const rows = terminalDb.raw<LaunchJobLogRow>(
-    `SELECT id, jobId, atMs, label, valueJson
-     FROM launchJobLogs
-     WHERE jobId = ?
-     ORDER BY atMs DESC, id DESC
-     LIMIT ?`,
-    jobId,
-    clampLimit(limit, MAX_LOGS_PER_JOB),
+  const rows = launchDbOperation(
+    `db.list_launch_logs job=${compactId(jobId)}`,
+    () =>
+      db.launchJobLogsV2
+        .select()
+        .where({
+          jobId,
+        })
+        .orderBy("atMs", "DESC")
+        .limit(clampLimit(limit, MAX_LOGS_PER_JOB))
+        .all() as LaunchJobLogDbRow[],
   );
+
   return rows.reverse().map((row) => ({
     atMs: Number(row.atMs) || 0,
+
     label: row.label,
+
     value: parseJson(row.valueJson, null),
   }));
 }
@@ -246,90 +258,119 @@ function persistedLaunchInput(input: PumpLaunchInput): PumpLaunchInput {
   return persisted;
 }
 
-function createJobRow(input: PumpLaunchInput): LaunchJobRow {
-  initLaunchJobStore();
+function createJobRow(input: PumpLaunchInput): LaunchJobDbRow {
   const now = Date.now();
-  const row: LaunchJobRow = {
+
+  const publicInput = persistedLaunchInput(input);
+
+  const row: LaunchJobDbRow = {
     jobId: randomUUID(),
+
     kind: "launch:pump",
+
     status: "queued",
-    inputJson: json(persistedLaunchInput(input)),
-    argvJson: json(pumpLaunchArgsFromInput(persistedLaunchInput(input))),
+
+    inputJson: json(publicInput),
+
+    argvJson: json(pumpLaunchArgsFromInput(publicInput)),
+
     resultJson: null,
+
     error: null,
+
     createdAtMs: now,
+
     updatedAtMs: now,
   };
-  terminalDb.exec(
-    `INSERT INTO launchJobs (jobId, kind, status, inputJson, argvJson, resultJson, error, createdAtMs, updatedAtMs)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    row.jobId,
-    row.kind,
-    row.status,
-    row.inputJson,
-    row.argvJson,
-    row.resultJson,
-    row.error,
-    row.createdAtMs,
-    row.updatedAtMs,
+
+  return launchDbOperation(
+    `db.insert_launch_job job=${compactId(row.jobId)}`,
+    () => db.launchJobsV2.insert(row) as LaunchJobDbRow,
   );
-  return row;
 }
 
-function getJobRow(jobId: string): LaunchJobRow | null {
-  initLaunchJobStore();
-  return (
-    terminalDb.raw<LaunchJobRow>(
-      `SELECT jobId, kind, status, inputJson, argvJson, resultJson, error, createdAtMs, updatedAtMs
-       FROM launchJobs
-       WHERE jobId = ?
-       LIMIT 1`,
-      jobId,
-    )[0] ?? null
+function getJobRow(jobId: string): LaunchJobDbRow | null {
+  return launchDbOperation(
+    `db.get_launch_job job=${compactId(jobId)}`,
+    () =>
+      (db.launchJobsV2
+        .select()
+        .where({
+          jobId,
+        })
+        .get() as LaunchJobDbRow | null) ?? null,
   );
 }
 
 function updateJob(
   jobId: string,
-  patch: Partial<Omit<LaunchJobRow, "jobId" | "createdAtMs">>,
-): LaunchJobRow | null {
-  initLaunchJobStore();
+  patch: Partial<Omit<LaunchJobDbRow, "jobId" | "createdAtMs">>,
+): LaunchJobDbRow | null {
   const existing = getJobRow(jobId);
-  if (!existing) return null;
-  const row: LaunchJobRow = {
+
+  if (!existing) {
+    return null;
+  }
+
+  const row: LaunchJobDbRow = {
     ...existing,
     ...patch,
+
+    jobId: existing.jobId,
+
     kind: "launch:pump",
-    updatedAtMs: Date.now(),
+
+    createdAtMs: existing.createdAtMs,
+
+    updatedAtMs: patch.updatedAtMs ?? Date.now(),
   };
-  terminalDb.exec(
-    `UPDATE launchJobs
-     SET kind = ?, status = ?, inputJson = ?, argvJson = ?, resultJson = ?, error = ?, updatedAtMs = ?
-     WHERE jobId = ?`,
-    row.kind,
-    row.status,
-    row.inputJson,
-    row.argvJson,
-    row.resultJson,
-    row.error,
-    row.updatedAtMs,
-    row.jobId,
+
+  return launchDbOperation(
+    `db.upsert_launch_job job=${compactId(jobId)} status=${row.status}`,
+    () =>
+      db.launchJobsV2.upsert(row, {
+        on: "jobId",
+
+        merge: (t) => ({
+          kind: t.excluded("kind"),
+
+          status: t.excluded("status"),
+
+          inputJson: t.excluded("inputJson"),
+
+          argvJson: t.excluded("argvJson"),
+
+          resultJson: t.excluded("resultJson"),
+
+          error: t.excluded("error"),
+
+          updatedAtMs: t.excluded("updatedAtMs"),
+        }),
+      }) as LaunchJobDbRow,
   );
-  return row;
 }
 
 function pushLog(jobId: string, label: string, value: unknown): void {
-  initLaunchJobStore();
   const atMs = Date.now();
-  terminalDb.exec(
-    `INSERT INTO launchJobLogs (jobId, atMs, label, valueJson)
-     VALUES (?, ?, ?, ?)`,
+
+  const row: LaunchJobLogDbRow = {
+    logId: randomUUID(),
+
     jobId,
     atMs,
     label,
-    json(value),
+
+    valueJson: json(value),
+  };
+
+  launchDbOperation(
+    `db.insert_launch_log job=${compactId(jobId)}`,
+    () => db.launchJobLogsV2.insert(row) as LaunchJobLogDbRow,
   );
-  updateJob(jobId, { updatedAtMs: atMs });
+
+  updateJob(jobId, {
+    updatedAtMs: atMs,
+  });
 }
 
 async function cleanupTemporaryLaunchImage(
@@ -358,22 +399,32 @@ async function cleanupTemporaryLaunchImage(
 
 export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
   const row = createJobRow(input);
+
   queueMicrotask(() => {
     void (async () => {
       try {
-        updateJob(row.jobId, { status: "running", error: null });
+        updateJob(row.jobId, {
+          status: "running",
+
+          error: null,
+        });
+
         const publicInput = persistedLaunchInput(input);
 
         pushLog(row.jobId, "launch input", summarizeForMeasure(publicInput));
 
         pushLog(row.jobId, "launch argv", pumpLaunchArgsFromInput(publicInput));
+
         const result = await launchPumpTokenAction(input, {
           report: (label, value) =>
             pushLog(row.jobId, label, summarizeForMeasure(value)),
         });
+
         updateJob(row.jobId, {
           status: "succeeded",
+
           resultJson: json(result),
+
           error: null,
         });
       } catch (error) {
@@ -382,50 +433,75 @@ export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
             ? (error.stack ?? error.message)
             : String(error);
 
-        pushLog(row.jobId, "fatal", message);
+        try {
+          pushLog(row.jobId, "fatal", message);
+        } catch (logError) {
+          console.error(
+            "[solard:launch] failed to persist fatal log",
+            logError,
+          );
+        }
 
-        updateJob(row.jobId, {
-          status: "failed",
+        try {
+          updateJob(row.jobId, {
+            status: "failed",
 
-          error: message,
-        });
+            error: message,
+          });
+        } catch (updateError) {
+          console.error(
+            "[solard:launch] failed to persist failed status",
+            updateError,
+          );
+        }
       } finally {
-        await cleanupTemporaryLaunchImage(input).catch((error) =>
-          pushLog(
-            row.jobId,
-            "image cleanup failed",
-            summarizeForMeasure(error),
-          ),
-        );
+        await cleanupTemporaryLaunchImage(input).catch((error) => {
+          try {
+            pushLog(
+              row.jobId,
+              "image cleanup failed",
+              summarizeForMeasure(error),
+            );
+          } catch (logError) {
+            console.error(
+              "[solard:launch] failed to persist image cleanup error",
+              logError,
+            );
+          }
+        });
       }
     })();
   });
-  return rowToJob(row, []);
+
+  return rowToJob(row);
 }
 
 export function listLaunchJobs(
   options: ListLaunchJobsOptions = {},
 ): LaunchJob[] {
-  initLaunchJobStore();
   const limit = clampLimit(options.limit, DEFAULT_JOB_LIMIT);
+
   const status = launchJobStatus(options.status ?? null);
-  const rows = status
-    ? terminalDb.raw<LaunchJobRow>(
-        `SELECT jobId, kind, status, inputJson, argvJson, resultJson, error, createdAtMs, updatedAtMs
-         FROM launchJobs
-         WHERE status = ?
-         ORDER BY createdAtMs DESC
-         LIMIT ?`,
-        status,
-        limit,
-      )
-    : terminalDb.raw<LaunchJobRow>(
-        `SELECT jobId, kind, status, inputJson, argvJson, resultJson, error, createdAtMs, updatedAtMs
-         FROM launchJobs
-         ORDER BY createdAtMs DESC
-         LIMIT ?`,
-        limit,
-      );
+
+  const rows = launchDbOperation(
+    `db.list_launch_jobs status=${status ?? "all"}`,
+    () =>
+      (status
+        ? db.launchJobsV2
+            .select()
+            .where({
+              status,
+            })
+            .orderBy("createdAtMs", "DESC")
+            .limit(limit)
+            .all()
+        : db.launchJobsV2
+            .select()
+            .orderBy("createdAtMs", "DESC")
+            .limit(limit)
+            .all()) as LaunchJobDbRow[],
+  );
+
   return rows.map((row) =>
     rowToJob(row, options.includeLogs ? listLaunchJobLogs(row.jobId) : []),
   );
@@ -433,5 +509,6 @@ export function listLaunchJobs(
 
 export function getLaunchJob(id: string): LaunchJob | undefined {
   const row = getJobRow(id);
+
   return row ? rowToJob(row, listLaunchJobLogs(row.jobId)) : undefined;
 }
