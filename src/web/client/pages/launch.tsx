@@ -1,660 +1,1908 @@
 import {
-  state,
-  update,
-  runAction,
   api,
-  formData,
-  mountPage,
-  refreshOverview,
-  refreshJobs,
-  refreshPortfolio,
-  refreshSignals,
-  refreshPumpLive,
-  refreshWatchGroups,
-  startPumpFeed,
-  stopPumpFeed,
-  navigatePage,
-  short,
-  solFromLamports,
-  formatSol,
-  tokenUrl,
-  tokenImage,
-  TokenBadges,
-  passesBadgeFilters,
-  formatMcap,
-  latestMcap,
-  mcapChange,
-  mcapChangePct,
-  formatSignedMcap,
-  formatPct,
-  sortFeedRows,
-  sortWatchRows,
-  age,
-  selectedWatchGroup,
-  statusClass,
-  isRetryExecution,
-  friendlyExecutionKind,
-  jobHeadline,
-  jobStatusPill,
   latestJob,
   LaunchRunSummary,
-  walletGroupBadges,
-  walletHoldingsChips,
-  walletBalanceForAddress,
-  newBuyPlanRow,
-  updateBuyPlanRow,
-  removeBuyPlanRow,
+  refreshJobs,
+  runAction,
+  state,
+  update,
   walletLabel,
-  populateBuyPlanFromGroup,
-  buyPlanPayload,
-  addWatchedToken,
-  removeWatchedToken,
-  starPumpFeedRow,
-  quickBuyPumpFeedRow,
-  signalAction,
+  mountPage,
 } from "../runtime";
 import type {
   AnyRow,
-  BuyPlanRow,
-  PumpFeedRow,
-  TokenWatchToken,
 } from "../runtime";
 
-function BuyPlanTable() {
-  const wallets = state.overview?.wallets ?? [];
-  const groups = state.overview?.groups ?? [];
+const BUYER_RESERVE_SOL =
+  "0.02";
+
+const BUYER_CU_LIMIT =
+  600_000;
+
+type FollowerWallet = {
+  id: string;
+  wallet: string;
+
+  sender:
+    | "helius-fast"
+    | "helius-rpc";
+
+  strategy:
+    | "fast-spam"
+    | "spam-after-market-ready"
+    | "after-deploy-processed"
+    | "after-deploy-confirmed";
+};
+
+type FollowerSettingsGroup = {
+  id: string;
+  name: string;
+  sourceGroup: string | null;
+  wallets: FollowerWallet[];
+
+  minPct: string;
+  maxPct: string;
+
+  tipSol: string;
+  priorityFeeSol: string;
+  slippagePct: string;
+
+  retryIntervalMs: string;
+  recompileIntervalMs: string;
+  freshQuoteDelayMs: string;
+  maxFailedAttempts: string;
+};
+
+let followerGroups:
+  FollowerSettingsGroup[] =
+  [];
+
+let selectedImage:
+  File | null =
+  null;
+
+let selectedImagePreview:
+  string | null =
+  null;
+
+function id(
+  prefix: string,
+): string {
+  const suffix =
+    globalThis.crypto
+      ?.randomUUID?.() ??
+    `${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2)}`;
+
+  return `${prefix}:${suffix}`;
+}
+
+function newFollowerWallet(
+  wallet = "",
+): FollowerWallet {
+  return {
+    id:
+      id("wallet"),
+
+    wallet,
+
+    sender:
+      "helius-fast",
+
+    strategy:
+      "fast-spam",
+  };
+}
+
+function newFollowerGroup(
+  seed: Partial<
+    FollowerSettingsGroup
+  > = {},
+): FollowerSettingsGroup {
+  return {
+    id:
+      id("followers"),
+
+    name:
+      "Individual",
+
+    sourceGroup:
+      null,
+
+    wallets: [
+      newFollowerWallet(),
+    ],
+
+    minPct:
+      "50",
+
+    maxPct:
+      "80",
+
+    tipSol:
+      "0.001",
+
+    /**
+     * 0.0009 SOL over a 600K CU budget equals 1,500,000 micro-lamports/CU.
+     */
+    priorityFeeSol:
+      "0.0009",
+
+    slippagePct:
+      "2.5",
+
+    retryIntervalMs:
+      "75",
+
+    recompileIntervalMs:
+      "750",
+
+    freshQuoteDelayMs:
+      "-1",
+
+    maxFailedAttempts:
+      "0",
+
+    ...seed,
+  };
+}
+
+function wallets():
+  AnyRow[] {
   return (
-    <div className="launch-panel span-12 buy-plan-panel">
-      <div className="section-head">
+    state.overview
+      ?.wallets ??
+    []
+  );
+}
+
+function savedGroups():
+  AnyRow[] {
+  return (
+    state.overview
+      ?.groups ??
+    []
+  );
+}
+
+function walletAddress(
+  value: AnyRow,
+): string {
+  const raw =
+    String(
+      value.walletAddress ??
+      value.address ??
+      value.wallet?.address ??
+      value.wallet?.name ??
+      value.wallet ??
+      "",
+    ).trim();
+
+  if (!raw) {
+    return "";
+  }
+
+  const direct =
+    walletByAddress(
+      raw,
+    );
+
+  if (direct?.address) {
+    return String(
+      direct.address,
+    );
+  }
+
+  const name =
+    raw
+      .replace(/^@/, "")
+      .toLowerCase();
+
+  const named =
+    wallets().find(
+      (wallet) =>
+        String(
+          wallet.name ??
+          "",
+        ).toLowerCase() ===
+        name,
+    );
+
+  return String(
+    named?.address ??
+    raw,
+  ).trim();
+}
+
+function walletByAddress(
+  address: string,
+): AnyRow | null {
+  const target =
+    address.toLowerCase();
+
+  return (
+    wallets().find(
+      (wallet) =>
+        String(
+          wallet.address ??
+          "",
+        ).toLowerCase() ===
+        target,
+    ) ??
+    null
+  );
+}
+
+function displayWallet(
+  address: string,
+): string {
+  const wallet =
+    walletByAddress(
+      address,
+    );
+
+  if (wallet) {
+    return walletLabel(
+      wallet,
+    );
+  }
+
+  if (!address) {
+    return "Select wallet…";
+  }
+
+  return `${address.slice(
+    0,
+    6,
+  )}…${address.slice(-6)}`;
+}
+
+function mutateFollowerGroup(
+  groupId: string,
+  patch: Partial<
+    FollowerSettingsGroup
+  >,
+): void {
+  followerGroups =
+    followerGroups.map(
+      (group) =>
+        group.id ===
+        groupId
+          ? {
+              ...group,
+              ...patch,
+            }
+          : group,
+    );
+
+  update();
+}
+
+function removeFollowerGroup(
+  groupId: string,
+): void {
+  followerGroups =
+    followerGroups.filter(
+      (group) =>
+        group.id !==
+        groupId,
+    );
+
+  update();
+}
+
+function addIndividualGroup():
+  void {
+  const number =
+    followerGroups.filter(
+      (group) =>
+        group.sourceGroup ==
+        null,
+    ).length + 1;
+
+  followerGroups = [
+    ...followerGroups,
+
+    newFollowerGroup({
+      name:
+        `Individual ${number}`,
+    }),
+  ];
+
+  update();
+}
+
+function addSavedGroup(
+  groupName: string,
+): void {
+  const saved =
+    savedGroups().find(
+      (group) =>
+        group.name ===
+        groupName,
+    );
+
+  if (!saved) {
+    return;
+  }
+
+  const addresses =
+    Array.from(
+      new Set(
+        (
+          saved.wallets ??
+          []
+        )
+          .map(
+            walletAddress,
+          )
+          .filter(
+            Boolean,
+          ),
+      ),
+    );
+
+  if (!addresses.length) {
+    state.error =
+      `${groupName} has no resolvable wallets. Refresh wallets/groups and try again.`;
+
+    update();
+    return;
+  }
+
+  state.error =
+    null;
+
+  followerGroups = [
+    ...followerGroups,
+
+    newFollowerGroup({
+      name:
+        String(
+          saved.name ??
+          "Wallet group",
+        ),
+
+      sourceGroup:
+        String(
+          saved.name ??
+          groupName,
+        ),
+
+      wallets:
+        addresses.map(
+          (address) =>
+            newFollowerWallet(
+              address,
+            ),
+        ),
+    }),
+  ];
+
+  update();
+}
+
+function addWalletToFollowerGroup(
+  groupId: string,
+): void {
+  const group =
+    followerGroups.find(
+      (item) =>
+        item.id ===
+        groupId,
+    );
+
+  if (!group) {
+    return;
+  }
+
+  mutateFollowerGroup(
+    groupId,
+    {
+      wallets: [
+        ...group.wallets,
+
+        newFollowerWallet(),
+      ],
+    },
+  );
+}
+
+function updateFollowerWallet(
+  groupId: string,
+  walletId: string,
+  patch: Partial<
+    FollowerWallet
+  >,
+): void {
+  const group =
+    followerGroups.find(
+      (item) =>
+        item.id ===
+        groupId,
+    );
+
+  if (!group) {
+    return;
+  }
+
+  mutateFollowerGroup(
+    groupId,
+    {
+      wallets:
+        group.wallets.map(
+          (wallet) =>
+            wallet.id ===
+            walletId
+              ? {
+                  ...wallet,
+                  ...patch,
+                }
+              : wallet,
+        ),
+    },
+  );
+}
+
+function removeFollowerWallet(
+  groupId: string,
+  walletId: string,
+): void {
+  const group =
+    followerGroups.find(
+      (item) =>
+        item.id ===
+        groupId,
+    );
+
+  if (!group) {
+    return;
+  }
+
+  const remaining =
+    group.wallets.filter(
+      (wallet) =>
+        wallet.id !==
+        walletId,
+    );
+
+  mutateFollowerGroup(
+    groupId,
+    {
+      wallets:
+        remaining.length
+          ? remaining
+          : [
+              newFollowerWallet(),
+            ],
+    },
+  );
+}
+
+function numberValue(
+  value: string,
+  label: string,
+  options: {
+    minimum?: number;
+    maximum?: number;
+  } = {},
+): number {
+  const parsed =
+    Number(value);
+
+  if (
+    !Number.isFinite(
+      parsed,
+    )
+  ) {
+    throw new Error(
+      `${label} must be numeric.`,
+    );
+  }
+
+  if (
+    options.minimum != null &&
+    parsed <
+      options.minimum
+  ) {
+    throw new Error(
+      `${label} must be at least ${options.minimum}.`,
+    );
+  }
+
+  if (
+    options.maximum != null &&
+    parsed >
+      options.maximum
+  ) {
+    throw new Error(
+      `${label} must be at most ${options.maximum}.`,
+    );
+  }
+
+  return parsed;
+}
+
+function percentToBps(
+  value: string,
+  label: string,
+): number {
+  return Math.round(
+    numberValue(
+      value,
+      label,
+      {
+        minimum:
+          0,
+
+        maximum:
+          100,
+      },
+    ) * 100,
+  );
+}
+
+function priorityFeeSolToMicroLamports(
+  value: string,
+): number {
+  const sol =
+    numberValue(
+      value,
+      "Priority fee SOL",
+      {
+        minimum:
+          0,
+      },
+    );
+
+  /**
+   * total priority fee lamports =
+   *   microLamportsPerCU * CU limit / 1,000,000
+   */
+  return Math.round(
+    sol *
+      1_000_000_000 *
+      1_000_000 /
+      BUYER_CU_LIMIT,
+  );
+}
+
+function payloadLabel(
+  group: FollowerSettingsGroup,
+  wallet: FollowerWallet,
+): string {
+  const resolved =
+    walletByAddress(
+      wallet.wallet,
+    );
+
+  return String(
+    resolved?.name ??
+    `${group.name} ${displayWallet(wallet.wallet)}`,
+  );
+}
+
+function followerPlanPayload():
+  AnyRow[] {
+  const output:
+    AnyRow[] = [];
+
+  const seen =
+    new Set<string>();
+
+  for (
+    const group of
+      followerGroups
+  ) {
+    const minBps =
+      percentToBps(
+        group.minPct,
+        `${group.name} minimum amount`,
+      );
+
+    const maxBps =
+      percentToBps(
+        group.maxPct,
+        `${group.name} maximum amount`,
+      );
+
+    if (
+      minBps >
+      maxBps
+    ) {
+      throw new Error(
+        `${group.name}: minimum amount cannot exceed maximum amount.`,
+      );
+    }
+
+    const tipSol =
+      String(
+        numberValue(
+          group.tipSol,
+          `${group.name} tip SOL`,
+          {
+            minimum:
+              0,
+          },
+        ),
+      );
+
+    const priorityMicroLamports =
+      priorityFeeSolToMicroLamports(
+        group.priorityFeeSol,
+      );
+
+    const slippageBps =
+      percentToBps(
+        group.slippagePct,
+        `${group.name} slippage`,
+      );
+
+    const retryIntervalMs =
+      numberValue(
+        group.retryIntervalMs,
+        `${group.name} retry interval`,
+        {
+          minimum:
+            0,
+        },
+      );
+
+    const recompileIntervalMs =
+      numberValue(
+        group.recompileIntervalMs,
+        `${group.name} recompile interval`,
+        {
+          minimum:
+            0,
+        },
+      );
+
+    const freshQuoteDelayMs =
+      numberValue(
+        group.freshQuoteDelayMs,
+        `${group.name} fresh quote delay`,
+      );
+
+    const maxFailedAttempts =
+      numberValue(
+        group.maxFailedAttempts,
+        `${group.name} max failed attempts`,
+        {
+          minimum:
+            0,
+        },
+      );
+
+    for (
+      const wallet of
+        group.wallets
+    ) {
+      const address =
+        wallet.wallet.trim();
+
+      if (!address) {
+        continue;
+      }
+
+      const normalized =
+        address.toLowerCase();
+
+      if (
+        seen.has(
+          normalized,
+        )
+      ) {
+        throw new Error(
+          `${displayWallet(address)} appears more than once in the follower plan.`,
+        );
+      }
+
+      seen.add(
+        normalized,
+      );
+
+      output.push({
+        wallet:
+          address,
+
+        label:
+          payloadLabel(
+            group,
+            wallet,
+          ),
+
+        amountMode:
+          "range-bps",
+
+        minBps,
+        maxBps,
+
+        reserveSol:
+          BUYER_RESERVE_SOL,
+
+        sender:
+          wallet.sender,
+
+        strategy:
+          wallet.strategy,
+
+        tipSol:
+          wallet.sender ===
+          "helius-fast"
+            ? tipSol
+            : undefined,
+
+        priorityMicroLamports,
+
+        slippageBps,
+
+        retryIntervalMs,
+
+        recompileIntervalMs,
+
+        freshQuoteDelayMs,
+
+        maxFailedAttempts,
+      });
+    }
+  }
+
+  return output;
+}
+
+function tokenAlias(
+  name: string,
+  symbol: string,
+): string {
+  const value =
+    (symbol || name)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48);
+
+  return value ||
+    `token-${Date.now()}`;
+}
+
+const LAUNCH_IMAGE_TYPES =
+  new Set([
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+  ]);
+
+const MAX_LAUNCH_IMAGE_BYTES =
+  12 * 1024 * 1024;
+
+function onImageSelected(
+  event: Event,
+): void {
+  const input =
+    event.currentTarget as
+      HTMLInputElement;
+
+  let file =
+    input.files?.[0] ??
+    null;
+
+  if (
+    file &&
+    !LAUNCH_IMAGE_TYPES.has(
+      file.type,
+    )
+  ) {
+    state.error =
+      "Token image must be PNG, JPG, WEBP, or GIF.";
+
+    input.value =
+      "";
+
+    file =
+      null;
+  }
+
+  if (
+    file &&
+    (
+      file.size <= 0 ||
+      file.size >
+        MAX_LAUNCH_IMAGE_BYTES
+    )
+  ) {
+    state.error =
+      "Token image must be between 1 byte and 12 MB.";
+
+    input.value =
+      "";
+
+    file =
+      null;
+  }
+
+  if (file) {
+    state.error =
+      null;
+  }
+
+  if (
+    selectedImagePreview
+  ) {
+    URL.revokeObjectURL(
+      selectedImagePreview,
+    );
+  }
+
+  selectedImage =
+    file;
+
+  selectedImagePreview =
+    file
+      ? URL.createObjectURL(
+          file,
+        )
+      : null;
+
+  update();
+}
+
+function walletOptions(
+  selected: string,
+) {
+  const known =
+    selected
+      ? walletByAddress(
+          selected,
+        )
+      : null;
+
+  return (
+    <>
+      <option value="">
+        Select wallet…
+      </option>
+
+      {selected &&
+      !known ? (
+        <option value={selected}>
+          Unlisted · {displayWallet(selected)}
+        </option>
+      ) : null}
+
+      {wallets().map(
+        (wallet) => (
+          <option
+            key={
+              wallet.address
+            }
+            value={
+              wallet.address
+            }
+          >
+            {walletLabel(
+              wallet,
+            )}
+          </option>
+        ),
+      )}
+    </>
+  );
+}
+
+function FollowerGroupCard({
+  group,
+}: {
+  group:
+    FollowerSettingsGroup;
+}) {
+  return (
+    <section
+      className="launch-follower-group"
+      key={group.id}
+    >
+      <header className="launch-follower-head">
         <div>
-          <div className="section-kicker">Parallel followers</div>
-          <h2>Follower buy plan</h2>
-          <p className="muted">
-            Each card is one wallet lane. Mix amount rules, sender, strategy,
-            fees and retry rhythm in the same launch.
+          <span className="launch-group-kind">
+            {group.sourceGroup
+              ? "Saved wallet group"
+              : "Custom follower set"}
+          </span>
+
+          <input
+            className="launch-group-name"
+            value={group.name}
+            aria-label="Follower settings group name"
+            onInput={(event: any) =>
+              mutateFollowerGroup(
+                group.id,
+                {
+                  name:
+                    event.currentTarget
+                      .value,
+                },
+              )
+            }
+          />
+        </div>
+
+        <div className="launch-follower-actions">
+          <button
+            type="button"
+            className="secondary compact"
+            onClick={() =>
+              addWalletToFollowerGroup(
+                group.id,
+              )
+            }
+          >
+            Add wallet
+          </button>
+
+          <button
+            type="button"
+            className="danger compact"
+            onClick={() =>
+              removeFollowerGroup(
+                group.id,
+              )
+            }
+          >
+            Remove set
+          </button>
+        </div>
+      </header>
+
+      <div className="launch-shared-settings">
+        <fieldset>
+          <legend>
+            Amount range
+          </legend>
+
+          <label>
+            <span>
+              Min %
+            </span>
+
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="0.1"
+              value={group.minPct}
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    minPct:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+
+          <label>
+            <span>
+              Max %
+            </span>
+
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="0.1"
+              value={group.maxPct}
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    maxPct:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+
+          <small>
+            Keeps 0.02 SOL reserved automatically.
+          </small>
+        </fieldset>
+
+        <fieldset>
+          <legend>
+            Fees & slippage
+          </legend>
+
+          <label>
+            <span>
+              Tip SOL
+            </span>
+
+            <input
+              type="number"
+              min="0"
+              step="0.0001"
+              value={group.tipSol}
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    tipSol:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+
+          <label>
+            <span>
+              Priority SOL
+            </span>
+
+            <input
+              type="number"
+              min="0"
+              step="0.0001"
+              value={
+                group.priorityFeeSol
+              }
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    priorityFeeSol:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+
+          <label>
+            <span>
+              Slippage %
+            </span>
+
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="0.1"
+              value={
+                group.slippagePct
+              }
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    slippagePct:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+
+          <small>
+            Priority SOL is the total per-buy priority budget, converted with
+            the launcher's 600K compute-unit cap.
+          </small>
+        </fieldset>
+      </div>
+
+      <div className="launch-wallet-table-wrap">
+        <table className="launch-wallet-table">
+          <thead>
+            <tr>
+              <th>
+                Wallet
+              </th>
+
+              <th>
+                Sender
+              </th>
+
+              <th>
+                Buy timing
+              </th>
+
+              <th
+                aria-label="Remove wallet"
+              />
+            </tr>
+          </thead>
+
+          <tbody>
+            {group.wallets.map(
+              (wallet) => (
+                <tr key={wallet.id}>
+                  <td>
+                    <select
+                      value={
+                        wallet.wallet
+                      }
+                      onInput={(event: any) =>
+                        updateFollowerWallet(
+                          group.id,
+                          wallet.id,
+                          {
+                            wallet:
+                              event.currentTarget
+                                .value,
+                          },
+                        )
+                      }
+                    >
+                      {walletOptions(
+                        wallet.wallet,
+                      )}
+                    </select>
+                  </td>
+
+                  <td>
+                    <select
+                      value={
+                        wallet.sender
+                      }
+                      onInput={(event: any) =>
+                        updateFollowerWallet(
+                          group.id,
+                          wallet.id,
+                          {
+                            sender:
+                              event.currentTarget
+                                .value,
+                          },
+                        )
+                      }
+                    >
+                      <option value="helius-fast">
+                        Helius fast
+                      </option>
+
+                      <option value="helius-rpc">
+                        Helius RPC
+                      </option>
+                    </select>
+                  </td>
+
+                  <td>
+                    <select
+                      value={
+                        wallet.strategy
+                      }
+                      onInput={(event: any) =>
+                        updateFollowerWallet(
+                          group.id,
+                          wallet.id,
+                          {
+                            strategy:
+                              event.currentTarget
+                                .value,
+                          },
+                        )
+                      }
+                    >
+                      <option value="fast-spam">
+                        Fast spam
+                      </option>
+
+                      <option value="spam-after-market-ready">
+                        After market ready
+                      </option>
+
+                      <option value="after-deploy-processed">
+                        After deploy processed
+                      </option>
+
+                      <option value="after-deploy-confirmed">
+                        After deploy confirmed
+                      </option>
+                    </select>
+                  </td>
+
+                  <td>
+                    <button
+                      type="button"
+                      className="danger compact"
+                      aria-label={`Remove ${displayWallet(wallet.wallet)}`}
+                      onClick={() =>
+                        removeFollowerWallet(
+                          group.id,
+                          wallet.id,
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </td>
+                </tr>
+              ),
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <details className="launch-advanced">
+        <summary>
+          Advanced retry settings
+        </summary>
+
+        <div className="launch-advanced-grid">
+          <label>
+            <span>
+              Retry interval ms
+            </span>
+
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={
+                group.retryIntervalMs
+              }
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    retryIntervalMs:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+
+          <label>
+            <span>
+              Recompile ms
+            </span>
+
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={
+                group.recompileIntervalMs
+              }
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    recompileIntervalMs:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+
+          <label>
+            <span>
+              Fresh quote delay ms
+            </span>
+
+            <input
+              type="number"
+              step="1"
+              value={
+                group.freshQuoteDelayMs
+              }
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    freshQuoteDelayMs:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+
+          <label>
+            <span>
+              Max failed attempts
+            </span>
+
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={
+                group.maxFailedAttempts
+              }
+              onInput={(event: any) =>
+                mutateFollowerGroup(
+                  group.id,
+                  {
+                    maxFailedAttempts:
+                      event.currentTarget
+                        .value,
+                  },
+                )
+              }
+            />
+          </label>
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function FollowersBuilder() {
+  const groups =
+    savedGroups();
+
+  return (
+    <section className="launch-panel launch-followers">
+      <header className="launch-section-head">
+        <div>
+          <span className="section-kicker">
+            03
+          </span>
+
+          <h3>
+            Follower buyers
+          </h3>
+
+          <p>
+            A settings set shares amount, fees, slippage, and retry behavior.
+            Every follower wallet remains one compact table row with its own
+            sender and buy timing.
           </p>
         </div>
-        <div className="plan-toolbar">
-          <select id="buy-plan-group-select" className="group-picker">
-            <option value="">Load wallets from group…</option>
-            {groups.map((group: AnyRow) => (
-              <option value={group.name}>{group.name}</option>
-            ))}
+
+        <div className="launch-followers-toolbar">
+          <select
+            id="launch-saved-group"
+            aria-label="Saved wallet group"
+          >
+            <option value="">
+              Add saved group…
+            </option>
+
+            {groups.map(
+              (group) => (
+                <option
+                  key={
+                    group.name
+                  }
+                  value={
+                    group.name
+                  }
+                >
+                  {group.name}
+                </option>
+              ),
+            )}
           </select>
+
           <button
             type="button"
             className="secondary"
             onClick={() => {
-              const select = document.getElementById(
-                "buy-plan-group-select",
-              ) as HTMLSelectElement | null;
-              if (select?.value) populateBuyPlanFromGroup(select.value);
+              const select =
+                document.getElementById(
+                  "launch-saved-group",
+                ) as
+                  HTMLSelectElement |
+                  null;
+
+              if (
+                select?.value
+              ) {
+                addSavedGroup(
+                  select.value,
+                );
+
+                select.value =
+                  "";
+              }
             }}
           >
-            Load group
+            Add group
           </button>
+
           <button
             type="button"
-            onClick={() => {
-              state.buyPlanRows = [
-                ...state.buyPlanRows,
-                newBuyPlanRow({
-                  label: `buyer-${state.buyPlanRows.length + 1}`,
-                }),
-              ];
-              update();
-            }}
+            onClick={
+              addIndividualGroup
+            }
           >
-            Add wallet
+            Add individual
           </button>
         </div>
-      </div>
+      </header>
 
-      <div className="plan-summary">
-        <span>
-          <b>{state.buyPlanRows.length}</b> wallet lanes
-        </span>
-        <span>
-          <b>
-            {
-              state.buyPlanRows.filter((row) => row.sender === "helius-fast")
-                .length
-            }
-          </b>{" "}
-          Helius fast
-        </span>
-        <span>
-          <b>
-            {
-              state.buyPlanRows.filter((row) => row.strategy.includes("spam"))
-                .length
-            }
-          </b>{" "}
-          spam lanes
-        </span>
-        <span>Rows override the fallback buyer group settings.</span>
-      </div>
+      <div className="launch-follower-list">
+        {followerGroups.map(
+          (group) => (
+            <FollowerGroupCard
+              key={group.id}
+              group={group}
+            />
+          ),
+        )}
 
-      <div className="plan-list">
-        {state.buyPlanRows.map((row, index) => (
-          <div className="plan-card" data-sender={row.sender}>
-            <div className="plan-card-top">
-              <div className="lane-badge">#{index + 1}</div>
-              <label className="field label-field">
-                <span>Label</span>
-                <input
-                  placeholder="buyer-1"
-                  value={row.label}
-                  onInput={(event: any) =>
-                    updateBuyPlanRow(row.id, {
-                      label: event.currentTarget.value,
-                    })
-                  }
-                />
-              </label>
-              <label className="field wallet-field">
-                <span>Wallet</span>
-                <select
-                  value={row.wallet}
-                  onInput={(event: any) =>
-                    updateBuyPlanRow(row.id, {
-                      wallet: event.currentTarget.value,
-                    })
-                  }
-                >
-                  <option value="">Select wallet…</option>
-                  {wallets.map((wallet: AnyRow) => (
-                    <option value={wallet.address}>
-                      {walletLabel(wallet)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field sender-field">
-                <span>Sender</span>
-                <select
-                  value={row.sender}
-                  onInput={(event: any) =>
-                    updateBuyPlanRow(row.id, {
-                      sender: event.currentTarget.value,
-                    })
-                  }
-                >
-                  <option value="helius-fast">Helius fast</option>
-                  <option value="helius-rpc">Helius RPC</option>
-                </select>
-              </label>
-              <label className="field strategy-field">
-                <span>Strategy</span>
-                <select
-                  value={row.strategy}
-                  onInput={(event: any) =>
-                    updateBuyPlanRow(row.id, {
-                      strategy: event.currentTarget.value,
-                    })
-                  }
-                >
-                  <option value="fast-spam">Fast spam</option>
-                  <option value="spam-after-market-ready">
-                    Market-ready spam
-                  </option>
-                  <option value="after-deploy-processed">
-                    After processed
-                  </option>
-                  <option value="after-deploy-confirmed">
-                    After confirmed
-                  </option>
-                </select>
-              </label>
-              <button
-                type="button"
-                className="danger compact"
-                onClick={() => removeBuyPlanRow(row.id)}
-              >
-                Remove
-              </button>
-            </div>
+        {!followerGroups.length ? (
+          <div className="launch-empty-followers">
+            <b>
+              No follower buyers.
+            </b>
 
-            <div className="plan-card-body">
-              <div className="plan-block amount-block">
-                <div className="block-title">Amount</div>
-                <div className="inline-fields">
-                  <label className="field wide">
-                    <span>Mode</span>
-                    <select
-                      value={row.amountMode}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          amountMode: event.currentTarget.value,
-                        })
-                      }
-                    >
-                      <option value="range-bps">Balance % range</option>
-                      <option value="exact-sol">Exact SOL</option>
-                      <option value="exact-lamports">Exact lamports</option>
-                    </select>
-                  </label>
-                  {row.amountMode === "range-bps" ? (
-                    <>
-                      <label className="field">
-                        <span>Min %</span>
-                        <input
-                          value={String(Number(row.minBps || "0") / 100)}
-                          onInput={(event: any) =>
-                            updateBuyPlanRow(row.id, {
-                              minBps: String(
-                                Math.round(
-                                  Number(event.currentTarget.value || "0") *
-                                    100,
-                                ),
-                              ),
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Max %</span>
-                        <input
-                          value={String(Number(row.maxBps || "0") / 100)}
-                          onInput={(event: any) =>
-                            updateBuyPlanRow(row.id, {
-                              maxBps: String(
-                                Math.round(
-                                  Number(event.currentTarget.value || "0") *
-                                    100,
-                                ),
-                              ),
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Reserve SOL</span>
-                        <input
-                          value={row.reserveSol}
-                          onInput={(event: any) =>
-                            updateBuyPlanRow(row.id, {
-                              reserveSol: event.currentTarget.value,
-                            })
-                          }
-                        />
-                      </label>
-                    </>
-                  ) : null}
-                  {row.amountMode === "exact-sol" ? (
-                    <label className="field">
-                      <span>Exact SOL</span>
-                      <input
-                        placeholder="0.25"
-                        value={row.exactSol}
-                        onInput={(event: any) =>
-                          updateBuyPlanRow(row.id, {
-                            exactSol: event.currentTarget.value,
-                          })
-                        }
-                      />
-                    </label>
-                  ) : null}
-                  {row.amountMode === "exact-lamports" ? (
-                    <label className="field">
-                      <span>Lamports</span>
-                      <input
-                        placeholder="250000000"
-                        value={row.exactLamports}
-                        onInput={(event: any) =>
-                          updateBuyPlanRow(row.id, {
-                            exactLamports: event.currentTarget.value,
-                          })
-                        }
-                      />
-                    </label>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="plan-block fee-block">
-                <div className="block-title">Fees & slippage</div>
-                <div className="inline-fields">
-                  <label className="field">
-                    <span>Tip SOL</span>
-                    <input
-                      value={row.tipSol}
-                      disabled={row.sender !== "helius-fast"}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          tipSol: event.currentTarget.value,
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Priority µ-lamports</span>
-                    <input
-                      value={row.priorityMicroLamports}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          priorityMicroLamports: event.currentTarget.value,
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Slippage bps</span>
-                    <input
-                      value={row.slippageBps}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          slippageBps: event.currentTarget.value,
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-              </div>
-
-              <div className="plan-block retry-block">
-                <div className="block-title">Retry</div>
-                <div className="inline-fields">
-                  <label className="field">
-                    <span>Retry ms</span>
-                    <input
-                      value={row.retryIntervalMs}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          retryIntervalMs: event.currentTarget.value,
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Recompile ms</span>
-                    <input
-                      value={row.recompileIntervalMs}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          recompileIntervalMs: event.currentTarget.value,
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Fresh quote delay</span>
-                    <input
-                      value={row.freshQuoteDelayMs}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          freshQuoteDelayMs: event.currentTarget.value,
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Max failed</span>
-                    <input
-                      value={row.maxFailedAttempts}
-                      onInput={(event: any) =>
-                        updateBuyPlanRow(row.id, {
-                          maxFailedAttempts: event.currentTarget.value,
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-              </div>
-            </div>
-          </div>
-        ))}
-        {state.buyPlanRows.length === 0 ? (
-          <div className="empty-plan">
-            <b>No custom follower rows.</b>
             <span>
-              Load a group or add wallets manually. Without rows, the fallback
-              buyer-group settings are used.
+              Deploy only, add an individual wallet, or load a saved wallet
+              group.
             </span>
           </div>
         ) : null}
       </div>
-    </div>
+    </section>
   );
 }
 
 export function LaunchPage() {
+  const deployerWallets =
+    wallets();
+
   return (
     <form
-      className="launch-grid"
+      className="launch-builder"
+      encType="multipart/form-data"
       onSubmit={(event) => {
         event.preventDefault();
-        const body = formData(event.currentTarget);
-        body.live = event.currentTarget.querySelector<HTMLInputElement>(
-          "[name=live]",
-        )?.checked
-          ? "true"
-          : "false";
-        body.skipSimulation =
-          event.currentTarget.querySelector<HTMLInputElement>(
-            "[name=skipSimulation]",
-          )?.checked
-            ? "true"
-            : "false";
-        body.cashback = event.currentTarget.querySelector<HTMLInputElement>(
-          "[name=cashback]",
-        )?.checked
-          ? "true"
-          : "false";
-        body.vanitySuffixPump =
-          event.currentTarget.querySelector<HTMLInputElement>(
-            "[name=vanitySuffixPump]",
-          )?.checked
-            ? "true"
-            : "false";
-        if (body.vanitySuffixPump === "true" && !body.mintSuffix) {
-          body.mintSuffix = "pump";
-        }
-        const explicitBuyPlan = buyPlanPayload();
-        if (explicitBuyPlan.length > 0) body.buyPlan = explicitBuyPlan;
-        void runAction(async () => {
-          const started = await api<{ id: string }>("/api/launch/pump", {
-            method: "POST",
-            body: JSON.stringify(body),
-          });
-          state.selectedJobId = started.id;
-          await refreshJobs();
-        });
+
+        const form =
+          event.currentTarget;
+
+        void runAction(
+          async () => {
+            if (
+              !selectedImage
+            ) {
+              throw new Error(
+                "Choose a token image.",
+              );
+            }
+
+            const body =
+              new FormData(
+                form,
+              );
+
+            body.set(
+              "image",
+              selectedImage,
+              selectedImage.name,
+            );
+
+            const tokenName =
+              String(
+                body.get("name") ??
+                "",
+              );
+
+            const tokenSymbol =
+              String(
+                body.get("symbol") ??
+                "",
+              );
+
+            body.set(
+              "alias",
+              tokenAlias(
+                tokenName,
+                tokenSymbol,
+              ),
+            );
+
+            if (
+              !String(
+                body.get("mintSuffix") ??
+                "",
+              ).trim()
+            ) {
+              body.set(
+                "mintSuffix",
+                "pump",
+              );
+            }
+
+            body.set(
+              "buyPlanJson",
+              JSON.stringify(
+                followerPlanPayload(),
+              ),
+            );
+
+            body.set(
+              "live",
+              form.querySelector<HTMLInputElement>(
+                "[name=live]",
+              )?.checked
+                ? "true"
+                : "false",
+            );
+
+            body.set(
+              "skipSimulation",
+              form.querySelector<HTMLInputElement>(
+                "[name=skipSimulation]",
+              )?.checked
+                ? "true"
+                : "false",
+            );
+
+            body.set(
+              "cashback",
+              form.querySelector<HTMLInputElement>(
+                "[name=cashback]",
+              )?.checked
+                ? "true"
+                : "false",
+            );
+
+            const started =
+              await api<{
+                id: string;
+              }>(
+                "/api/launch/pump",
+                {
+                  method:
+                    "POST",
+
+                  body,
+                },
+              );
+
+            state.selectedJobId =
+              started.id;
+
+            await refreshJobs();
+          },
+        );
       }}
     >
-      <div className="launch-hero span-12">
+      <section className="launch-hero">
         <div>
-          <div className="section-kicker">Pump launch builder</div>
-          <h2>Build a token launch + parallel follower plan</h2>
-          <p className="muted">
-            Configure metadata, creator buy, per-wallet follower lanes, and
-            sender strategy in one place before starting the job.
+          <span className="section-kicker">
+            Pump launch builder
+          </span>
+
+          <h2>
+            Deploy token
+          </h2>
+
+          <p>
+            Enter the token details, upload the image, choose the deployer, and
+            optionally configure follower sets.
           </p>
         </div>
+
         <div className="launch-actions">
           <label className="toggle-card">
-            <span>Live</span>
-            <input type="checkbox" name="live" />
-          </label>
-          <label className="toggle-card">
-            <span>Skip sim</span>
-            <input type="checkbox" name="skipSimulation" defaultChecked />
-          </label>
-          <label className="toggle-card">
-            <span>Cashback</span>
-            <input type="checkbox" name="cashback" defaultChecked />
-          </label>
-          <label className="toggle-card">
-            <span>Mint ends pump</span>
-            <input type="checkbox" name="vanitySuffixPump" defaultChecked />
-          </label>
-          <button type="submit" className="primary-large">
-            Start launch job
-          </button>
-        </div>
-      </div>
+            <span>
+              Live
+            </span>
 
-      <div className="span-12">
-        <LaunchRunSummary job={latestJob()} />
-      </div>
-
-      <div className="launch-panel span-7">
-        <div className="section-head compact-head">
-          <div>
-            <div className="section-kicker">01</div>
-            <h3>Token metadata</h3>
-          </div>
-        </div>
-        <div className="clean-form token-form">
-          <label className="field full">
-            <span>Metadata JSON path</span>
-            <input name="metadataPath" placeholder="./metadata/mind.json" />
-          </label>
-          <label className="field">
-            <span>Alias</span>
-            <input name="alias" placeholder="mind" />
-          </label>
-          <label className="field">
-            <span>Name</span>
-            <input name="name" placeholder="Mind Token" />
-          </label>
-          <label className="field">
-            <span>Symbol</span>
-            <input name="symbol" placeholder="MIND" />
-          </label>
-          <label className="field">
-            <span>Metadata URI</span>
-            <input name="uri" placeholder="ipfs:// or https://" />
-          </label>
-          <label className="field full">
-            <span>Server image path</span>
-            <input name="imagePath" placeholder="./metadata/mind.png" />
-          </label>
-          <label className="field full">
-            <span>Description</span>
-            <textarea
-              name="description"
-              placeholder="Optional; auto-filled if empty."
+            <input
+              type="checkbox"
+              name="live"
             />
           </label>
-        </div>
-      </div>
 
-      <div className="launch-panel span-5">
-        <div className="section-head compact-head">
-          <div>
-            <div className="section-kicker">02</div>
-            <h3>Launch defaults</h3>
-          </div>
-        </div>
-        <div className="clean-form defaults-form">
-          <label className="field full">
-            <span>Creator wallet</span>
-            <input name="creator" required placeholder="name or address" />
-          </label>
-          <label className="field">
-            <span>Creator buy SOL</span>
-            <input name="creatorBuySol" placeholder="0" />
-          </label>
-          <label className="field">
-            <span>Buyer group fallback</span>
-            <input name="buyerGroup" placeholder="mind-buyers" />
-          </label>
-          <label className="field">
-            <span>Buyer min %</span>
-            <input name="buyerMinBps" defaultValue="5000" />
-          </label>
-          <label className="field">
-            <span>Buyer max %</span>
-            <input name="buyerMaxBps" defaultValue="8000" />
-          </label>
-          <label className="field">
-            <span>Reserve SOL</span>
-            <input name="buyerReserveSol" defaultValue="0.02" />
-          </label>
-          <label className="field">
-            <span>Deploy sender</span>
-            <select name="deploymentSender">
-              <option value="helius-rpc">Helius RPC</option>
-              <option value="helius-fast">Helius fast</option>
-            </select>
-          </label>
-          <label className="field">
-            <span>Buyer sender</span>
-            <select name="buyerSender">
-              <option value="helius-fast">Helius fast</option>
-              <option value="helius-rpc">Helius RPC</option>
-            </select>
-          </label>
-          <label className="field full">
-            <span>Submit mode</span>
-            <select name="submitMode">
-              <option value="fast-spam">Fast spam</option>
-              <option value="spam-after-market-ready">Market-ready spam</option>
-              <option value="after-deploy-processed">After processed</option>
-              <option value="after-deploy-confirmed">After confirmed</option>
-            </select>
-          </label>
-          <label className="field">
-            <span>Mint suffix</span>
-            <input name="mintSuffix" defaultValue="pump" />
-          </label>
-          <label className="field">
-            <span>Vanity attempts</span>
-            <input name="vanityMaxAttempts" defaultValue="25000000" />
-          </label>
-          <label className="field full">
-            <span>Vanity timeout ms</span>
-            <input name="vanityTimeoutMs" defaultValue="0" />
-          </label>
-          <p className="muted tiny full">
-            Exact pump suffix means the mint keypair is generated locally before
-            launch. The expected search is about 11.3M attempts for a
-            four-character base58 suffix.
-          </p>
-        </div>
-      </div>
+          <label className="toggle-card">
+            <span>
+              Skip simulation (live)
+            </span>
 
-      <BuyPlanTable />
+            <input
+              type="checkbox"
+              name="skipSimulation"
+            />
+          </label>
 
-      <div className="launch-panel span-12 global-strip">
-        <div>
-          <div className="section-kicker">03</div>
-          <h3>Global execution defaults</h3>
-          <p className="muted small">
-            Used when a follower row does not override the value.
-          </p>
-        </div>
-        <div className="global-fields">
-          <label className="field">
-            <span>Sender TPS</span>
-            <input name="senderTps" defaultValue="40" />
+          <label className="toggle-card">
+            <span>
+              Cashback
+            </span>
+
+            <input
+              type="checkbox"
+              name="cashback"
+              defaultChecked
+            />
           </label>
-          <label className="field">
-            <span>Helius tip SOL</span>
-            <input name="heliusTipSol" defaultValue="0.001" />
-          </label>
-          <label className="field">
-            <span>Buyer priority</span>
-            <input name="buyerPriorityMicroLamports" defaultValue="1500000" />
-          </label>
-          <label className="field">
-            <span>Slippage bps</span>
-            <input name="slippageBps" defaultValue="9999" />
-          </label>
-          <label className="field">
-            <span>Fresh quote delay</span>
-            <input name="freshQuoteDelayMs" defaultValue="-1" />
-          </label>
-          <button type="submit" className="primary-large bottom-submit">
-            Start launch job
+
+          <button
+            type="submit"
+            className="primary-large"
+          >
+            Start launch
           </button>
         </div>
+      </section>
+
+      <LaunchRunSummary
+        job={latestJob()}
+      />
+
+      <div className="launch-primary-grid">
+        <section className="launch-panel launch-metadata">
+          <header className="launch-section-head">
+            <div>
+              <span className="section-kicker">
+                01
+              </span>
+
+              <h3>
+                Token
+              </h3>
+
+              <p>
+                These fields become the token metadata. No metadata path or URI
+                is required.
+              </p>
+            </div>
+          </header>
+
+          <div className="launch-token-form">
+            <label>
+              <span>
+                Image
+              </span>
+
+              <span className="launch-image-picker">
+                <input
+                  type="file"
+                  name="image"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  required
+                  onInput={
+                    onImageSelected
+                  }
+                />
+
+                {selectedImagePreview ? (
+                  <img
+                    src={
+                      selectedImagePreview
+                    }
+                    alt="Selected token"
+                  />
+                ) : (
+                  <span className="launch-image-empty">
+                    Upload PNG, JPG, WEBP, or GIF
+                  </span>
+                )}
+
+                {selectedImage ? (
+                  <small>
+                    {selectedImage.name}
+                  </small>
+                ) : null}
+              </span>
+            </label>
+
+            <div className="launch-name-row">
+              <label>
+                <span>
+                  Name
+                </span>
+
+                <input
+                  name="name"
+                  required
+                  maxLength={32}
+                  placeholder="Token name"
+                />
+              </label>
+
+              <label>
+                <span>
+                  Symbol
+                </span>
+
+                <input
+                  name="symbol"
+                  required
+                  maxLength={10}
+                  placeholder="TOKEN"
+                />
+              </label>
+            </div>
+
+            <label>
+              <span>
+                Description
+              </span>
+
+              <textarea
+                name="description"
+                rows={5}
+                maxLength={500}
+                required
+                placeholder="What is this token?"
+              />
+            </label>
+
+            <div className="launch-social-row">
+              <label>
+                <span>
+                  Website
+                </span>
+
+                <input
+                  type="url"
+                  name="website"
+                  placeholder="https://"
+                />
+              </label>
+
+              <label>
+                <span>
+                  X / Twitter
+                </span>
+
+                <input
+                  name="twitter"
+                  placeholder="https://x.com/…"
+                />
+              </label>
+
+              <label>
+                <span>
+                  Telegram
+                </span>
+
+                <input
+                  name="telegram"
+                  placeholder="https://t.me/…"
+                />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section className="launch-panel launch-deployer">
+          <header className="launch-section-head">
+            <div>
+              <span className="section-kicker">
+                02
+              </span>
+
+              <h3>
+                Deployer
+              </h3>
+
+              <p>
+                Choose a loaded wallet and enter the optional creator buy.
+              </p>
+            </div>
+          </header>
+
+          <div className="launch-deployer-form">
+            <label>
+              <span>
+                Deployer wallet
+              </span>
+
+              <select
+                name="creator"
+                required
+              >
+                <option value="">
+                  Select deployer…
+                </option>
+
+                {deployerWallets.map(
+                  (wallet) => (
+                    <option
+                      key={
+                        wallet.address
+                      }
+                      value={
+                        wallet.address
+                      }
+                    >
+                      {walletLabel(
+                        wallet,
+                      )}
+                    </option>
+                  ),
+                )}
+              </select>
+            </label>
+
+            <label>
+              <span>
+                Creator buy SOL
+              </span>
+
+              <input
+                type="number"
+                name="creatorBuySol"
+                min="0"
+                step="0.001"
+                defaultValue="0"
+              />
+            </label>
+
+            <label>
+              <span>
+                Mint suffix
+              </span>
+
+              <input
+                name="mintSuffix"
+                defaultValue="pump"
+                maxLength={12}
+                autoComplete="off"
+              />
+            </label>
+
+            <small className="launch-deployer-note">
+              The suffix defaults to pump. Generation limits use the launcher's
+              internal policy instead of extra form fields.
+            </small>
+          </div>
+        </section>
       </div>
+
+      <FollowersBuilder />
+
+      <footer className="launch-submit-bar">
+        <div>
+          <b>
+            Ready to launch
+          </b>
+
+          <span>
+            {followerGroups.reduce(
+              (count, group) =>
+                count +
+                group.wallets.filter(
+                  (wallet) =>
+                    Boolean(
+                      wallet.wallet
+                        .trim(),
+                    ),
+                ).length,
+              0,
+            )}{" "}
+            follower wallets configured
+          </span>
+        </div>
+
+        <button
+          type="submit"
+          className="primary-large"
+        >
+          Start launch
+        </button>
+      </footer>
     </form>
   );
 }
 
 export default function mount() {
-  return mountPage("launch", LaunchPage);
+  return mountPage(
+    "launch",
+    LaunchPage,
+  );
 }

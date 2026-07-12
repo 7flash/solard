@@ -18,6 +18,13 @@ export type PumpLaunchInput = {
   symbol?: string | null;
   uri?: string | null;
   imagePath?: string | null;
+
+  /**
+   * Server-owned upload path removed after the background launch completes.
+   * It is never forwarded to the CLI.
+   */
+  temporaryImagePath?: string | null;
+
   description?: string | null;
   website?: string | null;
   twitter?: string | null;
@@ -178,6 +185,9 @@ export function pumpLaunchInputFromRecord(
     symbol: stringValue("symbol"),
     uri: stringValue("uri"),
     imagePath: stringValue("imagePath"),
+
+    temporaryImagePath: stringValue("temporaryImagePath"),
+
     description: stringValue("description"),
     website: stringValue("website"),
     twitter: stringValue("twitter"),
@@ -186,7 +196,8 @@ export function pumpLaunchInputFromRecord(
     showName: boolValue("showName", true),
     cashback: boolValue("cashback", boolValue("cashbackEnabled", false)),
     mayhemMode: boolValue("mayhemMode", boolValue("mayhem", false)),
-    mintSuffix: stringValue("mintSuffix") ?? stringValue("vanitySuffix"),
+    mintSuffix:
+      stringValue("mintSuffix") ?? stringValue("vanitySuffix") ?? "pump",
     vanitySuffix: stringValue("vanitySuffix"),
     pumpSuffix: boolValue("pumpSuffix", boolValue("vanitySuffixPump", false)),
     vanityMaxAttempts: numberValue("vanityMaxAttempts"),
@@ -195,31 +206,28 @@ export function pumpLaunchInputFromRecord(
     creatorBuySol: stringValue("creatorBuySol"),
     creatorBuyLamports: stringValue("creatorBuyLamports"),
     creatorReserveSol: stringValue("creatorReserveSol"),
-    buyerMinBps: numberValue("buyerMinBps", 5000),
-    buyerMaxBps: numberValue("buyerMaxBps", 8000),
-    buyerReserveSol: stringValue("buyerReserveSol") ?? "0.02",
+    buyerMinBps: numberValue("buyerMinBps"),
+    buyerMaxBps: numberValue("buyerMaxBps"),
+    buyerReserveSol: stringValue("buyerReserveSol"),
     deploymentSender: stringValue("deploymentSender") ?? "helius-rpc",
-    buyerSender: stringValue("buyerSender") ?? "helius-fast",
-    submitMode: stringValue("submitMode") ?? "fast-spam",
-    senderTps: numberValue("senderTps", 40),
-    retryIntervalMs: numberValue("retryIntervalMs", 75),
-    retryRecompileIntervalMs: numberValue("retryRecompileIntervalMs", 750),
-    blockhashRefreshIntervalMs: numberValue("blockhashRefreshIntervalMs", 500),
-    freshQuoteDelayMs: numberValue("freshQuoteDelayMs", -1),
-    retryTimeoutMs: numberValue("retryTimeoutMs", 0),
-    maxFailedAttempts: numberValue("maxFailedAttempts", 0),
-    rateLimitBackoffMs: numberValue("rateLimitBackoffMs", 400),
-    retryJitterMs: numberValue("retryJitterMs", 100),
-    heliusTipSol: stringValue("heliusTipSol") ?? "0.001",
-    buyerPriorityMicroLamports: numberValue(
-      "buyerPriorityMicroLamports",
-      1_500_000,
-    ),
+    buyerSender: stringValue("buyerSender"),
+    submitMode: stringValue("submitMode"),
+    senderTps: numberValue("senderTps"),
+    retryIntervalMs: numberValue("retryIntervalMs"),
+    retryRecompileIntervalMs: numberValue("retryRecompileIntervalMs"),
+    blockhashRefreshIntervalMs: numberValue("blockhashRefreshIntervalMs"),
+    freshQuoteDelayMs: numberValue("freshQuoteDelayMs"),
+    retryTimeoutMs: numberValue("retryTimeoutMs"),
+    maxFailedAttempts: numberValue("maxFailedAttempts"),
+    rateLimitBackoffMs: numberValue("rateLimitBackoffMs"),
+    retryJitterMs: numberValue("retryJitterMs"),
+    heliusTipSol: stringValue("heliusTipSol"),
+    buyerPriorityMicroLamports: numberValue("buyerPriorityMicroLamports"),
     deploymentPriorityMicroLamports: numberValue(
       "deploymentPriorityMicroLamports",
       0,
     ),
-    slippageBps: numberValue("slippageBps", 9999),
+    slippageBps: numberValue("slippageBps"),
     live: boolValue("live", false),
     skipSimulation: boolValue("skipSimulation", true),
     out: stringValue("out"),

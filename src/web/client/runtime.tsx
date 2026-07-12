@@ -519,10 +519,23 @@ export async function api<T>(
   return await measureClient(
     path,
     async () => {
+      const isFormData =
+        typeof FormData !==
+          "undefined" &&
+        options.body instanceof
+          FormData;
+
       const response = await fetch(url, {
         ...options,
         headers: {
-          "content-type": "application/json",
+          ...(
+            isFormData
+              ? {}
+              : {
+                  "content-type":
+                    "application/json",
+                }
+          ),
           ...authHeaders(),
           ...(options.headers ?? {}),
         },
@@ -1613,7 +1626,7 @@ export async function startPumpFeed(
   while (!abort.signal.aborted) {
     try {
       await refreshTerminalFeedOnce({
-        ensure: false,
+        ensure: true,
         activeWindowMs: 5 * 60_000,
         includeUnpriced: state.pumpFeedSource === "helius",
       });
@@ -2154,82 +2167,14 @@ function ConsoleRuntime() {
   );
 }
 
-let runtimeRenderQueued = false;
-let runtimeRenderAgain = false;
-
-function renderConsoleRuntime(): void {
-  let root = document.getElementById("app-root");
-  if (!root) return;
-
-  try {
-    render(<ConsoleRuntime />, root, {
-      reconciler: state.tab === "terminal" ? "sequential" : "auto",
-    });
-  } catch (error) {
-    /**
-     * Recover from a previously corrupted TradJS fiber root without mutating
-     * children inside the tracked container. A replacement container has no
-     * entry in TradJS' root-fiber WeakMap, so the next render mounts cleanly.
-     */
-    if (
-      error instanceof DOMException &&
-      error.name === "NotFoundError" &&
-      root.parentNode
-    ) {
-      const replacement = root.cloneNode(false) as HTMLElement;
-      root.parentNode.replaceChild(replacement, root);
-      root = replacement;
-
-      render(<ConsoleRuntime />, root, {
-        reconciler: state.tab === "terminal" ? "sequential" : "auto",
-      });
-
-      measureEvent("tradjs root recovered", {
-        page: state.tab,
-        error: error.message,
-      });
-    } else {
-      throw error;
-    }
-  }
-
+export function update() {
+  const root = document.getElementById("app-root");
+  if (root) render(<ConsoleRuntime />, root);
   document
     .querySelectorAll<HTMLAnchorElement>("#main-nav a")
     .forEach((link) =>
       link.classList.toggle("active", link.dataset.page === state.tab),
     );
-}
-
-export function update() {
-  if (runtimeRenderQueued) {
-    runtimeRenderAgain = true;
-    return;
-  }
-
-  runtimeRenderQueued = true;
-
-  queueMicrotask(() => {
-    try {
-      do {
-        runtimeRenderAgain = false;
-        renderConsoleRuntime();
-      } while (runtimeRenderAgain);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-
-      if (state.tab === "terminal") {
-        state.terminalLastError = message;
-      }
-
-      console.error("[solard:web] render failed", error);
-    } finally {
-      runtimeRenderQueued = false;
-
-      if (runtimeRenderAgain) {
-        update();
-      }
-    }
-  });
 }
 
 export function mountPage(page: State["tab"], view: ConsolePage) {
@@ -2317,7 +2262,7 @@ export function mountPage(page: State["tab"], view: ConsolePage) {
           await refreshPumpLive()
             .then(update)
             .catch(() => undefined);
-        if (state.tab === "terminal" && !state.pumpFeedAbort)
+        if (state.tab === "terminal")
           await refreshTerminalFeedOnce({
             ensure: false,
             activeWindowMs: 5 * 60_000,

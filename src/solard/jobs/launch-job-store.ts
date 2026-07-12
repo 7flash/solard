@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import {
   launchPumpTokenAction,
@@ -235,6 +236,16 @@ export function listLaunchJobLogs(
   }));
 }
 
+function persistedLaunchInput(input: PumpLaunchInput): PumpLaunchInput {
+  const { temporaryImagePath, ...persisted } = input;
+
+  if (temporaryImagePath && persisted.imagePath === temporaryImagePath) {
+    persisted.imagePath = "[browser-upload]";
+  }
+
+  return persisted;
+}
+
 function createJobRow(input: PumpLaunchInput): LaunchJobRow {
   initLaunchJobStore();
   const now = Date.now();
@@ -242,8 +253,8 @@ function createJobRow(input: PumpLaunchInput): LaunchJobRow {
     jobId: randomUUID(),
     kind: "launch:pump",
     status: "queued",
-    inputJson: json(input),
-    argvJson: json(pumpLaunchArgsFromInput(input)),
+    inputJson: json(persistedLaunchInput(input)),
+    argvJson: json(pumpLaunchArgsFromInput(persistedLaunchInput(input))),
     resultJson: null,
     error: null,
     createdAtMs: now,
@@ -321,14 +332,41 @@ function pushLog(jobId: string, label: string, value: unknown): void {
   updateJob(jobId, { updatedAtMs: atMs });
 }
 
+async function cleanupTemporaryLaunchImage(
+  input: PumpLaunchInput,
+): Promise<void> {
+  const path = input.temporaryImagePath?.trim();
+
+  if (!path) {
+    return;
+  }
+
+  await unlink(path).catch((error) => {
+    if (
+      (
+        error as {
+          code?: unknown;
+        }
+      )?.code === "ENOENT"
+    ) {
+      return;
+    }
+
+    throw error;
+  });
+}
+
 export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
   const row = createJobRow(input);
   queueMicrotask(() => {
     void (async () => {
       try {
         updateJob(row.jobId, { status: "running", error: null });
-        pushLog(row.jobId, "launch input", summarizeForMeasure(input));
-        pushLog(row.jobId, "launch argv", pumpLaunchArgsFromInput(input));
+        const publicInput = persistedLaunchInput(input);
+
+        pushLog(row.jobId, "launch input", summarizeForMeasure(publicInput));
+
+        pushLog(row.jobId, "launch argv", pumpLaunchArgsFromInput(publicInput));
         const result = await launchPumpTokenAction(input, {
           report: (label, value) =>
             pushLog(row.jobId, label, summarizeForMeasure(value)),
@@ -343,8 +381,22 @@ export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
           error instanceof Error
             ? (error.stack ?? error.message)
             : String(error);
+
         pushLog(row.jobId, "fatal", message);
-        updateJob(row.jobId, { status: "failed", error: message });
+
+        updateJob(row.jobId, {
+          status: "failed",
+
+          error: message,
+        });
+      } finally {
+        await cleanupTemporaryLaunchImage(input).catch((error) =>
+          pushLog(
+            row.jobId,
+            "image cleanup failed",
+            summarizeForMeasure(error),
+          ),
+        );
       }
     })();
   });
