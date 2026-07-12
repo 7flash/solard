@@ -6,6 +6,10 @@ import {
 import { liveTradesEnabled } from "./context.js";
 import { measureSolard, summarizeForMeasure } from "../api-response.js";
 
+const PUMP_LAUNCH_JOB_LIVE_CAPABILITY = Symbol.for(
+  "solard.launch.pump.job-live",
+);
+
 export type PumpLaunchInput = {
   creator: string;
   buyerGroup?: string | null;
@@ -65,6 +69,28 @@ export type PumpLaunchInput = {
   skipSimulation?: boolean | null;
   out?: string | null;
 };
+
+export function authorizePumpLaunchJobLive(input: PumpLaunchInput): void {
+  Object.defineProperty(input, PUMP_LAUNCH_JOB_LIVE_CAPABILITY, {
+    value: true,
+
+    enumerable: false,
+
+    configurable: false,
+
+    writable: false,
+  });
+}
+
+function isAuthorizedPumpLaunchJobLive(input: PumpLaunchInput): boolean {
+  return Boolean(
+    (
+      input as PumpLaunchInput & {
+        [PUMP_LAUNCH_JOB_LIVE_CAPABILITY]?: boolean;
+      }
+    )[PUMP_LAUNCH_JOB_LIVE_CAPABILITY],
+  );
+}
 
 function present(value: unknown): value is string | number | boolean {
   return value !== null && value !== undefined && value !== "";
@@ -250,9 +276,9 @@ async function launchPumpTokenActionInner(
 ): Promise<PumpTokenLaunchCliResult> {
   if (!input.creator?.trim()) throw new Error("creator is required");
   const live = Boolean(input.live);
-  if (live && !liveTradesEnabled()) {
+  if (live && !liveTradesEnabled() && !isAuthorizedPumpLaunchJobLive(input)) {
     throw new Error(
-      "Pump launch requested live execution, but SOLARD_ENABLE_LIVE_TRADES=1 is not set. Run dry-run first, then opt in explicitly.",
+      "Pump launch requested live execution outside the authenticated Launch-job path.",
     );
   }
   const argv = pumpLaunchArgsFromInput({ ...input, live });

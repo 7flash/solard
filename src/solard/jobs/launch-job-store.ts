@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 
 import {
-  launchPumpTokenAction,
   pumpLaunchArgsFromInput,
   type PumpLaunchInput,
 } from "../actions/launches.js";
-import type { PumpTokenLaunchCliResult } from "../../launches/pump/token-launch-cli.js";
+import {
+  runPumpTokenLaunchFromArgs,
+  type PumpTokenLaunchCliResult,
+} from "../../launches/pump/token-launch-cli.js";
 import {
   db,
   isSqliteBusyError,
@@ -16,9 +18,12 @@ import {
 import {
   compactId,
   dbMeasure,
+  indexerMeasure,
   summarizeError,
   summarizeForMeasure,
 } from "../../../shared/measure.js";
+
+export const LAUNCH_JOB_RUNNER_VERSION = "v50-direct-live";
 
 export type LaunchJobStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -49,9 +54,14 @@ const MAX_LOGS_PER_JOB = 500;
 
 const DEFAULT_JOB_LIMIT = 100;
 
-const LAUNCH_DB_RETRY_MS = 2_500;
+/**
+ * Persistence is bookkeeping. It must never prevent or delay live execution.
+ */
+const LAUNCH_PERSIST_RETRY_MS = 60_000;
 
-const RETRY_SLEEP_ARRAY = new Int32Array(new SharedArrayBuffer(4));
+const runtimeJobs = new Map<string, LaunchJob>();
+
+let persistenceTail: Promise<void> = Promise.resolve();
 
 function jsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
@@ -88,96 +98,59 @@ function clampLimit(
 
 function busyDelayMs(attempt: number): number {
   return Math.min(
-    350,
-    12 * 2 ** Math.min(attempt, 5) + Math.floor(Math.random() * 17),
+    1_000,
+    20 * 2 ** Math.min(attempt, 6) + Math.floor(Math.random() * 31),
   );
 }
 
-function sleepSync(delayMs: number): void {
-  Atomics.wait(RETRY_SLEEP_ARRAY, 0, 0, delayMs);
-}
+function persistedLaunchInput(input: PumpLaunchInput): PumpLaunchInput {
+  const { temporaryImagePath, ...persisted } = input;
 
-function launchDbOperation<T>(action: string, operation: () => T): T {
-  const startedAtMs = Date.now();
-
-  let attempt = 0;
-
-  while (true) {
-    try {
-      return dbMeasure.sync(
-        {
-          start: () => `${action} attempt=${attempt + 1}`,
-
-          end: (result: any) => ({
-            ok: result != null,
-          }),
-
-          catch: summarizeError,
-        },
-        operation,
-      );
-    } catch (error) {
-      if (!isSqliteBusyError(error)) {
-        throw error;
-      }
-
-      attempt++;
-
-      const elapsedMs = Date.now() - startedAtMs;
-
-      if (elapsedMs >= LAUNCH_DB_RETRY_MS) {
-        const wrapped = new Error(
-          `Launch storage remained busy after ${elapsedMs}ms. Please retry the launch.`,
-          {
-            cause: error,
-          },
-        );
-
-        Object.assign(wrapped, {
-          code: "SOLARD_LAUNCH_DB_BUSY",
-
-          attempts: attempt,
-        });
-
-        throw wrapped;
-      }
-
-      const delayMs = Math.min(
-        busyDelayMs(attempt),
-        LAUNCH_DB_RETRY_MS - elapsedMs,
-      );
-
-      if (attempt === 1 || attempt % 4 === 0) {
-        console.warn(
-          `[solard:launch-db] ${action} busy; retrying in ${delayMs}ms`,
-        );
-      }
-
-      sleepSync(delayMs);
-    }
-  }
-}
-
-export function initLaunchJobStore(): void {
-  /**
-   * sqlite-zod-orm creates the typed V2 tables from shared/db.ts.
-   * Kept for compatibility with existing callers.
-   */
-}
-
-export function launchJobStatus(
-  value: string | null | undefined,
-): LaunchJobStatus | null {
-  if (
-    value === "queued" ||
-    value === "running" ||
-    value === "succeeded" ||
-    value === "failed"
-  ) {
-    return value;
+  if (temporaryImagePath && persisted.imagePath === temporaryImagePath) {
+    persisted.imagePath = "[browser-upload]";
   }
 
-  return null;
+  return persisted;
+}
+
+function cloneJob(job: LaunchJob, includeLogs = true): LaunchJob {
+  return {
+    ...job,
+
+    input: {
+      ...job.input,
+    },
+
+    argv: [...job.argv],
+
+    logs: includeLogs
+      ? job.logs.map((entry) => ({
+          ...entry,
+        }))
+      : [],
+  };
+}
+
+function jobToRow(job: LaunchJob): LaunchJobDbRow {
+  return {
+    jobId: job.id,
+
+    kind: job.kind,
+
+    status: job.status,
+
+    inputJson: json(job.input),
+
+    argvJson: json(job.argv),
+
+    resultJson: job.result ? json(job.result) : null,
+
+    error: job.error ?? null,
+
+    createdAtMs: job.createdAtMs,
+
+    updatedAtMs: job.updatedAtMs,
+  };
 }
 
 function rowToJob(
@@ -222,111 +195,89 @@ function rowToJob(
   };
 }
 
-export function listLaunchJobLogs(
-  jobId: string,
-  limit = MAX_LOGS_PER_JOB,
-): LaunchJob["logs"] {
-  const rows = launchDbOperation(
-    `db.list_launch_logs job=${compactId(jobId)}`,
-    () =>
-      db.launchJobLogsV2
-        .select()
-        .where({
-          jobId,
-        })
-        .orderBy("atMs", "DESC")
-        .limit(clampLimit(limit, MAX_LOGS_PER_JOB))
-        .all() as LaunchJobLogDbRow[],
-  );
+async function persistWithRetry<T>(
+  action: string,
+  operation: () => T,
+): Promise<T> {
+  const startedAtMs = Date.now();
 
-  return rows.reverse().map((row) => ({
-    atMs: Number(row.atMs) || 0,
+  let attempt = 0;
 
-    label: row.label,
+  while (true) {
+    try {
+      return dbMeasure.sync(
+        {
+          start: () => `${action} attempt=${attempt + 1}`,
 
-    value: parseJson(row.valueJson, null),
-  }));
-}
+          end: (result: any) => ({
+            ok: result != null,
+          }),
 
-function persistedLaunchInput(input: PumpLaunchInput): PumpLaunchInput {
-  const { temporaryImagePath, ...persisted } = input;
+          catch: summarizeError,
+        },
+        operation,
+      );
+    } catch (error) {
+      if (!isSqliteBusyError(error)) {
+        throw error;
+      }
 
-  if (temporaryImagePath && persisted.imagePath === temporaryImagePath) {
-    persisted.imagePath = "[browser-upload]";
+      attempt++;
+
+      const elapsedMs = Date.now() - startedAtMs;
+
+      if (elapsedMs >= LAUNCH_PERSIST_RETRY_MS) {
+        throw Object.assign(
+          new Error(
+            `Launch history persistence timed out after ${elapsedMs}ms.`,
+            {
+              cause: error,
+            },
+          ),
+          {
+            code: "SOLARD_LAUNCH_HISTORY_BUSY",
+
+            attempts: attempt,
+          },
+        );
+      }
+
+      const delayMs = Math.min(
+        busyDelayMs(attempt),
+        LAUNCH_PERSIST_RETRY_MS - elapsedMs,
+      );
+
+      if (attempt === 1 || attempt % 8 === 0) {
+        console.warn(
+          `[solard:launch-history] ${action} busy; retrying asynchronously in ${delayMs}ms`,
+        );
+      }
+
+      await Bun.sleep(delayMs);
+    }
   }
-
-  return persisted;
 }
 
-function createJobRow(input: PumpLaunchInput): LaunchJobDbRow {
-  const now = Date.now();
-
-  const publicInput = persistedLaunchInput(input);
-
-  const row: LaunchJobDbRow = {
-    jobId: randomUUID(),
-
-    kind: "launch:pump",
-
-    status: "queued",
-
-    inputJson: json(publicInput),
-
-    argvJson: json(pumpLaunchArgsFromInput(publicInput)),
-
-    resultJson: null,
-
-    error: null,
-
-    createdAtMs: now,
-
-    updatedAtMs: now,
-  };
-
-  return launchDbOperation(
-    `db.insert_launch_job job=${compactId(row.jobId)}`,
-    () => db.launchJobsV2.insert(row) as LaunchJobDbRow,
-  );
+function enqueuePersistence(action: string, operation: () => unknown): void {
+  persistenceTail = persistenceTail
+    .catch(() => undefined)
+    .then(async () => {
+      await persistWithRetry(action, operation);
+    })
+    .catch((error) => {
+      /**
+       * Persistence failure is observable, but it never aborts or delays
+       * the live launch that owns this bookkeeping event.
+       */
+      console.error(`[solard:launch-history] ${action} failed`, error);
+    });
 }
 
-function getJobRow(jobId: string): LaunchJobDbRow | null {
-  return launchDbOperation(
-    `db.get_launch_job job=${compactId(jobId)}`,
-    () =>
-      (db.launchJobsV2
-        .select()
-        .where({
-          jobId,
-        })
-        .get() as LaunchJobDbRow | null) ?? null,
-  );
-}
+function persistJob(job: LaunchJob): void {
+  const row = jobToRow(cloneJob(job, false));
 
-function updateJob(
-  jobId: string,
-  patch: Partial<Omit<LaunchJobDbRow, "jobId" | "createdAtMs">>,
-): LaunchJobDbRow | null {
-  const existing = getJobRow(jobId);
-
-  if (!existing) {
-    return null;
-  }
-
-  const row: LaunchJobDbRow = {
-    ...existing,
-    ...patch,
-
-    jobId: existing.jobId,
-
-    kind: "launch:pump",
-
-    createdAtMs: existing.createdAtMs,
-
-    updatedAtMs: patch.updatedAtMs ?? Date.now(),
-  };
-
-  return launchDbOperation(
-    `db.upsert_launch_job job=${compactId(jobId)} status=${row.status}`,
+  enqueuePersistence(
+    `db.persist_launch_job job=${compactId(job.id)} status=${job.status}`,
     () =>
       db.launchJobsV2.upsert(row, {
         on: "jobId",
@@ -346,31 +297,173 @@ function updateJob(
 
           updatedAtMs: t.excluded("updatedAtMs"),
         }),
-      }) as LaunchJobDbRow,
+      }),
   );
 }
 
-function pushLog(jobId: string, label: string, value: unknown): void {
-  const atMs = Date.now();
-
+function persistLog(jobId: string, entry: LaunchJob["logs"][number]): void {
   const row: LaunchJobLogDbRow = {
     logId: randomUUID(),
 
     jobId,
-    atMs,
-    label,
 
-    valueJson: json(value),
+    atMs: entry.atMs,
+
+    label: entry.label,
+
+    valueJson: json(entry.value),
   };
 
-  launchDbOperation(
-    `db.insert_launch_log job=${compactId(jobId)}`,
-    () => db.launchJobLogsV2.insert(row) as LaunchJobLogDbRow,
+  enqueuePersistence(`db.persist_launch_log job=${compactId(jobId)}`, () =>
+    db.launchJobLogsV2.insert(row),
+  );
+}
+
+function updateRuntimeJob(
+  jobId: string,
+  patch: Partial<Pick<LaunchJob, "status" | "result" | "error">>,
+): LaunchJob | null {
+  const current = runtimeJobs.get(jobId);
+
+  if (!current) {
+    return null;
+  }
+
+  const next: LaunchJob = {
+    ...current,
+    ...patch,
+
+    updatedAtMs: Date.now(),
+  };
+
+  if (patch.error === undefined && current.error !== undefined) {
+    next.error = current.error;
+  }
+
+  runtimeJobs.set(jobId, next);
+
+  persistJob(next);
+
+  return next;
+}
+
+function pushLog(jobId: string, label: string, value: unknown): void {
+  const current = runtimeJobs.get(jobId);
+
+  if (!current) {
+    return;
+  }
+
+  const entry = {
+    atMs: Date.now(),
+
+    label,
+
+    value,
+  };
+
+  const logs = [...current.logs, entry].slice(-MAX_LOGS_PER_JOB);
+
+  runtimeJobs.set(jobId, {
+    ...current,
+
+    logs,
+
+    updatedAtMs: entry.atMs,
+  });
+
+  persistLog(jobId, entry);
+}
+
+function readWithoutWaiting<T>(
+  action: string,
+  operation: () => T,
+  fallback: T,
+): T {
+  try {
+    return dbMeasure.sync(
+      {
+        start: () => action,
+
+        end: (result: any) => ({
+          ok: result != null,
+        }),
+
+        catch: summarizeError,
+      },
+      operation,
+    );
+  } catch (error) {
+    if (isSqliteBusyError(error)) {
+      console.warn(
+        `[solard:launch-history] ${action} busy; serving in-memory jobs`,
+      );
+
+      return fallback;
+    }
+
+    console.error(
+      `[solard:launch-history] ${action} failed; serving in-memory jobs`,
+      error,
+    );
+
+    return fallback;
+  }
+}
+
+export function initLaunchJobStore(): void {
+  /**
+   * sqlite-zod-orm creates the typed V2 tables from shared/db.ts.
+   * Kept for compatibility with existing callers.
+   */
+}
+
+export function launchJobStatus(
+  value: string | null | undefined,
+): LaunchJobStatus | null {
+  if (
+    value === "queued" ||
+    value === "running" ||
+    value === "succeeded" ||
+    value === "failed"
+  ) {
+    return value;
+  }
+
+  return null;
+}
+
+export function listLaunchJobLogs(
+  jobId: string,
+  limit = MAX_LOGS_PER_JOB,
+): LaunchJob["logs"] {
+  const runtime = runtimeJobs.get(jobId);
+
+  if (runtime) {
+    return runtime.logs.slice(-clampLimit(limit, MAX_LOGS_PER_JOB));
+  }
+
+  const rows = readWithoutWaiting(
+    `db.list_launch_logs job=${compactId(jobId)}`,
+    () =>
+      db.launchJobLogsV2
+        .select()
+        .where({
+          jobId,
+        })
+        .orderBy("atMs", "DESC")
+        .limit(clampLimit(limit, MAX_LOGS_PER_JOB))
+        .all() as LaunchJobLogDbRow[],
+    [],
   );
 
-  updateJob(jobId, {
-    updatedAtMs: atMs,
-  });
+  return rows.reverse().map((row) => ({
+    atMs: Number(row.atMs) || 0,
+
+    label: row.label,
+
+    value: parseJson(row.valueJson, null),
+  }));
 }
 
 async function cleanupTemporaryLaunchImage(
@@ -398,34 +491,89 @@ async function cleanupTemporaryLaunchImage(
 }
 
 export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
-  const row = createJobRow(input);
+  const now = Date.now();
+
+  const publicInput = persistedLaunchInput(input);
+
+  const job: LaunchJob = {
+    id: randomUUID(),
+
+    kind: "launch:pump",
+
+    status: "queued",
+
+    createdAtMs: now,
+
+    updatedAtMs: now,
+
+    input: publicInput,
+
+    argv: pumpLaunchArgsFromInput(publicInput),
+
+    logs: [],
+  };
+
+  /**
+   * Acceptance is in-memory and immediate. Database availability is not part
+   * of the live-launch admission path.
+   */
+  runtimeJobs.set(job.id, job);
+
+  persistJob(job);
 
   queueMicrotask(() => {
     void (async () => {
+      updateRuntimeJob(job.id, {
+        status: "running",
+
+        error: undefined,
+      });
+
+      pushLog(job.id, "launch input", summarizeForMeasure(publicInput));
+
+      pushLog(job.id, "launch argv", job.argv);
+
       try {
-        updateJob(row.jobId, {
-          status: "running",
+        const argv = pumpLaunchArgsFromInput(input);
 
-          error: null,
-        });
+        const result = await indexerMeasure.measure(
+          {
+            start: () =>
+              `launch.pump.live job=${compactId(job.id)} creator=${compactId(input.creator)}`,
 
-        const publicInput = persistedLaunchInput(input);
+            end: (value: any) => ({
+              job: compactId(job.id),
 
-        pushLog(row.jobId, "launch input", summarizeForMeasure(publicInput));
+              mint: compactId(value?.token?.mint ?? value?.mint),
 
-        pushLog(row.jobId, "launch argv", pumpLaunchArgsFromInput(publicInput));
+              live: true,
+            }),
 
-        const result = await launchPumpTokenAction(input, {
-          report: (label, value) =>
-            pushLog(row.jobId, label, summarizeForMeasure(value)),
-        });
+            catch: summarizeError,
+          },
+          () =>
+            runPumpTokenLaunchFromArgs(argv, {
+              defaultSubmitMode: "after-deploy-processed",
 
-        updateJob(row.jobId, {
+              defaultDeploymentPriorityMicroLamports: 0,
+
+              defaultBuyerPriorityMicroLamports: 1_500_000,
+
+              defaultSlippageBps: 9_999,
+
+              persistOnLive: true,
+
+              report: (label, value) =>
+                pushLog(job.id, label, summarizeForMeasure(value)),
+            }),
+        );
+
+        updateRuntimeJob(job.id, {
           status: "succeeded",
 
-          resultJson: json(result),
+          result,
 
-          error: null,
+          error: undefined,
         });
       } catch (error) {
         const message =
@@ -433,47 +581,22 @@ export function startPumpLaunchJob(input: PumpLaunchInput): LaunchJob {
             ? (error.stack ?? error.message)
             : String(error);
 
-        try {
-          pushLog(row.jobId, "fatal", message);
-        } catch (logError) {
-          console.error(
-            "[solard:launch] failed to persist fatal log",
-            logError,
-          );
-        }
+        pushLog(job.id, "fatal", message);
 
-        try {
-          updateJob(row.jobId, {
-            status: "failed",
+        updateRuntimeJob(job.id, {
+          status: "failed",
 
-            error: message,
-          });
-        } catch (updateError) {
-          console.error(
-            "[solard:launch] failed to persist failed status",
-            updateError,
-          );
-        }
+          error: message,
+        });
       } finally {
         await cleanupTemporaryLaunchImage(input).catch((error) => {
-          try {
-            pushLog(
-              row.jobId,
-              "image cleanup failed",
-              summarizeForMeasure(error),
-            );
-          } catch (logError) {
-            console.error(
-              "[solard:launch] failed to persist image cleanup error",
-              logError,
-            );
-          }
+          pushLog(job.id, "image cleanup failed", summarizeForMeasure(error));
         });
       }
     })();
   });
 
-  return rowToJob(row);
+  return cloneJob(job);
 }
 
 export function listLaunchJobs(
@@ -483,7 +606,7 @@ export function listLaunchJobs(
 
   const status = launchJobStatus(options.status ?? null);
 
-  const rows = launchDbOperation(
+  const rows = readWithoutWaiting(
     `db.list_launch_jobs status=${status ?? "all"}`,
     () =>
       (status
@@ -500,15 +623,49 @@ export function listLaunchJobs(
             .orderBy("createdAtMs", "DESC")
             .limit(limit)
             .all()) as LaunchJobDbRow[],
+    [],
   );
 
-  return rows.map((row) =>
-    rowToJob(row, options.includeLogs ? listLaunchJobLogs(row.jobId) : []),
-  );
+  const byId = new Map<string, LaunchJob>();
+
+  for (const row of rows) {
+    byId.set(
+      row.jobId,
+      rowToJob(row, options.includeLogs ? listLaunchJobLogs(row.jobId) : []),
+    );
+  }
+
+  for (const job of runtimeJobs.values()) {
+    if (status && job.status !== status) {
+      continue;
+    }
+
+    byId.set(job.id, cloneJob(job, Boolean(options.includeLogs)));
+  }
+
+  return [...byId.values()]
+    .sort((left, right) => right.createdAtMs - left.createdAtMs)
+    .slice(0, limit);
 }
 
 export function getLaunchJob(id: string): LaunchJob | undefined {
-  const row = getJobRow(id);
+  const runtime = runtimeJobs.get(id);
+
+  if (runtime) {
+    return cloneJob(runtime);
+  }
+
+  const row = readWithoutWaiting<LaunchJobDbRow | null>(
+    `db.get_launch_job job=${compactId(id)}`,
+    () =>
+      (db.launchJobsV2
+        .select()
+        .where({
+          jobId: id,
+        })
+        .get() as LaunchJobDbRow | null) ?? null,
+    null,
+  );
 
   return row ? rowToJob(row, listLaunchJobLogs(row.jobId)) : undefined;
 }

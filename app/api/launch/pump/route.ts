@@ -9,7 +9,11 @@ import {
   readJson,
 } from "../../../../src/web/http.js";
 import { pumpLaunchInputFromRecord } from "../../../../src/solard/actions/index.js";
-import { startPumpLaunchJob } from "../../../../src/web/launch-jobs.js";
+import { authorizePumpLaunchJobLive } from "../../../../src/solard/actions/launches.js";
+import {
+  LAUNCH_JOB_RUNNER_VERSION,
+  startPumpLaunchJob,
+} from "../../../../src/solard/jobs/launch-job-store.js";
 
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 
@@ -205,6 +209,15 @@ export async function POST(request: Request): Promise<Response> {
 
     validateLaunchInput(input);
 
+    /**
+     * Non-enumerable internal capability. It is not accepted from request
+     * JSON/FormData and is not written into launch history.
+     *
+     * This also protects against any stale compatibility caller that still
+     * reaches launchPumpTokenAction().
+     */
+    authorizePumpLaunchJobLive(input);
+
     const job = startPumpLaunchJob(input);
 
     /**
@@ -219,6 +232,8 @@ export async function POST(request: Request): Promise<Response> {
         id: job.id,
 
         status: job.status,
+
+        runnerVersion: LAUNCH_JOB_RUNNER_VERSION,
       },
     });
   } catch (error) {

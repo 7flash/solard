@@ -218,10 +218,58 @@ function shortAddress(value: unknown, head = 4, tail = 4): string {
   return `${text.slice(0, head)}…${text.slice(-tail)}`;
 }
 
-function walletLabel(wallet: AnyRow): string {
-  const address = String(wallet.address ?? "");
+function walletPublicValue(wallet: AnyRow): string {
+  const nested = wallet.wallet;
 
-  return wallet.name ? `${wallet.name} — ${shortAddress(address)}` : address;
+  const account = wallet.account;
+
+  const candidates = [
+    wallet.address,
+    wallet.walletAddress,
+    wallet.publicKey,
+    wallet.pubkey,
+
+    typeof nested === "string" ? nested : null,
+
+    nested?.address,
+    nested?.walletAddress,
+    nested?.publicKey,
+    nested?.pubkey,
+
+    account?.address,
+    account?.publicKey,
+    account?.pubkey,
+  ];
+
+  return String(
+    candidates.find((candidate) => String(candidate ?? "").trim()) ?? "",
+  ).trim();
+}
+
+function walletIdentityValues(wallet: AnyRow): string[] {
+  const nested = wallet.wallet;
+
+  return [
+    walletPublicValue(wallet),
+
+    wallet.name,
+    wallet.walletName,
+    wallet.id,
+
+    typeof nested === "object" ? nested?.name : null,
+
+    typeof nested === "object" ? nested?.id : null,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+}
+
+function walletLabel(wallet: AnyRow): string {
+  const address = walletPublicValue(wallet);
+
+  const name = String(wallet.name ?? wallet.walletName ?? "").trim();
+
+  return name ? `${name} — ${shortAddress(address)}` : address;
 }
 
 function statusClass(status: unknown): string {
@@ -332,11 +380,20 @@ function LaunchRunSummary({ job }: { job: AnyRow | null }) {
       {fatal ? (
         <div className="launch-run-callout bad">
           <b>Run failed:</b>{" "}
-          {String(fatal.value ?? job.error ?? "Unknown error").slice(0, 420)}
+          {String(fatal.value ?? job.error ?? "Unknown error")
+            .replace(
+              /Pump launch requested live execution, but SOLARD_ENABLE_LIVE_TRADES=1 is not set\. Run dry-run first, then opt in explicitly\.?/i,
+              "Previous failed attempt: the old backend rejected it before metadata, signing, or broadcast. No transaction was sent.",
+            )
+            .slice(0, 420)}
         </div>
       ) : null}
 
-      {job.status === "running" ? (
+      {job.status === "queued" ? (
+        <div className="launch-run-callout warn">
+          Launch accepted. The background job is starting.
+        </div>
+      ) : job.status === "running" ? (
         <div className="launch-run-callout warn">
           Launch is running. Detailed execution events remain available in
           Activity.
@@ -383,6 +440,8 @@ async function refreshOverview(): Promise<void> {
     balances: overview.balances ?? [],
   };
 
+  normalizeSelectedWallets();
+
   state.lastLoadedAtMs = Date.now();
 }
 
@@ -423,8 +482,12 @@ async function runAction<T>(action: () => Promise<T>): Promise<T | undefined> {
       /database is locked|database is busy|sqlite_busy|sqlite_locked/i.test(
         message,
       )
-        ? "Launch storage remained busy after automatic retries. Press Start launch again."
-        : message;
+        ? "The request reached an outdated process that still blocks on SQLite. Restart the Solard web process, then submit once."
+        : /SOLARD_ENABLE_LIVE_TRADES|obsolete global live-trade gate/i.test(
+              message,
+            )
+          ? "The request reached an outdated Launch runner. Restart the Solard web process; no transaction was sent."
+          : message;
 
     return undefined;
   } finally {
@@ -453,7 +516,7 @@ function scheduleJobsPoll(): void {
 
   const active =
     job &&
-    ["running", "planned", "broadcast", "starting"].includes(
+    ["queued", "running", "planned", "broadcast", "starting"].includes(
       String(job.status ?? ""),
     );
 
@@ -508,6 +571,8 @@ async function loadLaunchPage(): Promise<void> {
   update();
   scheduleJobsPoll();
 }
+
+const EXPECTED_LAUNCH_RUNNER_VERSION = "v50-direct-live";
 
 const BUYER_RESERVE_SOL = "0.02";
 
@@ -756,7 +821,7 @@ function exportFollowerGroup(
 
     sourceGroup: group.sourceGroup,
 
-    wallets: group.wallets.map((wallet) => wallet.wallet),
+    wallets: group.wallets.map((wallet) => walletAddress(wallet.wallet)),
 
     sender: group.sender,
 
@@ -811,7 +876,7 @@ function launchConfig(): LaunchConfigV1 {
     },
 
     deployment: {
-      creator: launchDraft.creator,
+      creator: walletAddress(launchDraft.creator),
 
       creatorBuySol: launchDraft.creatorBuySol,
 
@@ -1003,11 +1068,19 @@ function applyLaunchConfig(raw: unknown): void {
 
   followerGroups = followers.map(importedFollowerGroup);
 
+  normalizeSelectedWallets();
+
   clearSelectedImage();
 
   state.error = null;
 
-  launchConfigNotice = `Imported ${followerGroups.length} follower ${followerGroups.length === 1 ? "set" : "sets"}. Choose the token image before launching.`;
+  const importedWalletCount = followerGroups.reduce(
+    (count, group) =>
+      count + group.wallets.filter((wallet) => Boolean(wallet.wallet)).length,
+    0,
+  );
+
+  launchConfigNotice = `Imported ${followerGroups.length} follower ${followerGroups.length === 1 ? "set" : "sets"} and restored ${importedWalletCount} wallet ${importedWalletCount === 1 ? "selection" : "selections"}. Choose the token image before launching.`;
 
   update();
 }
@@ -1116,6 +1189,8 @@ function walletReference(value: unknown): string {
 
   const nested = row.wallet;
 
+  const account = row.account;
+
   const candidates = [
     row.walletAddress,
     row.address,
@@ -1124,14 +1199,20 @@ function walletReference(value: unknown): string {
     row.walletId,
     row.walletName,
     row.name,
+    row.id,
 
     typeof nested === "string" ? nested : null,
 
     nested?.address,
+    nested?.walletAddress,
     nested?.publicKey,
     nested?.pubkey,
     nested?.name,
     nested?.id,
+
+    account?.address,
+    account?.publicKey,
+    account?.pubkey,
   ];
 
   return String(
@@ -1148,18 +1229,9 @@ function walletByReference(reference: string): AnyRow | null {
 
   return (
     wallets().find((wallet) =>
-      [
-        wallet.address,
-        wallet.name,
-        wallet.id,
-        wallet.publicKey,
-        wallet.pubkey,
-      ].some(
+      walletIdentityValues(wallet).some(
         (candidate) =>
-          String(candidate ?? "")
-            .replace(/^@/, "")
-            .trim()
-            .toLowerCase() === target,
+          candidate.replace(/^@/, "").trim().toLowerCase() === target,
       ),
     ) ?? null
   );
@@ -1174,11 +1246,41 @@ function walletAddress(value: unknown): string {
 
   const resolved = walletByReference(reference);
 
-  return String(resolved?.address ?? reference).trim();
+  return (
+    resolved ? walletPublicValue(resolved) || reference : reference
+  ).trim();
 }
 
 function walletByAddress(address: string): AnyRow | null {
   return walletByReference(address);
+}
+
+function normalizeSelectedWallets(): void {
+  const creator = walletAddress(launchDraft.creator);
+
+  if (creator !== launchDraft.creator) {
+    launchDraft = {
+      ...launchDraft,
+
+      creator,
+    };
+  }
+
+  followerGroups = followerGroups.map((group) => ({
+    ...group,
+
+    wallets: group.wallets.map((wallet) => {
+      const canonical = walletAddress(wallet.wallet);
+
+      return canonical === wallet.wallet
+        ? wallet
+        : {
+            ...wallet,
+
+            wallet: canonical,
+          };
+    }),
+  }));
 }
 
 function displayWallet(address: string): string {
@@ -1519,7 +1621,7 @@ function followerPlanPayload(): AnyRow[] {
     );
 
     for (const wallet of group.wallets) {
-      const address = wallet.wallet.trim();
+      const address = walletAddress(wallet.wallet).trim();
 
       if (!address) {
         continue;
@@ -1630,21 +1732,35 @@ function onImageSelected(event: Event): void {
 }
 
 function walletOptions(selected: string) {
-  const known = selected ? walletByAddress(selected) : null;
+  const selectedValue = walletAddress(selected);
+
+  const known = selectedValue ? walletByReference(selectedValue) : null;
 
   return (
     <>
-      <option value="">Select wallet…</option>
+      <option value="" selected={!selectedValue}>
+        Select wallet…
+      </option>
 
-      {selected && !known ? (
-        <option value={selected}>Unlisted · {displayWallet(selected)}</option>
+      {selectedValue && !known ? (
+        <option value={selectedValue} selected>
+          Unlisted · {displayWallet(selectedValue)}
+        </option>
       ) : null}
 
-      {wallets().map((wallet) => (
-        <option key={wallet.address} value={wallet.address}>
-          {walletLabel(wallet)}
-        </option>
-      ))}
+      {wallets().map((wallet) => {
+        const value = walletPublicValue(wallet);
+
+        if (!value) {
+          return null;
+        }
+
+        return (
+          <option key={value} value={value} selected={value === selectedValue}>
+            {walletLabel(wallet)}
+          </option>
+        );
+      })}
     </>
   );
 }
@@ -1865,11 +1981,12 @@ function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
                     </div>
                   ) : (
                     <select
-                      value={wallet.wallet}
+                      key={`${wallet.id}:${walletAddress(wallet.wallet)}:${wallets().length}`}
+                      value={walletAddress(wallet.wallet)}
                       aria-label={`${group.name} wallet`}
                       onInput={(event: any) =>
                         updateFollowerWallet(group.id, wallet.id, {
-                          wallet: event.currentTarget.value,
+                          wallet: walletAddress(event.currentTarget.value),
                         })
                       }
                     >
@@ -2166,15 +2283,68 @@ function LaunchBuilder() {
 
           const started = await api<{
             id: string;
+            status?: string;
+            runnerVersion?: string;
           }>("/api/launch/pump", {
             method: "POST",
 
             body,
           });
 
+          if (started.runnerVersion !== EXPECTED_LAUNCH_RUNNER_VERSION) {
+            throw new Error(
+              `The server is still running old Launch code (${started.runnerVersion ?? "no runner version"}). Restart the Solard web process before submitting again. This request was not accepted by the current runner.`,
+            );
+          }
+
+          const now = Date.now();
+
+          const optimisticJob: AnyRow = {
+            id: started.id,
+
+            kind: "launch:pump",
+
+            status: started.status ?? "queued",
+
+            createdAtMs: now,
+
+            updatedAtMs: now,
+
+            input: {
+              name: tokenName,
+
+              symbol: tokenSymbol,
+
+              creator: launchDraft.creator,
+            },
+
+            logs: [],
+          };
+
           state.selectedJobId = started.id;
 
-          await refreshJobs();
+          state.selectedJob = optimisticJob;
+
+          state.jobs = [
+            optimisticJob,
+
+            ...state.jobs.filter((job) => String(job.id ?? "") !== started.id),
+          ];
+
+          launchConfigNotice =
+            "Launch accepted. Preparing metadata and transactions now.";
+
+          update();
+          scheduleJobsPoll();
+
+          void refreshJobs()
+            .then(() => update())
+            .catch((error) =>
+              console.warn(
+                "[solard:launch] immediate job refresh failed",
+                error,
+              ),
+            );
         });
       }}
     >
@@ -2213,7 +2383,12 @@ function LaunchBuilder() {
             </button>
           </div>
 
-          <span className="launch-live-badge">Live execution</span>
+          <span
+            className="launch-live-badge"
+            title="Expected backend Launch runner"
+          >
+            Live · {EXPECTED_LAUNCH_RUNNER_VERSION}
+          </span>
 
           <button type="submit" className="primary-large" disabled={state.busy}>
             {state.busy ? "Starting…" : "Start launch"}
@@ -2445,32 +2620,47 @@ function LaunchBuilder() {
               <span>Deployer wallet</span>
 
               <select
+                key={`launch-creator:${walletAddress(launchDraft.creator)}:${deployerWallets.length}`}
                 name="creator"
                 required
-                value={launchDraft.creator}
+                value={walletAddress(launchDraft.creator)}
                 onInput={(event: any) =>
                   mutateLaunchDraft({
-                    creator: event.currentTarget.value,
+                    creator: walletAddress(event.currentTarget.value),
                   })
                 }
               >
                 <option value="">Select deployer…</option>
 
-                {launchDraft.creator &&
+                {walletAddress(launchDraft.creator) &&
                 !deployerWallets.some(
                   (wallet) =>
-                    String(wallet.address ?? "") === launchDraft.creator,
+                    walletPublicValue(wallet) ===
+                    walletAddress(launchDraft.creator),
                 ) ? (
-                  <option value={launchDraft.creator}>
-                    Unlisted · {displayWallet(launchDraft.creator)}
+                  <option value={walletAddress(launchDraft.creator)} selected>
+                    Unlisted ·{" "}
+                    {displayWallet(walletAddress(launchDraft.creator))}
                   </option>
                 ) : null}
 
-                {deployerWallets.map((wallet) => (
-                  <option key={wallet.address} value={wallet.address}>
-                    {walletLabel(wallet)}
-                  </option>
-                ))}
+                {deployerWallets.map((wallet) => {
+                  const value = walletPublicValue(wallet);
+
+                  if (!value) {
+                    return null;
+                  }
+
+                  return (
+                    <option
+                      key={value}
+                      value={value}
+                      selected={value === walletAddress(launchDraft.creator)}
+                    >
+                      {walletLabel(wallet)}
+                    </option>
+                  );
+                })}
               </select>
             </label>
 
