@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { serve } from "tradjs";
 import { isSqliteBusyError, upsertProcessStatus } from "../../../shared/db.js";
 import {
   compactId,
@@ -6,6 +7,8 @@ import {
   processMeasure,
   summarizeError,
 } from "../../../shared/measure.js";
+
+let serverHandle;
 
 const NAME = "solard-server-worker";
 
@@ -101,6 +104,8 @@ async function stop(signal: string): Promise<void> {
 
   stopping = true;
 
+  serverHandler?.stop(true);
+
   await sendHeartbeat("stopped", signal).catch(() => undefined);
 }
 
@@ -117,6 +122,8 @@ export async function runServerWorker(): Promise<void> {
     },
     async () => {
       await sendHeartbeat("starting");
+
+      serverHandle = await serve();
 
       const timer = setInterval(() => {
         void sendHeartbeat("running").catch((error) => {

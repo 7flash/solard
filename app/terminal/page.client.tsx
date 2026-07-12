@@ -101,6 +101,10 @@ type PageState = {
 
   lastPollAtMs: number | null;
   lastRows: number;
+
+  pendingRows: PumpFeedRow[] | null;
+  pendingNewRows: number;
+
   filter: string;
   hideMayhem: boolean;
   hideUsdc: boolean;
@@ -150,6 +154,10 @@ const state: PageState = {
 
   lastPollAtMs: null,
   lastRows: 0,
+
+  pendingRows: null,
+  pendingNewRows: 0,
+
   filter: storageGet("solwal:pump-feed-filter", ""),
   hideMayhem: storageFlag("solwal:pump-hide-mayhem"),
   hideUsdc: storageFlag("solwal:pump-hide-usdc"),
@@ -532,8 +540,9 @@ function mayhemFlag(row: PumpFeedRow): boolean | null {
 
 function isMayhemKnown(row: PumpFeedRow): boolean {
   return (
+    mayhemFlag(row) === true ||
     Number((row as any).mayhemCheckedAtMs ?? row.raw?.mayhemCheckedAtMs ?? 0) >
-      0 || mayhemFlag(row) != null
+      0
   );
 }
 
@@ -607,7 +616,7 @@ function previousSmaFor(row: PumpFeedRow, window: MetricWindow): number | null {
   return numberValue((row as any)[`previousSma${window}`]);
 }
 
-function percentChange(
+function amountChange(
   current: number | null,
   previous: number | null,
 ): number | null {
@@ -615,15 +624,54 @@ function percentChange(
     return null;
   }
 
-  if (previous === 0) {
-    if (current === 0) {
-      return 0;
-    }
+  return current - previous;
+}
 
-    return current > 0 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
-  }
+const SMA_DELTA_MIN_USD = 3_000;
 
-  return ((current - previous) / Math.abs(previous)) * 100;
+const WINDOW_DURATION_MS: Record<MetricWindow, number> = {
+  "1m": 60_000,
+
+  "5m": 5 * 60_000,
+
+  "15m": 15 * 60_000,
+};
+
+function dataCoverageStartedAt(row: PumpFeedRow): number | null {
+  const candidates = [
+    numberValue((row as any).dataCoverageStartedAtMs),
+
+    numberValue((row as any).firstRecordedTradeAtMs),
+
+    numberValue(row.createdAtMs),
+
+    numberValue((row as any).observedAtMs),
+  ].filter(
+    (value): value is number =>
+      value != null && Number.isFinite(value) && value > 0,
+  );
+
+  return candidates.length ? Math.max(...candidates) : null;
+}
+
+function hasRecordedCoverage(row: PumpFeedRow, requiredMs: number): boolean {
+  const startedAtMs = dataCoverageStartedAt(row);
+
+  return startedAtMs != null && Date.now() - startedAtMs >= requiredMs;
+}
+
+/**
+ * Volume, SMA, and transaction deltas compare two equal-length windows.
+ */
+function metricDeltaReady(row: PumpFeedRow, window: MetricWindow): boolean {
+  return hasRecordedCoverage(row, WINDOW_DURATION_MS[window] * 2);
+}
+
+/**
+ * Holder deltas compare now with one historical point.
+ */
+function holderDeltaReady(row: PumpFeedRow, window: MetricWindow): boolean {
+  return hasRecordedCoverage(row, WINDOW_DURATION_MS[window]);
 }
 
 function metricDelta(
@@ -631,21 +679,25 @@ function metricDelta(
   metric: WindowMetric,
   window: MetricWindow,
 ): number | null {
+  if (!metricDeltaReady(row, window)) {
+    return null;
+  }
+
   if (metric === "volume") {
-    return percentChange(
-      volumeFor(row, window),
-      previousVolumeFor(row, window),
-    );
+    return amountChange(volumeFor(row, window), previousVolumeFor(row, window));
   }
 
   if (metric === "trades") {
-    return percentChange(
-      tradesFor(row, window),
-      previousTradesFor(row, window),
-    );
+    return amountChange(tradesFor(row, window), previousTradesFor(row, window));
   }
 
-  return percentChange(smaFor(row, window), previousSmaFor(row, window));
+  const delta = amountChange(smaFor(row, window), previousSmaFor(row, window));
+
+  if (delta == null || Math.abs(delta) < SMA_DELTA_MIN_USD) {
+    return null;
+  }
+
+  return delta;
 }
 
 function holderCount(
@@ -656,28 +708,58 @@ function holderCount(
 }
 
 function holderDelta(row: PumpFeedRow, window: MetricWindow): number | null {
+  if (!holderDeltaReady(row, window)) {
+    return null;
+  }
+
   const point =
     window === "1m" ? "1mAgo" : window === "5m" ? "5mAgo" : "15mAgo";
 
-  return percentChange(holderCount(row, "Now"), holderCount(row, point));
+  return amountChange(holderCount(row, "Now"), holderCount(row, point));
 }
 
-function formatDelta(value: number | null): string {
-  if (value == null) {
+type DeltaFormat = "volume" | "marketCap" | "count";
+
+function signedPrefix(value: number): string {
+  return value > 0 ? "+" : value < 0 ? "−" : "";
+}
+
+function formatCountDelta(value: number): string {
+  return `${signedPrefix(value)}${Math.abs(Math.round(value)).toLocaleString(
+    "en-US",
+  )}`;
+}
+
+function formatMarketCapDelta(value: number): string {
+  if (value === 0) {
+    return "$0";
+  }
+
+  return `${signedPrefix(value)}${formatMcap(Math.abs(value))}`;
+}
+
+function formatVolumeDelta(value: number): string {
+  if (value === 0) {
+    return "0 SOL";
+  }
+
+  return `${signedPrefix(value)}${formatVolumeSol(Math.abs(value))}`;
+}
+
+function formatDelta(value: number | null, format: DeltaFormat): string {
+  if (value == null || !Number.isFinite(value)) {
     return "—";
   }
 
-  if (value === Number.POSITIVE_INFINITY) {
-    return "new";
+  if (format === "volume") {
+    return formatVolumeDelta(value);
   }
 
-  if (value === Number.NEGATIVE_INFINITY) {
-    return "−∞";
+  if (format === "marketCap") {
+    return formatMarketCapDelta(value);
   }
 
-  const sign = value > 0 ? "+" : "";
-
-  return `${sign}${value.toFixed(Math.abs(value) >= 100 ? 0 : 1)}%`;
+  return formatCountDelta(value);
 }
 
 function deltaTone(value: number | null): string {
@@ -696,12 +778,34 @@ function deltaTone(value: number | null): string {
   return "neutral";
 }
 
+function marketCapExtrema(row: PumpFeedRow): {
+  ath: number | null;
+  atl: number | null;
+} {
+  const values = [
+    numberValue((row as any).athMarketCapUsd),
+
+    numberValue((row as any).atlMarketCapUsd),
+
+    latestMcap(row),
+  ].filter(
+    (value): value is number =>
+      value != null && Number.isFinite(value) && value > 0,
+  );
+
+  return {
+    ath: values.length ? Math.max(...values) : null,
+
+    atl: values.length ? Math.min(...values) : null,
+  };
+}
+
 function athMcap(row: PumpFeedRow): number | null {
-  return numberValue((row as any).athMarketCapUsd);
+  return marketCapExtrema(row).ath;
 }
 
 function atlMcap(row: PumpFeedRow): number | null {
-  return numberValue((row as any).atlMarketCapUsd);
+  return marketCapExtrema(row).atl;
 }
 
 function exactSortBase(): SortBase {
@@ -749,7 +853,9 @@ function sortValue(row: PumpFeedRow): number {
     }
 
     if (base === `volumeDelta${window}`) {
-      return metricDelta(row, "volume", window) ?? -Infinity;
+      const delta = metricDelta(row, "volume", window);
+
+      return delta == null || delta === 0 ? Number.NaN : delta;
     }
 
     if (base === `sma${window}`) {
@@ -757,7 +863,9 @@ function sortValue(row: PumpFeedRow): number {
     }
 
     if (base === `smaDelta${window}`) {
-      return metricDelta(row, "sma", window) ?? -Infinity;
+      const delta = metricDelta(row, "sma", window);
+
+      return delta == null || delta === 0 ? Number.NaN : delta;
     }
 
     if (base === `trades${window}`) {
@@ -765,11 +873,15 @@ function sortValue(row: PumpFeedRow): number {
     }
 
     if (base === `tradesDelta${window}`) {
-      return metricDelta(row, "trades", window) ?? -Infinity;
+      const delta = metricDelta(row, "trades", window);
+
+      return delta == null || delta === 0 ? Number.NaN : delta;
     }
 
     if (base === `holdersDelta${window}`) {
-      return holderDelta(row, window) ?? -Infinity;
+      const delta = holderDelta(row, window);
+
+      return delta == null || delta === 0 ? Number.NaN : delta;
     }
   }
 
@@ -781,10 +893,89 @@ function visibleRows(): PumpFeedRow[] {
     if (isPinned(a) !== isPinned(b)) return isPinned(a) ? -1 : 1;
     const dir = state.sort.endsWith("-asc") ? 1 : -1;
     const av = sortValue(a);
+
     const bv = sortValue(b);
-    if (av !== bv) return (av - bv) * dir;
+
+    const aMissing = !Number.isFinite(av);
+
+    const bMissing = !Number.isFinite(bv);
+
+    if (aMissing !== bMissing) {
+      return aMissing ? 1 : -1;
+    }
+
+    if (!aMissing && av !== bv) {
+      return (av - bv) * dir;
+    }
+
     return (createdTime(b) ?? 0) - (createdTime(a) ?? 0);
   });
+}
+
+function tableScroller(): HTMLElement | null {
+  return document.querySelector(".terminal-table-scroll");
+}
+
+function tableAwayFromTop(): boolean {
+  return (tableScroller()?.scrollTop ?? 0) > 24;
+}
+
+function newRowCount(
+  current: readonly PumpFeedRow[],
+  incoming: readonly PumpFeedRow[],
+): number {
+  const currentKeys = new Set(current.map(rowKey));
+
+  return incoming.reduce(
+    (count, row) => (currentKeys.has(rowKey(row)) ? count : count + 1),
+    0,
+  );
+}
+
+function updateVisibleRowsWithoutReorder(
+  current: readonly PumpFeedRow[],
+  incoming: readonly PumpFeedRow[],
+): PumpFeedRow[] {
+  const incomingByKey = new Map(incoming.map((row) => [rowKey(row), row]));
+
+  return current.map((row) => incomingByKey.get(rowKey(row)) ?? row);
+}
+
+function commitPendingRows(): void {
+  if (!state.pendingRows) {
+    return;
+  }
+
+  state.rows = state.pendingRows;
+
+  state.pendingRows = null;
+
+  state.pendingNewRows = 0;
+
+  state.lastRows = state.rows.length;
+
+  rerender();
+}
+
+function handleTableScroll(element: HTMLElement): void {
+  if (element.scrollTop <= 24 && state.pendingRows) {
+    commitPendingRows();
+  }
+}
+
+function revealPendingRows(): void {
+  const scroller = tableScroller();
+
+  if (scroller && scroller.scrollTop > 24) {
+    scroller.scrollTo({
+      top: 0,
+      behavior: "smooth",
+    });
+
+    return;
+  }
+
+  commitPendingRows();
 }
 
 function selectedRow(rows: PumpFeedRow[]): PumpFeedRow | null {
@@ -1006,9 +1197,27 @@ async function reloadFeed(
       },
     );
 
-    state.rows = payload.rows ?? [];
+    const incomingRows = payload.rows ?? [];
+
+    if (state.rows.length && tableAwayFromTop()) {
+      state.pendingRows = incomingRows;
+
+      state.pendingNewRows = newRowCount(state.rows, incomingRows);
+
+      state.rows = updateVisibleRowsWithoutReorder(state.rows, incomingRows);
+
+      state.lastRows = incomingRows.length;
+    } else {
+      state.rows = incomingRows;
+
+      state.pendingRows = null;
+
+      state.pendingNewRows = 0;
+
+      state.lastRows = state.rows.length;
+    }
+
     state.feedMeta = payload.meta ?? null;
-    state.lastRows = state.rows.length;
     state.lastPollAtMs = Date.now();
     if (payload.health) state.health = payload.health;
     state.status = "live";
@@ -1093,6 +1302,10 @@ async function resetFeed(): Promise<void> {
     );
 
     state.rows = state.rows.filter((row) => isPinned(row));
+
+    state.pendingRows = null;
+
+    state.pendingNewRows = 0;
 
     if (
       state.selectedKey &&
@@ -1714,7 +1927,7 @@ function WindowSortHeader({
             key={`delta:${window}`}
             base={`${prefix}Delta${window}` as SortBase}
             label={`Δ${window.replace("m", "")}`}
-            title={`Sort by ${label} percentage change versus the previous ${window} window`}
+            title={`Sort by signed ${label} amount change after ${window === "1m" ? "2 minutes" : window === "5m" ? "10 minutes" : "30 minutes"} of recorded coverage: descending shows increases, ascending shows decreases${prefix === "sma" ? "; moves below $3K are ignored" : ""}`}
           />
         ))}
       </div>
@@ -1781,7 +1994,7 @@ function HolderSortHeader() {
             key={window}
             base={`holdersDelta${window}` as SortBase}
             label={`Δ${window.replace("m", "")}`}
-            title={`Sort by observed holder change during the last ${window}`}
+            title={`Sort by signed observed-holder count change after one complete ${window} interval: descending shows gains, ascending shows losses`}
           />
         ))}
       </div>
@@ -1818,6 +2031,7 @@ function MetricStack({
     label: string;
     value: string;
     delta?: number | null;
+    deltaFormat?: DeltaFormat;
   }>;
 }) {
   return (
@@ -1832,9 +2046,17 @@ function MetricStack({
             {"delta" in item ? (
               <em
                 className={`terminal-delta ${deltaTone(item.delta ?? null)}`}
-                title="Change versus the previous equal-length window"
+                title={
+                  item.delta == null
+                    ? "Waiting for complete recorded comparison history"
+                    : "Signed amount change versus the previous equal-length window"
+                }
               >
-                {formatDelta(item.delta ?? null)}
+                {formatDelta(
+                  item.delta ?? null,
+
+                  item.deltaFormat ?? "count",
+                )}
               </em>
             ) : null}
           </span>
@@ -1869,36 +2091,6 @@ function quoteLabel(row: PumpFeedRow): string {
   }
 
   return short(value, 4, 3);
-}
-
-function TokenFlags({ row }: { row: PumpFeedRow }) {
-  const known = isMayhemKnown(row);
-
-  const mayhem = isMayhem(row);
-
-  return (
-    <span className="terminal-token-flags">
-      <span
-        className={mayhem ? "bad" : known ? "ok" : "pending"}
-        title={
-          mayhem
-            ? "Mayhem token"
-            : known
-              ? "Verified non-Mayhem"
-              : "Mayhem status checking"
-        }
-      >
-        {mayhem ? "M" : known ? "M−" : "M?"}
-      </span>
-
-      <span
-        className={isUsdc(row) ? "warn" : ""}
-        title={`Quote asset: ${quoteLabel(row)}`}
-      >
-        {quoteLabel(row)}
-      </span>
-    </span>
-  );
 }
 
 function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
@@ -1940,8 +2132,6 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
               </b>
 
               <small>{row.name || "unnamed"}</small>
-
-              <TokenFlags row={row} />
             </span>
           </a>
         ) : (
@@ -1952,8 +2142,6 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
               <b>{row.symbol || row.name || "token"}</b>
 
               <small>{row.name || "unnamed"}</small>
-
-              <TokenFlags row={row} />
             </span>
           </div>
         )}
@@ -1986,18 +2174,24 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
               value: formatVolumeSol(volumeFor(row, "1m")),
 
               delta: metricDelta(row, "volume", "1m"),
+
+              deltaFormat: "volume",
             },
             {
               label: "5m",
               value: formatVolumeSol(volumeFor(row, "5m")),
 
               delta: metricDelta(row, "volume", "5m"),
+
+              deltaFormat: "volume",
             },
             {
               label: "15m",
               value: formatVolumeSol(volumeFor(row, "15m")),
 
               delta: metricDelta(row, "volume", "15m"),
+
+              deltaFormat: "volume",
             },
           ]}
         />
@@ -2011,18 +2205,24 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
               value: formatMcap(smaFor(row, "1m")),
 
               delta: metricDelta(row, "sma", "1m"),
+
+              deltaFormat: "marketCap",
             },
             {
               label: "5m",
               value: formatMcap(smaFor(row, "5m")),
 
               delta: metricDelta(row, "sma", "5m"),
+
+              deltaFormat: "marketCap",
             },
             {
               label: "15m",
               value: formatMcap(smaFor(row, "15m")),
 
               delta: metricDelta(row, "sma", "15m"),
+
+              deltaFormat: "marketCap",
             },
           ]}
         />
@@ -2036,18 +2236,24 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
               value: String(tradesFor(row, "1m")),
 
               delta: metricDelta(row, "trades", "1m"),
+
+              deltaFormat: "count",
             },
             {
               label: "5m",
               value: String(tradesFor(row, "5m")),
 
               delta: metricDelta(row, "trades", "5m"),
+
+              deltaFormat: "count",
             },
             {
               label: "15m",
               value: String(tradesFor(row, "15m")),
 
               delta: metricDelta(row, "trades", "15m"),
+
+              deltaFormat: "count",
             },
           ]}
         />
@@ -2061,18 +2267,24 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
               value: String(holderCount(row, "Now")),
 
               delta: holderDelta(row, "1m"),
+
+              deltaFormat: "count",
             },
             {
               label: "5m",
               value: String(holderCount(row, "5mAgo")),
 
               delta: holderDelta(row, "5m"),
+
+              deltaFormat: "count",
             },
             {
               label: "15m",
               value: String(holderCount(row, "15mAgo")),
 
               delta: holderDelta(row, "15m"),
+
+              deltaFormat: "count",
             },
           ]}
         />
@@ -2179,19 +2391,19 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
               <em
                 className={`terminal-delta ${deltaTone(metricDelta(row, "volume", window))}`}
               >
-                {formatDelta(metricDelta(row, "volume", window))}
+                {formatDelta(metricDelta(row, "volume", window), "volume")}
               </em>
               {" · "}S {formatMcap(smaFor(row, window))}{" "}
               <em
                 className={`terminal-delta ${deltaTone(metricDelta(row, "sma", window))}`}
               >
-                {formatDelta(metricDelta(row, "sma", window))}
+                {formatDelta(metricDelta(row, "sma", window), "marketCap")}
               </em>
               {" · "}T {tradesFor(row, window)}{" "}
               <em
                 className={`terminal-delta ${deltaTone(metricDelta(row, "trades", window))}`}
               >
-                {formatDelta(metricDelta(row, "trades", window))}
+                {formatDelta(metricDelta(row, "trades", window), "count")}
               </em>
             </b>
           </div>
@@ -2206,19 +2418,19 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
             <em
               className={`terminal-delta ${deltaTone(holderDelta(row, "1m"))}`}
             >
-              {formatDelta(holderDelta(row, "1m"))}
+              {formatDelta(holderDelta(row, "1m"), "count")}
             </em>
             {" · Δ5 "}
             <em
               className={`terminal-delta ${deltaTone(holderDelta(row, "5m"))}`}
             >
-              {formatDelta(holderDelta(row, "5m"))}
+              {formatDelta(holderDelta(row, "5m"), "count")}
             </em>
             {" · Δ15 "}
             <em
               className={`terminal-delta ${deltaTone(holderDelta(row, "15m"))}`}
             >
-              {formatDelta(holderDelta(row, "15m"))}
+              {formatDelta(holderDelta(row, "15m"), "count")}
             </em>
           </b>
         </div>
@@ -2233,10 +2445,33 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
         </div>
 
         <div>
+          <span>Recorded coverage</span>
+
+          <b>{displayAge(dataCoverageStartedAt(row))}</b>
+        </div>
+
+        <div>
           <span>Mayhem</span>
 
           <b>
             {isMayhemKnown(row) ? (isMayhem(row) ? "yes" : "no") : "checking"}
+          </b>
+        </div>
+
+        <div>
+          <span>Mayhem check</span>
+
+          <b>
+            {Number(
+              (row as any).mayhemCheckedAtMs ?? row.raw?.mayhemCheckedAtMs ?? 0,
+            ) > 0
+              ? displayAge(
+                  Number(
+                    (row as any).mayhemCheckedAtMs ??
+                      row.raw?.mayhemCheckedAtMs,
+                  ),
+                )
+              : "pending"}
           </b>
         </div>
 
@@ -2958,13 +3193,6 @@ function TerminalPage() {
         >
           Hide USDC
         </button>
-        <button
-          type="button"
-          className={`terminal-sort-button ${state.sort.startsWith("created") ? "active" : ""}`}
-          onClick={() => setSort("created")}
-        >
-          Created {sortMark("created")}
-        </button>
       </section>
 
       {(state.health as AnyRow | null)?.status !== "ok" ? (
@@ -2984,7 +3212,24 @@ function TerminalPage() {
       ) : null}
 
       <section className="terminal-table-card">
-        <div className="terminal-table-scroll">
+        {state.pendingRows ? (
+          <button
+            type="button"
+            className="terminal-feed-update"
+            onClick={revealPendingRows}
+          >
+            {state.pendingNewRows > 0
+              ? `${state.pendingNewRows} new ${state.pendingNewRows === 1 ? "token" : "tokens"}`
+              : "Latest order ready"}
+            {" · "}
+            show latest
+          </button>
+        ) : null}
+
+        <div
+          className="terminal-table-scroll"
+          onScroll={(event: any) => handleTableScroll(event.currentTarget)}
+        >
           <table className="terminal-table terminal-market-table">
             <thead>
               <tr>

@@ -164,8 +164,8 @@ export async function GET(request: Request): Promise<Response> {
 
             reads: [
               "terminalTokensLive",
-              "tokenPriceWindowsV6",
-              "tokenMarketExtremaV3",
+              "tokenPriceWindowsV7",
+              "tokenMarketExtremaV4",
               "tokenHolderWindowsV1",
             ],
 

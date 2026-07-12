@@ -35,7 +35,7 @@
     "measure-fn": "5",
     "pinata": "^2.5.6",
     "sqlite-zod-orm": "3.33.0",
-    "tradjs": "^4.1.3"
+    "tradjs": "4.2.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

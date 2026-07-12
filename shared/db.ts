@@ -187,6 +187,12 @@ export const TokenPriceWindowsSchema = z.object({
   currentMarketCapUsd: z.number().nullable(),
 
   latestTradeAtMs: z.number().nullable(),
+
+  /**
+   * Earliest trade actually present in tokenTradesV2.
+   * This is recorded-data coverage, not necessarily the true first trade.
+   */
+  firstRecordedTradeAtMs: z.number().nullable(),
 });
 
 export type TerminalToken = z.infer<typeof TerminalTokenSchema>;
@@ -244,6 +250,13 @@ export type TerminalFeedRow = TerminalToken & {
   atlMarketCapUsd: number | null;
 
   lastTradeAtMs: number | null;
+
+  /**
+   * Latest of creation, observation, and first recorded trade timestamps.
+   * Deltas must not compare against history before this boundary.
+   */
+  dataCoverageStartedAtMs: number | null;
+
   priceAgeMs: number | null;
   priceStatus: "live" | "stale" | "missing";
 
@@ -462,7 +475,7 @@ export const db = await openDatabaseWithRetry(
         },
 
         views: {
-          tokenPriceWindowsV6: defineView(
+          tokenPriceWindowsV7: defineView(
             TokenPriceWindowsSchema,
             `
         WITH recent AS (
@@ -670,9 +683,22 @@ export const db = await openDatabaseWithRetry(
 
         resolved AS (
           SELECT
-            *,
+            aggregated.*,
 
-            latestMarketCapUsd AS currentMarketCapUsd
+            latestMarketCapUsd AS currentMarketCapUsd,
+
+            (
+              SELECT
+                MIN(
+                  coverage.tradedAtMs
+                )
+
+              FROM tokenTradesV2 AS coverage
+
+              WHERE
+                coverage.mint =
+                  aggregated.mint
+            ) AS firstRecordedTradeAtMs
 
           FROM aggregated
         )
@@ -682,7 +708,7 @@ export const db = await openDatabaseWithRetry(
         `,
           ),
 
-          tokenMarketExtremaV3: defineView(
+          tokenMarketExtremaV4: defineView(
             TokenMarketExtremaSchema,
             `
         WITH marketCaps AS (
@@ -691,11 +717,17 @@ export const db = await openDatabaseWithRetry(
 
             COALESCE(
               trade.marketCapUsd,
-              trade.priceUsd *
-                COALESCE(
-                  token.supplyUi,
-                  1000000000
-                )
+
+              CASE
+                WHEN
+                  trade.priceUsd IS NOT NULL
+                  AND token.supplyUi IS NOT NULL
+                  AND token.supplyUi > 0
+
+                THEN
+                  trade.priceUsd *
+                  token.supplyUi
+              END
             ) AS marketCapUsd
 
           FROM tokenTradesV2 AS trade
@@ -1055,63 +1087,66 @@ export function upsertTerminalToken(
     updatedAtMs: integer(input.updatedAtMs, now),
   };
 
-  return db.terminalTokensLive.upsertOnConflict(row, "mint", (t) => ({
-    symbol: t.excludedIfNotEmpty("symbol"),
+  return db.terminalTokensLive.upsert(row, {
+    on: "mint",
+    merge: (t) => ({
+      symbol: t.excludedIfNotEmpty("symbol"),
 
-    name: t.excludedIfNotEmpty("name"),
+      name: t.excludedIfNotEmpty("name"),
 
-    image: t.excludedIfNotEmpty("image"),
+      image: t.excludedIfNotEmpty("image"),
 
-    uri: t.excludedIfNotEmpty("uri"),
+      uri: t.excludedIfNotEmpty("uri"),
 
-    description: t.excludedIfNotNull("description"),
+      description: t.excludedIfNotNull("description"),
 
-    website: t.excludedIfNotNull("website"),
+      website: t.excludedIfNotNull("website"),
 
-    twitter: t.excludedIfNotNull("twitter"),
+      twitter: t.excludedIfNotNull("twitter"),
 
-    telegram: t.excludedIfNotNull("telegram"),
+      telegram: t.excludedIfNotNull("telegram"),
 
-    creator: t.excludedIfNotNull("creator"),
+      creator: t.excludedIfNotNull("creator"),
 
-    bondingCurveKey: t.excludedIfNotNull("bondingCurveKey"),
+      bondingCurveKey: t.excludedIfNotNull("bondingCurveKey"),
 
-    source: t.excluded("source"),
+      source: t.excluded("source"),
 
-    phase: t.excluded("phase"),
+      phase: t.excluded("phase"),
 
-    isMayhemMode: t.max("isMayhemMode"),
+      isMayhemMode: t.max("isMayhemMode"),
 
-    mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
+      mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
 
-    quoteAsset: t.excludedIfNotNull("quoteAsset"),
+      quoteAsset: t.excludedIfNotNull("quoteAsset"),
 
-    quoteMint: t.excludedIfNotNull("quoteMint"),
+      quoteMint: t.excludedIfNotNull("quoteMint"),
 
-    supplyUi: t.excluded("supplyUi"),
+      supplyUi: t.excluded("supplyUi"),
 
-    priceSol: t.excludedIfNotNull("priceSol"),
+      priceSol: t.excludedIfNotNull("priceSol"),
 
-    priceUsd: t.excludedIfNotNull("priceUsd"),
+      priceUsd: t.excludedIfNotNull("priceUsd"),
 
-    marketCapSol: t.excludedIfNotNull("marketCapSol"),
+      marketCapSol: t.excludedIfNotNull("marketCapSol"),
 
-    marketCapUsd: t.excludedIfNotNull("marketCapUsd"),
+      marketCapUsd: t.excludedIfNotNull("marketCapUsd"),
 
-    initialMarketCapUsd: t.keepFirst("initialMarketCapUsd"),
+      initialMarketCapUsd: t.keepFirst("initialMarketCapUsd"),
 
-    lastSlot: t.max("lastSlot"),
+      lastSlot: t.max("lastSlot"),
 
-    signature: t.excludedIfNotNull("signature"),
+      signature: t.excludedIfNotNull("signature"),
 
-    createdAtMs: t.keepFirst("createdAtMs"),
+      createdAtMs: t.keepFirst("createdAtMs"),
 
-    observedAtMs: t.max("observedAtMs"),
+      observedAtMs: t.max("observedAtMs"),
 
-    priceUpdatedAtMs: t.max("priceUpdatedAtMs"),
+      priceUpdatedAtMs: t.max("priceUpdatedAtMs"),
 
-    updatedAtMs: t.excluded("updatedAtMs"),
-  })) as TerminalToken;
+      updatedAtMs: t.excluded("updatedAtMs"),
+    }),
+  }) as TerminalToken;
 }
 
 /**
@@ -1243,7 +1278,7 @@ export function getTokenPriceWindows(
   if (!key) return null;
 
   return (
-    (db.tokenPriceWindowsV6
+    (db.tokenPriceWindowsV7
       .select()
       .where({ mint: key })
       .cache({
@@ -1256,7 +1291,7 @@ export function getTokenPriceWindows(
 export function listTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows[] {
-  return db.tokenPriceWindowsV6
+  return db.tokenPriceWindowsV7
     .select()
     .orderBy("latestTradeAtMs", "DESC")
     .cache({
@@ -1280,6 +1315,12 @@ export function listTokensNeedingMayhemCheck(
 > {
   const capped = Math.max(1, Math.min(integer(limit, 250), 1_000));
 
+  const now = Date.now();
+
+  const falseRecheckAfterMs = 10_000;
+
+  const falseRecheckWindowMs = 15 * 60_000;
+
   return (
     db.terminalTokensLive
       .select()
@@ -1287,12 +1328,26 @@ export function listTokensNeedingMayhemCheck(
       .limit(capped * 8)
       .all() as TerminalToken[]
   )
-    .filter(
-      (token) =>
-        token.phase !== "migrated" &&
-        Number(token.observedAtMs ?? 0) > 0 &&
-        Number(token.mayhemCheckedAtMs ?? 0) <= 0,
-    )
+    .filter((token) => {
+      if (
+        token.phase === "migrated" ||
+        Number(token.observedAtMs ?? 0) <= 0 ||
+        terminalTokenIsMayhem(token)
+      ) {
+        return false;
+      }
+
+      const checkedAtMs = Number(token.mayhemCheckedAtMs ?? 0);
+
+      if (checkedAtMs <= 0) {
+        return true;
+      }
+
+      return (
+        now - Number(token.observedAtMs ?? 0) <= falseRecheckWindowMs &&
+        now - checkedAtMs >= falseRecheckAfterMs
+      );
+    })
     .slice(0, capped)
     .map((token) => ({
       mint: token.mint,
@@ -1337,11 +1392,14 @@ export function setTerminalTokenMayhem(input: {
     mayhemCheckedAtMs: integer(input.checkedAtMs, Date.now()),
   };
 
-  return db.terminalTokensLive.upsertOnConflict(row, "mint", (t) => ({
-    isMayhemMode: t.max("isMayhemMode"),
+  return db.terminalTokensLive.upsert(row, {
+    on: "mint",
+    merge: (t) => ({
+      isMayhemMode: t.max("isMayhemMode"),
 
-    mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
-  })) as TerminalToken;
+      mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
+    }),
+  }) as TerminalToken;
 }
 
 function terminalTokenIsMayhem(token: TerminalToken): boolean {
@@ -1433,18 +1491,19 @@ export function resetTerminalFeed(
 
   const pinnedMints = cleanPinnedMints(input.pinnedMints);
 
-  const state = db.terminalFeedState.upsertOnConflict(
+  const state = db.terminalFeedState.upsert(
     {
       scope,
       resetAtMs: now,
       updatedAtMs: now,
     },
-    "scope",
-    (t) => ({
-      resetAtMs: t.excluded("resetAtMs"),
-
-      updatedAtMs: t.excluded("updatedAtMs"),
-    }),
+    {
+      on: "scope",
+      merge: (t) => ({
+        resetAtMs: t.excluded("resetAtMs"),
+        updatedAtMs: t.excluded("updatedAtMs"),
+      }),
+    },
   ) as TerminalFeedState;
 
   return {
@@ -1464,7 +1523,7 @@ function isTerminalFeedMember(
 }
 
 export function listTokenMarketExtrema(ttlMs = 2_000): TokenMarketExtrema[] {
-  return db.tokenMarketExtremaV3
+  return db.tokenMarketExtremaV4
     .select()
     .cache({
       ttlMs: Math.max(0, integer(ttlMs, 2_000)),
@@ -1597,11 +1656,7 @@ export function listTerminalFeed(
       isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
     )
     .filter((token) => sourceMatches(input.source, token.source))
-    .filter(
-      (token) =>
-        !input.hideMayhem ||
-        !(terminalTokenMayhemKnown(token) && terminalTokenIsMayhem(token)),
-    )
+    .filter((token) => !input.hideMayhem || !terminalTokenIsMayhem(token))
     .filter((token) => !input.hideUsdc || !isUsdc(token))
     .map((token) => {
       const windows = windowsByMint.get(token.mint) ?? null;
@@ -1622,7 +1677,35 @@ export function listTerminalFeed(
       const marketCapSol =
         priceSol != null ? priceSol * token.supplyUi : token.marketCapSol;
 
+      const extremaValues = [
+        extrema?.athMarketCapUsd,
+        extrema?.atlMarketCapUsd,
+        marketCapUsd,
+      ]
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0);
+
+      const athMarketCapUsd = extremaValues.length
+        ? Math.max(...extremaValues)
+        : null;
+
+      const atlMarketCapUsd = extremaValues.length
+        ? Math.min(...extremaValues)
+        : null;
+
       const latestTradeAtMs = windows?.latestTradeAtMs ?? null;
+
+      const coverageCandidates = [
+        token.createdAtMs,
+        token.observedAtMs,
+        windows?.firstRecordedTradeAtMs,
+      ]
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0);
+
+      const dataCoverageStartedAtMs = coverageCandidates.length
+        ? Math.max(...coverageCandidates)
+        : null;
 
       const priceUpdatedAtMs =
         latestTradeAtMs ??
@@ -1698,11 +1781,13 @@ export function listTerminalFeed(
 
         holders15mAgo: holderWindows?.holders15mAgo ?? 0,
 
-        athMarketCapUsd: extrema?.athMarketCapUsd ?? null,
+        athMarketCapUsd,
 
-        atlMarketCapUsd: extrema?.atlMarketCapUsd ?? null,
+        atlMarketCapUsd,
 
         lastTradeAtMs: latestTradeAtMs,
+
+        dataCoverageStartedAtMs,
 
         priceAgeMs,
 
@@ -1855,23 +1940,26 @@ export function upsertProcessStatus(
     updatedAtMs: integer(input.updatedAtMs, now),
   };
 
-  return db.processStatus.upsertOnConflict(row, "name", (t) => ({
-    kind: t.excluded("kind"),
+  return db.processStatus.upsert(row, {
+    on: "name",
+    merge: (t) => ({
+      kind: t.excluded("kind"),
 
-    status: t.excluded("status"),
+      status: t.excluded("status"),
 
-    heartbeatAtMs: t.excluded("heartbeatAtMs"),
+      heartbeatAtMs: t.excluded("heartbeatAtMs"),
 
-    pid: t.excluded("pid"),
+      pid: t.excluded("pid"),
 
-    buildId: t.excludedIfNotNull("buildId"),
+      buildId: t.excludedIfNotNull("buildId"),
 
-    error: t.excluded("error"),
+      error: t.excluded("error"),
 
-    dataJson: t.excluded("dataJson"),
+      dataJson: t.excluded("dataJson"),
 
-    updatedAtMs: t.excluded("updatedAtMs"),
-  })) as ProcessStatus;
+      updatedAtMs: t.excluded("updatedAtMs"),
+    }),
+  }) as ProcessStatus;
 }
 
 export function listProcessStatus(limit = 50): ProcessStatus[] {
