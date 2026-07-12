@@ -664,6 +664,10 @@ function tokenAgeMinutes(row: PumpFeedRow): number | null {
 }
 
 function passesFilters(row: PumpFeedRow): boolean {
+  if (isPinned(row)) {
+    return true;
+  }
+
   if (
     !valueInRange(
       latestMcap(row),
@@ -1047,8 +1051,10 @@ function tableScroller(): HTMLElement | null {
   return document.querySelector(".terminal-table-scroll");
 }
 
+const TABLE_TOP_EPSILON_PX = 1;
+
 function tableAwayFromTop(): boolean {
-  return (tableScroller()?.scrollTop ?? 0) > 24;
+  return (tableScroller()?.scrollTop ?? 0) > TABLE_TOP_EPSILON_PX;
 }
 
 function newRowCount(
@@ -1089,7 +1095,7 @@ function commitPendingRows(): void {
 }
 
 function handleTableScroll(element: HTMLElement): void {
-  if (element.scrollTop <= 24 && state.pendingRows) {
+  if (element.scrollTop <= TABLE_TOP_EPSILON_PX && state.pendingRows) {
     commitPendingRows();
   }
 }
@@ -1097,7 +1103,7 @@ function handleTableScroll(element: HTMLElement): void {
 function revealPendingRows(): void {
   const scroller = tableScroller();
 
-  if (scroller && scroller.scrollTop > 24) {
+  if (scroller && scroller.scrollTop > TABLE_TOP_EPSILON_PX) {
     scroller.scrollTo({
       top: 0,
       behavior: "smooth",
@@ -2387,7 +2393,9 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
       className={`${selected ? "selected" : ""} ${isPinned(row) ? "pinned" : ""}`}
       onClick={() => selectRow(row)}
     >
-      <td className="terminal-token-cell">
+      <td
+        className={`terminal-token-cell ${pumpHref ? "terminal-link-cell" : ""}`}
+      >
         <button
           type="button"
           className={`terminal-pin-button ${isPinned(row) ? "active" : ""}`}
@@ -2576,7 +2584,9 @@ function TokenRow({ row, selected }: { row: PumpFeedRow; selected: boolean }) {
         />
       </td>
 
-      <td className="terminal-mint-cell">
+      <td
+        className={`terminal-mint-cell ${pumpHref ? "terminal-link-cell" : ""}`}
+      >
         {pumpHref ? (
           <a
             className="terminal-mint-time-link"
@@ -3591,26 +3601,34 @@ function TerminalPage() {
         </section>
       ) : null}
 
-      <section className="terminal-table-card">
-        {state.pendingRows ? (
-          <button
-            type="button"
-            className="terminal-feed-update"
-            onClick={revealPendingRows}
-          >
-            {state.pendingNewRows > 0
+      <section key="terminal-table-card" className="terminal-table-card">
+        <button
+          key="terminal-feed-update"
+          type="button"
+          className={`terminal-feed-update ${state.pendingRows ? "visible" : ""}`}
+          aria-hidden={state.pendingRows ? "false" : "true"}
+          tabIndex={state.pendingRows ? 0 : -1}
+          disabled={!state.pendingRows}
+          onClick={revealPendingRows}
+        >
+          {state.pendingRows
+            ? state.pendingNewRows > 0
               ? `${state.pendingNewRows} new ${state.pendingNewRows === 1 ? "token" : "tokens"}`
-              : "Latest order ready"}
-            {" · "}
-            show latest
-          </button>
-        ) : null}
+              : "Latest order ready"
+            : "Latest rows ready"}
+          {" · "}
+          show latest
+        </button>
 
         <div
+          key="terminal-table-scroll"
           className="terminal-table-scroll"
           onScroll={(event: any) => handleTableScroll(event.currentTarget)}
         >
-          <table className="terminal-table terminal-market-table">
+          <table
+            key="terminal-market-table"
+            className="terminal-table terminal-market-table"
+          >
             <thead>
               <tr>
                 <th>

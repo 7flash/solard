@@ -211,7 +211,10 @@
 
 .launch-shared-settings {
   display: grid;
-  grid-template-columns: minmax(250px, .75fr) minmax(360px, 1.25fr);
+  grid-template-columns:
+    minmax(220px, .7fr)
+    minmax(330px, 1.15fr)
+    minmax(260px, .85fr);
   gap: 10px;
   padding: 12px;
   border-bottom: 1px solid var(--line);
@@ -248,7 +251,7 @@
 
 .launch-wallet-table {
   width: 100%;
-  min-width: 680px;
+  min-width: 360px;
   table-layout: fixed;
   border-collapse: collapse;
 }
@@ -257,22 +260,6 @@
 .launch-wallet-table td {
   padding: 7px;
   vertical-align: middle;
-}
-
-.launch-wallet-table th:nth-child(1) {
-  width: 38%;
-}
-
-.launch-wallet-table th:nth-child(2) {
-  width: 19%;
-}
-
-.launch-wallet-table th:nth-child(3) {
-  width: 35%;
-}
-
-.launch-wallet-table th:nth-child(4) {
-  width: 48px;
 }
 
 .launch-wallet-table button {
@@ -509,5 +496,53 @@
 
   .launch-run-metrics {
     grid-template-columns: 1fr;
+  }
+}
+
+
+.launch-execution-settings {
+  grid-template-columns:
+    minmax(120px, .75fr)
+    minmax(190px, 1.25fr) !important;
+}
+
+.launch-wallet-table th:first-child {
+  width: auto;
+}
+
+.launch-wallet-table th:last-child:not(:first-child) {
+  width: 48px;
+}
+
+.launch-wallet-static {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.launch-wallet-static b,
+.launch-wallet-static small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launch-wallet-static small {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 9px;
+}
+
+.launch-wallet-table tbody tr {
+  height: 42px;
+}
+
+@media (max-width: 1180px) {
+  .launch-shared-settings {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .launch-execution-settings {
+    grid-column: 1 / -1;
   }
 }

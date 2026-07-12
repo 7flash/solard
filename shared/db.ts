@@ -1676,6 +1676,10 @@ export function listTerminalFeed(
 
   if (minMarketCapUsd > 0 || maxMarketCapUsd > 0) {
     for (const [mint, token] of tokensByMint) {
+      if (pinnedSet.has(mint)) {
+        continue;
+      }
+
       const windows = windowsByMint.get(mint);
 
       const priceUsd = windows?.latestPriceUsd ?? token.priceUsd;
@@ -1869,6 +1873,10 @@ export function listTerminalFeed(
     })
     .filter((row) => sourceMatches(input.source, row.source))
     .filter((row) => {
+      if (pinnedSet.has(row.mint)) {
+        return true;
+      }
+
       if (minMarketCapUsd <= 0 && maxMarketCapUsd <= 0) {
         return true;
       }
@@ -1883,14 +1891,27 @@ export function listTerminalFeed(
       );
     })
     .filter(
-      (row) => input.includeUnpriced || hasPrice(row) || Boolean(row.image),
+      (row) =>
+        pinnedSet.has(row.mint) ||
+        input.includeUnpriced ||
+        hasPrice(row) ||
+        Boolean(row.image),
     )
-    .sort(
-      (left, right) =>
+    .sort((left, right) => {
+      const leftPinned = pinnedSet.has(left.mint);
+
+      const rightPinned = pinnedSet.has(right.mint);
+
+      if (leftPinned !== rightPinned) {
+        return leftPinned ? -1 : 1;
+      }
+
+      return (
         Math.max(right.updatedAtMs, right.lastTradeAtMs ?? 0) -
-        Math.max(left.updatedAtMs, left.lastTradeAtMs ?? 0),
-    )
-    .slice(0, limit);
+        Math.max(left.updatedAtMs, left.lastTradeAtMs ?? 0)
+      );
+    })
+    .slice(0, Math.max(limit, pinnedSet.size));
 
   return rows;
 }

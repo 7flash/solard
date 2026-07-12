@@ -44,6 +44,7 @@
     calc(100dvh - 260px)
   );
   overflow: auto;
+  overflow-anchor: none;
   overscroll-behavior: contain;
   scrollbar-gutter: stable both-edges;
   touch-action: pan-x pan-y;
@@ -58,7 +59,7 @@
 .terminal-table th:nth-child(8){width:120px}
 .terminal-sort-button{border:0;padding:0;background:transparent;color:var(--green);cursor:pointer;font-weight:950}
 .terminal-sort-button.active{color:var(--yellow)}
-.terminal-table tbody tr{cursor:pointer}
+.terminal-table tbody tr{cursor:default}
 .terminal-table tbody tr:hover{background:rgba(44,255,154,.055)}
 .terminal-table tbody tr.selected{background:rgba(44,255,154,.10);box-shadow:inset 3px 0 0 var(--green)}
 .terminal-table tbody tr.pinned{background:rgba(44,255,154,.055)}
@@ -428,6 +429,10 @@
 
 
 
+/*
+ * This button is permanently mounted so the scroll container never changes
+ * sibling position during sequential reconciliation.
+ */
 .terminal-feed-update {
   position: absolute;
   top: 10px;
@@ -445,7 +450,27 @@
   white-space: nowrap;
 }
 
-.terminal-feed-update:hover {
+.terminal-feed-update {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform:
+    translate(-50%, -4px);
+  transition:
+    opacity .1s ease,
+    transform .1s ease,
+    visibility .1s ease;
+}
+
+.terminal-feed-update.visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform:
+    translate(-50%, 0);
+}
+
+.terminal-feed-update.visible:hover {
   background: #0a1d16;
 }
 
@@ -722,4 +747,16 @@
   .terminal-table-scroll {
     min-height: 220px;
   }
+}
+
+
+/*
+ * Rows remain selectable, but only outbound link cells and actual controls
+ * advertise link-style navigation.
+ */
+.terminal-market-table .terminal-link-cell,
+.terminal-market-table .terminal-link-cell > a,
+.terminal-market-table button,
+.terminal-market-table [role="button"] {
+  cursor: pointer;
 }

@@ -509,21 +509,25 @@ const BUYER_CU_LIMIT = 600_000;
 type FollowerWallet = {
   id: string;
   wallet: string;
-
-  sender: "helius-fast" | "helius-rpc";
-
-  strategy:
-    | "fast-spam"
-    | "spam-after-market-ready"
-    | "after-deploy-processed"
-    | "after-deploy-confirmed";
 };
+
+type FollowerSender = "helius-fast" | "helius-rpc";
+
+type FollowerStrategy =
+  | "fast-spam"
+  | "spam-after-market-ready"
+  | "after-deploy-processed"
+  | "after-deploy-confirmed";
 
 type FollowerSettingsGroup = {
   id: string;
   name: string;
   sourceGroup: string | null;
   wallets: FollowerWallet[];
+
+  sender: FollowerSender;
+
+  strategy: FollowerStrategy;
 
   minPct: string;
   maxPct: string;
@@ -557,10 +561,6 @@ function newFollowerWallet(wallet = ""): FollowerWallet {
     id: id("wallet"),
 
     wallet,
-
-    sender: "helius-fast",
-
-    strategy: "fast-spam",
   };
 }
 
@@ -575,6 +575,10 @@ function newFollowerGroup(
     sourceGroup: null,
 
     wallets: [newFollowerWallet()],
+
+    sender: "helius-fast",
+
+    strategy: "fast-spam",
 
     minPct: "50",
 
@@ -609,43 +613,82 @@ function savedGroups(): AnyRow[] {
   return state.overview?.groups ?? [];
 }
 
-function walletAddress(value: AnyRow): string {
-  const raw = String(
-    value.walletAddress ??
-      value.address ??
-      value.wallet?.address ??
-      value.wallet?.name ??
-      value.wallet ??
-      "",
-  ).trim();
+function walletReference(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
 
-  if (!raw) {
+  if (!value || typeof value !== "object") {
     return "";
   }
 
-  const direct = walletByAddress(raw);
+  const row = value as AnyRow;
 
-  if (direct?.address) {
-    return String(direct.address);
+  const nested = row.wallet;
+
+  const candidates = [
+    row.walletAddress,
+    row.address,
+    row.publicKey,
+    row.pubkey,
+    row.walletId,
+    row.walletName,
+    row.name,
+
+    typeof nested === "string" ? nested : null,
+
+    nested?.address,
+    nested?.publicKey,
+    nested?.pubkey,
+    nested?.name,
+    nested?.id,
+  ];
+
+  return String(
+    candidates.find((candidate) => String(candidate ?? "").trim()) ?? "",
+  ).trim();
+}
+
+function walletByReference(reference: string): AnyRow | null {
+  const target = reference.replace(/^@/, "").trim().toLowerCase();
+
+  if (!target) {
+    return null;
   }
 
-  const name = raw.replace(/^@/, "").toLowerCase();
-
-  const named = wallets().find(
-    (wallet) => String(wallet.name ?? "").toLowerCase() === name,
+  return (
+    wallets().find((wallet) =>
+      [
+        wallet.address,
+        wallet.name,
+        wallet.id,
+        wallet.publicKey,
+        wallet.pubkey,
+      ].some(
+        (candidate) =>
+          String(candidate ?? "")
+            .replace(/^@/, "")
+            .trim()
+            .toLowerCase() === target,
+      ),
+    ) ?? null
   );
+}
 
-  return String(named?.address ?? raw).trim();
+function walletAddress(value: unknown): string {
+  const reference = walletReference(value);
+
+  if (!reference) {
+    return "";
+  }
+
+  const resolved = walletByReference(reference);
+
+  return String(resolved?.address ?? reference).trim();
 }
 
 function walletByAddress(address: string): AnyRow | null {
-  const target = address.toLowerCase();
-
-  return (
-    wallets().find(
-      (wallet) => String(wallet.address ?? "").toLowerCase() === target,
-    ) ?? null
-  );
+  return walletByReference(address);
 }
 
 function displayWallet(address: string): string {
@@ -692,11 +735,31 @@ function addIndividualGroup(): void {
     ...followerGroups,
 
     newFollowerGroup({
-      name: `Individual ${number}`,
+      name: `Wallet ${number}`,
+
+      sourceGroup: null,
+
+      wallets: [newFollowerWallet()],
     }),
   ];
 
   update();
+}
+
+function savedGroupMembers(saved: AnyRow): unknown[] {
+  for (const candidate of [
+    saved.wallets,
+    saved.members,
+    saved.addresses,
+    saved.walletAddresses,
+    saved.walletNames,
+  ]) {
+    if (Array.isArray(candidate)) {
+      return candidate;
+    }
+  }
+
+  return [];
 }
 
 function addSavedGroup(groupName: string): void {
@@ -707,7 +770,7 @@ function addSavedGroup(groupName: string): void {
   }
 
   const addresses = Array.from(
-    new Set((saved.wallets ?? []).map(walletAddress).filter(Boolean)),
+    new Set(savedGroupMembers(saved).map(walletAddress).filter(Boolean)),
   );
 
   if (!addresses.length) {
@@ -732,18 +795,6 @@ function addSavedGroup(groupName: string): void {
   ];
 
   update();
-}
-
-function addWalletToFollowerGroup(groupId: string): void {
-  const group = followerGroups.find((item) => item.id === groupId);
-
-  if (!group) {
-    return;
-  }
-
-  mutateFollowerGroup(groupId, {
-    wallets: [...group.wallets, newFollowerWallet()],
-  });
 }
 
 function updateFollowerWallet(
@@ -772,14 +823,18 @@ function updateFollowerWallet(
 function removeFollowerWallet(groupId: string, walletId: string): void {
   const group = followerGroups.find((item) => item.id === groupId);
 
-  if (!group) {
+  if (!group || group.sourceGroup) {
     return;
   }
 
-  const remaining = group.wallets.filter((wallet) => wallet.id !== walletId);
+  if (group.wallets.length <= 1) {
+    removeFollowerGroup(groupId);
+
+    return;
+  }
 
   mutateFollowerGroup(groupId, {
-    wallets: remaining.length ? remaining : [newFollowerWallet()],
+    wallets: group.wallets.filter((wallet) => wallet.id !== walletId),
   });
 }
 
@@ -930,11 +985,11 @@ function followerPlanPayload(): AnyRow[] {
 
         reserveSol: BUYER_RESERVE_SOL,
 
-        sender: wallet.sender,
+        sender: group.sender,
 
-        strategy: wallet.strategy,
+        strategy: group.strategy,
 
-        tipSol: wallet.sender === "helius-fast" ? tipSol : undefined,
+        tipSol: group.sender === "helius-fast" ? tipSol : undefined,
 
         priorityMicroLamports,
 
@@ -1054,14 +1109,6 @@ function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
         <div className="launch-follower-actions">
           <button
             type="button"
-            className="secondary compact"
-            onClick={() => addWalletToFollowerGroup(group.id)}
-          >
-            Add wallet
-          </button>
-
-          <button
-            type="button"
             className="danger compact"
             onClick={() => removeFollowerGroup(group.id)}
           >
@@ -1168,19 +1215,71 @@ function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
             the launcher's 600K compute-unit cap.
           </small>
         </fieldset>
+
+        <fieldset className="launch-execution-settings">
+          <legend>Execution</legend>
+
+          <label>
+            <span>Sender</span>
+
+            <select
+              value={group.sender}
+              onInput={(event: any) =>
+                mutateFollowerGroup(group.id, {
+                  sender: event.currentTarget.value,
+                })
+              }
+            >
+              <option value="helius-fast">Helius fast</option>
+
+              <option value="helius-rpc">Helius RPC</option>
+            </select>
+          </label>
+
+          <label>
+            <span>Buy timing</span>
+
+            <select
+              value={group.strategy}
+              onInput={(event: any) =>
+                mutateFollowerGroup(group.id, {
+                  strategy: event.currentTarget.value,
+                })
+              }
+            >
+              <option value="fast-spam">Fast spam</option>
+
+              <option value="spam-after-market-ready">
+                After market ready
+              </option>
+
+              <option value="after-deploy-processed">
+                After deploy processed
+              </option>
+
+              <option value="after-deploy-confirmed">
+                After deploy confirmed
+              </option>
+            </select>
+          </label>
+
+          <small>Applied to every wallet listed in this set.</small>
+        </fieldset>
       </div>
 
       <div className="launch-wallet-table-wrap">
         <table className="launch-wallet-table">
           <thead>
             <tr>
-              <th>Wallet</th>
+              <th>
+                {group.sourceGroup
+                  ? `Wallets from ${group.sourceGroup}`
+                  : "Wallet"}
+              </th>
 
-              <th>Sender</th>
-
-              <th>Buy timing</th>
-
-              <th aria-label="Remove wallet" />
+              {!group.sourceGroup ? (
+                <th aria-label="Remove wallet set" />
+              ) : null}
             </tr>
           </thead>
 
@@ -1188,68 +1287,39 @@ function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
             {group.wallets.map((wallet) => (
               <tr key={wallet.id}>
                 <td>
-                  <select
-                    value={wallet.wallet}
-                    onInput={(event: any) =>
-                      updateFollowerWallet(group.id, wallet.id, {
-                        wallet: event.currentTarget.value,
-                      })
-                    }
-                  >
-                    {walletOptions(wallet.wallet)}
-                  </select>
+                  {group.sourceGroup ? (
+                    <div className="launch-wallet-static">
+                      <b>{displayWallet(wallet.wallet)}</b>
+
+                      <small>{wallet.wallet}</small>
+                    </div>
+                  ) : (
+                    <select
+                      value={wallet.wallet}
+                      aria-label={`${group.name} wallet`}
+                      onInput={(event: any) =>
+                        updateFollowerWallet(group.id, wallet.id, {
+                          wallet: event.currentTarget.value,
+                        })
+                      }
+                    >
+                      {walletOptions(wallet.wallet)}
+                    </select>
+                  )}
                 </td>
 
-                <td>
-                  <select
-                    value={wallet.sender}
-                    onInput={(event: any) =>
-                      updateFollowerWallet(group.id, wallet.id, {
-                        sender: event.currentTarget.value,
-                      })
-                    }
-                  >
-                    <option value="helius-fast">Helius fast</option>
-
-                    <option value="helius-rpc">Helius RPC</option>
-                  </select>
-                </td>
-
-                <td>
-                  <select
-                    value={wallet.strategy}
-                    onInput={(event: any) =>
-                      updateFollowerWallet(group.id, wallet.id, {
-                        strategy: event.currentTarget.value,
-                      })
-                    }
-                  >
-                    <option value="fast-spam">Fast spam</option>
-
-                    <option value="spam-after-market-ready">
-                      After market ready
-                    </option>
-
-                    <option value="after-deploy-processed">
-                      After deploy processed
-                    </option>
-
-                    <option value="after-deploy-confirmed">
-                      After deploy confirmed
-                    </option>
-                  </select>
-                </td>
-
-                <td>
-                  <button
-                    type="button"
-                    className="danger compact"
-                    aria-label={`Remove ${displayWallet(wallet.wallet)}`}
-                    onClick={() => removeFollowerWallet(group.id, wallet.id)}
-                  >
-                    ×
-                  </button>
-                </td>
+                {!group.sourceGroup ? (
+                  <td>
+                    <button
+                      type="button"
+                      className="danger compact"
+                      aria-label={`Remove ${group.name}`}
+                      onClick={() => removeFollowerWallet(group.id, wallet.id)}
+                    >
+                      ×
+                    </button>
+                  </td>
+                ) : null}
               </tr>
             ))}
           </tbody>
@@ -1340,9 +1410,9 @@ function FollowersBuilder() {
           <h3>Follower buyers</h3>
 
           <p>
-            A settings set shares amount, fees, slippage, and retry behavior.
-            Every follower wallet remains one compact table row with its own
-            sender and buy timing.
+            Each set shares amount, fees, sender, buy timing, slippage, and
+            retry behavior. A saved group lists its wallets read-only. An
+            individual wallet gets its own independent settings set.
           </p>
         </div>
 
@@ -1376,7 +1446,7 @@ function FollowersBuilder() {
           </button>
 
           <button type="button" onClick={addIndividualGroup}>
-            Add individual
+            Add wallet
           </button>
         </div>
       </header>
@@ -1391,8 +1461,8 @@ function FollowersBuilder() {
             <b>No follower buyers.</b>
 
             <span>
-              Deploy only, add an individual wallet, or load a saved wallet
-              group.
+              Deploy only, add a wallet with its own settings, or load a saved
+              wallet group.
             </span>
           </div>
         ) : null}
