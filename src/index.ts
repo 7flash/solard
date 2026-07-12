@@ -163,3 +163,12 @@ export type {
   PumpTokenLaunchCliResult,
   PumpTokenMetadataInput,
 } from "./launches/pump/token-launch-cli.js";
+export { runPumpSpamBuyers } from "./launches/pump/spam-buy.js";
+export type {
+  PumpSpamBuyerInput,
+  PumpSpamBuyerResult,
+  PumpSpamBuyRunResult,
+  PumpSpamBuySettings,
+} from "./launches/pump/spam-buy.js";
+export { runPumpSpamBuyFromArgs } from "./launches/pump/spam-buy-cli.js";
+export type { PumpSpamBuyCliOptions } from "./launches/pump/spam-buy-cli.js";

@@ -41,6 +41,8 @@ export type PlannedTransaction = {
   lookupTables: AddressLookupTableAccount[];
   serializedSize: number;
   payer: PublicKey;
+  recentBlockhash: string;
+  lastValidBlockHeight: number;
 };
 export type SimulationResult = {
   success: boolean;

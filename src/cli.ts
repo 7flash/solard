@@ -2,7 +2,6 @@
 import type { TokenRow } from "./db/schema.js";
 import { emit } from "./core/ui.js";
 import { listScripts, runScript } from "./runner/run-script.js";
-import { maybeRunWorkerCliCommand } from "./solard/cli/worker-commands.js";
 
 const OWL = "🦉";
 type Flags = Map<string, string>;
@@ -126,14 +125,13 @@ Wallets and tokens
   sowl tokens
 
 Metadata and launching
-  solwal launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--alias <name>] [--buyer-group <group>] [--live] [--skip-simulation]
-                    [--submit-mode after-deploy-processed|spam-after-market-ready|fast-spam] [--sender-tps 40] [--helius-tip-sol 0.01]
+  solwal launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--alias <name>] [--live] [--skip-simulation]
+                    [--deployment-sender helius-rpc|helius-fast] [--helius-tip-sol 0.01]
   sowl metadata upload --image <local_path> --name <name> --symbol <symbol> --description <text> [--provider pump-frontend|pinata]
                        [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
   sowl deploy pump --wallet <wallet> --name <name> --symbol <symbol> (--uri <metadata_uri> | --image <local_path> --description <text>) [--alias <name>] [--live]
                    [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
-  sowl run launch-pump-token --creator <wallet> --metadata <token.json> [--creator-buy-sol <amount>] [--buyer-group <group>] [--live]
-  sowl run prepare-pump-launch-alt --creator <wallet> --metadata <token.json> --creator-buy-sol <amount> [--create --live]
+  sowl run launch-pump-token --creator <wallet> --metadata <token.json> [--deploy-only] [--live]
 
 Prices
   sowl quote buy <token|ca> --sol <amount>           Inspect buy quote without submitting
@@ -143,6 +141,9 @@ Prices
 
 Trading
   sowl buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
+  sowl buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
+  sowl spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
+  bun run scripts/spam-pump-buyers.ts --mint <future-mint> (--wallet <wallet> | --group <name>) --amount-mode range-bps --min-bps <n> --max-bps <n> [--live]
   sowl sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   sowl unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--simulate-only]
   sowl claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
@@ -201,6 +202,20 @@ async function main() {
     emit(help());
     return;
   }
+  if (command === "spam-buy" || command === "buy-spam") {
+    const { runPumpSpamBuyFromArgs } =
+      await import("./launches/pump/spam-buy-cli.js");
+    await runPumpSpamBuyFromArgs(rest);
+    return;
+  }
+  if (command === "buy" && flags.has("spam")) {
+    const { runPumpSpamBuyFromArgs } =
+      await import("./launches/pump/spam-buy-cli.js");
+    await runPumpSpamBuyFromArgs(rest);
+    return;
+  }
+  const { maybeRunWorkerCliCommand } =
+    await import("./solard/cli/worker-commands.js");
   if (await maybeRunWorkerCliCommand({ values: [command, ...values], flags }))
     return;
   if (command === "scripts") {

@@ -14,14 +14,6 @@ type OverviewPayload = {
 type LaunchPageState = {
   overview: OverviewPayload | null;
 
-  jobs: AnyRow[];
-
-  selectedJobId: string | null;
-
-  selectedJob: AnyRow | null;
-
-  busy: boolean;
-
   loading: boolean;
 
   error: string | null;
@@ -31,14 +23,6 @@ type LaunchPageState = {
 
 const state: LaunchPageState = {
   overview: null,
-
-  jobs: [],
-
-  selectedJobId: null,
-
-  selectedJob: null,
-
-  busy: false,
 
   loading: true,
 
@@ -54,10 +38,6 @@ let renderFrame: number | null = null;
 let renderActive = false;
 
 let renderPending = false;
-
-let jobsPollTimer: ReturnType<typeof setTimeout> | null = null;
-
-let jobsPollInFlight = false;
 
 function rootElement(): HTMLElement {
   const root = document.getElementById("app-root");
@@ -272,159 +252,6 @@ function walletLabel(wallet: AnyRow): string {
   return name ? `${name} — ${shortAddress(address)}` : address;
 }
 
-function statusClass(status: unknown): string {
-  const value = String(status ?? "");
-
-  if (value === "succeeded" || value === "confirmed") {
-    return "ok";
-  }
-
-  if (value === "failed") {
-    return "bad";
-  }
-
-  if (
-    value === "running" ||
-    value === "planned" ||
-    value === "broadcast" ||
-    value === "starting"
-  ) {
-    return "warn";
-  }
-
-  return "";
-}
-
-function latestJob(): AnyRow | null {
-  return state.selectedJob ?? state.jobs[0] ?? null;
-}
-
-function jobHeadline(job: AnyRow | null): string {
-  if (!job) {
-    return "No run selected";
-  }
-
-  const token =
-    job.result?.token?.symbol ??
-    job.result?.token?.alias ??
-    job.result?.token?.mint ??
-    job.result?.mint;
-
-  return token ? `Pump launch: ${token}` : String(job.kind ?? "Launch run");
-}
-
-function openActivity(): void {
-  window.location.href = "/activity";
-}
-
-function LaunchRunSummary({ job }: { job: AnyRow | null }) {
-  if (!job) {
-    return null;
-  }
-
-  const logs = Array.isArray(job.logs) ? job.logs : [];
-
-  const fatal =
-    logs.findLast?.((entry: AnyRow) =>
-      String(entry.label ?? "")
-        .toLowerCase()
-        .includes("fatal"),
-    ) ??
-    logs.find((entry: AnyRow) =>
-      String(entry.label ?? "")
-        .toLowerCase()
-        .includes("fatal"),
-    );
-
-  const plan = logs.find((entry: AnyRow) =>
-    String(entry.label ?? "").includes("plan"),
-  );
-
-  const result =
-    job.result ??
-    logs.findLast?.((entry: AnyRow) =>
-      String(entry.label ?? "").includes("result"),
-    )?.value;
-
-  return (
-    <section className="launch-run-card">
-      <header className="launch-run-head">
-        <div>
-          <span className="section-kicker">Current run</span>
-
-          <h3>{jobHeadline(job)}</h3>
-
-          <p>
-            Started {new Date(job.createdAtMs).toLocaleString()}
-            {" · "}
-            updated{" "}
-            {new Date(job.updatedAtMs ?? job.createdAtMs).toLocaleTimeString()}
-          </p>
-        </div>
-
-        <div className="launch-run-actions">
-          <span className={`pill ${statusClass(job.status)}`}>
-            {String(job.status ?? "unknown")}
-          </span>
-
-          <button
-            type="button"
-            className="secondary compact"
-            onClick={openActivity}
-          >
-            Open activity
-          </button>
-        </div>
-      </header>
-
-      {fatal ? (
-        <div className="launch-run-callout bad">
-          <b>Run failed:</b>{" "}
-          {String(fatal.value ?? job.error ?? "Unknown error")
-            .replace(
-              /Pump launch requested live execution, but SOLARD_ENABLE_LIVE_TRADES=1 is not set\. Run dry-run first, then opt in explicitly\.?/i,
-              "Previous failed attempt: the old backend rejected it before metadata, signing, or broadcast. No transaction was sent.",
-            )
-            .slice(0, 420)}
-        </div>
-      ) : null}
-
-      {job.status === "queued" ? (
-        <div className="launch-run-callout warn">
-          Launch accepted. The background job is starting.
-        </div>
-      ) : job.status === "running" ? (
-        <div className="launch-run-callout warn">
-          Launch is running. Detailed execution events remain available in
-          Activity.
-        </div>
-      ) : null}
-
-      <div className="launch-run-metrics">
-        <span>
-          <b>{logs.length}</b>
-
-          <small>log events</small>
-        </span>
-
-        <span>
-          <b>
-            {plan?.value?.participants?.length ?? result?.buyers?.length ?? "—"}
-          </b>
-
-          <small>follower lanes</small>
-        </span>
-
-        <span>
-          <b>{result?.mint ?? result?.token?.mint ?? "—"}</b>
-
-          <small>mint</small>
-        </span>
-      </div>
-    </section>
-  );
-}
-
 async function refreshOverview(): Promise<void> {
   const overview = await api<OverviewPayload>("/api/overview?fast=1");
 
@@ -445,109 +272,6 @@ async function refreshOverview(): Promise<void> {
   state.lastLoadedAtMs = Date.now();
 }
 
-async function refreshJobs(): Promise<void> {
-  state.jobs = await api<AnyRow[]>("/api/jobs");
-
-  if (state.selectedJobId) {
-    state.selectedJob = await api<AnyRow>(
-      `/api/jobs?id=${encodeURIComponent(state.selectedJobId)}`,
-    ).catch(
-      () =>
-        state.jobs.find(
-          (job) => String(job.id ?? "") === state.selectedJobId,
-        ) ?? null,
-    );
-  } else {
-    state.selectedJob = null;
-  }
-}
-
-async function runAction<T>(action: () => Promise<T>): Promise<T | undefined> {
-  if (state.busy) {
-    return undefined;
-  }
-
-  state.busy = true;
-
-  state.error = null;
-
-  update();
-
-  try {
-    return await action();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-
-    state.error =
-      /database is locked|database is busy|sqlite_busy|sqlite_locked/i.test(
-        message,
-      )
-        ? "The request reached an outdated process that still blocks on SQLite. Restart the Solard web process, then submit once."
-        : /SOLARD_ENABLE_LIVE_TRADES|obsolete global live-trade gate/i.test(
-              message,
-            )
-          ? "The request reached an outdated Launch runner. Restart the Solard web process; no transaction was sent."
-          : message;
-
-    return undefined;
-  } finally {
-    state.busy = false;
-
-    update();
-  }
-}
-
-function clearJobsPoll(): void {
-  if (jobsPollTimer != null) {
-    clearTimeout(jobsPollTimer);
-
-    jobsPollTimer = null;
-  }
-}
-
-function scheduleJobsPoll(): void {
-  clearJobsPoll();
-
-  if (unmounted) {
-    return;
-  }
-
-  const job = latestJob();
-
-  const active =
-    job &&
-    ["queued", "running", "planned", "broadcast", "starting"].includes(
-      String(job.status ?? ""),
-    );
-
-  jobsPollTimer = setTimeout(
-    () => {
-      void pollJobs();
-    },
-    active ? 1_500 : 8_000,
-  );
-}
-
-async function pollJobs(): Promise<void> {
-  if (jobsPollInFlight || unmounted || document.visibilityState !== "visible") {
-    scheduleJobsPoll();
-    return;
-  }
-
-  jobsPollInFlight = true;
-
-  try {
-    await refreshJobs();
-  } catch (error) {
-    console.warn("[solard:launch] job refresh failed", error);
-  } finally {
-    jobsPollInFlight = false;
-
-    update();
-    scheduleJobsPoll();
-  }
-}
-
 async function loadLaunchPage(): Promise<void> {
   state.loading = true;
 
@@ -555,24 +279,21 @@ async function loadLaunchPage(): Promise<void> {
 
   update();
 
-  const results = await Promise.allSettled([refreshOverview(), refreshJobs()]);
+  try {
+    await refreshOverview();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.loading = false;
 
-  const failure = results.find((result) => result.status === "rejected");
-
-  if (failure && failure.status === "rejected") {
-    state.error =
-      failure.reason instanceof Error
-        ? failure.reason.message
-        : String(failure.reason);
+    update();
   }
-
-  state.loading = false;
-
-  update();
-  scheduleJobsPoll();
 }
 
-const EXPECTED_LAUNCH_RUNNER_VERSION = "v50-direct-live";
+const PUMP_LAUNCH_CLI_ENTRY = "bun run src/launches/pump/launch-pump-cli.ts";
+
+const VANITY_MINT_CLI_ENTRY =
+  "bun run src/launches/pump/generate-vanity-mint-cli.ts";
 
 const BUYER_RESERVE_SOL = "0.02";
 
@@ -620,6 +341,8 @@ type FollowerSettingsGroup = {
   maxFailedAttempts: string;
 };
 
+type MintSource = "pregenerated" | "during-launch";
+
 type LaunchDraft = {
   name: string;
   symbol: string;
@@ -627,14 +350,19 @@ type LaunchDraft = {
   website: string;
   twitter: string;
   telegram: string;
+  imagePath: string;
 
   creator: string;
   creatorBuySol: string;
+
+  mintSource: MintSource;
+
   mintSuffix: string;
+  mintKeypairPath: string;
+  mintAddress: string;
 
   live: boolean;
   skipSimulation: boolean;
-  cashback: boolean;
 };
 
 type ExportedFollowerGroup = {
@@ -670,6 +398,8 @@ type LaunchConfigV1 = {
     included: false;
 
     fileName: string | null;
+
+    path: string;
   };
 
   token: {
@@ -691,13 +421,17 @@ type LaunchConfigV1 = {
 
     creatorBuySol: string;
 
+    mintSource: MintSource;
+
     mintSuffix: string;
+
+    mintKeypairPath: string;
+
+    mintAddress: string;
 
     live: boolean;
 
     skipSimulation: boolean;
-
-    cashback: boolean;
   };
 
   followers: ExportedFollowerGroup[];
@@ -722,30 +456,44 @@ let launchDraft: LaunchDraft = {
 
   telegram: "",
 
+  imagePath: "",
+
   creator: "",
 
   creatorBuySol: "0",
 
+  mintSource: "pregenerated",
+
   mintSuffix: "pump",
+
+  mintKeypairPath: ".secrets/mints/token-pump.json",
+
+  mintAddress: "",
 
   live: true,
 
   skipSimulation: false,
-
-  cashback: true,
 };
 
 let launchConfigNotice: string | null = null;
-
-let imageInputRevision = 0;
 
 let configInputRevision = 0;
 
 let followerGroups: FollowerSettingsGroup[] = [];
 
-let selectedImage: File | null = null;
+let generatedVanityCommand: string | null = null;
 
-let selectedImagePreview: string | null = null;
+let vanityCommandCopied = false;
+
+let generatedCommand: string | null = null;
+
+let commandCopied = false;
+
+let commandOutputRevision = 0;
+
+let vanityCommandOutputRevision = 0;
+
+let commandCopyTimer: ReturnType<typeof setTimeout> | null = null;
 
 function id(prefix: string): string {
   const suffix =
@@ -762,6 +510,17 @@ function mutateLaunchDraft(patch: Partial<LaunchDraft>): void {
   };
 
   launchConfigNotice = null;
+
+  generatedCommand = null;
+
+  generatedVanityCommand = null;
+
+  commandOutputRevision++;
+  vanityCommandOutputRevision++;
+
+  commandCopied = false;
+
+  vanityCommandCopied = false;
 
   update();
 }
@@ -858,7 +617,9 @@ function launchConfig(): LaunchConfigV1 {
     image: {
       included: false,
 
-      fileName: selectedImage?.name ?? null,
+      fileName: launchDraft.imagePath.trim().split(/[\\/]/).pop() ?? null,
+
+      path: launchDraft.imagePath,
     },
 
     token: {
@@ -880,13 +641,17 @@ function launchConfig(): LaunchConfigV1 {
 
       creatorBuySol: launchDraft.creatorBuySol,
 
+      mintSource: launchDraft.mintSource,
+
       mintSuffix: launchDraft.mintSuffix,
+
+      mintKeypairPath: launchDraft.mintKeypairPath,
+
+      mintAddress: launchDraft.mintAddress,
 
       live: true,
 
       skipSimulation: launchDraft.skipSimulation,
-
-      cashback: launchDraft.cashback,
     },
 
     followers: followerGroups.map(exportFollowerGroup),
@@ -929,7 +694,7 @@ function exportLaunchJson(): void {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 
   launchConfigNotice =
-    "Exported the launch preset. Token image data is not included.";
+    "Exported the launch preset. It stores the image path, not image bytes.";
 
   update();
 }
@@ -983,18 +748,6 @@ function importedFollowerGroup(
   });
 }
 
-function clearSelectedImage(): void {
-  if (selectedImagePreview) {
-    URL.revokeObjectURL(selectedImagePreview);
-  }
-
-  selectedImage = null;
-
-  selectedImagePreview = null;
-
-  imageInputRevision++;
-}
-
 function applyLaunchConfig(raw: unknown): void {
   const root = raw && typeof raw === "object" ? (raw as AnyRow) : null;
 
@@ -1022,6 +775,9 @@ function applyLaunchConfig(raw: unknown): void {
       ? (root.deployment as AnyRow)
       : {};
 
+  const image =
+    root.image && typeof root.image === "object" ? (root.image as AnyRow) : {};
+
   /**
    * A direct followers array is also accepted for older hand-written presets.
    */
@@ -1044,6 +800,8 @@ function applyLaunchConfig(raw: unknown): void {
 
     telegram: jsonString(token.telegram ?? root.telegram, "", 2_000),
 
+    imagePath: jsonString(image.path ?? root.imagePath, "", 2_000),
+
     creator: walletAddress(deployment.creator ?? root.creator),
 
     creatorBuySol: jsonString(
@@ -1052,9 +810,27 @@ function applyLaunchConfig(raw: unknown): void {
       32,
     ),
 
+    mintSource:
+      deployment.mintSource === "during-launch" ||
+      root.mintSource === "during-launch"
+        ? "during-launch"
+        : "pregenerated",
+
     mintSuffix:
       jsonString(deployment.mintSuffix ?? root.mintSuffix, "pump", 12) ||
       "pump",
+
+    mintKeypairPath: jsonString(
+      deployment.mintKeypairPath ?? root.mintKeypairPath,
+      ".secrets/mints/token-pump.json",
+      2_000,
+    ),
+
+    mintAddress: jsonString(
+      deployment.mintAddress ?? root.mintAddress,
+      "",
+      128,
+    ),
 
     live: true,
 
@@ -1062,15 +838,11 @@ function applyLaunchConfig(raw: unknown): void {
       deployment.skipSimulation ?? root.skipSimulation,
       false,
     ),
-
-    cashback: jsonBoolean(deployment.cashback ?? root.cashback, true),
   };
 
   followerGroups = followers.map(importedFollowerGroup);
 
   normalizeSelectedWallets();
-
-  clearSelectedImage();
 
   state.error = null;
 
@@ -1080,7 +852,7 @@ function applyLaunchConfig(raw: unknown): void {
     0,
   );
 
-  launchConfigNotice = `Imported ${followerGroups.length} follower ${followerGroups.length === 1 ? "set" : "sets"} and restored ${importedWalletCount} wallet ${importedWalletCount === 1 ? "selection" : "selections"}. Choose the token image before launching.`;
+  launchConfigNotice = `Imported ${followerGroups.length} follower ${followerGroups.length === 1 ? "set" : "sets"} and restored ${importedWalletCount} wallet ${importedWalletCount === 1 ? "selection" : "selections"}. Review the CLI image path before generating.`;
 
   update();
 }
@@ -1673,6 +1445,343 @@ function followerPlanPayload(): AnyRow[] {
   return output;
 }
 
+type CliArgument = {
+  flag: string;
+  value?: string;
+};
+
+function cleanCliText(value: string): string {
+  return value.replace(/\r?\n+/g, " ").trim();
+}
+
+function addCliArgument(
+  output: CliArgument[],
+  flag: string,
+  value: string | number | boolean | null | undefined,
+): void {
+  if (value === null || value === undefined || value === false) {
+    return;
+  }
+
+  if (typeof value === "string" && !value.trim()) {
+    return;
+  }
+
+  output.push({
+    flag,
+
+    ...(value === true
+      ? {}
+      : {
+          value: String(value),
+        }),
+  });
+}
+
+function cleanMintSuffix(): string {
+  const suffix = launchDraft.mintSuffix.trim() || "pump";
+
+  if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(suffix)) {
+    throw new Error("Mint suffix must contain only base58 characters.");
+  }
+
+  if (suffix.length > 8) {
+    throw new Error("Mint suffix must be at most 8 characters.");
+  }
+
+  return suffix;
+}
+
+function launchCliArguments(): CliArgument[] {
+  const name = cleanCliText(launchDraft.name);
+
+  const symbol = cleanCliText(launchDraft.symbol);
+
+  const creator = walletAddress(launchDraft.creator).trim();
+
+  const imagePath = launchDraft.imagePath.trim();
+
+  const mintSuffix = cleanMintSuffix();
+
+  if (!name) {
+    throw new Error("Enter the token name.");
+  }
+
+  if (!symbol) {
+    throw new Error("Enter the token symbol.");
+  }
+
+  if (!creator) {
+    throw new Error("Select the deployer wallet.");
+  }
+
+  if (!imagePath) {
+    throw new Error("Enter the image path that the CLI can read.");
+  }
+
+  const mintKeypairPath = launchDraft.mintKeypairPath.trim();
+
+  const mintAddress = launchDraft.mintAddress.trim();
+
+  if (launchDraft.mintSource === "pregenerated") {
+    if (!mintKeypairPath) {
+      throw new Error("Enter the pregenerated mint keypair path.");
+    }
+
+    if (!mintAddress) {
+      throw new Error(
+        "Enter the public mint address printed by the vanity generator.",
+      );
+    }
+
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mintAddress)) {
+      throw new Error(
+        "The pregenerated mint address is not a valid base58 Solana address.",
+      );
+    }
+
+    if (!mintAddress.endsWith(mintSuffix)) {
+      throw new Error(`Mint address must end with ${mintSuffix}.`);
+    }
+  }
+
+  const creatorBuySol = numberValue(
+    launchDraft.creatorBuySol,
+    "Creator buy SOL",
+    {
+      minimum: 0,
+    },
+  );
+
+  const followerPlan = followerPlanPayload();
+
+  const output: CliArgument[] = [];
+
+  addCliArgument(output, "creator", creator);
+
+  if (followerPlan.length) {
+    addCliArgument(output, "buy-plan-json", JSON.stringify(followerPlan));
+  }
+
+  addCliArgument(output, "alias", tokenAlias(name, symbol));
+
+  addCliArgument(output, "name", name);
+
+  addCliArgument(output, "symbol", symbol);
+
+  addCliArgument(output, "image", imagePath);
+
+  addCliArgument(output, "description", cleanCliText(launchDraft.description));
+
+  addCliArgument(output, "website", launchDraft.website.trim());
+
+  addCliArgument(output, "twitter", launchDraft.twitter.trim());
+
+  addCliArgument(output, "telegram", launchDraft.telegram.trim());
+
+  if (launchDraft.mintSource === "pregenerated") {
+    addCliArgument(output, "mint-keypair", mintKeypairPath);
+
+    addCliArgument(output, "mint-address", mintAddress);
+  }
+
+  addCliArgument(output, "mint-suffix", mintSuffix);
+
+  addCliArgument(output, "creator-buy-sol", creatorBuySol);
+
+  addCliArgument(output, "live", true);
+
+  addCliArgument(output, "skip-simulation", launchDraft.skipSimulation);
+
+  return output;
+}
+
+function vanityCliArguments(): CliArgument[] {
+  const suffix = cleanMintSuffix();
+
+  const outputPath = launchDraft.mintKeypairPath.trim();
+
+  if (!outputPath) {
+    throw new Error("Enter the output keypair path.");
+  }
+
+  return [
+    {
+      flag: "suffix",
+
+      value: suffix,
+    },
+
+    {
+      flag: "out",
+
+      value: outputPath,
+    },
+  ];
+}
+
+function powerShellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function formatPowerShellCommand(argumentsList: CliArgument[]): string {
+  const launchCommand = [
+    PUMP_LAUNCH_CLI_ENTRY,
+
+    ...argumentsList.map(
+      (argument) =>
+        `--${argument.flag}${argument.value === undefined ? "" : ` ${powerShellQuote(argument.value)}`}`,
+    ),
+  ].join(" ");
+
+  return [
+    "Write-Host '[solard] starting isolated measured Pump launch CLI...'",
+    launchCommand,
+  ].join("; ");
+}
+
+function formatVanityPowerShellCommand(argumentsList: CliArgument[]): string {
+  const command = [
+    VANITY_MINT_CLI_ENTRY,
+
+    ...argumentsList.map(
+      (argument) =>
+        `--${argument.flag}${argument.value === undefined ? "" : ` ${powerShellQuote(argument.value)}`}`,
+    ),
+  ].join(" ");
+
+  return [
+    "Write-Host '[solard] pregenerating vanity mint keypair...'",
+    command,
+  ].join("; ");
+}
+
+function generateVanityCommand(): void {
+  try {
+    state.error = null;
+
+    generatedVanityCommand =
+      formatVanityPowerShellCommand(vanityCliArguments());
+
+    vanityCommandOutputRevision++;
+
+    vanityCommandCopied = false;
+
+    launchConfigNotice =
+      "Vanity command generated. Run it first, then paste the printed mint address below.";
+  } catch (error) {
+    generatedVanityCommand = null;
+
+    vanityCommandOutputRevision++;
+
+    vanityCommandCopied = false;
+
+    state.error = error instanceof Error ? error.message : String(error);
+  }
+
+  update();
+}
+
+async function copyVanityCommand(): Promise<void> {
+  if (!generatedVanityCommand) {
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(generatedVanityCommand);
+
+    vanityCommandCopied = true;
+
+    update();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+
+    update();
+  }
+}
+
+function generateLaunchCommand(): void {
+  try {
+    state.error = null;
+
+    generatedCommand = formatPowerShellCommand(launchCliArguments());
+
+    commandOutputRevision++;
+
+    commandCopied = false;
+
+    launchConfigNotice =
+      "CLI command generated. Nothing was submitted or broadcast.";
+  } catch (error) {
+    generatedCommand = null;
+
+    commandOutputRevision++;
+
+    commandCopied = false;
+
+    state.error = error instanceof Error ? error.message : String(error);
+  }
+
+  update();
+}
+
+async function copyLaunchCommand(): Promise<void> {
+  if (!generatedCommand) {
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(generatedCommand);
+
+    commandCopied = true;
+
+    if (commandCopyTimer != null) {
+      clearTimeout(commandCopyTimer);
+    }
+
+    commandCopyTimer = setTimeout(() => {
+      commandCopied = false;
+
+      commandCopyTimer = null;
+
+      update();
+    }, 1_800);
+
+    update();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+
+    update();
+  }
+}
+
+function downloadLaunchCommand(): void {
+  if (!generatedCommand) {
+    return;
+  }
+
+  const blob = new Blob([generatedCommand, "\r\n"], {
+    type: "text/plain;charset=utf-8",
+  });
+
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+
+  link.href = url;
+
+  link.download = `${safePresetName()}.launch.ps1`;
+
+  link.style.display = "none";
+
+  document.body.append(link);
+
+  link.click();
+  link.remove();
+
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function tokenAlias(name: string, symbol: string): string {
   const value = (symbol || name)
     .trim()
@@ -1682,53 +1791,6 @@ function tokenAlias(name: string, symbol: string): string {
     .slice(0, 48);
 
   return value || `token-${Date.now()}`;
-}
-
-const LAUNCH_IMAGE_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-]);
-
-const MAX_LAUNCH_IMAGE_BYTES = 12 * 1024 * 1024;
-
-function onImageSelected(event: Event): void {
-  const input = event.currentTarget as HTMLInputElement;
-
-  let file = input.files?.[0] ?? null;
-
-  if (file && !LAUNCH_IMAGE_TYPES.has(file.type)) {
-    state.error = "Token image must be PNG, JPG, WEBP, or GIF.";
-
-    input.value = "";
-
-    file = null;
-  }
-
-  if (file && (file.size <= 0 || file.size > MAX_LAUNCH_IMAGE_BYTES)) {
-    state.error = "Token image must be between 1 byte and 12 MB.";
-
-    input.value = "";
-
-    file = null;
-  }
-
-  if (file) {
-    state.error = null;
-
-    launchConfigNotice = null;
-  }
-
-  if (selectedImagePreview) {
-    URL.revokeObjectURL(selectedImagePreview);
-  }
-
-  selectedImage = file;
-
-  selectedImagePreview = file ? URL.createObjectURL(file) : null;
-
-  update();
 }
 
 function walletOptions(selected: string) {
@@ -2249,114 +2311,18 @@ function LaunchBuilder() {
       onSubmit={(event) => {
         event.preventDefault();
 
-        const form = event.currentTarget;
-
-        void runAction(async () => {
-          if (!selectedImage) {
-            throw new Error("Choose a token image.");
-          }
-
-          const body = new FormData(form);
-
-          body.set("image", selectedImage, selectedImage.name);
-
-          const tokenName = String(body.get("name") ?? "");
-
-          const tokenSymbol = String(body.get("symbol") ?? "");
-
-          body.set("alias", tokenAlias(tokenName, tokenSymbol));
-
-          if (!String(body.get("mintSuffix") ?? "").trim()) {
-            body.set("mintSuffix", "pump");
-          }
-
-          body.set("buyPlanJson", JSON.stringify(followerPlanPayload()));
-
-          body.set("live", "true");
-
-          body.set(
-            "skipSimulation",
-            launchDraft.skipSimulation ? "true" : "false",
-          );
-
-          body.set("cashback", launchDraft.cashback ? "true" : "false");
-
-          const started = await api<{
-            id: string;
-            status?: string;
-            runnerVersion?: string;
-          }>("/api/launch/pump", {
-            method: "POST",
-
-            body,
-          });
-
-          if (started.runnerVersion !== EXPECTED_LAUNCH_RUNNER_VERSION) {
-            throw new Error(
-              `The server is still running old Launch code (${started.runnerVersion ?? "no runner version"}). Restart the Solard web process before submitting again. This request was not accepted by the current runner.`,
-            );
-          }
-
-          const now = Date.now();
-
-          const optimisticJob: AnyRow = {
-            id: started.id,
-
-            kind: "launch:pump",
-
-            status: started.status ?? "queued",
-
-            createdAtMs: now,
-
-            updatedAtMs: now,
-
-            input: {
-              name: tokenName,
-
-              symbol: tokenSymbol,
-
-              creator: launchDraft.creator,
-            },
-
-            logs: [],
-          };
-
-          state.selectedJobId = started.id;
-
-          state.selectedJob = optimisticJob;
-
-          state.jobs = [
-            optimisticJob,
-
-            ...state.jobs.filter((job) => String(job.id ?? "") !== started.id),
-          ];
-
-          launchConfigNotice =
-            "Launch accepted. Preparing metadata and transactions now.";
-
-          update();
-          scheduleJobsPoll();
-
-          void refreshJobs()
-            .then(() => update())
-            .catch((error) =>
-              console.warn(
-                "[solard:launch] immediate job refresh failed",
-                error,
-              ),
-            );
-        });
+        generateLaunchCommand();
       }}
     >
       <section className="launch-hero">
         <div>
-          <span className="section-kicker">Pump launch builder</span>
+          <span className="section-kicker">Pump measured CLI builder</span>
 
-          <h2>Deploy token</h2>
+          <h2>Generate launch command</h2>
 
           <p>
-            Enter the token details, upload the image, choose the deployer, and
-            optionally configure follower sets.
+            Fill the fields and generate a PowerShell command. This page does
+            not submit, sign, or broadcast transactions.
           </p>
         </div>
 
@@ -2383,15 +2349,12 @@ function LaunchBuilder() {
             </button>
           </div>
 
-          <span
-            className="launch-live-badge"
-            title="Expected backend Launch runner"
-          >
-            Live · {EXPECTED_LAUNCH_RUNNER_VERSION}
+          <span className="launch-live-badge" title="Generated command format">
+            PowerShell CLI only
           </span>
 
-          <button type="submit" className="primary-large" disabled={state.busy}>
-            {state.busy ? "Starting…" : "Start launch"}
+          <button type="submit" className="primary-large">
+            Generate CLI
           </button>
         </div>
       </section>
@@ -2414,15 +2377,107 @@ function LaunchBuilder() {
         </section>
       ) : null}
 
-      <LaunchRunSummary job={latestJob()} />
+      <section
+        className={`launch-command-card launch-vanity-command ${generatedVanityCommand ? "ready" : ""}`}
+        aria-live="polite"
+        hidden={launchDraft.mintSource !== "pregenerated"}
+      >
+        <header>
+          <div>
+            <span className="section-kicker">Step 1 · Vanity keypair</span>
+
+            <h3>Pregeneration command</h3>
+
+            <p>
+              Run this ahead of launch. It writes the secret keypair file and
+              prints the public mint address.
+            </p>
+          </div>
+
+          <div className="launch-command-actions">
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={!generatedVanityCommand}
+              onClick={() => {
+                void copyVanityCommand();
+              }}
+            >
+              {vanityCommandCopied ? "Copied" : "Copy"}
+            </button>
+          </div>
+        </header>
+
+        <pre
+          key={`vanity-command-output:${vanityCommandOutputRevision}`}
+          tabIndex={0}
+          aria-label="Generated vanity mint PowerShell command"
+        >
+          <code>
+            {generatedVanityCommand ??
+              "Choose a keypair output path, then press Generate vanity CLI."}
+          </code>
+        </pre>
+      </section>
+
+      <section
+        className={`launch-command-card ${generatedCommand ? "ready" : ""}`}
+        aria-live="polite"
+      >
+        <header>
+          <div>
+            <span className="section-kicker">Step 2 · Token launch</span>
+
+            <h3>PowerShell launch command</h3>
+
+            <p>
+              Runs the isolated Pump executable with measure-fn progress.
+              Nothing is submitted by this page itself.
+            </p>
+          </div>
+
+          <div className="launch-command-actions">
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={!generatedCommand}
+              onClick={() => {
+                void copyLaunchCommand();
+              }}
+            >
+              {commandCopied ? "Copied" : "Copy"}
+            </button>
+
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={!generatedCommand}
+              onClick={downloadLaunchCommand}
+            >
+              Download .ps1
+            </button>
+          </div>
+        </header>
+
+        <pre
+          key={`launch-command-output:${commandOutputRevision}`}
+          tabIndex={0}
+          aria-label="Generated Pump launch PowerShell command"
+        >
+          <code>
+            {generatedCommand ??
+              "Fill the required fields, then press Generate CLI. The command will run the isolated measured Pump executable."}
+          </code>
+        </pre>
+      </section>
 
       <details className="launch-global-advanced">
         <summary>Advanced launch behavior</summary>
 
         <div>
           <p>
-            This page always submits a live launch. These options are rarely
-            needed.
+            The generated command always includes --live. These flags are
+            optional.
           </p>
 
           <label className="toggle-card">
@@ -2434,20 +2489,6 @@ function LaunchBuilder() {
               onInput={(event: any) =>
                 mutateLaunchDraft({
                   skipSimulation: event.currentTarget.checked,
-                })
-              }
-            />
-          </label>
-
-          <label className="toggle-card">
-            <span>Cashback</span>
-
-            <input
-              type="checkbox"
-              checked={launchDraft.cashback}
-              onInput={(event: any) =>
-                mutateLaunchDraft({
-                  cashback: event.currentTarget.checked,
                 })
               }
             />
@@ -2464,40 +2505,33 @@ function LaunchBuilder() {
               <h3>Token</h3>
 
               <p>
-                These fields become the token metadata. No metadata path or URI
-                is required.
+                These fields become CLI arguments. Enter the real local image
+                path that PowerShell and Bun can read.
               </p>
             </div>
           </header>
 
           <div className="launch-token-form">
-            <label>
-              <span>Image</span>
+            <label className="launch-image-path">
+              <span>Image filesystem path</span>
 
-              <span className="launch-image-picker">
-                <input
-                  key={`launch-image:${imageInputRevision}`}
-                  type="file"
-                  name="image"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  onInput={onImageSelected}
-                />
+              <input
+                name="imagePath"
+                required
+                value={launchDraft.imagePath}
+                placeholder="C:\\Code\\solwal\\assets\\token.jpg"
+                onInput={(event: any) =>
+                  mutateLaunchDraft({
+                    imagePath: event.currentTarget.value,
+                  })
+                }
+              />
 
-                <img
-                  className={selectedImagePreview ? "visible" : ""}
-                  src={selectedImagePreview ?? undefined}
-                  alt=""
-                  aria-hidden="true"
-                />
-
-                <span
-                  className={`launch-image-empty ${selectedImagePreview ? "hidden" : ""}`}
-                >
-                  Upload PNG, JPG, WEBP, or GIF
-                </span>
-
-                <small>{selectedImage?.name ?? "No image selected"}</small>
-              </span>
+              <small>
+                This must be an existing file that the terminal can read. The
+                browser does not upload, copy, or expose a selected file path.
+                Absolute Windows paths are recommended.
+              </small>
             </label>
 
             <div className="launch-name-row">
@@ -2682,12 +2716,34 @@ function LaunchBuilder() {
             </label>
 
             <label>
+              <span>Mint source</span>
+
+              <select
+                value={launchDraft.mintSource}
+                onInput={(event: any) =>
+                  mutateLaunchDraft({
+                    mintSource:
+                      event.currentTarget.value === "during-launch"
+                        ? "during-launch"
+                        : "pregenerated",
+                  })
+                }
+              >
+                <option value="pregenerated">
+                  Pregenerated keypair · recommended
+                </option>
+
+                <option value="during-launch">Grind during launch</option>
+              </select>
+            </label>
+
+            <label>
               <span>Mint suffix</span>
 
               <input
                 name="mintSuffix"
                 value={launchDraft.mintSuffix}
-                maxLength={12}
+                maxLength={8}
                 autoComplete="off"
                 onInput={(event: any) =>
                   mutateLaunchDraft({
@@ -2704,9 +2760,60 @@ function LaunchBuilder() {
               />
             </label>
 
+            <div
+              className="launch-mint-pregenerated"
+              hidden={launchDraft.mintSource !== "pregenerated"}
+            >
+              <label>
+                <span>Mint keypair JSON path</span>
+
+                <input
+                  value={launchDraft.mintKeypairPath}
+                  placeholder=".secrets/mints/token-pump.json"
+                  onInput={(event: any) =>
+                    mutateLaunchDraft({
+                      mintKeypairPath: event.currentTarget.value,
+                    })
+                  }
+                />
+
+                <small>
+                  Secret 64-byte Solana keypair file. Never commit it.
+                </small>
+              </label>
+
+              <label>
+                <span>Expected mint address</span>
+
+                <input
+                  value={launchDraft.mintAddress}
+                  placeholder="Public address printed by the generator"
+                  onInput={(event: any) =>
+                    mutateLaunchDraft({
+                      mintAddress: event.currentTarget.value,
+                    })
+                  }
+                />
+
+                <small>
+                  The CLI derives the public address from the keypair and
+                  refuses to continue if this value does not match.
+                </small>
+              </label>
+
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={generateVanityCommand}
+              >
+                Generate vanity CLI
+              </button>
+            </div>
+
             <small className="launch-deployer-note">
-              The suffix defaults to pump. Generation limits use the launcher's
-              internal policy instead of extra form fields.
+              An address alone cannot create the mint: the mint keypair must
+              sign. Pregenerated mode passes both the secret-key path and the
+              expected public address, then skips the launch-time grind.
             </small>
           </div>
         </section>
@@ -2716,7 +2823,7 @@ function LaunchBuilder() {
 
       <footer className="launch-submit-bar">
         <div>
-          <b>Ready to launch</b>
+          <b>Ready to generate</b>
 
           <span>
             {followerGroups.reduce(
@@ -2730,8 +2837,8 @@ function LaunchBuilder() {
           </span>
         </div>
 
-        <button type="submit" className="primary-large" disabled={state.busy}>
-          {state.busy ? "Starting…" : "Start launch"}
+        <button type="submit" className="primary-large">
+          Generate CLI
         </button>
       </footer>
     </form>
@@ -2761,7 +2868,7 @@ export function LaunchPage() {
 
       {state.loading ? (
         <section className="launch-page-message">
-          Loading wallets, saved groups, and recent launches…
+          Loading wallets and saved groups…
         </section>
       ) : null}
 
@@ -2779,12 +2886,11 @@ export default function mount() {
 
   const onVisibility = () => {
     if (document.visibilityState === "visible") {
-      void Promise.allSettled([refreshOverview(), refreshJobs()]).then(() => {
-        update();
-        scheduleJobsPoll();
-      });
-    } else {
-      clearJobsPoll();
+      void refreshOverview()
+        .catch((error) => {
+          state.error = error instanceof Error ? error.message : String(error);
+        })
+        .finally(update);
     }
   };
 
@@ -2795,9 +2901,11 @@ export default function mount() {
 
     document.removeEventListener("visibilitychange", onVisibility);
 
-    clearJobsPoll();
+    if (commandCopyTimer != null) {
+      clearTimeout(commandCopyTimer);
 
-    jobsPollInFlight = false;
+      commandCopyTimer = null;
+    }
 
     if (renderFrame != null) {
       cancelAnimationFrame(renderFrame);
@@ -2807,12 +2915,12 @@ export default function mount() {
 
     renderPending = false;
 
-    if (selectedImagePreview) {
-      URL.revokeObjectURL(selectedImagePreview);
+    generatedVanityCommand = null;
 
-      selectedImagePreview = null;
-    }
+    generatedCommand = null;
 
-    selectedImage = null;
+    vanityCommandCopied = false;
+
+    commandCopied = false;
   };
 }

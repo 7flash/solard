@@ -1,3 +1,4 @@
+import bs58 from "bs58";
 import {
   PublicKey,
   SystemProgram,
@@ -10,6 +11,11 @@ import type { WalletRef } from "../../core/refs.js";
 import type { Sowl } from "../../sdk/sowl.js";
 import { HeliusSender } from "../../tx/senders/helius-sender.js";
 import { HttpRpcSender } from "../../tx/senders/http-rpc-sender.js";
+import {
+  isJitoBundleExpiredError,
+  isJitoBundleGenerationRetryError,
+  JitoSender,
+} from "../../tx/senders/jito-sender.js";
 import type {
   PlannedTransaction,
   SendReceipt,
@@ -22,6 +28,11 @@ import type {
   PreparedPendingBuy,
   PreparedTokenDeployment,
 } from "../launchpad.js";
+import {
+  BUY_EXACT_QUOTE_IN_V2_D8,
+  CREATE_V2_D8,
+  PUMP_PROGRAM_ID,
+} from "../../venues/pump/constants.js";
 
 export type TokenMetadata = {
   alias: string;
@@ -51,7 +62,9 @@ export type TraderSubmitMode =
   /** Human-friendly alias for blind-spam-after-submit. */
   | "fast-spam"
   /** Backwards-compatible alias for blind-spam-after-submit. */
-  | "spam-after-deploy-submit";
+  | "spam-after-deploy-submit"
+  /** Ordered atomic deployment + buyer transactions through Jito. */
+  | "jito-bundle";
 
 export type TipConfig = { account?: string; lamports?: bigint };
 
@@ -70,6 +83,8 @@ export type BuyerExecutionOverride = {
   strategy?: BuyerLaunchStrategy;
   /** Per-wallet Helius tip. Only applied when sender is helius-fast. */
   tipLamports?: bigint;
+  /** Per-wallet compute-unit limit. Defaults to the launch CU limit. */
+  cuLimit?: number;
   /** Per-wallet compute-unit price. Defaults to buyerPriorityMicroLamports. */
   priorityMicroLamports?: number;
   /** Per-wallet slippage. Defaults to launch slippageBps. */
@@ -123,11 +138,13 @@ export type LaunchSenderPolicy = {
   rpcTraderSender: SenderId;
   fastTraderCount: number;
   fastTip: TipConfig;
+  jitoTip: TipConfig;
 };
 
 export type PumpLaunchEnvironment = {
   rpcUrl: string;
   senderUrl?: string;
+  jitoUrl: string;
   policy: LaunchSenderPolicy;
   spam: SpamSubmitOptions;
   submitMode: TraderSubmitMode;
@@ -155,6 +172,7 @@ export type TraderReceiptOutcome =
 
 export type PumpTokenLaunchPlan = {
   token: TokenMetadata;
+  creatorWallet: WalletRef;
   deployment: PreparedTokenDeployment;
   creator: BuyerAllocation | null;
   traders: BuyerAllocation[];
@@ -193,7 +211,24 @@ export type LaunchReporter = (label: string, value: unknown) => void;
 
 type LaunchReadiness = "pending" | "processed" | "confirmed" | "failed";
 
-type LaunchSenderName = "helius-fast" | "helius-rpc";
+type LaunchSenderName = "helius-fast" | "helius-rpc" | "jito";
+
+const JITO_TIP_ACCOUNTS = [
+  "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+  "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+  "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+  "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+  "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+  "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+  "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+  "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+] as const;
+
+function randomJitoTipAccount(): string {
+  return JITO_TIP_ACCOUNTS[
+    Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)
+  ]!;
+}
 
 function envString(name: string): string | undefined {
   const primary = process.env[name]?.trim();
@@ -243,9 +278,9 @@ function senderEnv(name: string, fallback: LaunchSenderName): LaunchSenderName {
   const value = envString(name);
   if (!value) return fallback;
 
-  if (value !== "helius-fast" && value !== "helius-rpc") {
+  if (value !== "helius-fast" && value !== "helius-rpc" && value !== "jito") {
     throw new Error(
-      `Invalid ${name}: ${value}. Expected "helius-fast" or "helius-rpc".`,
+      `Invalid ${name}: ${value}. Expected "helius-fast", "helius-rpc", or "jito".`,
     );
   }
 
@@ -262,17 +297,19 @@ export function normalizeTraderSubmitMode(
     value === "after-deploy-confirmed" ||
     value === "after-deploy-processed" ||
     value === "spam-after-market-ready" ||
-    value === "blind-spam-after-submit"
+    value === "blind-spam-after-submit" ||
+    value === "jito-bundle"
   ) {
     return value;
   }
   throw new Error(
-    `Invalid SOWL_LAUNCH_SUBMIT_MODE: ${value}. Expected after-deploy-confirmed, after-deploy-processed, spam-after-market-ready, blind-spam-after-submit or fast-spam.`,
+    `Invalid SOWL_LAUNCH_SUBMIT_MODE: ${value}. Expected after-deploy-confirmed, after-deploy-processed, spam-after-market-ready, blind-spam-after-submit, fast-spam, or jito-bundle.`,
   );
 }
 
 export function pumpLaunchEnvironment(): PumpLaunchEnvironment {
-  const rpcUrl = envString("HELIUS_RPC_URL") || requireEnv("RPC_ENDPOINT");
+  const rpcUrl =
+    envString("RPC_ENDPOINT") || "https://api.mainnet-beta.solana.com";
 
   const deploymentSender = senderEnv("SOWL_DEPLOYMENT_SENDER", "helius-rpc");
   const evolutionSender = senderEnv("SOWL_EVOLUTION_SENDER", "helius-rpc");
@@ -295,10 +332,15 @@ export function pumpLaunchEnvironment(): PumpLaunchEnvironment {
   const tipLamports = usesHeliusSender
     ? bigintEnv("HELIUS_TIP_LAMPORTS", 200_000n)
     : 0n;
+  const jitoUrl = "https://mainnet.block-engine.jito.wtf";
+  const configuredJitoTipAccount = envString("JITO_TIP_ACCOUNT");
+  const jitoTipAccount = configuredJitoTipAccount || randomJitoTipAccount();
+  const jitoTipLamports = bigintEnv("JITO_TIP_LAMPORTS", 100_000n);
 
   return {
     rpcUrl,
     senderUrl,
+    jitoUrl,
     cuLimit: intEnv("SOWL_LAUNCH_CU_LIMIT", 600_000),
     priorityMicroLamports: intEnv("HELIUS_PRIORITY_MICRO_LAMPORTS", 500_000),
     submitMode: normalizeTraderSubmitMode(envString("SOWL_LAUNCH_SUBMIT_MODE")),
@@ -327,6 +369,10 @@ export function pumpLaunchEnvironment(): PumpLaunchEnvironment {
         usesHeliusSender && tipAccount
           ? { account: tipAccount, lamports: tipLamports }
           : {},
+      jitoTip: {
+        account: jitoTipAccount,
+        lamports: jitoTipLamports,
+      },
     },
   };
 }
@@ -340,8 +386,9 @@ export function installPumpLaunchSenders(
   }
 
   sowl.registerSender(
-    new HttpRpcSender("helius-rpc", env.rpcUrl, "HELIUS_RPC_URL/RPC_ENDPOINT"),
+    new HttpRpcSender("helius-rpc", env.rpcUrl, "--rpc-url/RPC_ENDPOINT"),
   );
+  sowl.registerSender(new JitoSender(env.jitoUrl));
 }
 
 function validateBps(minBps: number, maxBps: number): void {
@@ -406,6 +453,26 @@ export function validateHeliusTip(args: {
   }
 }
 
+export function validateJitoTip(args: {
+  tip: TipConfig;
+  live: boolean;
+  label: string;
+}): void {
+  validateOptionalTipAddress(args.tip.account, "Jito tip account");
+  if (!args.live) return;
+
+  if (!args.tip.account || args.tip.lamports == null) {
+    throw new Error(
+      `${args.label} requires a Jito tip account and tip lamports in live mode`,
+    );
+  }
+  if (args.tip.lamports < 1_000n) {
+    throw new Error(
+      `${args.label} requires at least 1000 Jito tip lamports; got ${args.tip.lamports}`,
+    );
+  }
+}
+
 export function usesHeliusSenderForLaunch(
   env: PumpLaunchEnvironment,
   hasBuyerGroup: boolean,
@@ -424,6 +491,7 @@ function addTip(
   builder: ReturnType<Sowl["transaction"]>,
   payer: PublicKey,
   tip: TipConfig,
+  sender: "helius-fast" | "jito" = "helius-fast",
 ): void {
   if (!tip.account || tip.lamports == null || tip.lamports <= 0n) return;
   const recipient = new PublicKey(tip.account);
@@ -434,9 +502,9 @@ function addTip(
       lamports: tip.lamports,
     }),
     {
-      kind: "sender-tip",
+      kind: sender === "jito" ? "jito-tip" : "sender-tip",
       recipient,
-      meta: { lamports: tip.lamports.toString(), sender: "helius-fast" },
+      meta: { lamports: tip.lamports.toString(), sender },
     },
   );
 }
@@ -632,6 +700,8 @@ function launchBuilder(args: {
   cuLimit: number;
   priorityMicroLamports: number;
   senderTip: TipConfig;
+  senderTipSender?: "helius-fast" | "jito";
+  useAlts?: boolean;
   initialBuy?: PreparedPendingBuy | null;
   initialBuyer?: BuyerAllocation | null;
 }) {
@@ -642,8 +712,9 @@ function launchBuilder(args: {
   // priority price. Buyer transactions have their own high-priority path.
   if (args.cuLimit > 0 || args.priorityMicroLamports > 0) {
     builder.priorityFee({
-      cuLimit: args.cuLimit,
-      microLamports: args.priorityMicroLamports,
+      cuLimit: args.cuLimit > 0 ? args.cuLimit : 600_000,
+      microLamports:
+        args.priorityMicroLamports > 0 ? args.priorityMicroLamports : undefined,
     });
   }
 
@@ -672,6 +743,7 @@ function launchBuilder(args: {
     builder,
     args.sowl.signer(args.creatorWallet).publicKey,
     args.senderTip,
+    args.senderTipSender,
   );
   return builder;
 }
@@ -680,7 +752,7 @@ async function compileLaunch(
   args: Parameters<typeof launchBuilder>[0],
 ): Promise<{ draft: TransactionDraft; plan: PlannedTransaction }> {
   const draft = launchBuilder(args).snapshot();
-  const hasHeliusTip = Boolean(
+  const hasStaticTip = Boolean(
     args.senderTip.account &&
     args.senderTip.lamports != null &&
     args.senderTip.lamports > 0n,
@@ -691,7 +763,7 @@ async function compileLaunch(
       plan: await args.sowl.compile(
         args.sowl.signer(args.creatorWallet),
         draft,
-        hasHeliusTip ? { useAlts: false } : undefined,
+        hasStaticTip || args.useAlts === false ? { useAlts: false } : undefined,
       ),
     };
   } catch (error) {
@@ -699,8 +771,8 @@ async function compileLaunch(
       error instanceof Error &&
       /too large|overrun|packet/i.test(error.message)
     ) {
-      const altAdvice = hasHeliusTip
-        ? "Create + Helius Sender tip does not fit while keeping the tip account static. Use a non-Helius deployment sender for this launch transaction."
+      const altAdvice = hasStaticTip
+        ? "Create + sender tip does not fit while keeping the tip account static. Reduce the launch transaction size or tip instructions."
         : "Create + creator initial buy does not fit without a registered launch ALT. Run: sowl run prepare-pump-launch-alt --creator <wallet> --name <name> --symbol <symbol> --alias <alias> --creator-buy-sol <amount> --create --live.";
       throw new Error(`${altAdvice} Original error: ${error.message}`);
     }
@@ -716,6 +788,7 @@ async function buildPendingBuyPlan(args: {
   cuLimit: number;
   priorityMicroLamports: number;
   senderTip: TipConfig;
+  senderTipSender?: "helius-fast" | "jito";
   kind: string;
   lane: BuyerLane;
 }): Promise<PlannedTransaction> {
@@ -743,6 +816,7 @@ async function buildPendingBuyPlan(args: {
     builder,
     args.sowl.signer(args.buyer.walletRef).publicKey,
     args.senderTip,
+    args.senderTipSender,
   );
   return await args.sowl.compile(
     args.sowl.signer(args.buyer.walletRef),
@@ -809,6 +883,14 @@ export async function preparePumpTokenLaunch(args: {
   cashback?: boolean;
   mayhemMode?: boolean;
 }): Promise<PumpTokenLaunchPlan> {
+  // A zero CU limit is not "automatic" once it reaches the transaction draft:
+  // the assembler emits setComputeUnitLimit(0), so even that instruction cannot
+  // execute. Treat zero as the launch default before compiling or saving drafts.
+  const deploymentCuLimit =
+    Number.isFinite(args.cuLimit) && args.cuLimit > 0
+      ? Math.trunc(args.cuLimit)
+      : 600_000;
+
   const deployment = await args.sowl.prepareTokenDeployment(
     "pump",
     args.creatorWallet,
@@ -844,28 +926,38 @@ export async function preparePumpTokenLaunch(args: {
     state = initialBuy.nextState;
   }
 
+  const deploymentSender = String(args.senderPolicy.deploymentSender);
+  // Jito bundle tips belong in the final buyer transaction. Keeping the
+  // deployment transaction untipped reduces standalone-tip exposure if bundle
+  // transactions are ever rebroadcast outside normal bundle execution.
   const launchSenderTip: TipConfig =
-    String(args.senderPolicy.deploymentSender) === "helius-fast"
-      ? args.senderPolicy.fastTip
-      : {};
+    deploymentSender === "helius-fast" ? args.senderPolicy.fastTip : {};
 
   const launch = await compileLaunch({
     ...args,
+    cuLimit: deploymentCuLimit,
+    senderTipSender: "helius-fast",
     deployment,
     kind: "launch-pump-token",
     alias: args.token.alias,
     symbol: args.token.symbol,
     senderTip: launchSenderTip,
+    useAlts: deploymentSender === "jito" ? false : undefined,
     initialBuy,
     initialBuyer: creator,
   });
 
+  const finalTraderIndex = args.traders.length - 1;
   const tipForSender = (
     sender: SenderId,
-    trader?: BuyerAllocation,
+    trader: BuyerAllocation,
+    index: number,
   ): TipConfig => {
+    if (String(sender) === "jito") {
+      return index === finalTraderIndex ? args.senderPolicy.jitoTip : {};
+    }
     if (String(sender) !== "helius-fast") return {};
-    const explicitTip = trader?.execution?.tipLamports;
+    const explicitTip = trader.execution?.tipLamports;
     return explicitTip != null
       ? { ...args.senderPolicy.fastTip, lamports: explicitTip }
       : args.senderPolicy.fastTip;
@@ -881,7 +973,7 @@ export async function preparePumpTokenLaunch(args: {
       index < args.senderPolicy.fastTraderCount
         ? ("trader-fast" as const)
         : ("trader-rpc" as const);
-    return { sender, tip: tipForSender(sender, trader), lane };
+    return { sender, tip: tipForSender(sender, trader, index), lane };
   });
 
   const pendingBuys = await prepareWorstCaseBuys({
@@ -900,9 +992,12 @@ export async function preparePumpTokenLaunch(args: {
         ...args,
         deployment,
         buyer: args.traders[index]!,
+        cuLimit: args.traders[index]!.execution?.cuLimit ?? deploymentCuLimit,
         buy: pendingBuys[index]!,
         kind: "buy-pump-token-group",
         senderTip: lane.tip,
+        senderTipSender:
+          String(lane.sender) === "jito" ? "jito" : "helius-fast",
         lane,
         priorityMicroLamports:
           args.traders[index]!.execution?.priorityMicroLamports ??
@@ -913,13 +1008,14 @@ export async function preparePumpTokenLaunch(args: {
 
   return {
     token: args.token,
+    creatorWallet: args.creatorWallet,
     deployment,
     creator,
     traders: args.traders,
     launchDraft: launch.draft,
     launchPlan: launch.plan,
     slippageBps: args.slippageBps,
-    cuLimit: args.cuLimit,
+    cuLimit: deploymentCuLimit,
     buyerPriorityMicroLamports: args.buyerPriorityMicroLamports,
     deploymentSender: args.senderPolicy.deploymentSender,
     traderPlans,
@@ -1691,6 +1787,758 @@ async function broadcastLaunchWithRetry(args: {
   );
 }
 
+export async function executeArmedPumpBuyers(args: {
+  sowl: Sowl;
+  prepared: PumpTokenLaunchPlan;
+  spam: SpamSubmitOptions;
+  kind: string;
+  reporter?: LaunchReporter;
+}): Promise<TraderReceiptOutcome[]> {
+  if (args.prepared.traders.length === 0) {
+    throw new Error("Armed buyer plan has no traders.");
+  }
+
+  const sendLimiter = new SenderRateLimiter(args.spam, args.reporter);
+  const stopBlockhashWarmer = startBlockhashWarmer(
+    args.sowl,
+    args.spam.blockhashRefreshIntervalMs ?? 500,
+    args.reporter,
+  );
+  const mintRef = args.prepared.deployment.mint.publicKey.toBase58();
+  let tokenPersisted = false;
+  const ensureTokenPersisted = () => {
+    if (tokenPersisted) return;
+    args.sowl.persistPreparedDeployment(
+      args.prepared.deployment,
+      args.prepared.token.alias,
+    );
+    tokenPersisted = true;
+  };
+
+  try {
+    args.reporter?.("pump armed buyer spam start", {
+      mint: mintRef,
+      buyers: args.prepared.traders.length,
+    });
+
+    const settled = await Promise.allSettled(
+      args.prepared.traderPlans.map((plan, index) => {
+        const participant = args.prepared.traders[index]!;
+        return spamDependentBuy({
+          sowl: args.sowl,
+          template: plan,
+          participant,
+          lane: args.prepared.traderLanes[index]!,
+          kind: `${args.kind}:trader:${index + 1}`,
+          options: {
+            ...args.spam,
+            intervalMs:
+              participant.execution?.retryIntervalMs ?? args.spam.intervalMs,
+            recompileIntervalMs:
+              participant.execution?.recompileIntervalMs ??
+              args.spam.recompileIntervalMs,
+            freshQuoteDelayMs:
+              participant.execution?.freshQuoteDelayMs ??
+              args.spam.freshQuoteDelayMs,
+            maxFailedAttempts:
+              participant.execution?.maxFailedAttempts ??
+              args.spam.maxFailedAttempts,
+          },
+          // FIRE is deliberately before deployment broadcast. No signature gate.
+          startMode: "blind-spam-after-submit",
+          prepared: args.prepared,
+          buildReadyPlan: async () => {
+            ensureTokenPersisted();
+            const builder = args.sowl
+              .tx(participant.walletRef)
+              .priorityFee({
+                cuLimit: args.prepared.cuLimit,
+                microLamports:
+                  participant.execution?.priorityMicroLamports ??
+                  args.prepared.buyerPriorityMicroLamports,
+              })
+              .buy(mintRef, rawAmount(participant.spendLamports, SOL_ASSET), {
+                slippageBps:
+                  participant.execution?.slippageBps ??
+                  args.prepared.slippageBps,
+              });
+
+            addTip(
+              builder as unknown as ReturnType<Sowl["transaction"]>,
+              args.sowl.signer(participant.walletRef).publicKey,
+              String(args.prepared.traderLanes[index]!.sender) ===
+                "helius-fast" && participant.execution?.tipLamports != null
+                ? {
+                    ...args.prepared.traderLanes[index]!.tip,
+                    lamports: participant.execution.tipLamports,
+                  }
+                : args.prepared.traderLanes[index]!.tip,
+            );
+            const draft = await builder.materializedDraft();
+            return await args.sowl.compile(
+              args.sowl.signer(participant.walletRef),
+              draft,
+              { useAlts: false },
+            );
+          },
+          sendLimiter,
+          reporter: args.reporter,
+        });
+      }),
+    );
+
+    const outcomes: TraderReceiptOutcome[] = settled.map((item, index) =>
+      item.status === "fulfilled"
+        ? {
+            ok: true,
+            index,
+            address: args.prepared.traders[index]!.address,
+            result: item.value,
+          }
+        : {
+            ok: false,
+            index,
+            address: args.prepared.traders[index]!.address,
+            error:
+              item.reason instanceof Error
+                ? item.reason.message
+                : String(item.reason),
+          },
+    );
+
+    args.reporter?.("pump armed buyer spam complete", {
+      mint: mintRef,
+      succeeded: outcomes.filter((item) => item.ok).length,
+      failed: outcomes.filter((item) => !item.ok).length,
+    });
+    return outcomes;
+  } finally {
+    stopBlockhashWarmer();
+  }
+}
+
+function instructionHasDiscriminator(
+  data: Buffer,
+  discriminator: Buffer,
+): boolean {
+  return (
+    data.length >= discriminator.length &&
+    data.subarray(0, discriminator.length).equals(discriminator)
+  );
+}
+
+function assertJitoPumpBundleLayout(args: {
+  prepared: PumpTokenLaunchPlan;
+  plans: PlannedTransaction[];
+}): void {
+  if (args.plans.length < 2 || args.plans.length > 5) {
+    throw new Error(
+      `Pump Jito bundle must contain deployment plus 1..4 buyers; got ${args.plans.length} transactions.`,
+    );
+  }
+
+  const blockhashes = new Set(args.plans.map((plan) => plan.recentBlockhash));
+  if (blockhashes.size !== 1) {
+    throw new Error(
+      `Pump Jito bundle transactions must share one recent blockhash; got ${blockhashes.size}.`,
+    );
+  }
+
+  for (const [index, plan] of args.plans.entries()) {
+    if (plan.lookupTables.length !== 0) {
+      throw new Error(
+        `Pump Jito transaction ${index + 1} unexpectedly uses ` +
+          `${plan.lookupTables.length} address lookup table(s). ` +
+          `This launch path requires fully static account keys.`,
+      );
+    }
+    if (plan.serializedSize > 1_232) {
+      throw new Error(
+        `Pump Jito transaction ${index + 1} is ${plan.serializedSize} bytes; ` +
+          `the Solana packet limit is 1232 bytes.`,
+      );
+    }
+  }
+
+  const createInstruction = args.plans[0]!.draft.instructions.find(
+    (instruction) =>
+      instruction.programId.equals(PUMP_PROGRAM_ID) &&
+      instructionHasDiscriminator(instruction.data, CREATE_V2_D8),
+  );
+  if (!createInstruction) {
+    throw new Error("Pump deployment transaction is missing create_v2.");
+  }
+  if (createInstruction.keys.length !== 16) {
+    throw new Error(
+      `SOL-paired Pump create_v2 must have 16 accounts; got ` +
+        `${createInstruction.keys.length}.`,
+    );
+  }
+
+  for (let index = 1; index < args.plans.length; index += 1) {
+    const buyInstruction = args.plans[index]!.draft.instructions.find(
+      (instruction) =>
+        instruction.programId.equals(PUMP_PROGRAM_ID) &&
+        instructionHasDiscriminator(instruction.data, BUY_EXACT_QUOTE_IN_V2_D8),
+    );
+    if (!buyInstruction) {
+      throw new Error(
+        `Pump buyer transaction ${index + 1} is missing buy_exact_quote_in_v2.`,
+      );
+    }
+
+    // Pump's current public IDL defines exactly 27 mandatory accounts for
+    // buy_exact_quote_in_v2. There are no optional or trailing accounts.
+    if (buyInstruction.keys.length !== 27) {
+      throw new Error(
+        `Pump buyer transaction ${index + 1} must have the official ` +
+          `27-account buy_exact_quote_in_v2 layout; got ` +
+          `${buyInstruction.keys.length}.`,
+      );
+    }
+
+    const user = buyInstruction.keys[13];
+    const systemProgram = buyInstruction.keys[24];
+    const program = buyInstruction.keys[26];
+
+    if (!user?.isSigner || !user.isWritable) {
+      throw new Error(
+        `Pump buyer transaction ${index + 1} must mark account 14 ` +
+          `(user) writable and signer.`,
+      );
+    }
+    if (!systemProgram?.pubkey.equals(SystemProgram.programId)) {
+      throw new Error(
+        `Pump buyer transaction ${index + 1} has the wrong account 25 ` +
+          `(system_program).`,
+      );
+    }
+    if (!program?.pubkey.equals(PUMP_PROGRAM_ID)) {
+      throw new Error(
+        `Pump buyer transaction ${index + 1} has the wrong account 27 ` +
+          `(program).`,
+      );
+    }
+  }
+}
+
+type BundleSimulationTransactionResult = {
+  err?: unknown;
+  logs?: string[] | null;
+  unitsConsumed?: number | null;
+};
+
+type BundleSimulationResponse = {
+  context?: {
+    slot?: number;
+    apiVersion?: string;
+  };
+  value?: {
+    summary?: unknown;
+    transactionResults?: BundleSimulationTransactionResult[];
+  };
+};
+
+function requiredBundleSimulationRpcUrl(): string {
+  const value = process.env.JITO_BUNDLE_SIMULATION_RPC_URL?.trim();
+  if (!value) {
+    throw new Error(
+      "Atomic Jito bundle simulation is required before submission. " +
+        "Configure -BundleSimulationRpcUrl in the interactive launcher with " +
+        "a Jito-enabled RPC that supports simulateBundle. A normal public " +
+        "Solana RPC cannot simulate state across ordered transactions.",
+    );
+  }
+
+  try {
+    new URL(value);
+  } catch {
+    throw new Error(
+      "JITO_BUNDLE_SIMULATION_RPC_URL must be a valid HTTP(S) URL.",
+    );
+  }
+
+  return value;
+}
+
+function safeEndpointLabel(value: string): string {
+  try {
+    return new URL(value).host;
+  } catch {
+    return "configured bundle simulation RPC";
+  }
+}
+
+function simulationSummarySucceeded(summary: unknown): boolean {
+  return (
+    typeof summary === "string" && summary.trim().toLowerCase() === "succeeded"
+  );
+}
+
+type AtomicBundleSimulationResult = {
+  unitsConsumed: Array<number | null>;
+  slot: number | null;
+};
+
+async function simulateAtomicJitoBundle(args: {
+  plans: PlannedTransaction[];
+  reporter?: LaunchReporter;
+  generation: number;
+  pass: "baseline" | "optimized";
+}): Promise<AtomicBundleSimulationResult> {
+  const endpoint = requiredBundleSimulationRpcUrl();
+  const encodedTransactions = args.plans.map((plan) =>
+    Buffer.from(plan.transaction.serialize()).toString("base64"),
+  );
+  const accountConfigs = args.plans.map(() => null);
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: Date.now(),
+        method: "simulateBundle",
+        params: [
+          { encodedTransactions },
+          {
+            preExecutionAccountsConfigs: accountConfigs,
+            postExecutionAccountsConfigs: accountConfigs,
+            skipSigVerify: false,
+            simulationBank: {
+              commitment: { commitment: "processed" },
+            },
+            transactionEncoding: "base64",
+            replaceRecentBlockhash: false,
+          },
+        ],
+      }),
+    });
+  } catch (error) {
+    throw new Error(
+      `simulateBundle request failed through ${safeEndpointLabel(endpoint)}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const raw = await response.text();
+  let payload: {
+    result?: BundleSimulationResponse;
+    error?: unknown;
+  } | null = null;
+  try {
+    payload = JSON.parse(raw) as {
+      result?: BundleSimulationResponse;
+      error?: unknown;
+    };
+  } catch {
+    // Preserve raw text in the error below.
+  }
+
+  if (!response.ok || payload?.error || !payload?.result?.value) {
+    const detail = JSON.stringify(
+      payload?.error ?? raw.slice(0, 1_000) ?? response.status,
+    );
+    const unsupported =
+      /method not found|unsupported|unauthorized|forbidden|upgrade/i.test(
+        detail,
+      );
+
+    throw new Error(
+      `Atomic bundle simulation failed through ` +
+        `${safeEndpointLabel(endpoint)} with HTTP ${response.status}: ${detail}` +
+        (unsupported
+          ? " Configure -BundleSimulationRpcUrl with a Jito-enabled RPC " +
+            "that supports simulateBundle. sendBundle still goes directly " +
+            "to Jito."
+          : ""),
+    );
+  }
+
+  const value = payload.result.value;
+  const transactionResults = value.transactionResults ?? [];
+  const normalizedResults = args.plans.map((plan, index) => {
+    const result = transactionResults[index] ?? {};
+    return {
+      transactionIndex: index + 1,
+      role: index === 0 ? "deployment" : `buyer-${index}`,
+      signature: bs58.encode(plan.transaction.signatures[0]!),
+      success: result.err == null,
+      error: result.err ?? null,
+      unitsConsumed: result.unitsConsumed ?? null,
+      lastLogs: (result.logs ?? []).slice(-20),
+    };
+  });
+
+  const firstFailure = normalizedResults.find((result) => !result.success);
+  const success =
+    simulationSummarySucceeded(value.summary) &&
+    firstFailure == null &&
+    transactionResults.length === args.plans.length;
+
+  args.reporter?.("pump jito atomic bundle simulation", {
+    generation: args.generation,
+    pass: args.pass,
+    endpoint: safeEndpointLabel(endpoint),
+    slot: payload.result.context?.slot ?? null,
+    apiVersion: payload.result.context?.apiVersion ?? null,
+    summary: value.summary ?? null,
+    success,
+    transactionCount: args.plans.length,
+    transactions: normalizedResults,
+  });
+
+  if (!success) {
+    const failure = firstFailure ?? normalizedResults.at(-1);
+    const logs = failure?.lastLogs ?? [];
+    throw new Error(
+      `Atomic Jito bundle simulation failed before submission. ` +
+        `Transaction ${failure?.transactionIndex ?? "unknown"} ` +
+        `(${failure?.role ?? "unknown"}) error: ` +
+        `${JSON.stringify(failure?.error ?? value.summary ?? "unknown")}` +
+        (logs.length > 0 ? `\n${logs.join("\n")}` : ""),
+    );
+  }
+
+  return {
+    unitsConsumed: normalizedResults.map(
+      (result) => result.unitsConsumed ?? null,
+    ),
+    slot: payload.result.context?.slot ?? null,
+  };
+}
+
+async function validateJitoBundleGeneration(args: {
+  sowl: Sowl;
+  prepared: PumpTokenLaunchPlan;
+  plans: PlannedTransaction[];
+  reporter?: LaunchReporter;
+  generation: number;
+  pass: "baseline" | "optimized";
+}): Promise<AtomicBundleSimulationResult> {
+  assertJitoPumpBundleLayout({
+    prepared: args.prepared,
+    plans: args.plans,
+  });
+
+  return await simulateAtomicJitoBundle({
+    plans: args.plans,
+    reporter: args.reporter,
+    generation: args.generation,
+    pass: args.pass,
+  });
+}
+
+function bundleNumberSetting(
+  name: string,
+  fallback: number,
+  minimum: number,
+): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < minimum) {
+    throw new Error(`${name} must be at least ${minimum}; got ${raw}`);
+  }
+  return value;
+}
+
+function optimizedJitoCuLimit(
+  consumed: number | null,
+  current: number | undefined,
+): number {
+  const currentLimit =
+    current != null && Number.isFinite(current) && current > 0
+      ? Math.trunc(current)
+      : 600_000;
+  if (consumed == null || !Number.isFinite(consumed) || consumed <= 0) {
+    return currentLimit;
+  }
+
+  const multiplier = bundleNumberSetting(
+    "JITO_BUNDLE_CU_SAFETY_MULTIPLIER",
+    1.3,
+    1,
+  );
+  const padding = Math.trunc(
+    bundleNumberSetting("JITO_BUNDLE_CU_PADDING", 30_000, 0),
+  );
+  const minimum = Math.trunc(
+    bundleNumberSetting("JITO_BUNDLE_CU_MINIMUM", 150_000, 1),
+  );
+  const raw = Math.ceil(consumed * multiplier + padding);
+  const rounded = Math.ceil(raw / 10_000) * 10_000;
+  return Math.min(currentLimit, Math.max(minimum, rounded));
+}
+
+async function optimizeJitoBundleForAuction(args: {
+  sowl: Sowl;
+  prepared: PumpTokenLaunchPlan;
+  plans: PlannedTransaction[];
+  simulation: AtomicBundleSimulationResult;
+  reporter?: LaunchReporter;
+  generation: number;
+}): Promise<{
+  changed: boolean;
+  plans: PlannedTransaction[];
+}> {
+  const optimizedLimits = args.plans.map((plan, index) =>
+    optimizedJitoCuLimit(
+      args.simulation.unitsConsumed[index] ?? null,
+      plan.draft.cuLimit,
+    ),
+  );
+
+  const changed = args.plans.some(
+    (plan, index) =>
+      plan.draft.cuLimit !== optimizedLimits[index] ||
+      plan.draft.cuPriceMicroLamports !== 0,
+  );
+  if (!changed) {
+    return { changed: false, plans: args.plans };
+  }
+
+  const optimizedDrafts = args.plans.map((plan, index) => ({
+    ...plan.draft,
+    instructions: [...plan.draft.instructions],
+    signers: [...plan.draft.signers],
+    actions: [...plan.draft.actions],
+    trackedAccounts: [...plan.draft.trackedAccounts],
+    cuLimit: optimizedLimits[index],
+    // Jito's sendBundle auction uses the Jito tip. A CU price only spends
+    // additional lamports and does not improve bundle auction ranking.
+    cuPriceMicroLamports: 0,
+  }));
+
+  const launchPlan = await args.sowl.compile(
+    args.sowl.signer(args.prepared.creatorWallet),
+    optimizedDrafts[0]!,
+    { useAlts: false },
+  );
+  const traderPlans = await Promise.all(
+    optimizedDrafts.slice(1).map((draft, index) => {
+      const trader = args.prepared.traders[index];
+      if (!trader) {
+        throw new Error(
+          `Missing trader allocation for Jito transaction ${index + 2}`,
+        );
+      }
+      return args.sowl.compile(args.sowl.signer(trader.walletRef), draft, {
+        useAlts: false,
+      });
+    }),
+  );
+
+  args.prepared.launchDraft = optimizedDrafts[0]!;
+  args.prepared.launchPlan = launchPlan;
+  args.prepared.traderPlans = traderPlans;
+
+  const beforeTotal = args.plans.reduce(
+    (sum, plan) => sum + (plan.draft.cuLimit ?? 600_000),
+    0,
+  );
+  const afterTotal = optimizedLimits.reduce((sum, value) => sum + value, 0);
+
+  args.reporter?.("pump jito auction compute optimization", {
+    generation: args.generation,
+    measuredUnits: args.simulation.unitsConsumed,
+    requestedBefore: args.plans.map((plan) => plan.draft.cuLimit ?? 600_000),
+    requestedAfter: optimizedLimits,
+    totalRequestedBefore: beforeTotal,
+    totalRequestedAfter: afterTotal,
+    auctionEfficiencyGain:
+      afterTotal > 0 ? Number((beforeTotal / afterTotal).toFixed(3)) : null,
+    priorityMicroLamportsAfter: 0,
+  });
+
+  return {
+    changed: true,
+    plans: [launchPlan, ...traderPlans],
+  };
+}
+
+function bundleTipEscalationMultiplier(): number {
+  return bundleNumberSetting("JITO_BUNDLE_TIP_ESCALATION_MULTIPLIER", 2, 1);
+}
+
+function bundleTipMaximumLamports(): bigint {
+  const raw = process.env.JITO_BUNDLE_TIP_MAX_LAMPORTS?.trim();
+  if (!raw) return 100_000_000n;
+  try {
+    const value = BigInt(raw);
+    if (value < 1_000n) {
+      throw new Error("below minimum");
+    }
+    return value;
+  } catch {
+    throw new Error(
+      `JITO_BUNDLE_TIP_MAX_LAMPORTS must be an integer of at least 1000; got ${raw}`,
+    );
+  }
+}
+
+function escalateJitoTipForRefresh(args: {
+  prepared: PumpTokenLaunchPlan;
+  refresh: number;
+  reporter?: LaunchReporter;
+}): boolean {
+  const finalIndex = args.prepared.traderPlans.length - 1;
+  const finalPlan = args.prepared.traderPlans[finalIndex];
+  const trader = args.prepared.traders[finalIndex];
+  if (!finalPlan || !trader) {
+    throw new Error("Cannot escalate Jito tip without a final buyer.");
+  }
+
+  const actionIndex = finalPlan.draft.actions.findIndex(
+    (action) => action.kind === "jito-tip",
+  );
+  const action = finalPlan.draft.actions[actionIndex];
+  const recipient = action?.recipient;
+  const currentRaw = action?.meta?.lamports;
+  if (
+    actionIndex < 0 ||
+    !recipient ||
+    typeof currentRaw !== "string" ||
+    !/^\d+$/.test(currentRaw)
+  ) {
+    throw new Error(
+      "Cannot escalate Jito tip because the final buyer tip metadata is missing.",
+    );
+  }
+
+  const current = BigInt(currentRaw);
+  const maximum = bundleTipMaximumLamports();
+  const multiplier = bundleTipEscalationMultiplier();
+  const multiplied = BigInt(Math.ceil(Number(current) * multiplier));
+  const next = multiplied > maximum ? maximum : multiplied;
+  if (next <= current) {
+    args.reporter?.("pump jito tip escalation", {
+      refresh: args.refresh,
+      currentLamports: current.toString(),
+      nextLamports: current.toString(),
+      maximumLamports: maximum.toString(),
+      changed: false,
+    });
+    return false;
+  }
+
+  let instructionIndex = -1;
+  for (
+    let index = finalPlan.draft.instructions.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    const instruction = finalPlan.draft.instructions[index]!;
+    if (
+      instruction.programId.equals(SystemProgram.programId) &&
+      instruction.keys.some((key) => key.pubkey.equals(recipient))
+    ) {
+      instructionIndex = index;
+      break;
+    }
+  }
+  if (instructionIndex < 0) {
+    throw new Error(
+      "Cannot escalate Jito tip because its System Program transfer was not found.",
+    );
+  }
+
+  const instructions = [...finalPlan.draft.instructions];
+  instructions[instructionIndex] = SystemProgram.transfer({
+    fromPubkey: finalPlan.payer,
+    toPubkey: recipient,
+    lamports: next,
+  });
+
+  const actions = finalPlan.draft.actions.map((candidate, index) =>
+    index === actionIndex
+      ? {
+          ...candidate,
+          meta: {
+            ...(candidate.meta ?? {}),
+            lamports: next.toString(),
+          },
+        }
+      : candidate,
+  );
+
+  finalPlan.draft = {
+    ...finalPlan.draft,
+    instructions,
+    actions,
+  };
+
+  args.reporter?.("pump jito tip escalation", {
+    refresh: args.refresh,
+    currentLamports: current.toString(),
+    nextLamports: next.toString(),
+    maximumLamports: maximum.toString(),
+    multiplier,
+    changed: true,
+  });
+
+  return true;
+}
+
+function positiveBundleGenerationLimit(): number {
+  const raw = process.env.JITO_BUNDLE_MAX_GENERATIONS?.trim();
+  if (!raw) return 5;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+    throw new Error(
+      `JITO_BUNDLE_MAX_GENERATIONS must be an integer from 1 to 100; got ${raw}`,
+    );
+  }
+  return parsed;
+}
+
+async function rebuildJitoBundlePlans(args: {
+  sowl: Sowl;
+  prepared: PumpTokenLaunchPlan;
+  refresh: number;
+  reporter?: LaunchReporter;
+}): Promise<PlannedTransaction[]> {
+  const tipChanged = escalateJitoTipForRefresh({
+    prepared: args.prepared,
+    refresh: args.refresh,
+    reporter: args.reporter,
+  });
+  if (!tipChanged) {
+    throw new Error(
+      "The Jito tip has reached its configured maximum without landing. " +
+        "No additional generation was submitted.",
+    );
+  }
+
+  args.sowl.blockhash.invalidate();
+
+  const launchPlan = await args.sowl.compile(
+    args.sowl.signer(args.prepared.creatorWallet),
+    args.prepared.launchDraft,
+    { useAlts: false },
+  );
+
+  const traderPlans = await Promise.all(
+    args.prepared.traderPlans.map((plan, index) => {
+      const trader = args.prepared.traders[index];
+      if (!trader) {
+        throw new Error(
+          `Missing trader allocation for Jito bundle transaction ${index + 2}`,
+        );
+      }
+      return args.sowl.compile(args.sowl.signer(trader.walletRef), plan.draft, {
+        useAlts: false,
+      });
+    }),
+  );
+
+  args.prepared.launchPlan = launchPlan;
+  args.prepared.traderPlans = traderPlans;
+  return [launchPlan, ...traderPlans];
+}
+
 export async function executePumpTokenLaunch(args: {
   sowl: Sowl;
   prepared: PumpTokenLaunchPlan;
@@ -1700,6 +2548,10 @@ export async function executePumpTokenLaunch(args: {
   spam: SpamSubmitOptions;
   kind: string;
   reporter?: LaunchReporter;
+  /** Runs immediately before the first deployment broadcast attempt. */
+  beforeDeploymentBroadcast?: () => Promise<void>;
+  /** Runs only when deployment could not be broadcast. */
+  onDeploymentBroadcastFailure?: (error: unknown) => Promise<void>;
 }): Promise<PumpTokenLaunchResult> {
   const submitMode = normalizeTraderSubmitMode(args.traderSubmitMode);
 
@@ -1716,6 +2568,156 @@ export async function executePumpTokenLaunch(args: {
     };
   }
 
+  if (submitMode === "jito-bundle") {
+    let plans = [args.prepared.launchPlan, ...args.prepared.traderPlans];
+    if (args.prepared.traders.length > 4) {
+      throw new Error(
+        `jito-bundle supports deployment plus at most 4 buyers; got ${args.prepared.traders.length} buyers.`,
+      );
+    }
+    const launchHasJitoTip = args.prepared.launchPlan.draft.actions.some(
+      (action) => action.kind === "jito-tip",
+    );
+    const finalTraderPlan = args.prepared.traderPlans.at(-1);
+    const finalBuyerHasJitoTip = Boolean(
+      finalTraderPlan?.draft.actions.some(
+        (action) => action.kind === "jito-tip",
+      ),
+    );
+    const jitoTipCount = plans.reduce(
+      (count, plan) =>
+        count +
+        plan.draft.actions.filter((action) => action.kind === "jito-tip")
+          .length,
+      0,
+    );
+    if (launchHasJitoTip || !finalBuyerHasJitoTip || jitoTipCount !== 1) {
+      throw new Error(
+        "jito-bundle requires exactly one Jito tip in the final buyer transaction and no tip in the deployment transaction.",
+      );
+    }
+
+    args.reporter?.("pump jito bundle submit", {
+      mint: args.prepared.deployment.mint.publicKey.toBase58(),
+      transactions: plans.length,
+      buyers: args.prepared.traders.length,
+      tipTransactionIndex: plans.length,
+    });
+
+    const maxGenerations = positiveBundleGenerationLimit();
+    let completedGenerations = 0;
+    let batch: Awaited<ReturnType<Sowl["sendBatchPlans"]>>;
+
+    while (true) {
+      const generation = completedGenerations + 1;
+      const baselineSimulation = await validateJitoBundleGeneration({
+        sowl: args.sowl,
+        prepared: args.prepared,
+        plans,
+        reporter: args.reporter,
+        generation,
+        pass: "baseline",
+      });
+
+      const optimized = await optimizeJitoBundleForAuction({
+        sowl: args.sowl,
+        prepared: args.prepared,
+        plans,
+        simulation: baselineSimulation,
+        reporter: args.reporter,
+        generation,
+      });
+      plans = optimized.plans;
+
+      if (optimized.changed) {
+        await validateJitoBundleGeneration({
+          sowl: args.sowl,
+          prepared: args.prepared,
+          plans,
+          reporter: args.reporter,
+          generation,
+          pass: "optimized",
+        });
+      }
+
+      try {
+        batch = await args.sowl.sendBatchPlans(
+          plans,
+          "jito",
+          `${args.kind}:jito-bundle:generation-${generation}`,
+          { skipSimulation: true, skipPreflight: true },
+        );
+        break;
+      } catch (error) {
+        const expired = isJitoBundleExpiredError(error);
+        const retryGeneration = isJitoBundleGenerationRetryError(error);
+
+        if (!expired && !retryGeneration) {
+          throw error;
+        }
+
+        const reason = error instanceof Error ? error.message : String(error);
+
+        args.reporter?.("pump jito generation not landed", {
+          mint: args.prepared.deployment.mint.publicKey.toBase58(),
+          generation,
+          reasonType: expired ? "blockhash-expired" : "landing-window-closed",
+          reason,
+        });
+
+        if (generation >= maxGenerations) {
+          throw new Error(
+            `Jito bundle did not land after ${maxGenerations} fresh ` +
+              `tip generation(s). Last error: ${reason}`,
+          );
+        }
+
+        completedGenerations += 1;
+
+        args.reporter?.("pump jito fresh generation", {
+          mint: args.prepared.deployment.mint.publicKey.toBase58(),
+          completedGeneration: generation,
+          nextGeneration: completedGenerations + 1,
+          maximumGenerations: maxGenerations,
+          newBlockhash: true,
+          newSignatures: true,
+          identicalByteResubmission: false,
+          reason,
+        });
+
+        plans = await rebuildJitoBundlePlans({
+          sowl: args.sowl,
+          prepared: args.prepared,
+          refresh: completedGenerations,
+          reporter: args.reporter,
+        });
+
+        args.reporter?.("pump jito bundle rebuilt", {
+          mint: args.prepared.deployment.mint.publicKey.toBase58(),
+          escalation: completedGenerations,
+          generation: completedGenerations + 1,
+          recentBlockhash: plans[0]!.recentBlockhash,
+          lastValidBlockHeight: Math.min(
+            ...plans.map((plan) => plan.lastValidBlockHeight),
+          ),
+          signaturesChanged: true,
+          transactionCount: plans.length,
+        });
+      }
+    }
+
+    const [launchReceipt, ...traderReceipts] = batch.receipts;
+    if (!launchReceipt) {
+      throw new Error("Jito bundle returned no deployment receipt.");
+    }
+
+    return {
+      mode: submitMode,
+      launchReceipt,
+      traderReceipts,
+    };
+  }
+
   const sendLimiter = new SenderRateLimiter(args.spam, args.reporter);
   const stopBlockhashWarmer = startBlockhashWarmer(
     args.sowl,
@@ -1723,16 +2725,29 @@ export async function executePumpTokenLaunch(args: {
     args.reporter,
   );
   try {
-    const launch = await broadcastLaunchWithRetry({
-      sowl: args.sowl,
-      plan: args.prepared.launchPlan,
-      sender: args.prepared.deploymentSender,
-      kind: `${args.kind}:create-and-creator-buy`,
-      skipSimulation: args.skipSimulation,
-      spam: args.spam,
-      sendLimiter,
-      reporter: args.reporter,
-    });
+    if (args.beforeDeploymentBroadcast) {
+      args.reporter?.("pump armed buyer release before deployment", {
+        mint: args.prepared.deployment.mint.publicKey.toBase58(),
+      });
+      await args.beforeDeploymentBroadcast();
+    }
+
+    let launch: SubmittedPlan;
+    try {
+      launch = await broadcastLaunchWithRetry({
+        sowl: args.sowl,
+        plan: args.prepared.launchPlan,
+        sender: args.prepared.deploymentSender,
+        kind: `${args.kind}:create-and-creator-buy`,
+        skipSimulation: args.skipSimulation,
+        spam: args.spam,
+        sendLimiter,
+        reporter: args.reporter,
+      });
+    } catch (error) {
+      await args.onDeploymentBroadcastFailure?.(error);
+      throw error;
+    }
 
     if (submitMode === "after-deploy-confirmed") {
       const launchReceipt = await args.sowl.confirmSubmitted(launch);

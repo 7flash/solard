@@ -31,9 +31,10 @@ async function fetchLookupTables(
   );
   return rows.filter((row): row is AddressLookupTableAccount => row != null);
 }
+
 function uniqueSigners(payer: Keypair, signers: Keypair[]): Keypair[] {
-  const seen = new Set<string>(),
-    result: Keypair[] = [];
+  const seen = new Set<string>();
+  const result: Keypair[] = [];
   for (const signer of [payer, ...signers]) {
     const key = signer.publicKey.toBase58();
     if (!seen.has(key)) {
@@ -43,6 +44,7 @@ function uniqueSigners(payer: Keypair, signers: Keypair[]): Keypair[] {
   }
   return result;
 }
+
 /** Account candidates that can be compressed through an ALT. Signers remain static. */
 export function lookupCandidates(
   payer: PublicKey,
@@ -69,6 +71,7 @@ export function lookupCandidates(
   }
   return addresses;
 }
+
 function isSizeFailure(error: unknown): boolean {
   return (
     (error instanceof RangeError &&
@@ -77,6 +80,7 @@ function isSizeFailure(error: unknown): boolean {
       /encoding overruns|transaction too large|too large/i.test(error.message))
   );
 }
+
 export async function assembleTransaction(args: {
   connection: Connection;
   blockhash: BlockhashCache;
@@ -143,6 +147,8 @@ export async function assembleTransaction(args: {
         lookupTables: tables,
         serializedSize: size,
         payer: args.payer.publicKey,
+        recentBlockhash: latest.blockhash,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
       };
       return {
         payer: args.payer.publicKey.toBase58(),

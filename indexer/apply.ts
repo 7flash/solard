@@ -1,4 +1,8 @@
-import { appendTokenTradeOnce, upsertTerminalToken } from "../shared/db.js";
+import {
+  appendTokenTradeOnce,
+  getTerminalToken,
+  upsertTerminalToken,
+} from "../shared/db.js";
 import {
   compactId,
   dbMeasure,
@@ -8,12 +12,93 @@ import {
 import type { IndexerConfig } from "./config.js";
 import { enqueueMetadata } from "./metadata.js";
 import { enqueueMayhemCheck } from "./mayhem.js";
-import type { Counters, IndexedEvent } from "./types.js";
+import type { Counters, IndexedEvent, IndexedTrade } from "./types.js";
 
 function json(value: unknown): string {
   return JSON.stringify(value, (_key, item) =>
     typeof item === "bigint" ? item.toString() : item,
   );
+}
+
+/**
+ * A websocket/RPC provider can deliver a TradeEvent even when the matching
+ * CreateEvent was missed during disconnect, deployment, or event-layout drift.
+ *
+ * listTerminalFeed() can only render mints that exist in terminalTokensLive,
+ * and feed membership requires a positive observedAtMs. Create the minimum
+ * token row only when the mint is absent or has never been observed. Existing
+ * observed tokens are deliberately left unchanged so every trade does not
+ * refresh feed membership or defeat a logical feed reset.
+ */
+function ensureTradeToken(
+  event: IndexedTrade,
+  input: {
+    config: IndexerConfig;
+    counters: Counters;
+  },
+): void {
+  const existing = getTerminalToken(event.mint);
+
+  if (existing && Number(existing.observedAtMs ?? 0) > 0) {
+    return;
+  }
+
+  const observedAtMs =
+    Number.isFinite(event.createdAtMs) && event.createdAtMs > 0
+      ? event.createdAtMs
+      : Date.now();
+
+  dbMeasure.sync(
+    {
+      start: () => `db.discover_trade_token mint=${compactId(event.mint)}`,
+
+      end: (result: any) => ({
+        updated: result != null,
+
+        observedAtMs: Number(result?.observedAtMs ?? observedAtMs),
+      }),
+
+      catch: summarizeError,
+    },
+    () =>
+      upsertTerminalToken({
+        mint: event.mint,
+
+        source: "helius-indexer-trade-discovery",
+
+        phase: "pump",
+
+        supplyUi: input.config.pumpSupplyUi,
+
+        priceSol: event.priceSol,
+
+        priceUsd: event.priceUsd,
+
+        marketCapSol: event.marketCapSol,
+
+        marketCapUsd: event.marketCapUsd,
+
+        signature: event.signature,
+
+        lastSlot: event.slot,
+
+        createdAtMs: observedAtMs,
+
+        observedAtMs,
+
+        priceUpdatedAtMs: observedAtMs,
+
+        updatedAtMs: Date.now(),
+      }),
+  );
+
+  enqueueMayhemCheck(input.config, input.counters, {
+    mint: event.mint,
+
+    bondingCurveKey: null,
+
+    attempt: 0,
+  });
 }
 
 export async function applyIndexedEvents(
@@ -117,9 +202,15 @@ export async function applyIndexedEvents(
           applied++;
         } else if (event.kind === "trade") {
           /**
+           * Repair the feed token row before the append-only trade write. This
+           * covers missed CreateEvents while preserving the rule that normal
+           * trades do not continuously refresh observedAtMs.
+           */
+          ensureTradeToken(event, input);
+
+          /**
            * The trade hot path is append-only. Current price, market cap, and SMA
-           * windows are read from tokenPriceWindows; no token-state update or
-           * aggregation runs here.
+           * windows are read from tokenPriceWindows; no aggregation runs here.
            */
           const tradeWrite = dbMeasure.sync(
             {

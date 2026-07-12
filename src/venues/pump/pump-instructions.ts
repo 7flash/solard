@@ -13,7 +13,6 @@ import {
   BUY_EXACT_QUOTE_IN_V2_D8,
   CREATE_V2_D8,
   MAYHEM_PROGRAM_ID,
-  PUMP_BREAKING_FEE_RECIPIENTS,
   PUMP_FEE_PROGRAM_ID,
   PUMP_PROGRAM_ID,
   SELL_V2_D8,
@@ -29,7 +28,6 @@ import {
 import {
   ata,
   bondingCurvePda,
-  bondingCurveV2Pda,
   creatorVaultPda,
   globalPda,
   globalVolumeAccumulatorPda,
@@ -61,12 +59,6 @@ type CurveInstructionArgs = {
   quote: QuoteAsset;
   routing: PumpRouting;
 };
-
-function breakingFeeRecipient(mint: PublicKey): PublicKey {
-  return PUMP_BREAKING_FEE_RECIPIENTS[
-    mint.toBytes()[0]! % PUMP_BREAKING_FEE_RECIPIENTS.length
-  ]!;
-}
 
 export function ensureAtaIx(
   payer: PublicKey,
@@ -111,44 +103,50 @@ function curveSharedKeys(args: CurveInstructionArgs) {
   ];
 }
 
-function curveTrailingKeys(args: CurveInstructionArgs) {
-  return [
-    ro(bondingCurveV2Pda(args.mint)),
-    wr(breakingFeeRecipient(args.mint)),
-  ];
-}
-
 function curveBuyKeys(args: CurveInstructionArgs) {
-  const uva = userVolumeAccumulatorPda(args.user);
+  const userVolumeAccumulator = userVolumeAccumulatorPda(args.user);
 
+  // Official buy_exact_quote_in_v2 layout: exactly 27 accounts.
   return [
     ...curveSharedKeys(args),
     ro(globalVolumeAccumulatorPda()),
-    wr(uva),
-    wr(ata(args.quote.mint, uva, args.quote.tokenProgram, true)),
+    wr(userVolumeAccumulator),
+    wr(
+      ata(
+        args.quote.mint,
+        userVolumeAccumulator,
+        args.quote.tokenProgram,
+        true,
+      ),
+    ),
     ro(pumpFeeConfigPda()),
     ro(PUMP_FEE_PROGRAM_ID),
     ro(SystemProgram.programId),
     ro(pumpEventAuthorityPda()),
     ro(PUMP_PROGRAM_ID),
-    ...curveTrailingKeys(args),
   ];
 }
 
 function curveSellKeys(args: CurveInstructionArgs) {
-  const uva = userVolumeAccumulatorPda(args.user);
+  const userVolumeAccumulator = userVolumeAccumulatorPda(args.user);
 
+  // Official sell_v2 layout: exactly 26 accounts.
   return [
     ...curveSharedKeys(args),
-    // sell_v2 skips the buy-only global_volume_accumulator account.
-    wr(uva),
-    wr(ata(args.quote.mint, uva, args.quote.tokenProgram, true)),
+    wr(userVolumeAccumulator),
+    wr(
+      ata(
+        args.quote.mint,
+        userVolumeAccumulator,
+        args.quote.tokenProgram,
+        true,
+      ),
+    ),
     ro(pumpFeeConfigPda()),
     ro(PUMP_FEE_PROGRAM_ID),
     ro(SystemProgram.programId),
     ro(pumpEventAuthorityPda()),
     ro(PUMP_PROGRAM_ID),
-    ...curveTrailingKeys(args),
   ];
 }
 
@@ -163,14 +161,18 @@ export function buildCreateV2(args: {
   mayhemMode?: boolean;
   cashback?: boolean;
 }): TransactionInstruction {
-  if (Buffer.byteLength(args.name, "utf8") > 32)
+  if (Buffer.byteLength(args.name, "utf8") > 32) {
     throw new Error("Pump token name exceeds 32 UTF-8 bytes");
-  if (Buffer.byteLength(args.symbol, "utf8") > 13)
+  }
+  if (Buffer.byteLength(args.symbol, "utf8") > 13) {
     throw new Error("Pump token symbol exceeds 13 UTF-8 bytes");
-  if (Buffer.byteLength(args.uri, "utf8") > 200)
+  }
+  if (Buffer.byteLength(args.uri, "utf8") > 200) {
     throw new Error("Pump token metadata URI exceeds 200 UTF-8 bytes");
-  if (args.creator.equals(PublicKey.default))
+  }
+  if (args.creator.equals(PublicKey.default)) {
     throw new Error("Pump creator cannot be the default public key");
+  }
 
   const curve = bondingCurvePda(args.mint);
   const keys = [

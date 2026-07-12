@@ -59,7 +59,13 @@ import {
   type ComposerHost,
 } from "../tx/composer.js";
 import { HeliusSender } from "../tx/senders/helius-sender.js";
-import { JitoSender } from "../tx/senders/jito-sender.js";
+import {
+  isJitoBundleExpiredError,
+  isJitoBundleGenerationRetryError,
+  JitoBundleExpiredError,
+  JitoBundleGenerationRetryError,
+  JitoSender,
+} from "../tx/senders/jito-sender.js";
 import { RpcSender } from "../tx/senders/rpc-sender.js";
 import {
   SenderRegistry,
@@ -718,23 +724,35 @@ export class Sowl implements ComposerHost {
       const submissionIds: string[] = [];
       const signatures: string[] = [];
       const isJitoBundle = String(via) === "jito";
-      const chunkSize = isJitoBundle
-        ? BUNDLE_TRANSACTION_LIMIT - 1
-        : BUNDLE_TRANSACTION_LIMIT;
+      const hasEmbeddedJitoTip = plans.some((plan) =>
+        plan.draft.actions.some((action) => action.kind === "jito-tip"),
+      );
+      const chunkSize =
+        isJitoBundle && !hasEmbeddedJitoTip
+          ? BUNDLE_TRANSACTION_LIMIT - 1
+          : BUNDLE_TRANSACTION_LIMIT;
 
       for (const chunk of chunkPlans(plans, chunkSize)) {
         const transactions = chunk.map((plan) => plan.transaction);
 
         if (isJitoBundle) {
-          const tipTransaction = await this.buildJitoTipTransaction(
-            chunk[0]!.payer,
+          const chunkHasEmbeddedTip = chunk.some((plan) =>
+            plan.draft.actions.some((action) => action.kind === "jito-tip"),
           );
+          const bundleTransactions = chunkHasEmbeddedTip
+            ? transactions
+            : [
+                await this.buildJitoTipTransaction(chunk[0]!.payer),
+                ...transactions,
+              ];
           const submission = await sender.sendBundle({
             connection: this.connection(),
-            transactions: [tipTransaction, ...transactions],
+            transactions: bundleTransactions,
           });
           submissionIds.push(submission.submissionId);
-          signatures.push(...submission.signatures.slice(1));
+          signatures.push(
+            ...submission.signatures.slice(chunkHasEmbeddedTip ? 0 : 1),
+          );
         } else {
           const submission = await sender.sendBundle({
             connection: this.connection(),
@@ -744,11 +762,45 @@ export class Sowl implements ComposerHost {
           signatures.push(...submission.signatures);
         }
       }
-      const receipts = await Promise.all(
-        signatures.map((signature) =>
-          confirmSignature(this.connection(), signature, String(via)),
-        ),
-      );
+      const receipts =
+        isJitoBundle && sender instanceof JitoSender
+          ? await (async (): Promise<SendReceipt[]> => {
+              if (submissionIds.length !== 1) {
+                throw new Error(
+                  `Expected one Jito bundle submission, got ${submissionIds.length}`,
+                );
+              }
+              const landing = await sender.waitForBundle(submissionIds[0]!);
+              if (landing.status === "expired") {
+                throw new JitoBundleExpiredError(
+                  landing.detail ??
+                    `Jito bundle ${submissionIds[0]} exhausted its blockhash`,
+                );
+              }
+              if (landing.status === "retry") {
+                throw new JitoBundleGenerationRetryError(
+                  landing.detail ??
+                    `Jito bundle ${submissionIds[0]} needs a fresh tip generation`,
+                );
+              }
+              if (landing.status !== "landed") {
+                throw new Error(
+                  landing.detail ??
+                    `Jito bundle ${submissionIds[0]} ended with ${landing.status}`,
+                );
+              }
+              return signatures.map((signature) => ({
+                signature,
+                slot: landing.slot,
+                sender: String(via),
+                status: "confirmed" as const,
+              }));
+            })()
+          : await Promise.all(
+              signatures.map((signature) =>
+                confirmSignature(this.connection(), signature, String(via)),
+              ),
+            );
       receipts.forEach((receipt, index) =>
         this.executions.update(records[index]!, {
           signature: receipt.signature,
@@ -764,9 +816,12 @@ export class Sowl implements ComposerHost {
         receipts,
       };
     } catch (error) {
+      const retryGeneration =
+        isJitoBundleExpiredError(error) ||
+        isJitoBundleGenerationRetryError(error);
       for (const record of records)
         this.executions.update(record, {
-          status: "failed",
+          status: retryGeneration ? "planned" : "failed",
           error: error instanceof Error ? error.message : String(error),
         });
       throw error;

@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-import type { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { sol } from "../../core/amounts.js";
 import {
   uploadPumpMetadata,
@@ -20,6 +20,7 @@ import {
   pumpLaunchEnvironment,
   usesHeliusSenderForLaunch,
   validateHeliusTip,
+  validateJitoTip,
   type ExplicitBuyerPlanRow,
   type LaunchReporter,
   type PumpLaunchEnvironment,
@@ -29,6 +30,14 @@ import {
   type TraderSubmitMode,
 } from "./token-launch.js";
 import { generateMintKeypairWithSuffix } from "./vanity-mint.js";
+import { PUMP_PROGRAM_ID, TOKEN_2022_ID } from "../../venues/pump/constants.js";
+import { bondingCurvePda } from "../../venues/pump/pda.js";
+import {
+  abortArmedBuyerEndpoints,
+  assertArmedBuyerEndpointsReady,
+  parseArmedBuyerEndpoint,
+  releaseArmedBuyerEndpoints,
+} from "./armed-buyers.js";
 
 export type Flags = Map<string, string[]>;
 
@@ -202,6 +211,86 @@ function optionalBoolean(value: unknown): boolean | undefined {
   }
 }
 
+type LoadedMintKeypair = {
+  mint: Keypair;
+  path: string;
+  address: string;
+};
+
+function mintSecretKeyBytes(value: unknown): Uint8Array {
+  const source = Array.isArray(value)
+    ? value
+    : value &&
+        typeof value === "object" &&
+        Array.isArray((value as { secretKey?: unknown }).secretKey)
+      ? (value as { secretKey: unknown[] }).secretKey
+      : null;
+
+  if (!source || source.length !== 64) {
+    throw new Error(
+      "Mint keypair JSON must be an array of exactly 64 bytes, or an object with a 64-byte secretKey array.",
+    );
+  }
+
+  return Uint8Array.from(
+    source.map((item, index) => {
+      const byte = Number(item);
+      if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+        throw new Error(`Invalid mint keypair byte at index ${index}.`);
+      }
+      return byte;
+    }),
+  );
+}
+
+export function loadMintKeypairFromFlags(
+  flags: Flags,
+  requiredSuffix: string | null,
+): LoadedMintKeypair | null {
+  const configuredPath = nonEmpty(first(flags, "mint-keypair"));
+  const expectedAddress = nonEmpty(first(flags, "mint-address"));
+
+  if (expectedAddress && !configuredPath) {
+    throw new Error(
+      "--mint-address cannot be used without --mint-keypair; the mint keypair must sign token creation.",
+    );
+  }
+
+  if (!configuredPath) return null;
+
+  const absolutePath = resolve(configuredPath);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(absolutePath, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`Could not read mint keypair JSON: ${absolutePath}`, {
+      cause: error,
+    });
+  }
+
+  const mint = Keypair.fromSecretKey(mintSecretKeyBytes(parsed));
+  const address = mint.publicKey.toBase58();
+
+  if (expectedAddress && address !== expectedAddress) {
+    throw new Error(
+      `Mint keypair derives ${address}, not the expected --mint-address ${expectedAddress}.`,
+    );
+  }
+
+  if (requiredSuffix && !address.endsWith(requiredSuffix)) {
+    throw new Error(
+      `Mint keypair address ${address} does not end with required suffix ${requiredSuffix}.`,
+    );
+  }
+
+  return {
+    mint,
+    path: absolutePath,
+    address,
+  };
+}
+
 export function pumpTokenMetadataInput(flags: Flags): PumpTokenMetadataInput {
   const metadataPath = first(flags, "metadata");
   let loaded: Partial<PumpTokenMetadataInput> = {};
@@ -250,6 +339,49 @@ export function pumpTokenMetadataInput(flags: Flags): PumpTokenMetadataInput {
   };
 }
 
+async function assertPumpMintIsUnused(args: {
+  sowl: Sowl;
+  mint: PublicKey;
+  report: LaunchReporter;
+}): Promise<void> {
+  const bondingCurve = bondingCurvePda(args.mint);
+  const [mintAccount, bondingCurveAccount] = await args.sowl
+    .connection()
+    .getMultipleAccountsInfo([args.mint, bondingCurve], {
+      commitment: "confirmed",
+    });
+
+  args.report("pump mint on-chain preflight", {
+    mint: args.mint.toBase58(),
+    mintExists: mintAccount != null,
+    mintOwner: mintAccount?.owner.toBase58() ?? null,
+    mintLamports: mintAccount?.lamports ?? null,
+    mintDataLength: mintAccount?.data.length ?? null,
+    mintIsToken2022: mintAccount?.owner.equals(TOKEN_2022_ID) ?? false,
+    bondingCurve: bondingCurve.toBase58(),
+    bondingCurveExists: bondingCurveAccount != null,
+    bondingCurveOwner: bondingCurveAccount?.owner.toBase58() ?? null,
+    bondingCurveIsPump:
+      bondingCurveAccount?.owner.equals(PUMP_PROGRAM_ID) ?? false,
+  });
+
+  if (mintAccount == null && bondingCurveAccount == null) return;
+
+  const state =
+    mintAccount != null && bondingCurveAccount != null
+      ? "the mint and Pump bonding curve already exist"
+      : mintAccount != null
+        ? "the mint account is already initialized"
+        : "the Pump bonding-curve account already exists";
+
+  throw new Error(
+    `Configured mint ${args.mint.toBase58()} cannot be used for create_v2: ` +
+      `${state}. Pump create_v2 requires a new Token-2022 mint account. ` +
+      `Run .\\rotate-pump-mint.ps1 to generate a fresh vanity mint and ` +
+      `update the saved launch profile.`,
+  );
+}
+
 function optionalSol(
   flags: Flags,
   solKey: string,
@@ -290,12 +422,269 @@ function optionalSolEnv(
   return human == null ? undefined : sol(human).raw;
 }
 
+type JitoTipFloorPercentile = "25" | "50" | "75" | "95" | "99" | "ema50";
+
+type JitoTipFloorRow = {
+  time?: string;
+  landed_tips_25th_percentile?: number;
+  landed_tips_50th_percentile?: number;
+  landed_tips_75th_percentile?: number;
+  landed_tips_95th_percentile?: number;
+  landed_tips_99th_percentile?: number;
+  ema_landed_tips_50th_percentile?: number;
+};
+
+type JitoTipSelection = {
+  mode: "fixed" | "dynamic";
+  source: "configured" | "minimum-fallback" | "tip-floor-rest";
+  lamports: bigint;
+  percentile?: JitoTipFloorPercentile;
+  multiplier?: number;
+  rawSol?: number;
+  selectedSol: number;
+  sampleTime?: string;
+  sampleAgeMs?: number;
+  endpoint?: string;
+  fallbackReason?: string;
+};
+
+function jitoTipPercentile(flags: Flags): JitoTipFloorPercentile {
+  const value = (
+    first(flags, "jito-tip-percentile") ??
+    envFirst("JITO_TIP_PERCENTILE") ??
+    "95"
+  )
+    .trim()
+    .toLowerCase();
+  if (
+    value === "25" ||
+    value === "50" ||
+    value === "75" ||
+    value === "95" ||
+    value === "99" ||
+    value === "ema50"
+  ) {
+    return value;
+  }
+  throw new Error(
+    `Invalid --jito-tip-percentile: ${value}. Expected 25, 50, 75, 95, 99, or ema50.`,
+  );
+}
+
+function jitoTipField(
+  percentile: JitoTipFloorPercentile,
+): keyof JitoTipFloorRow {
+  switch (percentile) {
+    case "25":
+      return "landed_tips_25th_percentile";
+    case "50":
+      return "landed_tips_50th_percentile";
+    case "75":
+      return "landed_tips_75th_percentile";
+    case "95":
+      return "landed_tips_95th_percentile";
+    case "99":
+      return "landed_tips_99th_percentile";
+    case "ema50":
+      return "ema_landed_tips_50th_percentile";
+  }
+}
+
+function clampBigInt(value: bigint, minimum: bigint, maximum: bigint): bigint {
+  if (value < minimum) return minimum;
+  if (value > maximum) return maximum;
+  return value;
+}
+
+async function resolveJitoBundleTip(args: {
+  flags: Flags;
+  configuredLamports: bigint;
+}): Promise<JitoTipSelection> {
+  const mode = (
+    first(args.flags, "jito-tip-mode") ??
+    envFirst("JITO_TIP_MODE") ??
+    "dynamic"
+  )
+    .trim()
+    .toLowerCase();
+
+  if (mode === "fixed") {
+    return {
+      mode: "fixed",
+      source: "configured",
+      lamports: args.configuredLamports,
+      selectedSol: Number(args.configuredLamports) / 1_000_000_000,
+    };
+  }
+  if (mode !== "dynamic") {
+    throw new Error(
+      `Invalid --jito-tip-mode: ${mode}. Expected dynamic or fixed.`,
+    );
+  }
+
+  const endpoint = (
+    first(args.flags, "jito-tip-floor-url") ??
+    envFirst("JITO_TIP_FLOOR_URL") ??
+    "https://bundles.jito.wtf/api/v1/bundles/tip_floor"
+  ).trim();
+  const percentile = jitoTipPercentile(args.flags);
+  const multiplier = numberFlag(
+    args.flags,
+    "jito-tip-multiplier",
+    Number(envFirst("JITO_TIP_MULTIPLIER") ?? "1.25"),
+  );
+  if (!Number.isFinite(multiplier) || multiplier <= 0) {
+    throw new Error(
+      `--jito-tip-multiplier must be greater than zero; got ${multiplier}.`,
+    );
+  }
+
+  const minimum =
+    optionalSolOverride(
+      args.flags,
+      "jito-tip-min-sol",
+      "jito-tip-min-lamports",
+    ) ??
+    optionalSolEnv(["JITO_TIP_MIN_SOL"], ["JITO_TIP_MIN_LAMPORTS"]) ??
+    1_000n;
+  const maximum =
+    optionalSolOverride(
+      args.flags,
+      "jito-tip-max-sol",
+      "jito-tip-max-lamports",
+    ) ??
+    optionalSolEnv(["JITO_TIP_MAX_SOL"], ["JITO_TIP_MAX_LAMPORTS"]) ??
+    1_000_000_000n;
+  if (minimum < 1_000n) {
+    throw new Error(
+      `Jito dynamic tip minimum must be at least 1000 lamports; got ${minimum}.`,
+    );
+  }
+  if (maximum < minimum) {
+    throw new Error(
+      `Jito dynamic tip maximum ${maximum} is below minimum ${minimum}.`,
+    );
+  }
+
+  const timeoutMs = numberFlag(
+    args.flags,
+    "jito-tip-floor-timeout-ms",
+    Number(envFirst("JITO_TIP_FLOOR_TIMEOUT_MS") ?? "2500"),
+  );
+  const maximumAgeMs = numberFlag(
+    args.flags,
+    "jito-tip-floor-max-age-ms",
+    Number(envFirst("JITO_TIP_FLOOR_MAX_AGE_MS") ?? "300000"),
+  );
+  if (timeoutMs <= 0 || maximumAgeMs <= 0) {
+    throw new Error("Jito tip floor timeout and maximum age must be positive.");
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () =>
+        controller.abort(
+          new Error(`Jito tip floor request timed out after ${timeoutMs}ms`),
+        ),
+      timeoutMs,
+    );
+
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        headers: { accept: "application/json" },
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(
+          `Jito tip floor request timed out after ${timeoutMs}ms`,
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 500);
+      throw new Error(
+        `Jito tip floor request failed with HTTP ${response.status}: ${detail}`,
+      );
+    }
+
+    const payload = (await response.json()) as
+      JitoTipFloorRow | JitoTipFloorRow[];
+    const row = Array.isArray(payload) ? payload[0] : payload;
+    if (!row) {
+      throw new Error("Jito tip floor response contained no samples.");
+    }
+
+    const sampleTime = String(row.time ?? "");
+    const sampleTimestamp = Date.parse(sampleTime);
+    if (!Number.isFinite(sampleTimestamp)) {
+      throw new Error(
+        `Jito tip floor response has an invalid time: ${sampleTime}`,
+      );
+    }
+
+    const sampleAgeMs = Math.max(0, Date.now() - sampleTimestamp);
+    if (sampleAgeMs > maximumAgeMs) {
+      throw new Error(
+        `Jito tip floor sample is stale: age=${sampleAgeMs}ms ` +
+          `maximum=${maximumAgeMs}ms.`,
+      );
+    }
+
+    const rawSol = Number(row[jitoTipField(percentile)]);
+    if (!Number.isFinite(rawSol) || rawSol <= 0) {
+      throw new Error(
+        `Jito tip floor percentile ${percentile} is missing or invalid: ` +
+          `${String(rawSol)}`,
+      );
+    }
+
+    const calculated = BigInt(Math.ceil(rawSol * 1_000_000_000 * multiplier));
+    const lamports = clampBigInt(calculated, minimum, maximum);
+    return {
+      mode: "dynamic",
+      source: "tip-floor-rest",
+      lamports,
+      percentile,
+      multiplier,
+      rawSol,
+      selectedSol: Number(lamports) / 1_000_000_000,
+      sampleTime,
+      sampleAgeMs,
+      endpoint,
+    };
+  } catch (error) {
+    // A dynamic-tip outage must start the bounded auction at the configured
+    // minimum, not at the larger fixed-tip fallback.
+    const fallbackLamports = minimum;
+    const fallbackReason =
+      error instanceof Error ? error.message : String(error);
+
+    return {
+      mode: "dynamic",
+      source: "minimum-fallback",
+      lamports: fallbackLamports,
+      percentile,
+      multiplier,
+      selectedSol: Number(fallbackLamports) / 1_000_000_000,
+      endpoint,
+      fallbackReason,
+    };
+  }
+}
+
 function senderFlag(flags: Flags, key: string, fallback: string): string {
   const value = first(flags, key);
   if (!value) return fallback;
-  if (value !== "helius-fast" && value !== "helius-rpc") {
+  if (value !== "helius-fast" && value !== "helius-rpc" && value !== "jito") {
     throw new Error(
-      `Invalid --${key}: ${value}. Expected helius-fast or helius-rpc.`,
+      `Invalid --${key}: ${value}. Expected helius-fast, helius-rpc, or jito.`,
     );
   }
   return value;
@@ -314,10 +703,11 @@ export function pumpLaunchEnvironmentFromFlags(
   if (
     buyerSender &&
     buyerSender !== "helius-fast" &&
-    buyerSender !== "helius-rpc"
+    buyerSender !== "helius-rpc" &&
+    buyerSender !== "jito"
   ) {
     throw new Error(
-      `Invalid --buyer-sender: ${buyerSender}. Expected helius-fast or helius-rpc.`,
+      `Invalid --buyer-sender: ${buyerSender}. Expected helius-fast, helius-rpc, or jito.`,
     );
   }
 
@@ -375,13 +765,25 @@ export function pumpLaunchEnvironmentFromFlags(
     ) ??
     base.policy.fastTip.lamports;
 
+  const jitoUrl =
+    first(flags, "jito-block-engine-url") ??
+    first(flags, "jito-url") ??
+    base.jitoUrl;
+  const jitoTipAccount =
+    first(flags, "jito-tip-account") ??
+    envFirst("JITO_TIP_ACCOUNT") ??
+    base.policy.jitoTip.account;
+  const jitoTipLamports =
+    optionalSolOverride(flags, "jito-tip-sol", "jito-tip-lamports") ??
+    optionalSolEnv(["JITO_TIP_SOL"], ["JITO_TIP_LAMPORTS"]) ??
+    base.policy.jitoTip.lamports;
+
   return {
     ...base,
-    rpcUrl:
-      first(flags, "rpc-url") ??
-      envFirst("HELIUS_RPC_URL", "RPC_ENDPOINT") ??
-      base.rpcUrl,
+    rpcUrl: first(flags, "rpc-url") ?? envFirst("RPC_ENDPOINT") ?? base.rpcUrl,
     senderUrl,
+    jitoUrl,
+    cuLimit: numberFlag(flags, "cu-limit", base.cuLimit),
     policy: {
       ...base.policy,
       deploymentSender,
@@ -392,6 +794,10 @@ export function pumpLaunchEnvironmentFromFlags(
       fastTip:
         tipAccount || tipLamports != null
           ? { account: tipAccount, lamports: tipLamports }
+          : {},
+      jitoTip:
+        jitoTipAccount || jitoTipLamports != null
+          ? { account: jitoTipAccount, lamports: jitoTipLamports }
           : {},
     },
   };
@@ -452,11 +858,12 @@ function requireSkipSimulationForBlindLiveBuys(
   if (
     live &&
     hasBuyerGroup &&
-    normalizeTraderSubmitMode(submitMode) === "blind-spam-after-submit" &&
+    (normalizeTraderSubmitMode(submitMode) === "blind-spam-after-submit" ||
+      normalizeTraderSubmitMode(submitMode) === "jito-bundle") &&
     !skipSimulation
   ) {
     throw new Error(
-      "Blind parallel dependent-buy submission requires --skip-simulation after a reviewed dry run.",
+      "Blind parallel dependent-buy submission and Jito bundles require --skip-simulation after a reviewed dry run.",
     );
   }
 }
@@ -517,7 +924,7 @@ function resolveSubmitMode(
   );
 }
 
-function spamOptionsFromFlags(
+export function spamOptionsFromFlags(
   flags: Flags,
   fallback: ReturnType<typeof pumpLaunchEnvironment>["spam"],
 ): ReturnType<typeof pumpLaunchEnvironment>["spam"] {
@@ -666,6 +1073,7 @@ function parseBuyPlanRows(flags: Flags): ExplicitBuyerPlanRow[] | null {
         sender: stringValue(row, "sender") as never,
         strategy: stringValue(row, "strategy") as never,
         tipLamports,
+        cuLimit: numberValue(row, "cuLimit"),
         priorityMicroLamports: numberValue(row, "priorityMicroLamports"),
         slippageBps: numberValue(row, "slippageBps"),
         retryIntervalMs: numberValue(row, "retryIntervalMs"),
@@ -692,7 +1100,7 @@ export async function preparePumpTokenLaunchFromFlags(args: {
   const group = first(args.flags, "buyer-group");
   const env = args.env ?? pumpLaunchEnvironmentFromFlags(args.flags);
   const explicitBuyPlan = parseBuyPlanRows(args.flags);
-  const traders = explicitBuyPlan
+  let traders = explicitBuyPlan
     ? await loadExplicitBuyerAllocations({
         sowl: args.sowl,
         rows: explicitBuyPlan,
@@ -713,6 +1121,39 @@ export async function preparePumpTokenLaunchFromFlags(args: {
           excludeWallet: args.creator,
         })
       : [];
+
+  const effectiveSubmitMode = normalizeTraderSubmitMode(
+    first(args.flags, "submit-mode") ?? env.submitMode,
+  );
+  const jitoTipLamports = env.policy.jitoTip.lamports ?? 0n;
+  if (
+    effectiveSubmitMode === "jito-bundle" &&
+    traders.length > 0 &&
+    jitoTipLamports > 0n
+  ) {
+    const finalIndex = traders.length - 1;
+    const finalTrader = traders[finalIndex]!;
+    const reserveLamports = finalTrader.reserveLamports + jitoTipLamports;
+    const spendLamports =
+      finalTrader.selectedBps == null
+        ? finalTrader.spendLamports
+        : ((finalTrader.balanceLamports - reserveLamports) *
+            BigInt(finalTrader.selectedBps)) /
+          10_000n;
+    if (
+      spendLamports <= 0n ||
+      finalTrader.balanceLamports <= spendLamports + reserveLamports
+    ) {
+      throw new Error(
+        `Final Jito buyer ${finalTrader.address} cannot cover buy, reserve, and tip: balance=${finalTrader.balanceLamports} spend=${spendLamports} reserve=${finalTrader.reserveLamports} jitoTip=${jitoTipLamports}`,
+      );
+    }
+    traders = traders.map((trader, index) =>
+      index === finalIndex
+        ? { ...trader, reserveLamports, spendLamports }
+        : trader,
+    );
+  }
 
   return await preparePumpTokenLaunch({
     sowl: args.sowl,
@@ -780,10 +1221,34 @@ export async function runPumpTokenLaunchFromArgs(
   const live = enabled(flags, "live", "LIVE");
   const skipSimulation = enabled(flags, "skip-simulation", "SKIP_SIMULATION");
   const group = first(flags, "buyer-group");
-  const env = pumpLaunchEnvironmentFromFlags(flags);
-  const spam = spamOptionsFromFlags(flags, env.spam);
+  const hasExplicitBuyPlan = Boolean(
+    first(flags, "buy-plan") || first(flags, "buy-plan-json"),
+  );
+  const hasBuyers = Boolean(group) || hasExplicitBuyPlan;
+  const deployOnly = enabled(flags, "deploy-only");
+  if (deployOnly && hasBuyers) {
+    throw new Error(
+      "--deploy-only cannot be combined with --buyer-group, --buy-plan, or --buy-plan-json. Armed buyers must own the follower plan.",
+    );
+  }
+  const configuredEnv = pumpLaunchEnvironmentFromFlags(flags);
   const submitMode = resolveSubmitMode(flags, options);
-  const usesHeliusSender = usesHeliusSenderForLaunch(env, Boolean(group));
+  let env: PumpLaunchEnvironment =
+    submitMode === "jito-bundle"
+      ? {
+          ...configuredEnv,
+          policy: {
+            ...configuredEnv.policy,
+            deploymentSender: "jito",
+            evolutionSender: "jito",
+            fastTraderSender: "jito",
+            rpcTraderSender: "jito",
+            fastTraderCount: Number.MAX_SAFE_INTEGER,
+          },
+        }
+      : configuredEnv;
+  const spam = spamOptionsFromFlags(flags, env.spam);
+  const usesHeliusSender = usesHeliusSenderForLaunch(env, hasBuyers);
   const persistOnLive = options.persistOnLive ?? true;
 
   if (usesHeliusSender && !env.senderUrl) {
@@ -801,22 +1266,44 @@ export async function runPumpTokenLaunchFromArgs(
     });
   }
 
+  if (submitMode === "jito-bundle") {
+    if (!hasBuyers) {
+      throw new Error(
+        "jito-bundle requires at least one buyer in --buy-plan, --buy-plan-json, or --buyer-group.",
+      );
+    }
+    if (!env.jitoUrl) {
+      throw new Error(
+        "jito-bundle requires --jito-block-engine-url or JITO_BLOCK_ENGINE_URL.",
+      );
+    }
+  }
+
   requireSkipSimulationForBlindLiveBuys(
     live,
     submitMode,
     skipSimulation,
-    Boolean(group),
+    hasBuyers,
   );
 
   const { uri, uploaded } = await resolveMetadataUri(flags, input);
   const cashback = enabled(flags, "cashback", "SOLARD_LAUNCH_CASHBACK");
   const mayhemMode = enabled(flags, "mayhem", "SOLARD_LAUNCH_MAYHEM");
   const vanityMintSuffix = vanitySuffixFromFlags(flags);
-  let vanityMint: Keypair | undefined;
-  let vanityMintAttempts: number | null = null;
-  let vanityMintElapsedMs: number | null = null;
+  const pregeneratedMint = loadMintKeypairFromFlags(flags, vanityMintSuffix);
+  let vanityMint: Keypair | undefined = pregeneratedMint?.mint;
+  let vanityMintAttempts: number | null = pregeneratedMint ? 0 : null;
+  let vanityMintElapsedMs: number | null = pregeneratedMint ? 0 : null;
 
-  if (vanityMintSuffix) {
+  if (pregeneratedMint) {
+    report("pregenerated mint loaded", {
+      mint: pregeneratedMint.address,
+      keypairPath: pregeneratedMint.path,
+      suffix: vanityMintSuffix,
+      attempts: 0,
+      elapsedMs: 0,
+    });
+  } else if (vanityMintSuffix) {
     const maxAttempts = numberFlag(
       flags,
       "vanity-max-attempts",
@@ -830,7 +1317,7 @@ export async function runPumpTokenLaunchFromArgs(
     const reportEvery = numberFlag(
       flags,
       "vanity-report-every",
-      envNumber("SOLARD_VANITY_MINT_REPORT_EVERY", 1_000_000),
+      envNumber("SOLARD_VANITY_MINT_REPORT_EVERY", 10_000),
     );
     report("vanity mint start", {
       suffix: vanityMintSuffix,
@@ -856,8 +1343,71 @@ export async function runPumpTokenLaunchFromArgs(
     });
   }
 
+  const armedEndpointValues = flags.get("armed-buyer") ?? [];
+  const armedEndpoints = armedEndpointValues.map(parseArmedBuyerEndpoint);
+  const armedSession = first(flags, "session")?.trim() ?? "";
+  if (armedEndpoints.length > 1) {
+    throw new Error(
+      "v57 accepts one --armed-buyer endpoint containing the complete buy plan, so worst-case quotes include every buyer.",
+    );
+  }
+  if (armedEndpoints.length > 0 && !armedSession) {
+    throw new Error("--session is required when --armed-buyer is used.");
+  }
+  if (armedEndpoints.length > 0 && !deployOnly) {
+    throw new Error("--armed-buyer requires --deploy-only.");
+  }
+  if (armedEndpoints.length > 0 && !live) {
+    throw new Error("--armed-buyer release is live-only.");
+  }
+
+  let jitoTipSelection: JitoTipSelection | null = null;
+  if (submitMode === "jito-bundle") {
+    jitoTipSelection = await resolveJitoBundleTip({
+      flags,
+      configuredLamports: env.policy.jitoTip.lamports ?? 100_000n,
+    });
+    env = {
+      ...env,
+      policy: {
+        ...env.policy,
+        jitoTip: {
+          ...env.policy.jitoTip,
+          lamports: jitoTipSelection.lamports,
+        },
+      },
+    };
+    validateJitoTip({
+      tip: env.policy.jitoTip,
+      live,
+      label: "Pump Jito bundle",
+    });
+    if (jitoTipSelection.source === "minimum-fallback") {
+      report("jito tip floor fallback", {
+        endpoint: jitoTipSelection.endpoint,
+        reason: jitoTipSelection.fallbackReason,
+        startingLamports: jitoTipSelection.lamports.toString(),
+        selectedSol: jitoTipSelection.selectedSol,
+        policy: "start-at-minimum-and-escalate-fresh-generations",
+      });
+    }
+
+    report("jito tip selected", {
+      ...jitoTipSelection,
+      lamports: jitoTipSelection.lamports.toString(),
+    });
+  }
+
   const sowl = createTraderSowl({ rpcUrl: env.rpcUrl });
   installPumpLaunchSenders(sowl, env);
+
+  if (vanityMint) {
+    await assertPumpMintIsUnused({
+      sowl,
+      mint: vanityMint.publicKey,
+      report,
+    });
+  }
 
   let prepared: PumpTokenLaunchPlan | null = null;
   try {
@@ -917,11 +1467,12 @@ export async function runPumpTokenLaunchFromArgs(
         ? {
             provider: uploaded.provider,
             metadataUri: uploaded.metadataUri,
-            website: uploaded.metadata.website ?? null,
-            twitter: uploaded.metadata.twitter ?? null,
-            telegram: uploaded.metadata.telegram ?? null,
-            video: uploaded.metadata.video ?? null,
-            showName: uploaded.metadata.showName,
+            imageUri: uploaded.imageUri ?? null,
+            website: input.website ?? null,
+            twitter: input.twitter ?? null,
+            telegram: input.telegram ?? null,
+            video: input.video ?? null,
+            showName: input.showName ?? true,
           }
         : null,
       feeMode: "creator-fees",
@@ -945,6 +1496,12 @@ export async function runPumpTokenLaunchFromArgs(
         priorityMicroLamports: deploymentPriorityMicroLamports,
         buyerPriorityMicroLamports,
         heliusTipLamports: env.policy.fastTip.lamports ?? null,
+        jitoUrl: submitMode === "jito-bundle" ? env.jitoUrl : null,
+        jitoTipLamports:
+          submitMode === "jito-bundle"
+            ? (env.policy.jitoTip.lamports ?? null)
+            : null,
+        jitoTipSelection,
         senderTps: spam.senderTps ?? null,
       },
       routes: {
@@ -962,6 +1519,26 @@ export async function runPumpTokenLaunchFromArgs(
       participants: prepared.expectedOutputByWallet,
     });
 
+    const armedMint = prepared.deployment.mint.publicKey.toBase58();
+    const armedTimeoutMs = numberFlag(flags, "armed-timeout-ms", 1_000);
+
+    if (armedEndpoints.length > 0) {
+      await assertArmedBuyerEndpointsReady({
+        endpoints: armedEndpoints,
+        session: armedSession,
+        mint: armedMint,
+        timeoutMs: armedTimeoutMs,
+      });
+      report("pump armed buyers ready", {
+        session: armedSession,
+        mint: armedMint,
+        endpoints: armedEndpoints.map((endpoint) => ({
+          label: endpoint.label,
+          address: `${endpoint.host}:${endpoint.port}`,
+        })),
+      });
+    }
+
     const result = await executePumpTokenLaunch({
       sowl,
       prepared,
@@ -971,7 +1548,40 @@ export async function runPumpTokenLaunchFromArgs(
       spam,
       kind: `cli:launch:pump:${input.alias}`,
       reporter: report,
+      beforeDeploymentBroadcast:
+        armedEndpoints.length > 0
+          ? async () => {
+              await releaseArmedBuyerEndpoints({
+                endpoints: armedEndpoints,
+                session: armedSession,
+                mint: armedMint,
+                timeoutMs: armedTimeoutMs,
+                reporter: report,
+              });
+            }
+          : undefined,
+      onDeploymentBroadcastFailure:
+        armedEndpoints.length > 0
+          ? async (error) => {
+              await abortArmedBuyerEndpoints({
+                endpoints: armedEndpoints,
+                session: armedSession,
+                mint: armedMint,
+                reason: error instanceof Error ? error.message : String(error),
+                reporter: report,
+              });
+            }
+          : undefined,
     });
+
+    if (live && persistOnLive && prepared) {
+      try {
+        sowl.persistPreparedDeployment(prepared.deployment, input.alias);
+      } catch {
+        // The launch already succeeded. Persistence is best-effort and must not
+        // alter the on-chain result.
+      }
+    }
 
     const output: PumpTokenLaunchCliResult = {
       createdAt: new Date().toISOString(),
@@ -986,6 +1596,12 @@ export async function runPumpTokenLaunchFromArgs(
         priorityMicroLamports: deploymentPriorityMicroLamports,
         buyerPriorityMicroLamports,
         heliusTipLamports: env.policy.fastTip.lamports ?? null,
+        jitoUrl: submitMode === "jito-bundle" ? env.jitoUrl : null,
+        jitoTipLamports:
+          submitMode === "jito-bundle"
+            ? (env.policy.jitoTip.lamports ?? null)
+            : null,
+        jitoTipSelection,
         senderTps: spam.senderTps ?? null,
         createAndCreatorBuy: env.policy.deploymentSender,
         fastBuyerCount: env.policy.fastTraderCount,
@@ -1025,13 +1641,8 @@ export async function runPumpTokenLaunchFromArgs(
 
     return output;
   } finally {
-    if (live && persistOnLive && prepared) {
-      try {
-        sowl.persistPreparedDeployment(prepared.deployment, input.alias);
-      } catch {
-        // Best-effort persistence fallback. Do not mask the launch result/error.
-      }
-    }
+    // Never persist from finally: preflight, simulation, and bundle submission
+    // failures must leave the token registry untouched.
     sowl.close();
   }
 }

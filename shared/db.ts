@@ -153,6 +153,67 @@ export const LaunchJobLogDbSchema = z.object({
   valueJson: z.string().default("null"),
 });
 
+export const PumpLaunchSessionDbSchema = z.object({
+  sessionId: z.string(),
+
+  status: z.string().default("prepared"),
+  buyerStatus: z.string().default("idle"),
+  deploymentStatus: z.string().default("pending"),
+
+  mint: z.string(),
+  creator: z.string(),
+  mintKeypairPath: z.string(),
+  metadataUri: z.string(),
+
+  tokenJson: z.string().default("{}"),
+  buyPlanJson: z.string().default("[]"),
+  buyerArgvJson: z.string().default("[]"),
+  deployArgvJson: z.string().default("[]"),
+
+  fireToken: z.string().nullable().default(null),
+  fireAcknowledgedToken: z.string().nullable().default(null),
+
+  abortReason: z.string().nullable().default(null),
+  deploymentSignature: z.string().nullable().default(null),
+
+  armedPid: z.number().default(0),
+
+  armedAtMs: z.number().default(0),
+  heartbeatAtMs: z.number().default(0),
+  fireRequestedAtMs: z.number().default(0),
+  fireAcknowledgedAtMs: z.number().default(0),
+  deploymentBroadcastAtMs: z.number().default(0),
+  completedAtMs: z.number().default(0),
+
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
+export const PumpLaunchBuyerDbSchema = z.object({
+  buyerKey: z.string(),
+  sessionId: z.string(),
+
+  walletRef: z.string(),
+  address: z.string(),
+  label: z.string().nullable().default(null),
+
+  selectedBps: z.number().nullable().default(null),
+  spendLamports: z.string(),
+  reserveLamports: z.string(),
+
+  sender: z.string(),
+  strategy: z.string(),
+  configJson: z.string().default("{}"),
+
+  status: z.string().default("prepared"),
+  resultJson: z.string().nullable().default(null),
+  error: z.string().nullable().default(null),
+
+  heartbeatAtMs: z.number().default(0),
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
 export const TokenMarketExtremaSchema = z.object({
   mint: z.string(),
   athMarketCapUsd: z.number().nullable(),
@@ -237,6 +298,10 @@ export type TerminalFeedState = z.infer<typeof TerminalFeedStateSchema>;
 export type LaunchJobDbRow = z.infer<typeof LaunchJobDbSchema>;
 
 export type LaunchJobLogDbRow = z.infer<typeof LaunchJobLogDbSchema>;
+
+export type PumpLaunchSessionDbRow = z.infer<typeof PumpLaunchSessionDbSchema>;
+
+export type PumpLaunchBuyerDbRow = z.infer<typeof PumpLaunchBuyerDbSchema>;
 
 export type TerminalFeedRow = TerminalToken & {
   sma1m: number | null;
@@ -460,6 +525,8 @@ export const db = await openDatabaseWithRetry(
         terminalFeedState: TerminalFeedStateSchema,
         launchJobsV2: LaunchJobDbSchema,
         launchJobLogsV2: LaunchJobLogDbSchema,
+        pumpLaunchSessionsV1: PumpLaunchSessionDbSchema,
+        pumpLaunchBuyersV1: PumpLaunchBuyerDbSchema,
       },
       {
         timestamps: false,
@@ -475,6 +542,8 @@ export const db = await openDatabaseWithRetry(
           terminalFeedState: [["scope"]],
           launchJobsV2: [["jobId"]],
           launchJobLogsV2: [["logId"]],
+          pumpLaunchSessionsV1: [["sessionId"]],
+          pumpLaunchBuyersV1: [["buyerKey"]],
         },
 
         indexes: {
@@ -512,6 +581,19 @@ export const db = await openDatabaseWithRetry(
           ],
 
           launchJobLogsV2: [["jobId", "atMs"], ["atMs"]],
+
+          pumpLaunchSessionsV1: [
+            ["status", "updatedAtMs"],
+            ["buyerStatus", "heartbeatAtMs"],
+            ["deploymentStatus", "updatedAtMs"],
+            ["mint"],
+          ],
+
+          pumpLaunchBuyersV1: [
+            ["sessionId", "status"],
+            ["sessionId", "updatedAtMs"],
+            ["address"],
+          ],
         },
 
         views: {
