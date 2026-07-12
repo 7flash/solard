@@ -12,7 +12,7 @@
 .terminal-header-title{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;min-width:0}
 .terminal-header-title h2{margin:0;font-size:34px;line-height:.9;letter-spacing:-.06em}
 .terminal-actions,.terminal-links,.terminal-trade-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
-.terminal-controls{display:grid;grid-template-columns:minmax(260px,1fr) minmax(220px,300px) auto auto;gap:8px;align-items:center;padding:10px;border:1px solid var(--line);background:#070a0f}
+.terminal-controls{display:grid;grid-template-columns:minmax(260px,1fr) minmax(220px,300px) minmax(150px,190px);gap:8px;align-items:center;padding:10px;border:1px solid var(--line);background:#070a0f}
 .terminal-controls input,.terminal-inspector input,.terminal-inspector select{min-height:36px;border:1px solid var(--line-strong);background:#0b1018;color:var(--text);padding:8px 10px;outline:none}
 .terminal-controls input:focus,.terminal-inspector input:focus,.terminal-inspector select:focus{border-color:var(--green)}
 .terminal-filter-toggle.active{color:var(--black);background:var(--green);border-color:var(--green)}
@@ -439,3 +439,66 @@
  * Equal-window deltas require two complete recorded windows.
  * Holder point-in-time deltas require one complete interval.
  */
+
+
+.terminal-mcap-filter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.terminal-money-input {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  border: 1px solid var(--line);
+  background: #05070b;
+  min-width: 0;
+}
+
+.terminal-money-input > span {
+  padding-left: 7px;
+  color: var(--muted);
+}
+
+.terminal-money-input input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding-left: 3px;
+}
+
+.terminal-header-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-header-help {
+  display: inline-grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  cursor: help;
+  font-size: 8px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.terminal-header-help:hover,
+.terminal-header-help:focus {
+  border-color: var(--green);
+  color: var(--green);
+  outline: none;
+}

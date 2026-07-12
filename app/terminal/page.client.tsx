@@ -106,8 +106,7 @@ type PageState = {
   pendingNewRows: number;
 
   filter: string;
-  hideMayhem: boolean;
-  hideUsdc: boolean;
+  minMarketCapUsd: string;
   sort: SortKey;
   selectedKey: string | null;
   pinned: string[];
@@ -159,8 +158,9 @@ const state: PageState = {
   pendingNewRows: 0,
 
   filter: storageGet("solwal:pump-feed-filter", ""),
-  hideMayhem: storageFlag("solwal:pump-hide-mayhem"),
-  hideUsdc: storageFlag("solwal:pump-hide-usdc"),
+
+  minMarketCapUsd: storageGet("solard:terminal-min-mcap-usd", "2500"),
+
   sort: (() => {
     const saved = storageGet("solwal:pump-feed-sort", "created-desc");
 
@@ -563,13 +563,27 @@ function isPinned(row: PumpFeedRow): boolean {
   return !!row.mint && state.pinned.includes(row.mint);
 }
 
+function minimumMarketCapUsd(): number {
+  const value = Number(state.minMarketCapUsd);
+
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function passesFilters(row: PumpFeedRow): boolean {
-  if (state.hideMayhem && isMayhemKnown(row) && isMayhem(row)) {
+  const minimum = minimumMarketCapUsd();
+
+  const marketCap = latestMcap(row);
+
+  if (minimum > 0 && (marketCap == null || marketCap < minimum)) {
     return false;
   }
-  if (state.hideUsdc && isUsdc(row)) return false;
+
   const q = state.filter.trim().toLowerCase();
-  if (!q) return true;
+
+  if (!q) {
+    return true;
+  }
+
   return [
     row.name,
     row.symbol,
@@ -1032,26 +1046,13 @@ function setFilter(value: string): void {
   rerender();
 }
 
-function toggleHide(field: "hideMayhem" | "hideUsdc", key: string): void {
-  state[field] = !state[field];
-  storageSet(key, state[field] ? "1" : "0");
-  terminalUiMeasure.measureSync(
-    {
-      start: () => `ui.filter field=${field} enabled=${state[field] ? 1 : 0}`,
+function setMinimumMarketCapUsd(value: string): void {
+  const normalized = value.replace(/[^0-9.]/g, "");
 
-      end: () => ({
-        field,
-        enabled: state[field],
-      }),
+  state.minMarketCapUsd = normalized;
 
-      catch: summarizeError,
-    },
-    () => ({
-      field,
-      enabled: state[field],
-    }),
-  );
-  void reloadFeed();
+  storageSet("solard:terminal-min-mcap-usd", normalized);
+
   rerender();
 }
 
@@ -1183,8 +1184,9 @@ async function reloadFeed(
           activeWindowMs: String(FEED_WINDOW_MS),
           includeUnpriced: "1",
           source: "both",
-          hideMayhem: state.hideMayhem ? "1" : "0",
-          hideUsdc: state.hideUsdc ? "1" : "0",
+
+          minMarketCapUsd: String(minimumMarketCapUsd()),
+
           stats: options.includeHealth ? "1" : "0",
           health: options.includeHealth ? "1" : "0",
 
@@ -1899,6 +1901,35 @@ function HeaderSortButton({
   );
 }
 
+function HeaderHelp({ label, help }: { label: string; help: string }) {
+  return (
+    <span className="terminal-header-label">
+      <b>{label}</b>
+
+      <span
+        className="terminal-header-help"
+        title={help}
+        aria-label={help}
+        tabIndex={0}
+      >
+        ?
+      </span>
+    </span>
+  );
+}
+
+function windowMetricHelp(prefix: "volume" | "sma" | "trades"): string {
+  if (prefix === "volume") {
+    return "VOL is SOL traded during the current 1m, 5m, and 15m windows. Δ1 equals current 1m volume minus the immediately previous 1m volume. Negative means less volume than the preceding equal-length window.";
+  }
+
+  if (prefix === "sma") {
+    return "SMA is average USD market cap during the current window. Its delta is the current-window average minus the preceding equal-length-window average. Negative means average market cap moved down. Moves below $3K are ignored.";
+  }
+
+  return "TRX is observed trade count during the current window. Δ1 equals current 1m trades minus immediately previous 1m trades. Negative means fewer trades occurred in the current window; it does not mean a negative number of trades.";
+}
+
 function WindowSortHeader({
   label,
   prefix,
@@ -1908,7 +1939,7 @@ function WindowSortHeader({
 }) {
   return (
     <div className="terminal-metric-header">
-      <b>{label}</b>
+      <HeaderHelp label={label} help={windowMetricHelp(prefix)} />
 
       <div className="terminal-header-values">
         {(["1m", "5m", "15m"] as const).map((window) => (
@@ -1938,7 +1969,10 @@ function WindowSortHeader({
 function MarketCapSortHeader() {
   return (
     <div className="terminal-metric-header terminal-market-cap-header">
-      <b>MC</b>
+      <HeaderHelp
+        label="MC"
+        help="MC is current USD market cap. ATH and ATL are the highest and lowest valid USD market caps observed in recorded trade history."
+      />
 
       <div>
         <HeaderSortButton
@@ -1966,7 +2000,10 @@ function MarketCapSortHeader() {
 function HolderSortHeader() {
   return (
     <div className="terminal-metric-header">
-      <b>HOLD</b>
+      <HeaderHelp
+        label="HOLD"
+        help="Observed holder counts come from indexed owner buy and sell balance changes. N is holders now; 5 and 15 are holder counts five and fifteen minutes ago. Holder Δ1 equals holders now minus holders one minute ago. It is the actual holder-count change, not this minute's additions versus last minute's additions. Negative means fewer observed holders now. Transfers and activity outside recorded history are not included."
+      />
 
       <div className="terminal-header-values">
         <HeaderSortButton
@@ -2005,7 +2042,10 @@ function HolderSortHeader() {
 function MintTimeSortHeader() {
   return (
     <div className="terminal-metric-header terminal-time-header">
-      <b>Mint / time</b>
+      <HeaderHelp
+        label="Mint / time"
+        help="The cell contains the clickable mint, creation age, and latest recorded trade age. C sorts by creation time and T sorts by last trade time."
+      />
 
       <div>
         <HeaderSortButton
@@ -3179,20 +3219,27 @@ function TerminalPage() {
             );
           })}
         </select>
-        <button
-          type="button"
-          className={`terminal-filter-toggle ${state.hideMayhem ? "active" : ""}`}
-          onClick={() => toggleHide("hideMayhem", "solwal:pump-hide-mayhem")}
+        <label
+          className="terminal-mcap-filter"
+          title="Hide tokens whose current USD market cap is below this value"
         >
-          {state.hideMayhem ? "Mayhem hidden" : "Hide mayhem"}
-        </button>
-        <button
-          type="button"
-          className={`terminal-filter-toggle ${state.hideUsdc ? "active" : ""}`}
-          onClick={() => toggleHide("hideUsdc", "solwal:pump-hide-usdc")}
-        >
-          Hide USDC
-        </button>
+          <span>Min MCAP</span>
+
+          <span className="terminal-money-input">
+            <span>$</span>
+
+            <input
+              type="number"
+              min="0"
+              step="500"
+              inputMode="decimal"
+              value={state.minMarketCapUsd}
+              onInput={(event: any) =>
+                setMinimumMarketCapUsd(event.currentTarget.value)
+              }
+            />
+          </span>
+        </label>
       </section>
 
       {(state.health as AnyRow | null)?.status !== "ok" ? (
@@ -3233,7 +3280,12 @@ function TerminalPage() {
           <table className="terminal-table terminal-market-table">
             <thead>
               <tr>
-                <th>Token</th>
+                <th>
+                  <HeaderHelp
+                    label="Token"
+                    help="Token image, symbol, and name. The search box matches symbol, mint, creator, quote asset, and source."
+                  />
+                </th>
 
                 <th>
                   <MarketCapSortHeader />

@@ -1559,8 +1559,7 @@ export function listTerminalFeed(
     activeWindowMs?: number;
     includeUnpriced?: boolean;
     source?: string | null;
-    hideMayhem?: boolean;
-    hideUsdc?: boolean;
+    minMarketCapUsd?: number;
     priceWindowTtlMs?: number;
     pinnedMints?: Iterable<string>;
   } = {},
@@ -1578,6 +1577,8 @@ export function listTerminalFeed(
     integer(input.sinceMs, 0),
     now - activeWindowMs,
   );
+
+  const minMarketCapUsd = Math.max(0, finite(input.minMarketCapUsd) ?? 0);
 
   const feedState = getTerminalFeedState();
 
@@ -1640,6 +1641,28 @@ export function listTerminalFeed(
     tokensByMint.set(token.mint, token);
   }
 
+  if (minMarketCapUsd > 0) {
+    for (const [mint, token] of tokensByMint) {
+      const windows = windowsByMint.get(mint);
+
+      const priceUsd = windows?.latestPriceUsd ?? token.priceUsd;
+
+      const currentMarketCapUsd =
+        windows?.latestMarketCapUsd ??
+        (priceUsd != null && token.supplyUi > 0
+          ? priceUsd * token.supplyUi
+          : token.marketCapUsd);
+
+      if (
+        currentMarketCapUsd == null ||
+        !Number.isFinite(currentMarketCapUsd) ||
+        currentMarketCapUsd < minMarketCapUsd
+      ) {
+        tokensByMint.delete(mint);
+      }
+    }
+  }
+
   /**
    * Holder counts are observed from indexed owner balance changes. Query only
    * current feed candidates and cache the typed view for five seconds.
@@ -1656,8 +1679,6 @@ export function listTerminalFeed(
       isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
     )
     .filter((token) => sourceMatches(input.source, token.source))
-    .filter((token) => !input.hideMayhem || !terminalTokenIsMayhem(token))
-    .filter((token) => !input.hideUsdc || !isUsdc(token))
     .map((token) => {
       const windows = windowsByMint.get(token.mint) ?? null;
 
@@ -1801,6 +1822,13 @@ export function listTerminalFeed(
         raw: token,
       } satisfies TerminalFeedRow;
     })
+    .filter(
+      (row) =>
+        minMarketCapUsd <= 0 ||
+        (row.marketCapUsd != null &&
+          Number.isFinite(row.marketCapUsd) &&
+          row.marketCapUsd >= minMarketCapUsd),
+    )
     .filter(
       (row) => input.includeUnpriced || hasPrice(row) || Boolean(row.image),
     )

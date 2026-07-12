@@ -54,6 +54,11 @@ export async function GET(request: Request): Promise<Response> {
           24 * 60 * 60_000,
         );
 
+        const minMarketCapUsd = Math.max(
+          0,
+          Number(url.searchParams.get("minMarketCapUsd") ?? 0) || 0,
+        );
+
         const pinnedMints = String(url.searchParams.get("pinned") ?? "")
           .split(",")
           .map((value) => value.trim())
@@ -82,9 +87,7 @@ export async function GET(request: Request): Promise<Response> {
 
               includeUnpriced: enabled(url, "includeUnpriced"),
 
-              hideMayhem: enabled(url, "hideMayhem"),
-
-              hideUsdc: enabled(url, "hideUsdc"),
+              minMarketCapUsd,
 
               priceWindowTtlMs: 1_000,
 
@@ -143,6 +146,7 @@ export async function GET(request: Request): Promise<Response> {
             limit,
             sinceMs,
             activeWindowMs,
+            minMarketCapUsd,
 
             count: rows.length,
             mapped: rows.length,
@@ -155,12 +159,6 @@ export async function GET(request: Request): Promise<Response> {
             pinned: pinnedMints.length,
 
             membership: "observed-after-reset-or-pinned",
-
-            hideMayhem: enabled(url, "hideMayhem"),
-
-            mayhemPolicy: enabled(url, "hideMayhem")
-              ? "hide-verified-mayhem-show-unknown"
-              : "all",
 
             reads: [
               "terminalTokensLive",
