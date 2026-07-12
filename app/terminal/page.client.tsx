@@ -481,6 +481,183 @@ function tokenImage(row: PumpFeedRow | null | undefined): string | null {
   );
 }
 
+type AvatarRetryState = {
+  url: string;
+  attempt: number;
+  waiting: boolean;
+};
+
+const AVATAR_RETRY_DELAYS_MS = [1_000, 2_500, 6_000, 15_000];
+
+const avatarRetryState = new Map<string, AvatarRetryState>();
+
+const avatarRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearAvatarRetryTimer(key: string): void {
+  const timer = avatarRetryTimers.get(key);
+
+  if (timer != null) {
+    clearTimeout(timer);
+
+    avatarRetryTimers.delete(key);
+  }
+}
+
+function clearAvatarRetry(key: string): void {
+  clearAvatarRetryTimer(key);
+
+  avatarRetryState.delete(key);
+}
+
+function retryImageUrl(url: string, attempt: number): string {
+  try {
+    const parsed = new URL(url, window.location.href);
+
+    /**
+     * Extra query parameters can invalidate signed object-store URLs.
+     */
+    const signed = [
+      "signature",
+      "sig",
+      "token",
+      "expires",
+      "x-amz-signature",
+    ].some((key) => parsed.searchParams.has(key));
+
+    if (signed) {
+      return url;
+    }
+
+    parsed.searchParams.set("_solard_image_retry", String(attempt));
+
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function avatarSource(row: PumpFeedRow): {
+  base: string | null;
+  request: string | null;
+} {
+  const base = tokenImage(row);
+
+  if (!base) {
+    return {
+      base: null,
+
+      request: null,
+    };
+  }
+
+  const key = rowKey(row);
+
+  const retry = avatarRetryState.get(key);
+
+  if (!retry || retry.url !== base) {
+    if (retry) {
+      clearAvatarRetry(key);
+    }
+
+    return {
+      base,
+
+      request: base,
+    };
+  }
+
+  return {
+    base,
+
+    request: retry.waiting ? null : retryImageUrl(base, retry.attempt),
+  };
+}
+
+function handleAvatarLoad(row: PumpFeedRow, loadedUrl: string | null): void {
+  if (!loadedUrl) {
+    return;
+  }
+
+  const key = rowKey(row);
+
+  const retry = avatarRetryState.get(key);
+
+  if (retry?.url === loadedUrl) {
+    clearAvatarRetryTimer(key);
+
+    avatarRetryState.set(key, {
+      ...retry,
+
+      waiting: false,
+    });
+  }
+}
+
+function handleAvatarError(row: PumpFeedRow, failedUrl: string | null): void {
+  if (!failedUrl) {
+    return;
+  }
+
+  const key = rowKey(row);
+
+  const previous = avatarRetryState.get(key);
+
+  const attempt = previous?.url === failedUrl ? previous.attempt + 1 : 1;
+
+  clearAvatarRetryTimer(key);
+
+  if (attempt > AVATAR_RETRY_DELAYS_MS.length) {
+    avatarRetryState.set(key, {
+      url: failedUrl,
+
+      attempt,
+
+      waiting: true,
+    });
+
+    rerender();
+
+    return;
+  }
+
+  avatarRetryState.set(key, {
+    url: failedUrl,
+
+    attempt,
+
+    waiting: true,
+  });
+
+  const timer = setTimeout(
+    () => {
+      avatarRetryTimers.delete(key);
+
+      const current = avatarRetryState.get(key);
+
+      if (
+        !current ||
+        current.url !== failedUrl ||
+        current.attempt !== attempt
+      ) {
+        return;
+      }
+
+      avatarRetryState.set(key, {
+        ...current,
+
+        waiting: false,
+      });
+
+      rerender();
+    },
+    AVATAR_RETRY_DELAYS_MS[attempt - 1],
+  );
+
+  avatarRetryTimers.set(key, timer);
+
+  rerender();
+}
+
 function TokenAvatar({
   row,
   large = false,
@@ -488,25 +665,30 @@ function TokenAvatar({
   row: PumpFeedRow;
   large?: boolean;
 }) {
-  const src = tokenImage(row);
+  const source = avatarSource(row);
+
   const initial =
     String(row.symbol ?? row.name ?? "?")
       .replace(/^\$/, "")
       .slice(0, 2)
       .toUpperCase() || "?";
-  return src ? (
-    <img
-      className={`terminal-token-avatar ${large ? "large" : ""}`}
-      src={src}
-      loading="lazy"
-      alt={String(row.symbol ?? row.name ?? "token")}
-    />
-  ) : (
-    <div
-      className={`terminal-token-avatar terminal-token-avatar-fallback ${large ? "large" : ""}`}
+
+  return (
+    <span
+      className={`terminal-token-avatar ${large ? "large" : ""} ${source.request ? "has-image" : ""}`}
     >
-      {initial}
-    </div>
+      <img
+        src={source.request ?? undefined}
+        loading="eager"
+        decoding="async"
+        alt=""
+        aria-hidden="true"
+        onLoad={() => handleAvatarLoad(row, source.base)}
+        onError={() => handleAvatarError(row, source.base)}
+      />
+
+      <span className="terminal-token-avatar-fallback">{initial}</span>
+    </span>
   );
 }
 
@@ -1388,6 +1570,8 @@ async function reloadFeed(
 
         return await api<TerminalFeedPayload>(`/api/terminal/feed?${params}`, {
           signal: controller.signal,
+
+          cache: "no-store",
         });
       },
     );
@@ -3763,6 +3947,13 @@ export default function mount() {
 
       renderFrame = null;
     }
+
+    for (const timer of avatarRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+
+    avatarRetryTimers.clear();
+    avatarRetryState.clear();
 
     renderPending = false;
 
