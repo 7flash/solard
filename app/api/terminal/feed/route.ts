@@ -49,7 +49,7 @@ export async function GET(request: Request): Promise<Response> {
         const activeWindowMs = intParam(
           url,
           "activeWindowMs",
-          300_000,
+          900_000,
           1_000,
           24 * 60 * 60_000,
         );
@@ -169,7 +169,7 @@ export async function GET(request: Request): Promise<Response> {
 
             reads: [
               "terminalTokensLive",
-              "tokenPriceWindowsV7",
+              "tokenPriceWindowsV8",
               "tokenMarketExtremaV4",
               "tokenHolderWindowsV1",
             ],

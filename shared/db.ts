@@ -187,6 +187,7 @@ export const TokenPriceWindowsSchema = z.object({
   currentMarketCapUsd: z.number().nullable(),
 
   latestTradeAtMs: z.number().nullable(),
+  latestTradeSource: z.string().nullable(),
 
   /**
    * Earliest trade actually present in tokenTradesV2.
@@ -250,6 +251,7 @@ export type TerminalFeedRow = TerminalToken & {
   atlMarketCapUsd: number | null;
 
   lastTradeAtMs: number | null;
+  latestTradeSource: string | null;
 
   /**
    * Latest of creation, observation, and first recorded trade timestamps.
@@ -475,7 +477,7 @@ export const db = await openDatabaseWithRetry(
         },
 
         views: {
-          tokenPriceWindowsV7: defineView(
+          tokenPriceWindowsV8: defineView(
             TokenPriceWindowsSchema,
             `
         WITH recent AS (
@@ -485,6 +487,7 @@ export const db = await openDatabaseWithRetry(
             priceSol,
             priceUsd,
             marketCapUsd,
+            source,
             tokenDeltaUi,
             solDeltaUi,
 
@@ -518,7 +521,14 @@ export const db = await openDatabaseWithRetry(
                 CASE WHEN marketCapUsd IS NULL THEN 1 ELSE 0 END,
                 tradedAtMs DESC,
                 id DESC
-            ) AS latestMarketCapUsdRank
+            ) AS latestMarketCapUsdRank,
+
+            ROW_NUMBER() OVER (
+              PARTITION BY mint
+              ORDER BY
+                tradedAtMs DESC,
+                id DESC
+            ) AS latestTradeRank
 
           FROM tokenTradesV2
 
@@ -674,7 +684,12 @@ export const db = await openDatabaseWithRetry(
             THEN marketCapUsd
           END) AS latestMarketCapUsd,
 
-          MAX(tradedAtMs) AS latestTradeAtMs
+          MAX(tradedAtMs) AS latestTradeAtMs,
+
+          MAX(CASE
+            WHEN latestTradeRank = 1
+            THEN source
+          END) AS latestTradeSource
 
         FROM recent
 
@@ -1149,6 +1164,21 @@ export function upsertTerminalToken(
   }) as TerminalToken;
 }
 
+export function getTerminalToken(mint: string): TerminalToken | null {
+  const key = mint.trim();
+
+  if (!key) {
+    return null;
+  }
+
+  return db.terminalTokensLive
+    .select()
+    .where({
+      mint: key,
+    })
+    .get() as TerminalToken | null;
+}
+
 /**
  * Append-only trade write.
  *
@@ -1278,7 +1308,7 @@ export function getTokenPriceWindows(
   if (!key) return null;
 
   return (
-    (db.tokenPriceWindowsV7
+    (db.tokenPriceWindowsV8
       .select()
       .where({ mint: key })
       .cache({
@@ -1291,7 +1321,7 @@ export function getTokenPriceWindows(
 export function listTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows[] {
-  return db.tokenPriceWindowsV7
+  return db.tokenPriceWindowsV8
     .select()
     .orderBy("latestTradeAtMs", "DESC")
     .cache({
@@ -1571,7 +1601,7 @@ export function listTerminalFeed(
 
   const activeWindowMs = Math.max(
     1_000,
-    integer(input.activeWindowMs, 300_000),
+    integer(input.activeWindowMs, 900_000),
   );
 
   const minUpdatedAt = Math.max(
@@ -1682,7 +1712,6 @@ export function listTerminalFeed(
     .filter((token) =>
       isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
     )
-    .filter((token) => sourceMatches(input.source, token.source))
     .map((token) => {
       const windows = windowsByMint.get(token.mint) ?? null;
 
@@ -1720,6 +1749,12 @@ export function listTerminalFeed(
 
       const latestTradeAtMs = windows?.latestTradeAtMs ?? null;
 
+      const latestTradeSource = windows?.latestTradeSource ?? token.source;
+
+      const currentPhase = String(latestTradeSource ?? "").includes("pumpswap")
+        ? "migrated"
+        : token.phase;
+
       const coverageCandidates = [
         token.createdAtMs,
         token.observedAtMs,
@@ -1748,6 +1783,10 @@ export function listTerminalFeed(
 
       return {
         ...token,
+
+        source: latestTradeSource,
+
+        phase: currentPhase,
 
         priceSol,
         priceUsd,
@@ -1812,6 +1851,8 @@ export function listTerminalFeed(
 
         lastTradeAtMs: latestTradeAtMs,
 
+        latestTradeSource,
+
         dataCoverageStartedAtMs,
 
         priceAgeMs,
@@ -1826,6 +1867,7 @@ export function listTerminalFeed(
         raw: token,
       } satisfies TerminalFeedRow;
     })
+    .filter((row) => sourceMatches(input.source, row.source))
     .filter((row) => {
       if (minMarketCapUsd <= 0 && maxMarketCapUsd <= 0) {
         return true;

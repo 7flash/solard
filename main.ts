@@ -7,7 +7,10 @@ import {
 import { compactId, dbMeasure, summarizeError } from "./shared/measure.js";
 
 type WorkerName =
-  "solard-server-worker" | "solard-helius-logs-v1" | "solard-telegram-signals";
+  | "solard-server-worker"
+  | "solard-helius-logs-v1"
+  | "solard-pumpswap-indexer"
+  | "solard-telegram-signals";
 
 type WorkerSpec = {
   name: WorkerName;
@@ -44,6 +47,18 @@ const WORKERS: Record<WorkerName, WorkerSpec> = {
     buildId: "indexer-v17-runtime-health",
   },
 
+  "solard-pumpswap-indexer": {
+    name: "solard-pumpswap-indexer",
+
+    kind: "indexer",
+
+    command: "bun run ./workers/pumpswap-indexer-worker.ts",
+
+    staleAfterMs: Number(process.env.SOLARD_PUMPSWAP_STALE_MS ?? "20000"),
+
+    buildId: "pumpswap-indexer-v1",
+  },
+
   "solard-telegram-signals": {
     name: "solard-telegram-signals",
     kind: "signals",
@@ -57,6 +72,10 @@ const WORKERS: Record<WorkerName, WorkerSpec> = {
 
 function targetWorkers(): WorkerName[] {
   const names: WorkerName[] = ["solard-server-worker", "solard-helius-logs-v1"];
+
+  if (process.env.SOLARD_PUMPSWAP_INDEXER !== "0") {
+    names.push("solard-pumpswap-indexer");
+  }
 
   if (process.env.SOLARD_TELEGRAM_SIGNALS === "1") {
     names.push("solard-telegram-signals");

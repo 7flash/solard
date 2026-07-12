@@ -158,7 +158,7 @@ type PageState = {
 
 const FEED_LIMIT = 160;
 const FEED_WINDOW_MS = Number(
-  storageGet("solard:terminal-feed-window-ms", "300000"),
+  storageGet("solard:terminal-feed-window-ms-v2", "900000"),
 );
 
 const state: PageState = {
@@ -2728,6 +2728,18 @@ function SelectedToken({ row }: { row: PumpFeedRow | null }) {
         <div>
           <span>Last trade</span>
           <b>{displayAge(lastTradeTime(row))}</b>
+        </div>
+
+        <div>
+          <span>Market</span>
+
+          <b>
+            {String(
+              (row as any).latestTradeSource ?? row.source ?? "",
+            ).includes("pumpswap")
+              ? "PumpSwap"
+              : "Pump curve"}
+          </b>
         </div>
 
         <div>

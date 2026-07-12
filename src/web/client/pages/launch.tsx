@@ -9,23 +9,17 @@ import {
   walletLabel,
   mountPage,
 } from "../runtime";
-import type {
-  AnyRow,
-} from "../runtime";
+import type { AnyRow } from "../runtime";
 
-const BUYER_RESERVE_SOL =
-  "0.02";
+const BUYER_RESERVE_SOL = "0.02";
 
-const BUYER_CU_LIMIT =
-  600_000;
+const BUYER_CU_LIMIT = 600_000;
 
 type FollowerWallet = {
   id: string;
   wallet: string;
 
-  sender:
-    | "helius-fast"
-    | "helius-rpc";
+  sender: "helius-fast" | "helius-rpc";
 
   strategy:
     | "fast-spam"
@@ -53,431 +47,249 @@ type FollowerSettingsGroup = {
   maxFailedAttempts: string;
 };
 
-let followerGroups:
-  FollowerSettingsGroup[] =
-  [];
+let followerGroups: FollowerSettingsGroup[] = [];
 
-let selectedImage:
-  File | null =
-  null;
+let selectedImage: File | null = null;
 
-let selectedImagePreview:
-  string | null =
-  null;
+let selectedImagePreview: string | null = null;
 
-function id(
-  prefix: string,
-): string {
+function id(prefix: string): string {
   const suffix =
-    globalThis.crypto
-      ?.randomUUID?.() ??
-    `${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}`;
+    globalThis.crypto?.randomUUID?.() ??
+    `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   return `${prefix}:${suffix}`;
 }
 
-function newFollowerWallet(
-  wallet = "",
-): FollowerWallet {
+function newFollowerWallet(wallet = ""): FollowerWallet {
   return {
-    id:
-      id("wallet"),
+    id: id("wallet"),
 
     wallet,
 
-    sender:
-      "helius-fast",
+    sender: "helius-fast",
 
-    strategy:
-      "fast-spam",
+    strategy: "fast-spam",
   };
 }
 
 function newFollowerGroup(
-  seed: Partial<
-    FollowerSettingsGroup
-  > = {},
+  seed: Partial<FollowerSettingsGroup> = {},
 ): FollowerSettingsGroup {
   return {
-    id:
-      id("followers"),
+    id: id("followers"),
 
-    name:
-      "Individual",
+    name: "Individual",
 
-    sourceGroup:
-      null,
+    sourceGroup: null,
 
-    wallets: [
-      newFollowerWallet(),
-    ],
+    wallets: [newFollowerWallet()],
 
-    minPct:
-      "50",
+    minPct: "50",
 
-    maxPct:
-      "80",
+    maxPct: "80",
 
-    tipSol:
-      "0.001",
+    tipSol: "0.001",
 
     /**
      * 0.0009 SOL over a 600K CU budget equals 1,500,000 micro-lamports/CU.
      */
-    priorityFeeSol:
-      "0.0009",
+    priorityFeeSol: "0.0009",
 
-    slippagePct:
-      "2.5",
+    slippagePct: "2.5",
 
-    retryIntervalMs:
-      "75",
+    retryIntervalMs: "75",
 
-    recompileIntervalMs:
-      "750",
+    recompileIntervalMs: "750",
 
-    freshQuoteDelayMs:
-      "-1",
+    freshQuoteDelayMs: "-1",
 
-    maxFailedAttempts:
-      "0",
+    maxFailedAttempts: "0",
 
     ...seed,
   };
 }
 
-function wallets():
-  AnyRow[] {
-  return (
-    state.overview
-      ?.wallets ??
-    []
-  );
+function wallets(): AnyRow[] {
+  return state.overview?.wallets ?? [];
 }
 
-function savedGroups():
-  AnyRow[] {
-  return (
-    state.overview
-      ?.groups ??
-    []
-  );
+function savedGroups(): AnyRow[] {
+  return state.overview?.groups ?? [];
 }
 
-function walletAddress(
-  value: AnyRow,
-): string {
-  const raw =
-    String(
-      value.walletAddress ??
+function walletAddress(value: AnyRow): string {
+  const raw = String(
+    value.walletAddress ??
       value.address ??
       value.wallet?.address ??
       value.wallet?.name ??
       value.wallet ??
       "",
-    ).trim();
+  ).trim();
 
   if (!raw) {
     return "";
   }
 
-  const direct =
-    walletByAddress(
-      raw,
-    );
+  const direct = walletByAddress(raw);
 
   if (direct?.address) {
-    return String(
-      direct.address,
-    );
+    return String(direct.address);
   }
 
-  const name =
-    raw
-      .replace(/^@/, "")
-      .toLowerCase();
+  const name = raw.replace(/^@/, "").toLowerCase();
 
-  const named =
-    wallets().find(
-      (wallet) =>
-        String(
-          wallet.name ??
-          "",
-        ).toLowerCase() ===
-        name,
-    );
+  const named = wallets().find(
+    (wallet) => String(wallet.name ?? "").toLowerCase() === name,
+  );
 
-  return String(
-    named?.address ??
-    raw,
-  ).trim();
+  return String(named?.address ?? raw).trim();
 }
 
-function walletByAddress(
-  address: string,
-): AnyRow | null {
-  const target =
-    address.toLowerCase();
+function walletByAddress(address: string): AnyRow | null {
+  const target = address.toLowerCase();
 
   return (
     wallets().find(
-      (wallet) =>
-        String(
-          wallet.address ??
-          "",
-        ).toLowerCase() ===
-        target,
-    ) ??
-    null
+      (wallet) => String(wallet.address ?? "").toLowerCase() === target,
+    ) ?? null
   );
 }
 
-function displayWallet(
-  address: string,
-): string {
-  const wallet =
-    walletByAddress(
-      address,
-    );
+function displayWallet(address: string): string {
+  const wallet = walletByAddress(address);
 
   if (wallet) {
-    return walletLabel(
-      wallet,
-    );
+    return walletLabel(wallet);
   }
 
   if (!address) {
     return "Select wallet…";
   }
 
-  return `${address.slice(
-    0,
-    6,
-  )}…${address.slice(-6)}`;
+  return `${address.slice(0, 6)}…${address.slice(-6)}`;
 }
 
 function mutateFollowerGroup(
   groupId: string,
-  patch: Partial<
-    FollowerSettingsGroup
-  >,
+  patch: Partial<FollowerSettingsGroup>,
 ): void {
-  followerGroups =
-    followerGroups.map(
-      (group) =>
-        group.id ===
-        groupId
-          ? {
-              ...group,
-              ...patch,
-            }
-          : group,
-    );
+  followerGroups = followerGroups.map((group) =>
+    group.id === groupId
+      ? {
+          ...group,
+          ...patch,
+        }
+      : group,
+  );
 
   update();
 }
 
-function removeFollowerGroup(
-  groupId: string,
-): void {
-  followerGroups =
-    followerGroups.filter(
-      (group) =>
-        group.id !==
-        groupId,
-    );
+function removeFollowerGroup(groupId: string): void {
+  followerGroups = followerGroups.filter((group) => group.id !== groupId);
 
   update();
 }
 
-function addIndividualGroup():
-  void {
+function addIndividualGroup(): void {
   const number =
-    followerGroups.filter(
-      (group) =>
-        group.sourceGroup ==
-        null,
-    ).length + 1;
+    followerGroups.filter((group) => group.sourceGroup == null).length + 1;
 
   followerGroups = [
     ...followerGroups,
 
     newFollowerGroup({
-      name:
-        `Individual ${number}`,
+      name: `Individual ${number}`,
     }),
   ];
 
   update();
 }
 
-function addSavedGroup(
-  groupName: string,
-): void {
-  const saved =
-    savedGroups().find(
-      (group) =>
-        group.name ===
-        groupName,
-    );
+function addSavedGroup(groupName: string): void {
+  const saved = savedGroups().find((group) => group.name === groupName);
 
   if (!saved) {
     return;
   }
 
-  const addresses =
-    Array.from(
-      new Set(
-        (
-          saved.wallets ??
-          []
-        )
-          .map(
-            walletAddress,
-          )
-          .filter(
-            Boolean,
-          ),
-      ),
-    );
+  const addresses = Array.from(
+    new Set((saved.wallets ?? []).map(walletAddress).filter(Boolean)),
+  );
 
   if (!addresses.length) {
-    state.error =
-      `${groupName} has no resolvable wallets. Refresh wallets/groups and try again.`;
+    state.error = `${groupName} has no resolvable wallets. Refresh wallets/groups and try again.`;
 
     update();
     return;
   }
 
-  state.error =
-    null;
+  state.error = null;
 
   followerGroups = [
     ...followerGroups,
 
     newFollowerGroup({
-      name:
-        String(
-          saved.name ??
-          "Wallet group",
-        ),
+      name: String(saved.name ?? "Wallet group"),
 
-      sourceGroup:
-        String(
-          saved.name ??
-          groupName,
-        ),
+      sourceGroup: String(saved.name ?? groupName),
 
-      wallets:
-        addresses.map(
-          (address) =>
-            newFollowerWallet(
-              address,
-            ),
-        ),
+      wallets: addresses.map((address) => newFollowerWallet(address)),
     }),
   ];
 
   update();
 }
 
-function addWalletToFollowerGroup(
-  groupId: string,
-): void {
-  const group =
-    followerGroups.find(
-      (item) =>
-        item.id ===
-        groupId,
-    );
+function addWalletToFollowerGroup(groupId: string): void {
+  const group = followerGroups.find((item) => item.id === groupId);
 
   if (!group) {
     return;
   }
 
-  mutateFollowerGroup(
-    groupId,
-    {
-      wallets: [
-        ...group.wallets,
-
-        newFollowerWallet(),
-      ],
-    },
-  );
+  mutateFollowerGroup(groupId, {
+    wallets: [...group.wallets, newFollowerWallet()],
+  });
 }
 
 function updateFollowerWallet(
   groupId: string,
   walletId: string,
-  patch: Partial<
-    FollowerWallet
-  >,
+  patch: Partial<FollowerWallet>,
 ): void {
-  const group =
-    followerGroups.find(
-      (item) =>
-        item.id ===
-        groupId,
-    );
+  const group = followerGroups.find((item) => item.id === groupId);
 
   if (!group) {
     return;
   }
 
-  mutateFollowerGroup(
-    groupId,
-    {
-      wallets:
-        group.wallets.map(
-          (wallet) =>
-            wallet.id ===
-            walletId
-              ? {
-                  ...wallet,
-                  ...patch,
-                }
-              : wallet,
-        ),
-    },
-  );
+  mutateFollowerGroup(groupId, {
+    wallets: group.wallets.map((wallet) =>
+      wallet.id === walletId
+        ? {
+            ...wallet,
+            ...patch,
+          }
+        : wallet,
+    ),
+  });
 }
 
-function removeFollowerWallet(
-  groupId: string,
-  walletId: string,
-): void {
-  const group =
-    followerGroups.find(
-      (item) =>
-        item.id ===
-        groupId,
-    );
+function removeFollowerWallet(groupId: string, walletId: string): void {
+  const group = followerGroups.find((item) => item.id === groupId);
 
   if (!group) {
     return;
   }
 
-  const remaining =
-    group.wallets.filter(
-      (wallet) =>
-        wallet.id !==
-        walletId,
-    );
+  const remaining = group.wallets.filter((wallet) => wallet.id !== walletId);
 
-  mutateFollowerGroup(
-    groupId,
-    {
-      wallets:
-        remaining.length
-          ? remaining
-          : [
-              newFollowerWallet(),
-            ],
-    },
-  );
+  mutateFollowerGroup(groupId, {
+    wallets: remaining.length ? remaining : [newFollowerWallet()],
+  });
 }
 
 function numberValue(
@@ -488,251 +300,150 @@ function numberValue(
     maximum?: number;
   } = {},
 ): number {
-  const parsed =
-    Number(value);
+  const parsed = Number(value);
 
-  if (
-    !Number.isFinite(
-      parsed,
-    )
-  ) {
-    throw new Error(
-      `${label} must be numeric.`,
-    );
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} must be numeric.`);
   }
 
-  if (
-    options.minimum != null &&
-    parsed <
-      options.minimum
-  ) {
-    throw new Error(
-      `${label} must be at least ${options.minimum}.`,
-    );
+  if (options.minimum != null && parsed < options.minimum) {
+    throw new Error(`${label} must be at least ${options.minimum}.`);
   }
 
-  if (
-    options.maximum != null &&
-    parsed >
-      options.maximum
-  ) {
-    throw new Error(
-      `${label} must be at most ${options.maximum}.`,
-    );
+  if (options.maximum != null && parsed > options.maximum) {
+    throw new Error(`${label} must be at most ${options.maximum}.`);
   }
 
   return parsed;
 }
 
-function percentToBps(
-  value: string,
-  label: string,
-): number {
+function percentToBps(value: string, label: string): number {
   return Math.round(
-    numberValue(
-      value,
-      label,
-      {
-        minimum:
-          0,
+    numberValue(value, label, {
+      minimum: 0,
 
-        maximum:
-          100,
-      },
-    ) * 100,
+      maximum: 100,
+    }) * 100,
   );
 }
 
-function priorityFeeSolToMicroLamports(
-  value: string,
-): number {
-  const sol =
-    numberValue(
-      value,
-      "Priority fee SOL",
-      {
-        minimum:
-          0,
-      },
-    );
+function priorityFeeSolToMicroLamports(value: string): number {
+  const sol = numberValue(value, "Priority fee SOL", {
+    minimum: 0,
+  });
 
   /**
    * total priority fee lamports =
    *   microLamportsPerCU * CU limit / 1,000,000
    */
-  return Math.round(
-    sol *
-      1_000_000_000 *
-      1_000_000 /
-      BUYER_CU_LIMIT,
-  );
+  return Math.round((sol * 1_000_000_000 * 1_000_000) / BUYER_CU_LIMIT);
 }
 
 function payloadLabel(
   group: FollowerSettingsGroup,
   wallet: FollowerWallet,
 ): string {
-  const resolved =
-    walletByAddress(
-      wallet.wallet,
-    );
+  const resolved = walletByAddress(wallet.wallet);
 
   return String(
-    resolved?.name ??
-    `${group.name} ${displayWallet(wallet.wallet)}`,
+    resolved?.name ?? `${group.name} ${displayWallet(wallet.wallet)}`,
   );
 }
 
-function followerPlanPayload():
-  AnyRow[] {
-  const output:
-    AnyRow[] = [];
+function followerPlanPayload(): AnyRow[] {
+  const output: AnyRow[] = [];
 
-  const seen =
-    new Set<string>();
+  const seen = new Set<string>();
 
-  for (
-    const group of
-      followerGroups
-  ) {
-    const minBps =
-      percentToBps(
-        group.minPct,
-        `${group.name} minimum amount`,
-      );
+  for (const group of followerGroups) {
+    const minBps = percentToBps(group.minPct, `${group.name} minimum amount`);
 
-    const maxBps =
-      percentToBps(
-        group.maxPct,
-        `${group.name} maximum amount`,
-      );
+    const maxBps = percentToBps(group.maxPct, `${group.name} maximum amount`);
 
-    if (
-      minBps >
-      maxBps
-    ) {
+    if (minBps > maxBps) {
       throw new Error(
         `${group.name}: minimum amount cannot exceed maximum amount.`,
       );
     }
 
-    const tipSol =
-      String(
-        numberValue(
-          group.tipSol,
-          `${group.name} tip SOL`,
-          {
-            minimum:
-              0,
-          },
-        ),
-      );
+    const tipSol = String(
+      numberValue(group.tipSol, `${group.name} tip SOL`, {
+        minimum: 0,
+      }),
+    );
 
-    const priorityMicroLamports =
-      priorityFeeSolToMicroLamports(
-        group.priorityFeeSol,
-      );
+    const priorityMicroLamports = priorityFeeSolToMicroLamports(
+      group.priorityFeeSol,
+    );
 
-    const slippageBps =
-      percentToBps(
-        group.slippagePct,
-        `${group.name} slippage`,
-      );
+    const slippageBps = percentToBps(
+      group.slippagePct,
+      `${group.name} slippage`,
+    );
 
-    const retryIntervalMs =
-      numberValue(
-        group.retryIntervalMs,
-        `${group.name} retry interval`,
-        {
-          minimum:
-            0,
-        },
-      );
+    const retryIntervalMs = numberValue(
+      group.retryIntervalMs,
+      `${group.name} retry interval`,
+      {
+        minimum: 0,
+      },
+    );
 
-    const recompileIntervalMs =
-      numberValue(
-        group.recompileIntervalMs,
-        `${group.name} recompile interval`,
-        {
-          minimum:
-            0,
-        },
-      );
+    const recompileIntervalMs = numberValue(
+      group.recompileIntervalMs,
+      `${group.name} recompile interval`,
+      {
+        minimum: 0,
+      },
+    );
 
-    const freshQuoteDelayMs =
-      numberValue(
-        group.freshQuoteDelayMs,
-        `${group.name} fresh quote delay`,
-      );
+    const freshQuoteDelayMs = numberValue(
+      group.freshQuoteDelayMs,
+      `${group.name} fresh quote delay`,
+    );
 
-    const maxFailedAttempts =
-      numberValue(
-        group.maxFailedAttempts,
-        `${group.name} max failed attempts`,
-        {
-          minimum:
-            0,
-        },
-      );
+    const maxFailedAttempts = numberValue(
+      group.maxFailedAttempts,
+      `${group.name} max failed attempts`,
+      {
+        minimum: 0,
+      },
+    );
 
-    for (
-      const wallet of
-        group.wallets
-    ) {
-      const address =
-        wallet.wallet.trim();
+    for (const wallet of group.wallets) {
+      const address = wallet.wallet.trim();
 
       if (!address) {
         continue;
       }
 
-      const normalized =
-        address.toLowerCase();
+      const normalized = address.toLowerCase();
 
-      if (
-        seen.has(
-          normalized,
-        )
-      ) {
+      if (seen.has(normalized)) {
         throw new Error(
           `${displayWallet(address)} appears more than once in the follower plan.`,
         );
       }
 
-      seen.add(
-        normalized,
-      );
+      seen.add(normalized);
 
       output.push({
-        wallet:
-          address,
+        wallet: address,
 
-        label:
-          payloadLabel(
-            group,
-            wallet,
-          ),
+        label: payloadLabel(group, wallet),
 
-        amountMode:
-          "range-bps",
+        amountMode: "range-bps",
 
         minBps,
         maxBps,
 
-        reserveSol:
-          BUYER_RESERVE_SOL,
+        reserveSol: BUYER_RESERVE_SOL,
 
-        sender:
-          wallet.sender,
+        sender: wallet.sender,
 
-        strategy:
-          wallet.strategy,
+        strategy: wallet.strategy,
 
-        tipSol:
-          wallet.sender ===
-          "helius-fast"
-            ? tipSol
-            : undefined,
+        tipSol: wallet.sender === "helius-fast" ? tipSol : undefined,
 
         priorityMicroLamports,
 
@@ -752,164 +463,89 @@ function followerPlanPayload():
   return output;
 }
 
-function tokenAlias(
-  name: string,
-  symbol: string,
-): string {
-  const value =
-    (symbol || name)
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 48);
+function tokenAlias(name: string, symbol: string): string {
+  const value = (symbol || name)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
 
-  return value ||
-    `token-${Date.now()}`;
+  return value || `token-${Date.now()}`;
 }
 
-const LAUNCH_IMAGE_TYPES =
-  new Set([
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/gif",
-  ]);
+const LAUNCH_IMAGE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+]);
 
-const MAX_LAUNCH_IMAGE_BYTES =
-  12 * 1024 * 1024;
+const MAX_LAUNCH_IMAGE_BYTES = 12 * 1024 * 1024;
 
-function onImageSelected(
-  event: Event,
-): void {
-  const input =
-    event.currentTarget as
-      HTMLInputElement;
+function onImageSelected(event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
 
-  let file =
-    input.files?.[0] ??
-    null;
+  let file = input.files?.[0] ?? null;
 
-  if (
-    file &&
-    !LAUNCH_IMAGE_TYPES.has(
-      file.type,
-    )
-  ) {
-    state.error =
-      "Token image must be PNG, JPG, WEBP, or GIF.";
+  if (file && !LAUNCH_IMAGE_TYPES.has(file.type)) {
+    state.error = "Token image must be PNG, JPG, WEBP, or GIF.";
 
-    input.value =
-      "";
+    input.value = "";
 
-    file =
-      null;
+    file = null;
   }
 
-  if (
-    file &&
-    (
-      file.size <= 0 ||
-      file.size >
-        MAX_LAUNCH_IMAGE_BYTES
-    )
-  ) {
-    state.error =
-      "Token image must be between 1 byte and 12 MB.";
+  if (file && (file.size <= 0 || file.size > MAX_LAUNCH_IMAGE_BYTES)) {
+    state.error = "Token image must be between 1 byte and 12 MB.";
 
-    input.value =
-      "";
+    input.value = "";
 
-    file =
-      null;
+    file = null;
   }
 
   if (file) {
-    state.error =
-      null;
+    state.error = null;
   }
 
-  if (
-    selectedImagePreview
-  ) {
-    URL.revokeObjectURL(
-      selectedImagePreview,
-    );
+  if (selectedImagePreview) {
+    URL.revokeObjectURL(selectedImagePreview);
   }
 
-  selectedImage =
-    file;
+  selectedImage = file;
 
-  selectedImagePreview =
-    file
-      ? URL.createObjectURL(
-          file,
-        )
-      : null;
+  selectedImagePreview = file ? URL.createObjectURL(file) : null;
 
   update();
 }
 
-function walletOptions(
-  selected: string,
-) {
-  const known =
-    selected
-      ? walletByAddress(
-          selected,
-        )
-      : null;
+function walletOptions(selected: string) {
+  const known = selected ? walletByAddress(selected) : null;
 
   return (
     <>
-      <option value="">
-        Select wallet…
-      </option>
+      <option value="">Select wallet…</option>
 
-      {selected &&
-      !known ? (
-        <option value={selected}>
-          Unlisted · {displayWallet(selected)}
-        </option>
+      {selected && !known ? (
+        <option value={selected}>Unlisted · {displayWallet(selected)}</option>
       ) : null}
 
-      {wallets().map(
-        (wallet) => (
-          <option
-            key={
-              wallet.address
-            }
-            value={
-              wallet.address
-            }
-          >
-            {walletLabel(
-              wallet,
-            )}
-          </option>
-        ),
-      )}
+      {wallets().map((wallet) => (
+        <option key={wallet.address} value={wallet.address}>
+          {walletLabel(wallet)}
+        </option>
+      ))}
     </>
   );
 }
 
-function FollowerGroupCard({
-  group,
-}: {
-  group:
-    FollowerSettingsGroup;
-}) {
+function FollowerGroupCard({ group }: { group: FollowerSettingsGroup }) {
   return (
-    <section
-      className="launch-follower-group"
-      key={group.id}
-    >
+    <section className="launch-follower-group" key={group.id}>
       <header className="launch-follower-head">
         <div>
           <span className="launch-group-kind">
-            {group.sourceGroup
-              ? "Saved wallet group"
-              : "Custom follower set"}
+            {group.sourceGroup ? "Saved wallet group" : "Custom follower set"}
           </span>
 
           <input
@@ -917,14 +553,9 @@ function FollowerGroupCard({
             value={group.name}
             aria-label="Follower settings group name"
             onInput={(event: any) =>
-              mutateFollowerGroup(
-                group.id,
-                {
-                  name:
-                    event.currentTarget
-                      .value,
-                },
-              )
+              mutateFollowerGroup(group.id, {
+                name: event.currentTarget.value,
+              })
             }
           />
         </div>
@@ -933,11 +564,7 @@ function FollowerGroupCard({
           <button
             type="button"
             className="secondary compact"
-            onClick={() =>
-              addWalletToFollowerGroup(
-                group.id,
-              )
-            }
+            onClick={() => addWalletToFollowerGroup(group.id)}
           >
             Add wallet
           </button>
@@ -945,11 +572,7 @@ function FollowerGroupCard({
           <button
             type="button"
             className="danger compact"
-            onClick={() =>
-              removeFollowerGroup(
-                group.id,
-              )
-            }
+            onClick={() => removeFollowerGroup(group.id)}
           >
             Remove set
           </button>
@@ -958,14 +581,10 @@ function FollowerGroupCard({
 
       <div className="launch-shared-settings">
         <fieldset>
-          <legend>
-            Amount range
-          </legend>
+          <legend>Amount range</legend>
 
           <label>
-            <span>
-              Min %
-            </span>
+            <span>Min %</span>
 
             <input
               type="number"
@@ -974,22 +593,15 @@ function FollowerGroupCard({
               step="0.1"
               value={group.minPct}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    minPct:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  minPct: event.currentTarget.value,
+                })
               }
             />
           </label>
 
           <label>
-            <span>
-              Max %
-            </span>
+            <span>Max %</span>
 
             <input
               type="number"
@@ -998,32 +610,21 @@ function FollowerGroupCard({
               step="0.1"
               value={group.maxPct}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    maxPct:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  maxPct: event.currentTarget.value,
+                })
               }
             />
           </label>
 
-          <small>
-            Keeps 0.02 SOL reserved automatically.
-          </small>
+          <small>Keeps 0.02 SOL reserved automatically.</small>
         </fieldset>
 
         <fieldset>
-          <legend>
-            Fees & slippage
-          </legend>
+          <legend>Fees & slippage</legend>
 
           <label>
-            <span>
-              Tip SOL
-            </span>
+            <span>Tip SOL</span>
 
             <input
               type="number"
@@ -1031,65 +632,42 @@ function FollowerGroupCard({
               step="0.0001"
               value={group.tipSol}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    tipSol:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  tipSol: event.currentTarget.value,
+                })
               }
             />
           </label>
 
           <label>
-            <span>
-              Priority SOL
-            </span>
+            <span>Priority SOL</span>
 
             <input
               type="number"
               min="0"
               step="0.0001"
-              value={
-                group.priorityFeeSol
-              }
+              value={group.priorityFeeSol}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    priorityFeeSol:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  priorityFeeSol: event.currentTarget.value,
+                })
               }
             />
           </label>
 
           <label>
-            <span>
-              Slippage %
-            </span>
+            <span>Slippage %</span>
 
             <input
               type="number"
               min="0"
               max="100"
               step="0.1"
-              value={
-                group.slippagePct
-              }
+              value={group.slippagePct}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    slippagePct:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  slippagePct: event.currentTarget.value,
+                })
               }
             />
           </label>
@@ -1105,236 +683,151 @@ function FollowerGroupCard({
         <table className="launch-wallet-table">
           <thead>
             <tr>
-              <th>
-                Wallet
-              </th>
+              <th>Wallet</th>
 
-              <th>
-                Sender
-              </th>
+              <th>Sender</th>
 
-              <th>
-                Buy timing
-              </th>
+              <th>Buy timing</th>
 
-              <th
-                aria-label="Remove wallet"
-              />
+              <th aria-label="Remove wallet" />
             </tr>
           </thead>
 
           <tbody>
-            {group.wallets.map(
-              (wallet) => (
-                <tr key={wallet.id}>
-                  <td>
-                    <select
-                      value={
-                        wallet.wallet
-                      }
-                      onInput={(event: any) =>
-                        updateFollowerWallet(
-                          group.id,
-                          wallet.id,
-                          {
-                            wallet:
-                              event.currentTarget
-                                .value,
-                          },
-                        )
-                      }
-                    >
-                      {walletOptions(
-                        wallet.wallet,
-                      )}
-                    </select>
-                  </td>
+            {group.wallets.map((wallet) => (
+              <tr key={wallet.id}>
+                <td>
+                  <select
+                    value={wallet.wallet}
+                    onInput={(event: any) =>
+                      updateFollowerWallet(group.id, wallet.id, {
+                        wallet: event.currentTarget.value,
+                      })
+                    }
+                  >
+                    {walletOptions(wallet.wallet)}
+                  </select>
+                </td>
 
-                  <td>
-                    <select
-                      value={
-                        wallet.sender
-                      }
-                      onInput={(event: any) =>
-                        updateFollowerWallet(
-                          group.id,
-                          wallet.id,
-                          {
-                            sender:
-                              event.currentTarget
-                                .value,
-                          },
-                        )
-                      }
-                    >
-                      <option value="helius-fast">
-                        Helius fast
-                      </option>
+                <td>
+                  <select
+                    value={wallet.sender}
+                    onInput={(event: any) =>
+                      updateFollowerWallet(group.id, wallet.id, {
+                        sender: event.currentTarget.value,
+                      })
+                    }
+                  >
+                    <option value="helius-fast">Helius fast</option>
 
-                      <option value="helius-rpc">
-                        Helius RPC
-                      </option>
-                    </select>
-                  </td>
+                    <option value="helius-rpc">Helius RPC</option>
+                  </select>
+                </td>
 
-                  <td>
-                    <select
-                      value={
-                        wallet.strategy
-                      }
-                      onInput={(event: any) =>
-                        updateFollowerWallet(
-                          group.id,
-                          wallet.id,
-                          {
-                            strategy:
-                              event.currentTarget
-                                .value,
-                          },
-                        )
-                      }
-                    >
-                      <option value="fast-spam">
-                        Fast spam
-                      </option>
+                <td>
+                  <select
+                    value={wallet.strategy}
+                    onInput={(event: any) =>
+                      updateFollowerWallet(group.id, wallet.id, {
+                        strategy: event.currentTarget.value,
+                      })
+                    }
+                  >
+                    <option value="fast-spam">Fast spam</option>
 
-                      <option value="spam-after-market-ready">
-                        After market ready
-                      </option>
+                    <option value="spam-after-market-ready">
+                      After market ready
+                    </option>
 
-                      <option value="after-deploy-processed">
-                        After deploy processed
-                      </option>
+                    <option value="after-deploy-processed">
+                      After deploy processed
+                    </option>
 
-                      <option value="after-deploy-confirmed">
-                        After deploy confirmed
-                      </option>
-                    </select>
-                  </td>
+                    <option value="after-deploy-confirmed">
+                      After deploy confirmed
+                    </option>
+                  </select>
+                </td>
 
-                  <td>
-                    <button
-                      type="button"
-                      className="danger compact"
-                      aria-label={`Remove ${displayWallet(wallet.wallet)}`}
-                      onClick={() =>
-                        removeFollowerWallet(
-                          group.id,
-                          wallet.id,
-                        )
-                      }
-                    >
-                      ×
-                    </button>
-                  </td>
-                </tr>
-              ),
-            )}
+                <td>
+                  <button
+                    type="button"
+                    className="danger compact"
+                    aria-label={`Remove ${displayWallet(wallet.wallet)}`}
+                    onClick={() => removeFollowerWallet(group.id, wallet.id)}
+                  >
+                    ×
+                  </button>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
 
       <details className="launch-advanced">
-        <summary>
-          Advanced retry settings
-        </summary>
+        <summary>Advanced retry settings</summary>
 
         <div className="launch-advanced-grid">
           <label>
-            <span>
-              Retry interval ms
-            </span>
+            <span>Retry interval ms</span>
 
             <input
               type="number"
               min="0"
               step="1"
-              value={
-                group.retryIntervalMs
-              }
+              value={group.retryIntervalMs}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    retryIntervalMs:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  retryIntervalMs: event.currentTarget.value,
+                })
               }
             />
           </label>
 
           <label>
-            <span>
-              Recompile ms
-            </span>
+            <span>Recompile ms</span>
 
             <input
               type="number"
               min="0"
               step="1"
-              value={
-                group.recompileIntervalMs
-              }
+              value={group.recompileIntervalMs}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    recompileIntervalMs:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  recompileIntervalMs: event.currentTarget.value,
+                })
               }
             />
           </label>
 
           <label>
-            <span>
-              Fresh quote delay ms
-            </span>
+            <span>Fresh quote delay ms</span>
 
             <input
               type="number"
               step="1"
-              value={
-                group.freshQuoteDelayMs
-              }
+              value={group.freshQuoteDelayMs}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    freshQuoteDelayMs:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  freshQuoteDelayMs: event.currentTarget.value,
+                })
               }
             />
           </label>
 
           <label>
-            <span>
-              Max failed attempts
-            </span>
+            <span>Max failed attempts</span>
 
             <input
               type="number"
               min="0"
               step="1"
-              value={
-                group.maxFailedAttempts
-              }
+              value={group.maxFailedAttempts}
               onInput={(event: any) =>
-                mutateFollowerGroup(
-                  group.id,
-                  {
-                    maxFailedAttempts:
-                      event.currentTarget
-                        .value,
-                  },
-                )
+                mutateFollowerGroup(group.id, {
+                  maxFailedAttempts: event.currentTarget.value,
+                })
               }
             />
           </label>
@@ -1345,20 +838,15 @@ function FollowerGroupCard({
 }
 
 function FollowersBuilder() {
-  const groups =
-    savedGroups();
+  const groups = savedGroups();
 
   return (
     <section className="launch-panel launch-followers">
       <header className="launch-section-head">
         <div>
-          <span className="section-kicker">
-            03
-          </span>
+          <span className="section-kicker">03</span>
 
-          <h3>
-            Follower buyers
-          </h3>
+          <h3>Follower buyers</h3>
 
           <p>
             A settings set shares amount, fees, slippage, and retry behavior.
@@ -1368,82 +856,48 @@ function FollowersBuilder() {
         </div>
 
         <div className="launch-followers-toolbar">
-          <select
-            id="launch-saved-group"
-            aria-label="Saved wallet group"
-          >
-            <option value="">
-              Add saved group…
-            </option>
+          <select id="launch-saved-group" aria-label="Saved wallet group">
+            <option value="">Add saved group…</option>
 
-            {groups.map(
-              (group) => (
-                <option
-                  key={
-                    group.name
-                  }
-                  value={
-                    group.name
-                  }
-                >
-                  {group.name}
-                </option>
-              ),
-            )}
+            {groups.map((group) => (
+              <option key={group.name} value={group.name}>
+                {group.name}
+              </option>
+            ))}
           </select>
 
           <button
             type="button"
             className="secondary"
             onClick={() => {
-              const select =
-                document.getElementById(
-                  "launch-saved-group",
-                ) as
-                  HTMLSelectElement |
-                  null;
+              const select = document.getElementById(
+                "launch-saved-group",
+              ) as HTMLSelectElement | null;
 
-              if (
-                select?.value
-              ) {
-                addSavedGroup(
-                  select.value,
-                );
+              if (select?.value) {
+                addSavedGroup(select.value);
 
-                select.value =
-                  "";
+                select.value = "";
               }
             }}
           >
             Add group
           </button>
 
-          <button
-            type="button"
-            onClick={
-              addIndividualGroup
-            }
-          >
+          <button type="button" onClick={addIndividualGroup}>
             Add individual
           </button>
         </div>
       </header>
 
       <div className="launch-follower-list">
-        {followerGroups.map(
-          (group) => (
-            <FollowerGroupCard
-              key={group.id}
-              group={group}
-            />
-          ),
-        )}
+        {followerGroups.map((group) => (
+          <FollowerGroupCard key={group.id} group={group} />
+        ))}
 
         {!followerGroups.length ? (
           <div className="launch-empty-followers">
-            <b>
-              No follower buyers.
-            </b>
+            <b>No follower buyers.</b>
 
             <span>
               Deploy only, add an individual wallet, or load a saved wallet
@@ -1457,8 +911,7 @@ function FollowersBuilder() {
 }
 
 export function LaunchPage() {
-  const deployerWallets =
-    wallets();
+  const deployerWallets = wallets();
 
   return (
     <form
@@ -1467,126 +920,70 @@ export function LaunchPage() {
       onSubmit={(event) => {
         event.preventDefault();
 
-        const form =
-          event.currentTarget;
+        const form = event.currentTarget;
 
-        void runAction(
-          async () => {
-            if (
-              !selectedImage
-            ) {
-              throw new Error(
-                "Choose a token image.",
-              );
-            }
+        void runAction(async () => {
+          if (!selectedImage) {
+            throw new Error("Choose a token image.");
+          }
 
-            const body =
-              new FormData(
-                form,
-              );
+          const body = new FormData(form);
 
-            body.set(
-              "image",
-              selectedImage,
-              selectedImage.name,
-            );
+          body.set("image", selectedImage, selectedImage.name);
 
-            const tokenName =
-              String(
-                body.get("name") ??
-                "",
-              );
+          const tokenName = String(body.get("name") ?? "");
 
-            const tokenSymbol =
-              String(
-                body.get("symbol") ??
-                "",
-              );
+          const tokenSymbol = String(body.get("symbol") ?? "");
 
-            body.set(
-              "alias",
-              tokenAlias(
-                tokenName,
-                tokenSymbol,
-              ),
-            );
+          body.set("alias", tokenAlias(tokenName, tokenSymbol));
 
-            if (
-              !String(
-                body.get("mintSuffix") ??
-                "",
-              ).trim()
-            ) {
-              body.set(
-                "mintSuffix",
-                "pump",
-              );
-            }
+          if (!String(body.get("mintSuffix") ?? "").trim()) {
+            body.set("mintSuffix", "pump");
+          }
 
-            body.set(
-              "buyPlanJson",
-              JSON.stringify(
-                followerPlanPayload(),
-              ),
-            );
+          body.set("buyPlanJson", JSON.stringify(followerPlanPayload()));
 
-            body.set(
-              "live",
-              form.querySelector<HTMLInputElement>(
-                "[name=live]",
-              )?.checked
-                ? "true"
-                : "false",
-            );
+          body.set(
+            "live",
+            form.querySelector<HTMLInputElement>("[name=live]")?.checked
+              ? "true"
+              : "false",
+          );
 
-            body.set(
-              "skipSimulation",
-              form.querySelector<HTMLInputElement>(
-                "[name=skipSimulation]",
-              )?.checked
-                ? "true"
-                : "false",
-            );
+          body.set(
+            "skipSimulation",
+            form.querySelector<HTMLInputElement>("[name=skipSimulation]")
+              ?.checked
+              ? "true"
+              : "false",
+          );
 
-            body.set(
-              "cashback",
-              form.querySelector<HTMLInputElement>(
-                "[name=cashback]",
-              )?.checked
-                ? "true"
-                : "false",
-            );
+          body.set(
+            "cashback",
+            form.querySelector<HTMLInputElement>("[name=cashback]")?.checked
+              ? "true"
+              : "false",
+          );
 
-            const started =
-              await api<{
-                id: string;
-              }>(
-                "/api/launch/pump",
-                {
-                  method:
-                    "POST",
+          const started = await api<{
+            id: string;
+          }>("/api/launch/pump", {
+            method: "POST",
 
-                  body,
-                },
-              );
+            body,
+          });
 
-            state.selectedJobId =
-              started.id;
+          state.selectedJobId = started.id;
 
-            await refreshJobs();
-          },
-        );
+          await refreshJobs();
+        });
       }}
     >
       <section className="launch-hero">
         <div>
-          <span className="section-kicker">
-            Pump launch builder
-          </span>
+          <span className="section-kicker">Pump launch builder</span>
 
-          <h2>
-            Deploy token
-          </h2>
+          <h2>Deploy token</h2>
 
           <p>
             Enter the token details, upload the image, choose the deployer, and
@@ -1596,63 +993,38 @@ export function LaunchPage() {
 
         <div className="launch-actions">
           <label className="toggle-card">
-            <span>
-              Live
-            </span>
+            <span>Live</span>
 
-            <input
-              type="checkbox"
-              name="live"
-            />
+            <input type="checkbox" name="live" />
           </label>
 
           <label className="toggle-card">
-            <span>
-              Skip simulation (live)
-            </span>
+            <span>Skip simulation (live)</span>
 
-            <input
-              type="checkbox"
-              name="skipSimulation"
-            />
+            <input type="checkbox" name="skipSimulation" />
           </label>
 
           <label className="toggle-card">
-            <span>
-              Cashback
-            </span>
+            <span>Cashback</span>
 
-            <input
-              type="checkbox"
-              name="cashback"
-              defaultChecked
-            />
+            <input type="checkbox" name="cashback" defaultChecked />
           </label>
 
-          <button
-            type="submit"
-            className="primary-large"
-          >
+          <button type="submit" className="primary-large">
             Start launch
           </button>
         </div>
       </section>
 
-      <LaunchRunSummary
-        job={latestJob()}
-      />
+      <LaunchRunSummary job={latestJob()} />
 
       <div className="launch-primary-grid">
         <section className="launch-panel launch-metadata">
           <header className="launch-section-head">
             <div>
-              <span className="section-kicker">
-                01
-              </span>
+              <span className="section-kicker">01</span>
 
-              <h3>
-                Token
-              </h3>
+              <h3>Token</h3>
 
               <p>
                 These fields become the token metadata. No metadata path or URI
@@ -1663,9 +1035,7 @@ export function LaunchPage() {
 
           <div className="launch-token-form">
             <label>
-              <span>
-                Image
-              </span>
+              <span>Image</span>
 
               <span className="launch-image-picker">
                 <input
@@ -1673,37 +1043,24 @@ export function LaunchPage() {
                   name="image"
                   accept="image/png,image/jpeg,image/webp,image/gif"
                   required
-                  onInput={
-                    onImageSelected
-                  }
+                  onInput={onImageSelected}
                 />
 
                 {selectedImagePreview ? (
-                  <img
-                    src={
-                      selectedImagePreview
-                    }
-                    alt="Selected token"
-                  />
+                  <img src={selectedImagePreview} alt="Selected token" />
                 ) : (
                   <span className="launch-image-empty">
                     Upload PNG, JPG, WEBP, or GIF
                   </span>
                 )}
 
-                {selectedImage ? (
-                  <small>
-                    {selectedImage.name}
-                  </small>
-                ) : null}
+                {selectedImage ? <small>{selectedImage.name}</small> : null}
               </span>
             </label>
 
             <div className="launch-name-row">
               <label>
-                <span>
-                  Name
-                </span>
+                <span>Name</span>
 
                 <input
                   name="name"
@@ -1714,9 +1071,7 @@ export function LaunchPage() {
               </label>
 
               <label>
-                <span>
-                  Symbol
-                </span>
+                <span>Symbol</span>
 
                 <input
                   name="symbol"
@@ -1728,9 +1083,7 @@ export function LaunchPage() {
             </div>
 
             <label>
-              <span>
-                Description
-              </span>
+              <span>Description</span>
 
               <textarea
                 name="description"
@@ -1743,37 +1096,21 @@ export function LaunchPage() {
 
             <div className="launch-social-row">
               <label>
-                <span>
-                  Website
-                </span>
+                <span>Website</span>
 
-                <input
-                  type="url"
-                  name="website"
-                  placeholder="https://"
-                />
+                <input type="url" name="website" placeholder="https://" />
               </label>
 
               <label>
-                <span>
-                  X / Twitter
-                </span>
+                <span>X / Twitter</span>
 
-                <input
-                  name="twitter"
-                  placeholder="https://x.com/…"
-                />
+                <input name="twitter" placeholder="https://x.com/…" />
               </label>
 
               <label>
-                <span>
-                  Telegram
-                </span>
+                <span>Telegram</span>
 
-                <input
-                  name="telegram"
-                  placeholder="https://t.me/…"
-                />
+                <input name="telegram" placeholder="https://t.me/…" />
               </label>
             </div>
           </div>
@@ -1782,57 +1119,31 @@ export function LaunchPage() {
         <section className="launch-panel launch-deployer">
           <header className="launch-section-head">
             <div>
-              <span className="section-kicker">
-                02
-              </span>
+              <span className="section-kicker">02</span>
 
-              <h3>
-                Deployer
-              </h3>
+              <h3>Deployer</h3>
 
-              <p>
-                Choose a loaded wallet and enter the optional creator buy.
-              </p>
+              <p>Choose a loaded wallet and enter the optional creator buy.</p>
             </div>
           </header>
 
           <div className="launch-deployer-form">
             <label>
-              <span>
-                Deployer wallet
-              </span>
+              <span>Deployer wallet</span>
 
-              <select
-                name="creator"
-                required
-              >
-                <option value="">
-                  Select deployer…
-                </option>
+              <select name="creator" required>
+                <option value="">Select deployer…</option>
 
-                {deployerWallets.map(
-                  (wallet) => (
-                    <option
-                      key={
-                        wallet.address
-                      }
-                      value={
-                        wallet.address
-                      }
-                    >
-                      {walletLabel(
-                        wallet,
-                      )}
-                    </option>
-                  ),
-                )}
+                {deployerWallets.map((wallet) => (
+                  <option key={wallet.address} value={wallet.address}>
+                    {walletLabel(wallet)}
+                  </option>
+                ))}
               </select>
             </label>
 
             <label>
-              <span>
-                Creator buy SOL
-              </span>
+              <span>Creator buy SOL</span>
 
               <input
                 type="number"
@@ -1844,9 +1155,7 @@ export function LaunchPage() {
             </label>
 
             <label>
-              <span>
-                Mint suffix
-              </span>
+              <span>Mint suffix</span>
 
               <input
                 name="mintSuffix"
@@ -1868,31 +1177,21 @@ export function LaunchPage() {
 
       <footer className="launch-submit-bar">
         <div>
-          <b>
-            Ready to launch
-          </b>
+          <b>Ready to launch</b>
 
           <span>
             {followerGroups.reduce(
               (count, group) =>
                 count +
-                group.wallets.filter(
-                  (wallet) =>
-                    Boolean(
-                      wallet.wallet
-                        .trim(),
-                    ),
-                ).length,
+                group.wallets.filter((wallet) => Boolean(wallet.wallet.trim()))
+                  .length,
               0,
             )}{" "}
             follower wallets configured
           </span>
         </div>
 
-        <button
-          type="submit"
-          className="primary-large"
-        >
+        <button type="submit" className="primary-large">
           Start launch
         </button>
       </footer>
@@ -1901,8 +1200,5 @@ export function LaunchPage() {
 }
 
 export default function mount() {
-  return mountPage(
-    "launch",
-    LaunchPage,
-  );
+  return mountPage("launch", LaunchPage);
 }

@@ -520,22 +520,16 @@ export async function api<T>(
     path,
     async () => {
       const isFormData =
-        typeof FormData !==
-          "undefined" &&
-        options.body instanceof
-          FormData;
+        typeof FormData !== "undefined" && options.body instanceof FormData;
 
       const response = await fetch(url, {
         ...options,
         headers: {
-          ...(
-            isFormData
-              ? {}
-              : {
-                  "content-type":
-                    "application/json",
-                }
-          ),
+          ...(isFormData
+            ? {}
+            : {
+                "content-type": "application/json",
+              }),
           ...authHeaders(),
           ...(options.headers ?? {}),
         },
