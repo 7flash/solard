@@ -1560,6 +1560,7 @@ export function listTerminalFeed(
     includeUnpriced?: boolean;
     source?: string | null;
     minMarketCapUsd?: number;
+    maxMarketCapUsd?: number;
     priceWindowTtlMs?: number;
     pinnedMints?: Iterable<string>;
   } = {},
@@ -1579,6 +1580,8 @@ export function listTerminalFeed(
   );
 
   const minMarketCapUsd = Math.max(0, finite(input.minMarketCapUsd) ?? 0);
+
+  const maxMarketCapUsd = Math.max(0, finite(input.maxMarketCapUsd) ?? 0);
 
   const feedState = getTerminalFeedState();
 
@@ -1641,7 +1644,7 @@ export function listTerminalFeed(
     tokensByMint.set(token.mint, token);
   }
 
-  if (minMarketCapUsd > 0) {
+  if (minMarketCapUsd > 0 || maxMarketCapUsd > 0) {
     for (const [mint, token] of tokensByMint) {
       const windows = windowsByMint.get(mint);
 
@@ -1656,7 +1659,8 @@ export function listTerminalFeed(
       if (
         currentMarketCapUsd == null ||
         !Number.isFinite(currentMarketCapUsd) ||
-        currentMarketCapUsd < minMarketCapUsd
+        (minMarketCapUsd > 0 && currentMarketCapUsd < minMarketCapUsd) ||
+        (maxMarketCapUsd > 0 && currentMarketCapUsd > maxMarketCapUsd)
       ) {
         tokensByMint.delete(mint);
       }
@@ -1822,13 +1826,20 @@ export function listTerminalFeed(
         raw: token,
       } satisfies TerminalFeedRow;
     })
-    .filter(
-      (row) =>
-        minMarketCapUsd <= 0 ||
-        (row.marketCapUsd != null &&
-          Number.isFinite(row.marketCapUsd) &&
-          row.marketCapUsd >= minMarketCapUsd),
-    )
+    .filter((row) => {
+      if (minMarketCapUsd <= 0 && maxMarketCapUsd <= 0) {
+        return true;
+      }
+
+      if (row.marketCapUsd == null || !Number.isFinite(row.marketCapUsd)) {
+        return false;
+      }
+
+      return (
+        (minMarketCapUsd <= 0 || row.marketCapUsd >= minMarketCapUsd) &&
+        (maxMarketCapUsd <= 0 || row.marketCapUsd <= maxMarketCapUsd)
+      );
+    })
     .filter(
       (row) => input.includeUnpriced || hasPrice(row) || Boolean(row.image),
     )

@@ -59,6 +59,11 @@ export async function GET(request: Request): Promise<Response> {
           Number(url.searchParams.get("minMarketCapUsd") ?? 0) || 0,
         );
 
+        const maxMarketCapUsd = Math.max(
+          0,
+          Number(url.searchParams.get("maxMarketCapUsd") ?? 0) || 0,
+        );
+
         const pinnedMints = String(url.searchParams.get("pinned") ?? "")
           .split(",")
           .map((value) => value.trim())
@@ -88,6 +93,7 @@ export async function GET(request: Request): Promise<Response> {
               includeUnpriced: enabled(url, "includeUnpriced"),
 
               minMarketCapUsd,
+              maxMarketCapUsd,
 
               priceWindowTtlMs: 1_000,
 
@@ -147,6 +153,7 @@ export async function GET(request: Request): Promise<Response> {
             sinceMs,
             activeWindowMs,
             minMarketCapUsd,
+            maxMarketCapUsd,
 
             count: rows.length,
             mapped: rows.length,

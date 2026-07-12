@@ -106,7 +106,27 @@ type PageState = {
   pendingNewRows: number;
 
   filter: string;
+
   minMarketCapUsd: string;
+  maxMarketCapUsd: string;
+
+  minAgeMinutes: string;
+  maxAgeMinutes: string;
+
+  filterWindow: "1m" | "5m" | "15m";
+
+  minVolumeSol: string;
+  maxVolumeSol: string;
+
+  minSmaUsd: string;
+  maxSmaUsd: string;
+
+  minTrades: string;
+  maxTrades: string;
+
+  minHolders: string;
+  maxHolders: string;
+
   sort: SortKey;
   selectedKey: string | null;
   pinned: string[];
@@ -160,6 +180,35 @@ const state: PageState = {
   filter: storageGet("solwal:pump-feed-filter", ""),
 
   minMarketCapUsd: storageGet("solard:terminal-min-mcap-usd", "2500"),
+
+  maxMarketCapUsd: storageGet("solard:terminal-max-mcap-usd", ""),
+
+  minAgeMinutes: storageGet("solard:terminal-min-age-minutes", ""),
+
+  maxAgeMinutes: storageGet("solard:terminal-max-age-minutes", ""),
+
+  filterWindow:
+    storageGet("solard:terminal-filter-window", "5m") === "1m"
+      ? "1m"
+      : storageGet("solard:terminal-filter-window", "5m") === "15m"
+        ? "15m"
+        : "5m",
+
+  minVolumeSol: storageGet("solard:terminal-min-volume-sol", ""),
+
+  maxVolumeSol: storageGet("solard:terminal-max-volume-sol", ""),
+
+  minSmaUsd: storageGet("solard:terminal-min-sma-usd", ""),
+
+  maxSmaUsd: storageGet("solard:terminal-max-sma-usd", ""),
+
+  minTrades: storageGet("solard:terminal-min-trades", ""),
+
+  maxTrades: storageGet("solard:terminal-max-trades", ""),
+
+  minHolders: storageGet("solard:terminal-min-holders", ""),
+
+  maxHolders: storageGet("solard:terminal-max-holders", ""),
 
   sort: (() => {
     const saved = storageGet("solwal:pump-feed-sort", "created-desc");
@@ -563,18 +612,86 @@ function isPinned(row: PumpFeedRow): boolean {
   return !!row.mint && state.pinned.includes(row.mint);
 }
 
-function minimumMarketCapUsd(): number {
-  const value = Number(state.minMarketCapUsd);
+function optionalFilterNumber(value: string): number | null {
+  if (!value.trim()) {
+    return null;
+  }
 
-  return Number.isFinite(value) && value > 0 ? value : 0;
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function minimumMarketCapUsd(): number {
+  return optionalFilterNumber(state.minMarketCapUsd) ?? 0;
+}
+
+function maximumMarketCapUsd(): number {
+  return optionalFilterNumber(state.maxMarketCapUsd) ?? 0;
+}
+
+function valueInRange(
+  value: number | null,
+  minimumText: string,
+  maximumText: string,
+): boolean {
+  const minimum = optionalFilterNumber(minimumText);
+
+  const maximum = optionalFilterNumber(maximumText);
+
+  if (minimum == null && maximum == null) {
+    return true;
+  }
+
+  if (value == null || !Number.isFinite(value)) {
+    return false;
+  }
+
+  return (
+    (minimum == null || value >= minimum) &&
+    (maximum == null || value <= maximum)
+  );
+}
+
+function tokenAgeMinutes(row: PumpFeedRow): number | null {
+  const createdAtMs = createdTime(row);
+
+  if (createdAtMs == null || createdAtMs <= 0) {
+    return null;
+  }
+
+  return Math.max(0, (Date.now() - createdAtMs) / 60_000);
 }
 
 function passesFilters(row: PumpFeedRow): boolean {
-  const minimum = minimumMarketCapUsd();
-
-  const marketCap = latestMcap(row);
-
-  if (minimum > 0 && (marketCap == null || marketCap < minimum)) {
+  if (
+    !valueInRange(
+      latestMcap(row),
+      state.minMarketCapUsd,
+      state.maxMarketCapUsd,
+    ) ||
+    !valueInRange(
+      tokenAgeMinutes(row),
+      state.minAgeMinutes,
+      state.maxAgeMinutes,
+    ) ||
+    !valueInRange(
+      volumeFor(row, state.filterWindow),
+      state.minVolumeSol,
+      state.maxVolumeSol,
+    ) ||
+    !valueInRange(
+      smaFor(row, state.filterWindow),
+      state.minSmaUsd,
+      state.maxSmaUsd,
+    ) ||
+    !valueInRange(
+      tradesFor(row, state.filterWindow),
+      state.minTrades,
+      state.maxTrades,
+    ) ||
+    !valueInRange(holderCount(row, "Now"), state.minHolders, state.maxHolders)
+  ) {
     return false;
   }
 
@@ -1046,12 +1163,80 @@ function setFilter(value: string): void {
   rerender();
 }
 
-function setMinimumMarketCapUsd(value: string): void {
-  const normalized = value.replace(/[^0-9.]/g, "");
+type NumericFilterField =
+  | "minMarketCapUsd"
+  | "maxMarketCapUsd"
+  | "minAgeMinutes"
+  | "maxAgeMinutes"
+  | "minVolumeSol"
+  | "maxVolumeSol"
+  | "minSmaUsd"
+  | "maxSmaUsd"
+  | "minTrades"
+  | "maxTrades"
+  | "minHolders"
+  | "maxHolders";
 
-  state.minMarketCapUsd = normalized;
+const NUMERIC_FILTER_STORAGE: Record<NumericFilterField, string> = {
+  minMarketCapUsd: "solard:terminal-min-mcap-usd",
 
-  storageSet("solard:terminal-min-mcap-usd", normalized);
+  maxMarketCapUsd: "solard:terminal-max-mcap-usd",
+
+  minAgeMinutes: "solard:terminal-min-age-minutes",
+
+  maxAgeMinutes: "solard:terminal-max-age-minutes",
+
+  minVolumeSol: "solard:terminal-min-volume-sol",
+
+  maxVolumeSol: "solard:terminal-max-volume-sol",
+
+  minSmaUsd: "solard:terminal-min-sma-usd",
+
+  maxSmaUsd: "solard:terminal-max-sma-usd",
+
+  minTrades: "solard:terminal-min-trades",
+
+  maxTrades: "solard:terminal-max-trades",
+
+  minHolders: "solard:terminal-min-holders",
+
+  maxHolders: "solard:terminal-max-holders",
+};
+
+function normalizeNumericFilter(value: string): string {
+  return value.replace(/[^0-9.]/g, "");
+}
+
+function setNumericFilter(field: NumericFilterField, value: string): void {
+  const normalized = normalizeNumericFilter(value);
+
+  state[field] = normalized;
+
+  storageSet(NUMERIC_FILTER_STORAGE[field], normalized);
+
+  rerender();
+}
+
+function setFilterWindow(value: string): void {
+  state.filterWindow = value === "1m" ? "1m" : value === "15m" ? "15m" : "5m";
+
+  storageSet("solard:terminal-filter-window", state.filterWindow);
+
+  rerender();
+}
+
+function clearRangeFilters(): void {
+  for (const field of Object.keys(
+    NUMERIC_FILTER_STORAGE,
+  ) as NumericFilterField[]) {
+    state[field] = field === "minMarketCapUsd" ? "2500" : "";
+
+    storageSet(NUMERIC_FILTER_STORAGE[field], state[field]);
+  }
+
+  state.filterWindow = "5m";
+
+  storageSet("solard:terminal-filter-window", "5m");
 
   rerender();
 }
@@ -1186,6 +1371,8 @@ async function reloadFeed(
           source: "both",
 
           minMarketCapUsd: String(minimumMarketCapUsd()),
+
+          maxMarketCapUsd: String(maximumMarketCapUsd()),
 
           stats: options.includeHealth ? "1" : "0",
           health: options.includeHealth ? "1" : "0",
@@ -1892,7 +2079,7 @@ function HeaderSortButton({
     <button
       type="button"
       className={exactSortBase() === base ? "active" : ""}
-      title={title}
+      aria-label={title}
       onClick={() => setSort(base)}
     >
       {label}
@@ -1901,19 +2088,78 @@ function HeaderSortButton({
   );
 }
 
+function RangeFilter({
+  label,
+  unit,
+  minimumField,
+  maximumField,
+  minimum,
+  maximum,
+  step = "1",
+}: {
+  label: string;
+  unit?: string;
+  minimumField: NumericFilterField;
+  maximumField: NumericFilterField;
+  minimum: string;
+  maximum: string;
+  step?: string;
+}) {
+  return (
+    <fieldset className="terminal-range-filter">
+      <legend>{label}</legend>
+
+      <label>
+        <span>Min</span>
+
+        <span className="terminal-range-input">
+          {unit ? <small>{unit}</small> : null}
+
+          <input
+            type="number"
+            min="0"
+            step={step}
+            inputMode="decimal"
+            value={minimum}
+            onInput={(event: any) =>
+              setNumericFilter(minimumField, event.currentTarget.value)
+            }
+          />
+        </span>
+      </label>
+
+      <span className="terminal-range-separator">–</span>
+
+      <label>
+        <span>Max</span>
+
+        <span className="terminal-range-input">
+          {unit ? <small>{unit}</small> : null}
+
+          <input
+            type="number"
+            min="0"
+            step={step}
+            inputMode="decimal"
+            value={maximum}
+            onInput={(event: any) =>
+              setNumericFilter(maximumField, event.currentTarget.value)
+            }
+          />
+        </span>
+      </label>
+    </fieldset>
+  );
+}
+
 function HeaderHelp({ label, help }: { label: string; help: string }) {
   return (
-    <span className="terminal-header-label">
+    <span
+      className="terminal-header-label terminal-header-tooltip"
+      data-help={help}
+      aria-label={`${label}. ${help}`}
+    >
       <b>{label}</b>
-
-      <span
-        className="terminal-header-help"
-        title={help}
-        aria-label={help}
-        tabIndex={0}
-      >
-        ?
-      </span>
     </span>
   );
 }
@@ -3191,55 +3437,130 @@ function TerminalPage() {
         <div className="pill ok">{state.resetMessage}</div>
       ) : null}
 
-      <section className="terminal-controls">
-        <input
-          data-terminal-focus="filter"
-          placeholder="filter symbol, mint, creator"
-          value={state.filter}
-          onInput={(event: any) => setFilter(event.currentTarget.value)}
-        />
+      <section className="terminal-query-row">
+        <label className="terminal-query-field">
+          <span>Search</span>
 
-        <select
-          data-terminal-focus="top-wallet"
-          value={state.selectedWallet}
-          title="Wallet used by Buy and Sell"
-          onInput={(event: any) =>
-            updateTradeField("selectedWallet", event.currentTarget.value)
-          }
-        >
-          <option value="">Select trade wallet…</option>
-
-          {state.wallets.map((wallet) => {
-            const value = wallet.address ?? "";
-
-            return (
-              <option key={`top:${value}`} value={value}>
-                {walletLabel(wallet)}
-              </option>
-            );
-          })}
-        </select>
-        <label
-          className="terminal-mcap-filter"
-          title="Hide tokens whose current USD market cap is below this value"
-        >
-          <span>Min MCAP</span>
-
-          <span className="terminal-money-input">
-            <span>$</span>
-
-            <input
-              type="number"
-              min="0"
-              step="500"
-              inputMode="decimal"
-              value={state.minMarketCapUsd}
-              onInput={(event: any) =>
-                setMinimumMarketCapUsd(event.currentTarget.value)
-              }
-            />
-          </span>
+          <input
+            data-terminal-focus="filter"
+            placeholder="symbol, mint, creator, source"
+            value={state.filter}
+            onInput={(event: any) => setFilter(event.currentTarget.value)}
+          />
         </label>
+
+        <label className="terminal-query-field">
+          <span>Trade wallet</span>
+
+          <select
+            data-terminal-focus="top-wallet"
+            value={state.selectedWallet}
+            onInput={(event: any) =>
+              updateTradeField("selectedWallet", event.currentTarget.value)
+            }
+          >
+            <option value="">Select trade wallet…</option>
+
+            {state.wallets.map((wallet) => {
+              const value = wallet.address ?? "";
+
+              return (
+                <option key={`top:${value}`} value={value}>
+                  {walletLabel(wallet)}
+                </option>
+              );
+            })}
+          </select>
+        </label>
+      </section>
+
+      <section className="terminal-filter-panel">
+        <div className="terminal-filter-row terminal-filter-row-primary">
+          <RangeFilter
+            label="Current MCAP"
+            unit="$"
+            minimumField="minMarketCapUsd"
+            maximumField="maxMarketCapUsd"
+            minimum={state.minMarketCapUsd}
+            maximum={state.maxMarketCapUsd}
+            step="500"
+          />
+
+          <RangeFilter
+            label="Token age"
+            unit="min"
+            minimumField="minAgeMinutes"
+            maximumField="maxAgeMinutes"
+            minimum={state.minAgeMinutes}
+            maximum={state.maxAgeMinutes}
+            step="1"
+          />
+
+          <label className="terminal-window-filter">
+            <span>Activity window</span>
+
+            <select
+              value={state.filterWindow}
+              onInput={(event: any) =>
+                setFilterWindow(event.currentTarget.value)
+              }
+            >
+              <option value="1m">1 minute</option>
+
+              <option value="5m">5 minutes</option>
+
+              <option value="15m">15 minutes</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="terminal-filter-row terminal-filter-row-activity">
+          <RangeFilter
+            label={`Volume ${state.filterWindow}`}
+            unit="SOL"
+            minimumField="minVolumeSol"
+            maximumField="maxVolumeSol"
+            minimum={state.minVolumeSol}
+            maximum={state.maxVolumeSol}
+            step="0.1"
+          />
+
+          <RangeFilter
+            label={`SMA ${state.filterWindow}`}
+            unit="$"
+            minimumField="minSmaUsd"
+            maximumField="maxSmaUsd"
+            minimum={state.minSmaUsd}
+            maximum={state.maxSmaUsd}
+            step="500"
+          />
+
+          <RangeFilter
+            label={`TRX ${state.filterWindow}`}
+            minimumField="minTrades"
+            maximumField="maxTrades"
+            minimum={state.minTrades}
+            maximum={state.maxTrades}
+            step="1"
+          />
+
+          <RangeFilter
+            label="Holders now"
+            minimumField="minHolders"
+            maximumField="maxHolders"
+            minimum={state.minHolders}
+            maximum={state.maxHolders}
+            step="1"
+          />
+
+          <button
+            type="button"
+            className="secondary compact terminal-clear-filters"
+            onClick={clearRangeFilters}
+          >
+            Reset ranges
+          </button>
+        </div>
       </section>
 
       {(state.health as AnyRow | null)?.status !== "ok" ? (
