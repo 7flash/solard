@@ -348,13 +348,32 @@ function parseCreateInstructionData(buf: Buffer): {
   };
 }
 
+function pumpEventStart(buf: Buffer): number {
+  // Anchor emit! starts with the event discriminator. emit_cpi! prepends the
+  // __event instruction discriminator, so the real event starts eight bytes
+  // later. Accept a second prefix as a defensive compatibility path.
+  for (const start of [0, 8, 16]) {
+    if (buf.length < start + 8) continue;
+    const candidate = buf.subarray(start, start + 8);
+    if (
+      candidate.equals(PUMP_CREATE_EVENT_DISC) ||
+      candidate.equals(PUMP_TRADE_EVENT_DISC) ||
+      candidate.equals(PUMP_COMPLETE_EVENT_DISC)
+    ) {
+      return start;
+    }
+  }
+  return -1;
+}
+
 function parsePumpEvent(buf: Buffer): {
   name: "CreateEvent" | "TradeEvent" | "CompleteEvent";
   data: Record<string, unknown>;
 } | null {
-  if (buf.length < 8) return null;
-  const d = buf.subarray(0, 8);
-  let offset = 8;
+  const start = pumpEventStart(buf);
+  if (start < 0) return null;
+  const d = buf.subarray(start, start + 8);
+  let offset = start + 8;
   if (d.equals(PUMP_CREATE_EVENT_DISC)) {
     const name = readBorshString(buf, offset);
     if (!name) return null;
@@ -644,7 +663,37 @@ function tradesFromLogs(args: {
       Number(BigInt(String(event.data.solAmount ?? "0"))) / 1_000_000_000;
     const tokenDeltaUi =
       Number(BigInt(String(event.data.tokenAmount ?? "0"))) / 1_000_000;
-    const priceSol = tokenDeltaUi > 0 ? solDeltaUi / tokenDeltaUi : null;
+    const virtualSolRaw = (() => {
+      try {
+        return event.data.virtualSolReserves != null
+          ? BigInt(String(event.data.virtualSolReserves))
+          : null;
+      } catch {
+        return null;
+      }
+    })();
+    const virtualTokenRaw = (() => {
+      try {
+        return event.data.virtualTokenReserves != null
+          ? BigInt(String(event.data.virtualTokenReserves))
+          : null;
+      } catch {
+        return null;
+      }
+    })();
+    const reservePriceSol =
+      virtualSolRaw != null &&
+      virtualTokenRaw != null &&
+      virtualSolRaw > 0n &&
+      virtualTokenRaw > 0n
+        ? ui(virtualSolRaw, 9) / ui(virtualTokenRaw, 6)
+        : null;
+    const priceSol =
+      reservePriceSol != null && Number.isFinite(reservePriceSol)
+        ? reservePriceSol
+        : tokenDeltaUi > 0
+          ? solDeltaUi / tokenDeltaUi
+          : null;
     const priceUsd =
       priceSol != null && args.solUsd != null ? priceSol * args.solUsd : null;
     out.push({

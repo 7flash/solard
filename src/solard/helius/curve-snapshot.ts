@@ -6,7 +6,7 @@ import {
   recomputeTerminalIndicators,
   upsertProcessStatus,
   type TerminalCurveSnapshotCandidate,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 import { createMeasure, summarizeForMeasure } from "../measure.js";
 import {
   bondingCurveProgressPct,

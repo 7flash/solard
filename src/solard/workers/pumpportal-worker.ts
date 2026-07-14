@@ -5,7 +5,7 @@ import {
   recomputeTerminalIndicators,
   upsertProcessStatus,
   upsertTerminalToken,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 import {
   pruneIngestionKeys,
   recordWorkerError,

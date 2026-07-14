@@ -1,5 +1,5 @@
 import { ensureWorkerGroup } from "../processes/bgrun.js";
-import { listTerminalFeed, terminalStoreStats } from "../db/terminal-store.js";
+import { listTerminalFeed, terminalStoreStats } from "../../../shared/db.js";
 import { cliMeasure, summarizeForMeasure } from "../measure.js";
 import {
   formatProcessSummary,

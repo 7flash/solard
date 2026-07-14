@@ -2,7 +2,7 @@ import type {
   ProcessStatus,
   TerminalFeedRow,
   TerminalTrade,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 
 export function short(
   value: string | null | undefined,

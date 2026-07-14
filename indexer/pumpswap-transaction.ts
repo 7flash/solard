@@ -324,6 +324,10 @@ export function extractPumpSwapCandidates(
 
       quoteMint: group.quoteMint,
 
+      poolBaseTokenAccount: group.poolBase,
+
+      poolQuoteTokenAccount: group.poolQuote,
+
       side,
 
       baseAmountUi: Math.abs(baseDelta),

@@ -1,4 +1,4 @@
-import type { TerminalToken, TerminalTrade } from "../db/terminal-store.js";
+import type { TerminalToken, TerminalTrade } from "../../../shared/db.js";
 import {
   DEFAULT_PUMP_SUPPLY_UI,
   LAMPORTS_PER_SOL,

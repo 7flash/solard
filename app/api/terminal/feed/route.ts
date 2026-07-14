@@ -1,194 +1,162 @@
-import {
-  getTerminalFeedState,
-  listTerminalFeed,
-  terminalStoreStats,
-} from "../../../../shared/db.js";
 import { assertWebAuth } from "../../../../src/web/http.js";
 import {
-  errorResponse,
-  intParam,
-  resolveTerminalSource,
-} from "../../../_server/measure.js";
+  listTerminalFeed,
+  terminalDatabaseHealth,
+  terminalStoreStats,
+  db,
+} from "../../../../shared/db.js";
 import {
-  apiMeasure,
-  dbMeasure,
-  summarizeError,
-} from "../../../../shared/measure.js";
-import { getSolardRuntimeHealth } from "../../../_server/process-health.js";
+  apiMeasure as m,
+  label,
+  requestParams,
+} from "../../../../src/solard/measure.js";
+
+function compactError(error: unknown) {
+  return error instanceof Error
+    ? { name: error.name, message: error.message }
+    : { message: String(error) };
+}
+
+function errorStatus(error: unknown): number {
+  const value = error as any;
+  return typeof value?.status === "number"
+    ? value.status
+    : typeof value?.statusCode === "number"
+      ? value.statusCode
+      : 500;
+}
+
+function errorResponse(error: unknown): Response {
+  return Response.json(
+    { ok: false, error: compactError(error) },
+    { status: errorStatus(error) },
+  );
+}
+
+function finite(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function intParam(
+  url: URL,
+  name: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const parsed = Number(url.searchParams.get(name) ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
 
 function enabled(url: URL, name: string): boolean {
-  const value = url.searchParams.get(name);
-
+  const value = String(url.searchParams.get(name) ?? "").toLowerCase();
   return value === "1" || value === "true" || value === "yes";
+}
+
+function resolveSource(value: unknown): "both" | "helius" | "pumpportal" {
+  const text = String(value ?? "").toLowerCase();
+  if (text.includes("helius")) return "helius";
+  if (text.includes("pump") && !text.includes("both")) return "pumpportal";
+  return "both";
 }
 
 export async function GET(request: Request): Promise<Response> {
   try {
     assertWebAuth(request);
-
     const url = new URL(request.url);
 
-    return await apiMeasure.measure(
-      {
-        start: () => `terminal.feed ${url.search}`,
-
-        end: (response: any) => ({
-          status: Number(response?.status ?? 200),
-        }),
-
-        catch: summarizeError,
-      },
+    const payload = await m(
+      label("terminal_feed_v9:get", requestParams(request)),
       async () => {
-        const source =
-          resolveTerminalSource(url.searchParams.get("source")) ?? "both";
-
-        const limit = intParam(url, "limit", 160, 1, 500);
-
+        const source = resolveSource(url.searchParams.get("source"));
+        const limit = intParam(url, "limit", 0, 0, 50_000);
         const sinceMs = intParam(url, "sinceMs", 0, 0, Number.MAX_SAFE_INTEGER);
-
         const activeWindowMs = intParam(
           url,
           "activeWindowMs",
-          900_000,
-          1_000,
+          0,
+          0,
           24 * 60 * 60_000,
         );
-
         const minMarketCapUsd = Math.max(
           0,
-          Number(url.searchParams.get("minMarketCapUsd") ?? 0) || 0,
+          finite(url.searchParams.get("minMarketCapUsd")) ?? 0,
         );
-
         const maxMarketCapUsd = Math.max(
           0,
-          Number(url.searchParams.get("maxMarketCapUsd") ?? 0) || 0,
+          finite(url.searchParams.get("maxMarketCapUsd")) ?? 0,
         );
-
-        const pinnedMints = String(url.searchParams.get("pinned") ?? "")
+        const pinned = String(url.searchParams.get("pinned") ?? "")
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
           .slice(0, 250);
 
-        const feedState = getTerminalFeedState();
-
-        const rows = await dbMeasure.measure(
-          {
-            start: () =>
-              `db.list_terminal_feed source=${source} limit=${limit}`,
-
-            end: (value: any) => ({
-              rows: Array.isArray(value) ? value.length : 0,
-            }),
-
-            catch: summarizeError,
-          },
-          async () =>
-            listTerminalFeed({
-              source,
-              limit,
-              sinceMs,
-              activeWindowMs,
-
-              includeUnpriced: enabled(url, "includeUnpriced"),
-
-              minMarketCapUsd,
-              maxMarketCapUsd,
-
-              priceWindowTtlMs: 1_000,
-
-              pinnedMints,
-            }),
+        const tokens = m(
+          "get tokens",
+          () =>
+            db.terminalTokensLive
+              .select()
+              .orderBy("updatedAtMs", "desc")
+              .all() as Record<string, unknown>[],
         );
 
-        const stats = enabled(url, "stats")
-          ? terminalStoreStats({
-              pinnedMints,
-            })
-          : null;
+        const rows = listTerminalFeed({
+          source,
+          limit,
+          sinceMs,
+          activeWindowMs,
+          includeUnpriced:
+            !url.searchParams.has("includeUnpriced") ||
+            enabled(url, "includeUnpriced"),
+          minMarketCapUsd,
+          maxMarketCapUsd,
+          pinned,
+        });
 
-        const health = enabled(url, "health")
-          ? {
-              ...(await getSolardRuntimeHealth()),
-
-              store:
-                stats ??
-                terminalStoreStats({
-                  pinnedMints,
-                }),
-            }
-          : null;
-
+        const stats = enabled(url, "stats") ? terminalStoreStats() : null;
+        const health = enabled(url, "health") ? terminalDatabaseHealth() : null;
         const priced = rows.filter(
-          (row: any) =>
+          (row) =>
             row.marketCapUsd != null ||
             row.marketCapSol != null ||
             row.priceUsd != null ||
             row.priceSol != null,
         ).length;
 
-        if (health?.store && typeof health.store === "object") {
-          health.store = {
-            ...health.store,
-
-            /**
-             * Displayed-feed priced count. The stored-history count remains
-             * available as storedPricedTokens when supplied by the repository.
-             */
-            storedPricedTokens: (health.store as any).pricedTokens ?? null,
-
-            pricedTokens: priced,
-          };
-        }
-
-        return Response.json({
+        return {
           rows,
           rawRows: rows,
           stats,
           health,
-
           meta: {
+            buildId: "terminal-feed-v10-orm-health-boundary",
             source,
             limit,
-            sinceMs,
             activeWindowMs,
-            minMarketCapUsd,
-            maxMarketCapUsd,
-
             count: rows.length,
-            mapped: rows.length,
             priced,
-
-            priceWindowTtlMs: 1_000,
-
-            feedResetAtMs: feedState.resetAtMs,
-
-            pinned: pinnedMints.length,
-
-            membership: "observed-after-reset-or-pinned",
-
             reads: [
               "terminalTokensLive",
-              "tokenPriceWindowsV8",
-              "tokenMarketExtremaV4",
-              "tokenHolderWindowsV1",
+              "terminalTradesLive",
+              "tokenTradesV2",
+              "terminalHolderSnapshotsLive",
             ],
-
-            writes: [],
-            appendOnlyTrades: true,
-
-            tradeTable: "tokenTradesV2",
-
-            legacyTradeTableUsed: false,
-
-            databaseModule: "shared/db.ts",
-
-            pageRuntime: "app/terminal/page.client.tsx",
           },
-        });
+        };
       },
     );
+
+    return Response.json(payload, {
+      headers: {
+        "cache-control": "no-store, no-cache, must-revalidate",
+        pragma: "no-cache",
+      },
+    });
   } catch (error) {
+    m.sync("terminal_feed_v9:get_error", () => error);
     return errorResponse(error);
   }
 }

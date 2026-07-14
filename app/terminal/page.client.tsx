@@ -89,6 +89,36 @@ type UiErrorEntry = {
   count: number;
 };
 
+type FilterSettings = {
+  minMarketCapUsd: string;
+  maxMarketCapUsd: string;
+  minAgeMinutes: string;
+  maxAgeMinutes: string;
+  minLastTradeMinutes: string;
+  maxLastTradeMinutes: string;
+
+  minVolumeSol1m: string;
+  maxVolumeSol1m: string;
+  minSmaUsd1m: string;
+  maxSmaUsd1m: string;
+  minTrades1m: string;
+  maxTrades1m: string;
+
+  minVolumeSol5m: string;
+  maxVolumeSol5m: string;
+  minSmaUsd5m: string;
+  maxSmaUsd5m: string;
+  minTrades5m: string;
+  maxTrades5m: string;
+
+  minVolumeSol15m: string;
+  maxVolumeSol15m: string;
+  minSmaUsd15m: string;
+  maxSmaUsd15m: string;
+  minTrades15m: string;
+  maxTrades15m: string;
+};
+
 type PageState = {
   rows: PumpFeedRow[];
   health: TerminalHealthPayload | null;
@@ -112,20 +142,35 @@ type PageState = {
 
   minAgeMinutes: string;
   maxAgeMinutes: string;
+  minLastTradeMinutes: string;
+  maxLastTradeMinutes: string;
 
-  filterWindow: "1m" | "5m" | "15m";
+  minVolumeSol1m: string;
+  maxVolumeSol1m: string;
+  minSmaUsd1m: string;
+  maxSmaUsd1m: string;
+  minTrades1m: string;
+  maxTrades1m: string;
 
-  minVolumeSol: string;
-  maxVolumeSol: string;
+  minVolumeSol5m: string;
+  maxVolumeSol5m: string;
+  minSmaUsd5m: string;
+  maxSmaUsd5m: string;
+  minTrades5m: string;
+  maxTrades5m: string;
 
-  minSmaUsd: string;
-  maxSmaUsd: string;
-
-  minTrades: string;
-  maxTrades: string;
+  minVolumeSol15m: string;
+  maxVolumeSol15m: string;
+  minSmaUsd15m: string;
+  maxSmaUsd15m: string;
+  minTrades15m: string;
+  maxTrades15m: string;
 
   minHolders: string;
   maxHolders: string;
+
+  filtersOpen: boolean;
+  filterDraft: FilterSettings;
 
   sort: SortKey;
   selectedKey: string | null;
@@ -156,10 +201,82 @@ type PageState = {
   copiedLogId: string | number | null;
 };
 
-const FEED_LIMIT = 160;
-const FEED_WINDOW_MS = Number(
-  storageGet("solard:terminal-feed-window-ms-v2", "900000"),
-);
+const FEED_LIMIT = 0;
+const FEED_WINDOW_MS = 0;
+const FILTER_SETTINGS_KEY = "solard:terminal-filter-settings-v7";
+
+const DEFAULT_FILTER_SETTINGS: FilterSettings = {
+  minMarketCapUsd: "",
+  maxMarketCapUsd: "",
+  minAgeMinutes: "",
+  maxAgeMinutes: "",
+  minLastTradeMinutes: "",
+  maxLastTradeMinutes: "",
+
+  minVolumeSol1m: "",
+  maxVolumeSol1m: "",
+  minSmaUsd1m: "",
+  maxSmaUsd1m: "",
+  minTrades1m: "",
+  maxTrades1m: "",
+
+  minVolumeSol5m: "",
+  maxVolumeSol5m: "",
+  minSmaUsd5m: "",
+  maxSmaUsd5m: "",
+  minTrades5m: "",
+  maxTrades5m: "",
+
+  minVolumeSol15m: "",
+  maxVolumeSol15m: "",
+  minSmaUsd15m: "",
+  maxSmaUsd15m: "",
+  minTrades15m: "",
+  maxTrades15m: "",
+};
+
+function cleanStoredFilter(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const cleaned = value.replace(/[^0-9.]/g, "");
+  const dot = cleaned.indexOf(".");
+  return dot < 0
+    ? cleaned
+    : `${cleaned.slice(0, dot + 1)}${cleaned.slice(dot + 1).replace(/\./g, "")}`;
+}
+
+function loadFilterSettings(): FilterSettings {
+  const saved = storageJson<Partial<FilterSettings>>(FILTER_SETTINGS_KEY, {});
+  return {
+    minMarketCapUsd: cleanStoredFilter(saved.minMarketCapUsd),
+    maxMarketCapUsd: cleanStoredFilter(saved.maxMarketCapUsd),
+    minAgeMinutes: cleanStoredFilter(saved.minAgeMinutes),
+    maxAgeMinutes: cleanStoredFilter(saved.maxAgeMinutes),
+    minLastTradeMinutes: cleanStoredFilter(saved.minLastTradeMinutes),
+    maxLastTradeMinutes: cleanStoredFilter(saved.maxLastTradeMinutes),
+    minVolumeSol1m: cleanStoredFilter(saved.minVolumeSol1m),
+    maxVolumeSol1m: cleanStoredFilter(saved.maxVolumeSol1m),
+    minSmaUsd1m: cleanStoredFilter(saved.minSmaUsd1m),
+    maxSmaUsd1m: cleanStoredFilter(saved.maxSmaUsd1m),
+    minTrades1m: cleanStoredFilter(saved.minTrades1m),
+    maxTrades1m: cleanStoredFilter(saved.maxTrades1m),
+
+    minVolumeSol5m: cleanStoredFilter(saved.minVolumeSol5m),
+    maxVolumeSol5m: cleanStoredFilter(saved.maxVolumeSol5m),
+    minSmaUsd5m: cleanStoredFilter(saved.minSmaUsd5m),
+    maxSmaUsd5m: cleanStoredFilter(saved.maxSmaUsd5m),
+    minTrades5m: cleanStoredFilter(saved.minTrades5m),
+    maxTrades5m: cleanStoredFilter(saved.maxTrades5m),
+
+    minVolumeSol15m: cleanStoredFilter(saved.minVolumeSol15m),
+    maxVolumeSol15m: cleanStoredFilter(saved.maxVolumeSol15m),
+    minSmaUsd15m: cleanStoredFilter(saved.minSmaUsd15m),
+    maxSmaUsd15m: cleanStoredFilter(saved.maxSmaUsd15m),
+    minTrades15m: cleanStoredFilter(saved.minTrades15m),
+    maxTrades15m: cleanStoredFilter(saved.maxTrades15m),
+  };
+}
+
+const initialFilterSettings = loadFilterSettings();
 
 const state: PageState = {
   rows: [],
@@ -179,36 +296,38 @@ const state: PageState = {
 
   filter: storageGet("solwal:pump-feed-filter", ""),
 
-  minMarketCapUsd: storageGet("solard:terminal-min-mcap-usd", "2500"),
+  minMarketCapUsd: initialFilterSettings.minMarketCapUsd,
+  maxMarketCapUsd: initialFilterSettings.maxMarketCapUsd,
+  minAgeMinutes: initialFilterSettings.minAgeMinutes,
+  maxAgeMinutes: initialFilterSettings.maxAgeMinutes,
+  minLastTradeMinutes: initialFilterSettings.minLastTradeMinutes,
+  maxLastTradeMinutes: initialFilterSettings.maxLastTradeMinutes,
+  minVolumeSol1m: initialFilterSettings.minVolumeSol1m,
+  maxVolumeSol1m: initialFilterSettings.maxVolumeSol1m,
+  minSmaUsd1m: initialFilterSettings.minSmaUsd1m,
+  maxSmaUsd1m: initialFilterSettings.maxSmaUsd1m,
+  minTrades1m: initialFilterSettings.minTrades1m,
+  maxTrades1m: initialFilterSettings.maxTrades1m,
 
-  maxMarketCapUsd: storageGet("solard:terminal-max-mcap-usd", ""),
+  minVolumeSol5m: initialFilterSettings.minVolumeSol5m,
+  maxVolumeSol5m: initialFilterSettings.maxVolumeSol5m,
+  minSmaUsd5m: initialFilterSettings.minSmaUsd5m,
+  maxSmaUsd5m: initialFilterSettings.maxSmaUsd5m,
+  minTrades5m: initialFilterSettings.minTrades5m,
+  maxTrades5m: initialFilterSettings.maxTrades5m,
 
-  minAgeMinutes: storageGet("solard:terminal-min-age-minutes", ""),
-
-  maxAgeMinutes: storageGet("solard:terminal-max-age-minutes", ""),
-
-  filterWindow:
-    storageGet("solard:terminal-filter-window", "5m") === "1m"
-      ? "1m"
-      : storageGet("solard:terminal-filter-window", "5m") === "15m"
-        ? "15m"
-        : "5m",
-
-  minVolumeSol: storageGet("solard:terminal-min-volume-sol", ""),
-
-  maxVolumeSol: storageGet("solard:terminal-max-volume-sol", ""),
-
-  minSmaUsd: storageGet("solard:terminal-min-sma-usd", ""),
-
-  maxSmaUsd: storageGet("solard:terminal-max-sma-usd", ""),
-
-  minTrades: storageGet("solard:terminal-min-trades", ""),
-
-  maxTrades: storageGet("solard:terminal-max-trades", ""),
-
-  minHolders: storageGet("solard:terminal-min-holders", ""),
-
-  maxHolders: storageGet("solard:terminal-max-holders", ""),
+  minVolumeSol15m: initialFilterSettings.minVolumeSol15m,
+  maxVolumeSol15m: initialFilterSettings.maxVolumeSol15m,
+  minSmaUsd15m: initialFilterSettings.minSmaUsd15m,
+  maxSmaUsd15m: initialFilterSettings.maxSmaUsd15m,
+  minTrades15m: initialFilterSettings.minTrades15m,
+  maxTrades15m: initialFilterSettings.maxTrades15m,
+  // Holder filtering is intentionally not part of the live feed modal; holder
+  // detail is loaded on demand and no longer blocks the one-second feed poll.
+  minHolders: "",
+  maxHolders: "",
+  filtersOpen: false,
+  filterDraft: { ...initialFilterSettings },
 
   sort: (() => {
     const saved = storageGet("solwal:pump-feed-sort", "created-desc");
@@ -804,14 +923,6 @@ function optionalFilterNumber(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function minimumMarketCapUsd(): number {
-  return optionalFilterNumber(state.minMarketCapUsd) ?? 0;
-}
-
-function maximumMarketCapUsd(): number {
-  return optionalFilterNumber(state.maxMarketCapUsd) ?? 0;
-}
-
 function valueInRange(
   value: number | null,
   minimumText: string,
@@ -845,6 +956,12 @@ function tokenAgeMinutes(row: PumpFeedRow): number | null {
   return Math.max(0, (Date.now() - createdAtMs) / 60_000);
 }
 
+function lastTradeAgeMinutes(row: PumpFeedRow): number | null {
+  const tradedAtMs = lastTradeTime(row);
+  if (tradedAtMs == null || tradedAtMs <= 0) return null;
+  return Math.max(0, (Date.now() - tradedAtMs) / 60_000);
+}
+
 function passesFilters(row: PumpFeedRow): boolean {
   if (isPinned(row)) {
     return true;
@@ -862,19 +979,34 @@ function passesFilters(row: PumpFeedRow): boolean {
       state.maxAgeMinutes,
     ) ||
     !valueInRange(
-      volumeFor(row, state.filterWindow),
-      state.minVolumeSol,
-      state.maxVolumeSol,
+      lastTradeAgeMinutes(row),
+      state.minLastTradeMinutes,
+      state.maxLastTradeMinutes,
     ) ||
     !valueInRange(
-      smaFor(row, state.filterWindow),
-      state.minSmaUsd,
-      state.maxSmaUsd,
+      volumeFor(row, "1m"),
+      state.minVolumeSol1m,
+      state.maxVolumeSol1m,
     ) ||
+    !valueInRange(smaFor(row, "1m"), state.minSmaUsd1m, state.maxSmaUsd1m) ||
+    !valueInRange(tradesFor(row, "1m"), state.minTrades1m, state.maxTrades1m) ||
     !valueInRange(
-      tradesFor(row, state.filterWindow),
-      state.minTrades,
-      state.maxTrades,
+      volumeFor(row, "5m"),
+      state.minVolumeSol5m,
+      state.maxVolumeSol5m,
+    ) ||
+    !valueInRange(smaFor(row, "5m"), state.minSmaUsd5m, state.maxSmaUsd5m) ||
+    !valueInRange(tradesFor(row, "5m"), state.minTrades5m, state.maxTrades5m) ||
+    !valueInRange(
+      volumeFor(row, "15m"),
+      state.minVolumeSol15m,
+      state.maxVolumeSol15m,
+    ) ||
+    !valueInRange(smaFor(row, "15m"), state.minSmaUsd15m, state.maxSmaUsd15m) ||
+    !valueInRange(
+      tradesFor(row, "15m"),
+      state.minTrades15m,
+      state.maxTrades15m,
     ) ||
     !valueInRange(holderCount(row, "Now"), state.minHolders, state.maxHolders)
   ) {
@@ -1251,6 +1383,31 @@ function newRowCount(
   );
 }
 
+/**
+ * The terminal feed is append-only from the browser's point of view. A poll
+ * may be empty or incomplete while the indexer/server is reconnecting, so a
+ * later response must never erase rows that were already observed. Rows leave
+ * this map only through the explicit destructive Flush Feed action.
+ */
+function mergePersistentFeedRows(
+  current: readonly PumpFeedRow[],
+  incoming: readonly PumpFeedRow[],
+): PumpFeedRow[] {
+  const merged = new Map<string, PumpFeedRow>();
+
+  for (const row of current) {
+    merged.set(rowKey(row), row);
+  }
+
+  for (const row of incoming) {
+    const key = rowKey(row);
+    const previous = merged.get(key);
+    merged.set(key, previous ? { ...previous, ...row } : row);
+  }
+
+  return [...merged.values()];
+}
+
 function updateVisibleRowsWithoutReorder(
   current: readonly PumpFeedRow[],
   incoming: readonly PumpFeedRow[],
@@ -1356,77 +1513,140 @@ type NumericFilterField =
   | "maxMarketCapUsd"
   | "minAgeMinutes"
   | "maxAgeMinutes"
-  | "minVolumeSol"
-  | "maxVolumeSol"
-  | "minSmaUsd"
-  | "maxSmaUsd"
-  | "minTrades"
-  | "maxTrades"
-  | "minHolders"
-  | "maxHolders";
+  | "minLastTradeMinutes"
+  | "maxLastTradeMinutes"
+  | "minVolumeSol1m"
+  | "maxVolumeSol1m"
+  | "minSmaUsd1m"
+  | "maxSmaUsd1m"
+  | "minTrades1m"
+  | "maxTrades1m"
+  | "minVolumeSol5m"
+  | "maxVolumeSol5m"
+  | "minSmaUsd5m"
+  | "maxSmaUsd5m"
+  | "minTrades5m"
+  | "maxTrades5m"
+  | "minVolumeSol15m"
+  | "maxVolumeSol15m"
+  | "minSmaUsd15m"
+  | "maxSmaUsd15m"
+  | "minTrades15m"
+  | "maxTrades15m";
 
-const NUMERIC_FILTER_STORAGE: Record<NumericFilterField, string> = {
-  minMarketCapUsd: "solard:terminal-min-mcap-usd",
-
-  maxMarketCapUsd: "solard:terminal-max-mcap-usd",
-
-  minAgeMinutes: "solard:terminal-min-age-minutes",
-
-  maxAgeMinutes: "solard:terminal-max-age-minutes",
-
-  minVolumeSol: "solard:terminal-min-volume-sol",
-
-  maxVolumeSol: "solard:terminal-max-volume-sol",
-
-  minSmaUsd: "solard:terminal-min-sma-usd",
-
-  maxSmaUsd: "solard:terminal-max-sma-usd",
-
-  minTrades: "solard:terminal-min-trades",
-
-  maxTrades: "solard:terminal-max-trades",
-
-  minHolders: "solard:terminal-min-holders",
-
-  maxHolders: "solard:terminal-max-holders",
-};
+const FILTER_NUMERIC_FIELDS: NumericFilterField[] = [
+  "minMarketCapUsd",
+  "maxMarketCapUsd",
+  "minAgeMinutes",
+  "maxAgeMinutes",
+  "minLastTradeMinutes",
+  "maxLastTradeMinutes",
+  "minVolumeSol1m",
+  "maxVolumeSol1m",
+  "minSmaUsd1m",
+  "maxSmaUsd1m",
+  "minTrades1m",
+  "maxTrades1m",
+  "minVolumeSol5m",
+  "maxVolumeSol5m",
+  "minSmaUsd5m",
+  "maxSmaUsd5m",
+  "minTrades5m",
+  "maxTrades5m",
+  "minVolumeSol15m",
+  "maxVolumeSol15m",
+  "minSmaUsd15m",
+  "maxSmaUsd15m",
+  "minTrades15m",
+  "maxTrades15m",
+];
 
 function normalizeNumericFilter(value: string): string {
-  return value.replace(/[^0-9.]/g, "");
+  return cleanStoredFilter(value);
 }
 
-function setNumericFilter(field: NumericFilterField, value: string): void {
-  const normalized = normalizeNumericFilter(value);
+function activeFilterSettings(): FilterSettings {
+  return {
+    minMarketCapUsd: state.minMarketCapUsd,
+    maxMarketCapUsd: state.maxMarketCapUsd,
+    minAgeMinutes: state.minAgeMinutes,
+    maxAgeMinutes: state.maxAgeMinutes,
+    minLastTradeMinutes: state.minLastTradeMinutes,
+    maxLastTradeMinutes: state.maxLastTradeMinutes,
+    minVolumeSol1m: state.minVolumeSol1m,
+    maxVolumeSol1m: state.maxVolumeSol1m,
+    minSmaUsd1m: state.minSmaUsd1m,
+    maxSmaUsd1m: state.maxSmaUsd1m,
+    minTrades1m: state.minTrades1m,
+    maxTrades1m: state.maxTrades1m,
 
-  state[field] = normalized;
+    minVolumeSol5m: state.minVolumeSol5m,
+    maxVolumeSol5m: state.maxVolumeSol5m,
+    minSmaUsd5m: state.minSmaUsd5m,
+    maxSmaUsd5m: state.maxSmaUsd5m,
+    minTrades5m: state.minTrades5m,
+    maxTrades5m: state.maxTrades5m,
 
-  storageSet(NUMERIC_FILTER_STORAGE[field], normalized);
+    minVolumeSol15m: state.minVolumeSol15m,
+    maxVolumeSol15m: state.maxVolumeSol15m,
+    minSmaUsd15m: state.minSmaUsd15m,
+    maxSmaUsd15m: state.maxSmaUsd15m,
+    minTrades15m: state.minTrades15m,
+    maxTrades15m: state.maxTrades15m,
+  };
+}
 
+function activeFilterCount(): number {
+  return FILTER_NUMERIC_FIELDS.filter((field) => Boolean(state[field].trim()))
+    .length;
+}
+
+function openFilters(): void {
+  state.filterDraft = { ...activeFilterSettings() };
+  state.filtersOpen = true;
   rerender();
 }
 
-function setFilterWindow(value: string): void {
-  state.filterWindow = value === "1m" ? "1m" : value === "15m" ? "15m" : "5m";
+function closeFilters(): void {
+  state.filtersOpen = false;
+  rerender();
+}
 
-  storageSet("solard:terminal-filter-window", state.filterWindow);
-
+function setNumericFilter(field: NumericFilterField, value: string): void {
+  state.filterDraft[field] = normalizeNumericFilter(value);
   rerender();
 }
 
 function clearRangeFilters(): void {
-  for (const field of Object.keys(
-    NUMERIC_FILTER_STORAGE,
-  ) as NumericFilterField[]) {
-    state[field] = field === "minMarketCapUsd" ? "2500" : "";
-
-    storageSet(NUMERIC_FILTER_STORAGE[field], state[field]);
-  }
-
-  state.filterWindow = "5m";
-
-  storageSet("solard:terminal-filter-window", "5m");
-
+  state.filterDraft = { ...DEFAULT_FILTER_SETTINGS };
   rerender();
+}
+
+function commitFilterSettings(settings: FilterSettings): void {
+  for (const field of FILTER_NUMERIC_FIELDS) {
+    state[field] = settings[field];
+  }
+  storageSet(FILTER_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function applyFilters(): void {
+  commitFilterSettings({ ...state.filterDraft });
+  state.filtersOpen = false;
+  state.pendingRows = null;
+  state.pendingNewRows = 0;
+  rerender();
+  void reloadFeed({ includeHealth: true, forceReplace: true });
+}
+
+function clearAndApplyFilters(): void {
+  const cleared = { ...DEFAULT_FILTER_SETTINGS };
+  state.filterDraft = cleared;
+  commitFilterSettings(cleared);
+  state.filtersOpen = false;
+  state.pendingRows = null;
+  state.pendingNewRows = 0;
+  rerender();
+  void reloadFeed({ includeHealth: true, forceReplace: true });
 }
 
 function togglePinned(row: PumpFeedRow): void {
@@ -1517,7 +1737,11 @@ async function loadWallets(): Promise<void> {
 }
 
 async function reloadFeed(
-  options: { includeHealth?: boolean; scheduleNext?: boolean } = {},
+  options: {
+    includeHealth?: boolean;
+    scheduleNext?: boolean;
+    forceReplace?: boolean;
+  } = {},
 ): Promise<void> {
   if (pollInFlight) {
     return;
@@ -1540,8 +1764,7 @@ async function reloadFeed(
   try {
     const payload = await terminalFeedMeasure.measure(
       {
-        start: () =>
-          `poll limit=${FEED_LIMIT} windowMs=${FEED_WINDOW_MS} health=${options.includeHealth ? 1 : 0}`,
+        start: () => `poll all=1 health=${options.includeHealth ? 1 : 0}`,
 
         end: (payload: any) => ({
           rows: Array.isArray(payload?.rows) ? payload.rows.length : 0,
@@ -1553,18 +1776,14 @@ async function reloadFeed(
       },
       async () => {
         const params = new URLSearchParams({
+          // Zero disables server-side row and recency limits. Every stored token
+          // reaches the browser; the applied modal settings filter locally.
           limit: String(FEED_LIMIT),
           activeWindowMs: String(FEED_WINDOW_MS),
           includeUnpriced: "1",
           source: "both",
-
-          minMarketCapUsd: String(minimumMarketCapUsd()),
-
-          maxMarketCapUsd: String(maximumMarketCapUsd()),
-
           stats: options.includeHealth ? "1" : "0",
           health: options.includeHealth ? "1" : "0",
-
           pinned: state.pinned.join(","),
         });
 
@@ -1577,22 +1796,19 @@ async function reloadFeed(
     );
 
     const incomingRows = payload.rows ?? [];
+    const mergedRows = mergePersistentFeedRows(state.rows, incomingRows);
 
-    if (state.rows.length && tableAwayFromTop()) {
-      state.pendingRows = incomingRows;
-
-      state.pendingNewRows = newRowCount(state.rows, incomingRows);
-
+    if (state.rows.length && tableAwayFromTop() && !options.forceReplace) {
+      state.pendingRows = mergedRows;
+      state.pendingNewRows = newRowCount(state.rows, mergedRows);
       state.rows = updateVisibleRowsWithoutReorder(state.rows, incomingRows);
-
-      state.lastRows = incomingRows.length;
+      state.lastRows = mergedRows.length;
     } else {
-      state.rows = incomingRows;
-
+      // Never replace a non-empty local feed with an empty/incomplete poll.
+      // The explicit Flush Feed action is the only code path that removes rows.
+      state.rows = mergedRows;
       state.pendingRows = null;
-
       state.pendingNewRows = 0;
-
       state.lastRows = state.rows.length;
     }
 
@@ -1635,7 +1851,7 @@ async function resetFeed(): Promise<void> {
   const keep = state.pinned.length;
 
   const confirmed = window.confirm(
-    `Reset the live feed? ${keep} pinned token${keep === 1 ? "" : "s"} will remain visible. Append-only trade history will not be deleted.`,
+    `Flush the feed permanently? Every unpinned token and its indexed trade history will be deleted from SQLite. ${keep} pinned token${keep === 1 ? "" : "s"} will remain.`,
   );
 
   if (!confirmed) return;
@@ -1660,12 +1876,14 @@ async function resetFeed(): Promise<void> {
 
     const result = await terminalFeedMeasure.measure(
       {
-        start: () => `reset pinned=${state.pinned.length}`,
+        start: () => `flush pinned=${state.pinned.length}`,
 
         end: (value: any) => ({
           resetAtMs: value?.resetAtMs ?? null,
 
           pinned: Array.isArray(value?.pinned) ? value.pinned.length : 0,
+          deletedTokens: Number(value?.deletedTokens ?? 0),
+          deletedTrades: Number(value?.deletedTrades ?? 0),
         }),
 
         catch: summarizeError,
@@ -1698,11 +1916,11 @@ async function resetFeed(): Promise<void> {
       storageSet("solard:terminal-inspector-key", state.selectedKey ?? "");
     }
 
-    state.resetMessage = `Feed reset · kept ${state.pinned.length} pinned`;
+    state.resetMessage = `Feed flushed · deleted ${Number(result?.deletedTokens ?? 0)} tokens and ${Number(result?.deletedTrades ?? 0)} trades · kept ${state.pinned.length} pinned`;
 
     terminalUiMeasure.measureSync(
       {
-        start: () => `ui.reset_complete pinned=${state.pinned.length}`,
+        start: () => `ui.flush_complete pinned=${state.pinned.length}`,
 
         end: () => ({
           resetAtMs: result?.resetAtMs ?? null,
@@ -1728,6 +1946,31 @@ async function resetFeed(): Promise<void> {
   } finally {
     state.resetBusy = false;
     rerender();
+  }
+}
+
+let liveWorkersEnsured = false;
+
+async function ensureLiveWorkersOnce(): Promise<void> {
+  if (liveWorkersEnsured) return;
+  liveWorkersEnsured = true;
+
+  try {
+    await api("/api/workers/ensure", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "ensure",
+        worker: "all",
+        all: true,
+        telegram: false,
+        restartStale: true,
+        source: "helius",
+      }),
+    });
+  } catch (error) {
+    // Feed display must remain usable even when the process supervisor route is
+    // unavailable. The health panel will expose the worker failure.
+    rememberUiError("workers.ensure", error);
   }
 }
 
@@ -3597,9 +3840,19 @@ function TerminalPage() {
           <button
             type="button"
             className="secondary compact"
-            onClick={() => void reloadFeed({ includeHealth: true })}
+            onClick={() =>
+              void reloadFeed({ includeHealth: true, forceReplace: true })
+            }
           >
             Refresh
+          </button>
+
+          <button
+            type="button"
+            className="secondary compact"
+            onClick={openFilters}
+          >
+            Filters{activeFilterCount() ? ` (${activeFilterCount()})` : ""}
           </button>
 
           <button
@@ -3608,7 +3861,7 @@ function TerminalPage() {
             disabled={state.resetBusy}
             onClick={() => void resetFeed()}
           >
-            {state.resetBusy ? "Resetting…" : "Reset feed"}
+            {state.resetBusy ? "Flushing…" : "Flush feed"}
           </button>
 
           <a className="secondary compact button" href="/system">
@@ -3680,94 +3933,208 @@ function TerminalPage() {
         </label>
       </section>
 
-      <section className="terminal-filter-panel">
-        <div className="terminal-filter-row terminal-filter-row-primary">
-          <RangeFilter
-            label="Current MCAP"
-            unit="$"
-            minimumField="minMarketCapUsd"
-            maximumField="maxMarketCapUsd"
-            minimum={state.minMarketCapUsd}
-            maximum={state.maxMarketCapUsd}
-            step="500"
-          />
-
-          <RangeFilter
-            label="Token age"
-            unit="min"
-            minimumField="minAgeMinutes"
-            maximumField="maxAgeMinutes"
-            minimum={state.minAgeMinutes}
-            maximum={state.maxAgeMinutes}
-            step="1"
-          />
-
-          <label className="terminal-window-filter">
-            <span>Activity window</span>
-
-            <select
-              value={state.filterWindow}
-              onInput={(event: any) =>
-                setFilterWindow(event.currentTarget.value)
-              }
-            >
-              <option value="1m">1 minute</option>
-
-              <option value="5m">5 minutes</option>
-
-              <option value="15m">15 minutes</option>
-            </select>
-          </label>
-        </div>
-
-        <div className="terminal-filter-row terminal-filter-row-activity">
-          <RangeFilter
-            label={`Volume ${state.filterWindow}`}
-            unit="SOL"
-            minimumField="minVolumeSol"
-            maximumField="maxVolumeSol"
-            minimum={state.minVolumeSol}
-            maximum={state.maxVolumeSol}
-            step="0.1"
-          />
-
-          <RangeFilter
-            label={`SMA ${state.filterWindow}`}
-            unit="$"
-            minimumField="minSmaUsd"
-            maximumField="maxSmaUsd"
-            minimum={state.minSmaUsd}
-            maximum={state.maxSmaUsd}
-            step="500"
-          />
-
-          <RangeFilter
-            label={`TRX ${state.filterWindow}`}
-            minimumField="minTrades"
-            maximumField="maxTrades"
-            minimum={state.minTrades}
-            maximum={state.maxTrades}
-            step="1"
-          />
-
-          <RangeFilter
-            label="Holders now"
-            minimumField="minHolders"
-            maximumField="maxHolders"
-            minimum={state.minHolders}
-            maximum={state.maxHolders}
-            step="1"
-          />
-
-          <button
-            type="button"
-            className="secondary compact terminal-clear-filters"
-            onClick={clearRangeFilters}
+      {state.filtersOpen ? (
+        <div
+          className="terminal-filter-backdrop"
+          role="presentation"
+          onClick={(event: any) => {
+            if (event.target === event.currentTarget) closeFilters();
+          }}
+        >
+          <section
+            className="terminal-filter-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="terminal-filter-title"
+            onClick={(event: any) => event.stopPropagation()}
           >
-            Reset ranges
-          </button>
+            <header className="terminal-filter-modal-header">
+              <div>
+                <span className="section-kicker">View settings</span>
+                <h3 id="terminal-filter-title">Terminal filters</h3>
+              </div>
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={closeFilters}
+              >
+                Close
+              </button>
+            </header>
+
+            <div className="terminal-filter-modal-body">
+              <div className="terminal-filter-row terminal-filter-row-primary">
+                <RangeFilter
+                  label="Current MCAP"
+                  unit="$"
+                  minimumField="minMarketCapUsd"
+                  maximumField="maxMarketCapUsd"
+                  minimum={state.filterDraft.minMarketCapUsd}
+                  maximum={state.filterDraft.maxMarketCapUsd}
+                  step="500"
+                />
+                <RangeFilter
+                  label="Token age"
+                  unit="min"
+                  minimumField="minAgeMinutes"
+                  maximumField="maxAgeMinutes"
+                  minimum={state.filterDraft.minAgeMinutes}
+                  maximum={state.filterDraft.maxAgeMinutes}
+                  step="1"
+                />
+                <RangeFilter
+                  label="Last trade age"
+                  unit="min"
+                  minimumField="minLastTradeMinutes"
+                  maximumField="maxLastTradeMinutes"
+                  minimum={state.filterDraft.minLastTradeMinutes}
+                  maximum={state.filterDraft.maxLastTradeMinutes}
+                  step="1"
+                />
+              </div>
+
+              <div className="terminal-filter-intervals">
+                <section className="terminal-filter-interval">
+                  <header>
+                    <b>1 minute</b>
+                    <span>Apply any combination; blank means no limit.</span>
+                  </header>
+                  <div className="terminal-filter-interval-grid">
+                    <RangeFilter
+                      label="Volume 1m"
+                      unit="SOL"
+                      minimumField="minVolumeSol1m"
+                      maximumField="maxVolumeSol1m"
+                      minimum={state.filterDraft.minVolumeSol1m}
+                      maximum={state.filterDraft.maxVolumeSol1m}
+                      step="0.1"
+                    />
+                    <RangeFilter
+                      label="SMA 1m"
+                      unit="$"
+                      minimumField="minSmaUsd1m"
+                      maximumField="maxSmaUsd1m"
+                      minimum={state.filterDraft.minSmaUsd1m}
+                      maximum={state.filterDraft.maxSmaUsd1m}
+                      step="500"
+                    />
+                    <RangeFilter
+                      label="TRX 1m"
+                      minimumField="minTrades1m"
+                      maximumField="maxTrades1m"
+                      minimum={state.filterDraft.minTrades1m}
+                      maximum={state.filterDraft.maxTrades1m}
+                      step="1"
+                    />
+                  </div>
+                </section>
+
+                <section className="terminal-filter-interval">
+                  <header>
+                    <b>5 minutes</b>
+                    <span>Independent from the 1m and 15m filters.</span>
+                  </header>
+                  <div className="terminal-filter-interval-grid">
+                    <RangeFilter
+                      label="Volume 5m"
+                      unit="SOL"
+                      minimumField="minVolumeSol5m"
+                      maximumField="maxVolumeSol5m"
+                      minimum={state.filterDraft.minVolumeSol5m}
+                      maximum={state.filterDraft.maxVolumeSol5m}
+                      step="0.1"
+                    />
+                    <RangeFilter
+                      label="SMA 5m"
+                      unit="$"
+                      minimumField="minSmaUsd5m"
+                      maximumField="maxSmaUsd5m"
+                      minimum={state.filterDraft.minSmaUsd5m}
+                      maximum={state.filterDraft.maxSmaUsd5m}
+                      step="500"
+                    />
+                    <RangeFilter
+                      label="TRX 5m"
+                      minimumField="minTrades5m"
+                      maximumField="maxTrades5m"
+                      minimum={state.filterDraft.minTrades5m}
+                      maximum={state.filterDraft.maxTrades5m}
+                      step="1"
+                    />
+                  </div>
+                </section>
+
+                <section className="terminal-filter-interval">
+                  <header>
+                    <b>15 minutes</b>
+                    <span>Independent from the 1m and 5m filters.</span>
+                  </header>
+                  <div className="terminal-filter-interval-grid">
+                    <RangeFilter
+                      label="Volume 15m"
+                      unit="SOL"
+                      minimumField="minVolumeSol15m"
+                      maximumField="maxVolumeSol15m"
+                      minimum={state.filterDraft.minVolumeSol15m}
+                      maximum={state.filterDraft.maxVolumeSol15m}
+                      step="0.1"
+                    />
+                    <RangeFilter
+                      label="SMA 15m"
+                      unit="$"
+                      minimumField="minSmaUsd15m"
+                      maximumField="maxSmaUsd15m"
+                      minimum={state.filterDraft.minSmaUsd15m}
+                      maximum={state.filterDraft.maxSmaUsd15m}
+                      step="500"
+                    />
+                    <RangeFilter
+                      label="TRX 15m"
+                      minimumField="minTrades15m"
+                      maximumField="maxTrades15m"
+                      minimum={state.filterDraft.minTrades15m}
+                      maximum={state.filterDraft.maxTrades15m}
+                      step="1"
+                    />
+                  </div>
+                </section>
+              </div>
+            </div>
+
+            <footer className="terminal-filter-modal-footer">
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={clearRangeFilters}
+              >
+                Reset fields
+              </button>
+              <span className="terminal-filter-modal-spacer" />
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={clearAndApplyFilters}
+              >
+                Clear &amp; apply
+              </button>
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={closeFilters}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary compact"
+                onClick={applyFilters}
+              >
+                Apply filters
+              </button>
+            </footer>
+          </section>
         </div>
-      </section>
+      ) : null}
 
       {(state.health as AnyRow | null)?.status !== "ok" ? (
         <section className="terminal-health">
@@ -3859,8 +4226,8 @@ function TerminalPage() {
           </table>
           {!rows.length ? (
             <div className="terminal-empty">
-              No rows in the live window yet. The route no longer full-scans
-              history during polling.
+              No tokens stored yet. Rows now stay visible until you explicitly
+              flush the feed.
             </div>
           ) : null}
         </div>
@@ -3920,10 +4287,13 @@ export default function mount() {
 
   document.addEventListener("visibilitychange", onVisibility);
 
-  void reloadFeed({
-    includeHealth: true,
-    scheduleNext: true,
-  });
+  void (async () => {
+    await ensureLiveWorkersOnce();
+    await reloadFeed({
+      includeHealth: true,
+      scheduleNext: true,
+    });
+  })();
 
   return () => {
     terminalUiMeasure.measureSync(

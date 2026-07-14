@@ -1,4 +1,4 @@
-import type { TerminalFeedRow } from "../db/terminal-store.js";
+import type { TerminalFeedRow } from "../../../shared/db.js";
 
 function n(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;

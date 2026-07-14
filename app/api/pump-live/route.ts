@@ -2,9 +2,9 @@ import { assertWebAuth, readJson } from "../../../src/web/http.js";
 import { ensureProcessesAction } from "../../../src/solard/actions/processes.js";
 import {
   listTerminalFeed,
+  terminalDatabaseHealth,
   terminalStoreStats,
-} from "../../../src/solard/db/terminal-store.js";
-import { terminalHealthAction } from "../../../src/solard/actions/terminal-health.js";
+} from "../../../shared/db.js";
 import { terminalFeedRowsToPumpRows } from "../../../src/solard/terminal/api-map.js";
 import { listTokenWatchGroups } from "../../../src/pump/services/pump-live-store.js";
 import {
@@ -96,19 +96,19 @@ export async function GET(request: Request): Promise<Response> {
 
         const newTokens = terminalFeedRowsToPumpRows(rawTokens);
         const watchGroups = safeWatchGroups();
-        const db =
+        const database =
           url.searchParams.get("stats") === "0" ? null : terminalStoreStats();
         const health =
           url.searchParams.get("health") === "0"
             ? null
-            : terminalHealthAction({ errors: 8, source });
+            : terminalDatabaseHealth();
 
         return {
           newTokens,
           rawTokens,
           watchGroups,
           watchedMints: [],
-          db,
+          db: database,
           health,
           source,
           ensure,

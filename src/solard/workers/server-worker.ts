@@ -1,168 +1,74 @@
-#!/usr/bin/env bun
 import { serve } from "tradjs";
-import { isSqliteBusyError, upsertProcessStatus } from "../../../shared/db.js";
-import {
-  compactId,
-  dbMeasure,
-  processMeasure,
-  summarizeError,
-} from "../../../shared/measure.js";
+import { upsertProcessStatus } from "../../../shared/db.js";
+import { measureSync, configure } from "measure-fn";
 
-let serverHandle;
+configure({ timestamps: true });
+const WORKER_NAME = process.env.SOLARD_WORKER_NAME || "solard-server-worker";
+const BUILD_ID = process.env.SOLARD_EXPECTED_BUILD_ID || "solard-server-v1";
+const PORT = Number(process.env.SOLARD_PORT || "3000");
 
-const NAME = "solard-server-worker";
+let serverHandle: {
+  stop?: (closeActiveConnections?: boolean) => unknown;
+} | null = null;
+let heartbeatTimer: Timer | null = null;
 
-const BUILD_ID = process.env.SOLARD_BUILD_ID ?? process.env.GIT_COMMIT ?? null;
-
-const HEARTBEAT_MS = Math.max(
-  1_000,
-  Number(process.env.SOLARD_SERVER_HEARTBEAT_MS ?? 5_000),
-);
-
-let stopping = false;
-let heartbeatInFlight = false;
-
-const STATUS_WRITE_ATTEMPTS = 5;
-
-function statusWriteDelayMs(attempt: number): number {
-  return Math.min(500, 20 * 2 ** Math.max(0, attempt - 1));
+function sendHeartbeat(status: string, error: string | null = null) {
+  try {
+    upsertProcessStatus({
+      name: WORKER_NAME,
+      kind: "server",
+      status,
+      heartbeatAtMs: Date.now(),
+      error,
+      data: {
+        buildId: BUILD_ID,
+        port: PORT,
+        pid: process.pid,
+        supervisor: "bgrun-sdk",
+        parent: process.env.BGR_PARENT_NAME || "solard",
+      },
+    });
+  } catch (err) {
+    console.error("Failed to push server worker state to database store:", err);
+  }
 }
 
-async function sendHeartbeat(
-  status = "running",
-  error: string | null = null,
-): Promise<void> {
-  if (heartbeatInFlight) {
-    return;
-  }
+// 1. Core HTTP Server Setup & Route Definitions
+try {
+  serverHandle = (await serve()) as any;
 
-  heartbeatInFlight = true;
+  console.log(
+    `[${WORKER_NAME}] Tradjs web server listening natively on port ${PORT}`,
+  );
+  sendHeartbeat("running");
+
+  // 2. High-Resolution Heartbeat Ping Interval Loop
+  heartbeatTimer = setInterval(() => sendHeartbeat("running"), 3000);
+} catch (error: any) {
+  sendHeartbeat(
+    "error",
+    error instanceof Error ? error.message : String(error),
+  );
+  console.error(`Fatal initialization failure on ${WORKER_NAME}:`, error);
+  process.exit(1);
+}
+
+// 3. Graceful Termination & Cleanup Hooks
+const shutdown = async (signal: string) => {
+  console.log(
+    `[${WORKER_NAME}] Intercepted ${signal}, tearing down server contexts...`,
+  );
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+
+  sendHeartbeat("stopped");
 
   try {
-    for (let attempt = 1; attempt <= STATUS_WRITE_ATTEMPTS; attempt++) {
-      try {
-        dbMeasure.sync(
-          {
-            start: () =>
-              `db.upsert_process_status name=${compactId(NAME)} status=${status}`,
-
-            end: (result: any) => ({
-              updated: result != null,
-
-              status: result?.status ?? status,
-            }),
-
-            catch: summarizeError,
-          },
-          () =>
-            upsertProcessStatus({
-              name: NAME,
-
-              kind: "server",
-
-              status,
-
-              buildId: BUILD_ID,
-
-              error,
-
-              dataJson: JSON.stringify({
-                heartbeatMs: HEARTBEAT_MS,
-
-                source: "shared/db.ts",
-              }),
-
-              heartbeatAtMs: Date.now(),
-
-              updatedAtMs: Date.now(),
-            }),
-        );
-
-        return;
-      } catch (writeError) {
-        if (
-          !isSqliteBusyError(writeError) ||
-          attempt >= STATUS_WRITE_ATTEMPTS
-        ) {
-          throw writeError;
-        }
-
-        await new Promise((resolve) =>
-          setTimeout(resolve, statusWriteDelayMs(attempt)),
-        );
-      }
-    }
-  } finally {
-    heartbeatInFlight = false;
+    if (serverHandle?.stop) serverHandle.stop(true);
+  } catch (e) {
+    console.error(e);
   }
-}
+  setTimeout(() => process.exit(0), 50).unref();
+};
 
-async function stop(signal: string): Promise<void> {
-  if (stopping) {
-    return;
-  }
-
-  stopping = true;
-
-  serverHandler?.stop(true);
-
-  await sendHeartbeat("stopped", signal).catch(() => undefined);
-}
-
-export async function runServerWorker(): Promise<void> {
-  await processMeasure.measure(
-    {
-      start: () => `server_worker.start heartbeatMs=${HEARTBEAT_MS}`,
-
-      end: () => ({
-        started: true,
-      }),
-
-      catch: summarizeError,
-    },
-    async () => {
-      await sendHeartbeat("starting");
-
-      serverHandle = await serve();
-
-      const timer = setInterval(() => {
-        void sendHeartbeat("running").catch((error) => {
-          console.error(
-            "Failed to push server worker state to shared database:",
-            error,
-          );
-        });
-      }, HEARTBEAT_MS);
-
-      process.once("SIGINT", () => {
-        clearInterval(timer);
-
-        void stop("SIGINT");
-      });
-
-      process.once("SIGTERM", () => {
-        clearInterval(timer);
-
-        void stop("SIGTERM");
-      });
-
-      await new Promise<void>((resolve) => {
-        const wait = setInterval(() => {
-          if (stopping) {
-            clearInterval(wait);
-
-            resolve();
-          }
-        }, 250);
-      });
-    },
-  );
-}
-
-if (import.meta.main) {
-  runServerWorker().catch((error) => {
-    console.error("[solard:server-worker] fatal", error);
-
-    process.exitCode = 1;
-  });
-}
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));

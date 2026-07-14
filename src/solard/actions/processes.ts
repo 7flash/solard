@@ -9,7 +9,7 @@ import {
   stopBgrunWorker,
   stopWorkerGroup,
 } from "../processes/bgrun.js";
-import { terminalStoreStats } from "../db/terminal-store.js";
+import { terminalStoreStats } from "../../../shared/db.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
 
 export function listProcessesAction(

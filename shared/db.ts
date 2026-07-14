@@ -1,6 +1,11 @@
 import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database, defineView, z } from "sqlite-zod-orm";
+import {
+  dbMeasure,
+  measureRetry,
+  summarizeForMeasure,
+} from "../src/solard/measure.js";
 
 const DEFAULT_DB_PATH = join(
   process.env.HOME || process.env.USERPROFILE || ".",
@@ -34,31 +39,31 @@ export const TerminalTokenSchema = z.object({
   source: z.string().default("unknown"),
   phase: z.enum(["pump", "migrated", "unknown"]).default("unknown"),
 
-  isMayhemMode: z.number().default(0),
+  isMayhemMode: z.coerce.number().default(0),
 
   /**
    * Zero means unknown. A positive timestamp means the Pump bonding-curve
    * account was decoded (or the upstream source explicitly supplied the flag).
    */
-  mayhemCheckedAtMs: z.number().default(0),
+  mayhemCheckedAtMs: z.coerce.number().default(0),
 
   quoteAsset: z.string().nullable().default(null),
   quoteMint: z.string().nullable().default(null),
 
-  supplyUi: z.number().default(1_000_000_000),
+  supplyUi: z.coerce.number().default(1_000_000_000),
 
-  priceSol: z.number().nullable().default(null),
-  priceUsd: z.number().nullable().default(null),
+  priceSol: z.coerce.number().nullable().default(null),
+  priceUsd: z.coerce.number().nullable().default(null),
 
-  marketCapSol: z.number().nullable().default(null),
-  marketCapUsd: z.number().nullable().default(null),
+  marketCapSol: z.coerce.number().nullable().default(null),
+  marketCapUsd: z.coerce.number().nullable().default(null),
 
-  initialMarketCapUsd: z.number().nullable().default(null),
+  initialMarketCapUsd: z.coerce.number().nullable().default(null),
 
-  lastSlot: z.number().default(0),
+  lastSlot: z.coerce.number().default(0),
   signature: z.string().nullable().default(null),
 
-  createdAtMs: z.number().default(0),
+  createdAtMs: z.coerce.number().default(0),
 
   /**
    * Feed membership timestamp.
@@ -66,10 +71,10 @@ export const TerminalTokenSchema = z.object({
    * This is set only by a token create/discovery path. A trade by itself does
    * not make an arbitrary historical token eligible for the Terminal feed.
    */
-  observedAtMs: z.number().default(0),
+  observedAtMs: z.coerce.number().default(0),
 
-  priceUpdatedAtMs: z.number().default(0),
-  updatedAtMs: z.number().default(0),
+  priceUpdatedAtMs: z.coerce.number().default(0),
+  updatedAtMs: z.coerce.number().default(0),
 });
 
 export const TokenTradeSchema = z.object({
@@ -77,18 +82,18 @@ export const TokenTradeSchema = z.object({
 
   mint: z.string(),
   signature: z.string(),
-  slot: z.number().default(0),
+  slot: z.coerce.number().default(0),
 
   owner: z.string().nullable().default(null),
 
   side: z.enum(["buy", "sell", "unknown"]).default("unknown"),
 
-  tokenDeltaUi: z.number().default(0),
-  solDeltaUi: z.number().default(0),
+  tokenDeltaUi: z.coerce.number().default(0),
+  solDeltaUi: z.coerce.number().default(0),
 
-  priceSol: z.number().nullable().default(null),
-  priceUsd: z.number().nullable().default(null),
-  marketCapUsd: z.number().nullable().default(null),
+  priceSol: z.coerce.number().nullable().default(null),
+  priceUsd: z.coerce.number().nullable().default(null),
+  marketCapUsd: z.coerce.number().nullable().default(null),
 
   confidence: z
     .enum(["processed", "confirmed", "finalized", "dropped"])
@@ -97,8 +102,8 @@ export const TokenTradeSchema = z.object({
   source: z.string().default("unknown"),
   rawJson: z.string().default("{}"),
 
-  tradedAtMs: z.number(),
-  updatedAtMs: z.number(),
+  tradedAtMs: z.coerce.number(),
+  updatedAtMs: z.coerce.number(),
 });
 
 export const ProcessStatusSchema = z.object({
@@ -106,14 +111,14 @@ export const ProcessStatusSchema = z.object({
   kind: z.string(),
   status: z.string(),
 
-  heartbeatAtMs: z.number(),
-  pid: z.number().default(0),
+  heartbeatAtMs: z.coerce.number(),
+  pid: z.coerce.number().default(0),
   buildId: z.string().nullable().default(null),
 
   error: z.string().nullable().default(null),
   dataJson: z.string().default("{}"),
 
-  updatedAtMs: z.number(),
+  updatedAtMs: z.coerce.number(),
 });
 
 export const WorkerErrorSchema = z.object({
@@ -125,10 +130,30 @@ export const WorkerErrorSchema = z.object({
   createdAtMs: z.number(),
 });
 
+export const WorkerCursorSchema = z.object({
+  key: z.string(),
+  value: z.string().default(""),
+  updatedAtMs: z.coerce.number().default(0),
+});
+
+export const TelegramSignalSchema = z.object({
+  signalKey: z.string(),
+  sourceId: z.string().nullable().default(null),
+  sourceName: z.string().nullable().default(null),
+  chatRef: z.string().nullable().default(null),
+  text: z.string().default(""),
+  mintsJson: z.string().default("[]"),
+  symbolsJson: z.string().default("[]"),
+  urlsJson: z.string().default("[]"),
+  status: z.string().default("new"),
+  receivedAtMs: z.coerce.number().default(0),
+  rawJson: z.string().default("{}"),
+});
+
 export const TerminalFeedStateSchema = z.object({
   scope: z.string(),
   resetAtMs: z.number(),
-  updatedAtMs: z.number(),
+  updatedAtMs: z.coerce.number(),
 });
 
 export const LaunchJobDbSchema = z.object({
@@ -142,7 +167,7 @@ export const LaunchJobDbSchema = z.object({
   error: z.string().nullable().default(null),
 
   createdAtMs: z.number(),
-  updatedAtMs: z.number(),
+  updatedAtMs: z.coerce.number(),
 });
 
 export const LaunchJobLogDbSchema = z.object({
@@ -186,7 +211,7 @@ export const PumpLaunchSessionDbSchema = z.object({
   completedAtMs: z.number().default(0),
 
   createdAtMs: z.number(),
-  updatedAtMs: z.number(),
+  updatedAtMs: z.coerce.number(),
 });
 
 export const PumpLaunchBuyerDbSchema = z.object({
@@ -211,7 +236,46 @@ export const PumpLaunchBuyerDbSchema = z.object({
 
   heartbeatAtMs: z.number().default(0),
   createdAtMs: z.number(),
-  updatedAtMs: z.number(),
+  updatedAtMs: z.coerce.number(),
+});
+
+export const ConfidenceSchema = z.enum([
+  "processed",
+  "confirmed",
+  "finalized",
+  "dropped",
+]);
+
+export const TerminalTradeSchema = z.object({
+  tradeKey: z.string(),
+  mint: z.string(),
+  signature: z.string(),
+  slot: z.coerce.number().default(0),
+  owner: z.string().nullable().default(null),
+  side: z.enum(["buy", "sell", "unknown"]).default("unknown"),
+  tokenDeltaUi: z.coerce.number().default(0),
+  solDeltaUi: z.coerce.number().default(0),
+  priceSol: z.coerce.number().nullable().default(null),
+  priceUsd: z.coerce.number().nullable().default(null),
+  marketCapUsd: z.coerce.number().nullable().default(null),
+  confidence: ConfidenceSchema.default("processed"),
+  source: z.string().default("unknown"),
+  rawJson: z.string().default("{}"),
+  createdAtMs: z.coerce.number().default(0),
+  updatedAtMs: z.coerce.number().default(0),
+});
+
+export const TerminalIndicatorSchema = z.object({
+  indicatorKey: z.string(),
+  mint: z.string(),
+  intervalSec: z.coerce.number(),
+  smaPriceUsd: z.coerce.number().nullable().default(null),
+  smaMarketCapUsd: z.coerce.number().nullable().default(null),
+  vwmaPriceUsd: z.coerce.number().nullable().default(null),
+  medianPriceUsd: z.coerce.number().nullable().default(null),
+  tradeCount: z.coerce.number().default(0),
+  volumeSol: z.coerce.number().default(0),
+  updatedAtMs: z.coerce.number().default(0),
 });
 
 export const TokenMarketExtremaSchema = z.object({
@@ -302,6 +366,26 @@ export type LaunchJobLogDbRow = z.infer<typeof LaunchJobLogDbSchema>;
 export type PumpLaunchSessionDbRow = z.infer<typeof PumpLaunchSessionDbSchema>;
 
 export type PumpLaunchBuyerDbRow = z.infer<typeof PumpLaunchBuyerDbSchema>;
+
+export type TerminalConfidence = z.infer<typeof ConfidenceSchema>;
+export type TerminalTradeDbRow = z.infer<typeof TerminalTradeSchema>;
+export type TerminalIndicatorDbRow = z.infer<typeof TerminalIndicatorSchema>;
+export type TelegramSignalDbRow = z.infer<typeof TelegramSignalSchema>;
+
+export type TerminalTrade = Omit<TerminalTradeDbRow, "tradeKey"> & {
+  id: string;
+  tradeKey?: string;
+};
+
+export type TerminalIndicator = Omit<TerminalIndicatorDbRow, "indicatorKey"> & {
+  id: string;
+  indicatorKey?: string;
+};
+
+export type TelegramSignal = Omit<TelegramSignalDbRow, "signalKey"> & {
+  id: string;
+  signalKey?: string;
+};
 
 export type TerminalFeedRow = TerminalToken & {
   sma1m: number | null;
@@ -520,7 +604,11 @@ export const db = await openDatabaseWithRetry(
       {
         terminalTokensLive: TerminalTokenSchema,
         tokenTradesV2: TokenTradeSchema,
+        terminalTradesLive: TerminalTradeSchema,
+        terminalIndicatorsLive: TerminalIndicatorSchema,
         processStatus: ProcessStatusSchema,
+        workerCursors: WorkerCursorSchema,
+        telegramSignals: TelegramSignalSchema,
         workerErrors: WorkerErrorSchema,
         terminalFeedState: TerminalFeedStateSchema,
         launchJobsV2: LaunchJobDbSchema,
@@ -537,7 +625,11 @@ export const db = await openDatabaseWithRetry(
         unique: {
           terminalTokensLive: [["mint"]],
           tokenTradesV2: [["eventKey"]],
+          terminalTradesLive: [["tradeKey"]],
+          terminalIndicatorsLive: [["indicatorKey"], ["mint", "intervalSec"]],
           processStatus: [["name"]],
+          workerCursors: [["key"]],
+          telegramSignals: [["signalKey"]],
           workerErrors: [["errorKey"]],
           terminalFeedState: [["scope"]],
           launchJobsV2: [["jobId"]],
@@ -568,7 +660,19 @@ export const db = await openDatabaseWithRetry(
             ["mint", "marketCapUsd"],
           ],
 
+          terminalTradesLive: [
+            ["mint", "createdAtMs"],
+            ["signature"],
+            ["source", "createdAtMs"],
+            ["confidence", "updatedAtMs"],
+          ],
+
+          terminalIndicatorsLive: [["mint", "intervalSec"], ["updatedAtMs"]],
+
           processStatus: [["heartbeatAtMs"], ["updatedAtMs"]],
+
+          workerCursors: [["updatedAtMs"]],
+          telegramSignals: [["receivedAtMs"]],
 
           workerErrors: [["createdAtMs"], ["worker", "createdAtMs"]],
 
@@ -1030,58 +1134,42 @@ export const db = await openDatabaseWithRetry(
 );
 
 const PRICE_WINDOW_TTL_MS = 1_000;
-
-export function isDuplicateTradeError(error: unknown): boolean {
-  const message = sqliteErrorMessage(error);
-
-  return (
-    message.includes("unique constraint failed") &&
-    (message.includes("tokentradesv2.eventkey") || message.includes("eventkey"))
-  );
-}
+const TERMINAL_FEED_SCOPE = "pump";
+const TERMINAL_INDICATOR_INTERVALS = [
+  60, 300, 900, 3600, 21600, 86400,
+] as const;
 
 function finite(value: unknown): number | null {
-  if (value == null || value === "") {
-    return null;
-  }
-
-  const result = Number(value);
-
-  return Number.isFinite(result) ? result : null;
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function integer(value: unknown, fallback = 0): number {
-  const result = Math.trunc(Number(value));
+  const parsed = Math.trunc(Number(value));
+  return Number.isSafeInteger(parsed) ? parsed : fallback;
+}
 
-  return Number.isSafeInteger(result) ? result : fallback;
+function positiveTime(value: unknown): number {
+  const parsed = finite(value) ?? 0;
+  return parsed > 0 ? parsed : 0;
 }
 
 function text(value: unknown): string | null {
   if (value == null) return null;
-
-  const result = String(value).trim();
-
-  return result || null;
+  const parsed = String(value).trim();
+  return parsed || null;
 }
 
 function displayText(value: unknown): string {
-  const result = text(value);
-
-  if (!result) return "";
-
-  const lowered = result.toLowerCase();
-
-  if (
-    lowered === "unknown" ||
-    lowered === "undefined" ||
-    lowered === "null" ||
-    lowered === "new token" ||
-    lowered === "-"
-  ) {
-    return "";
-  }
-
-  return result;
+  const parsed = text(value);
+  if (!parsed) return "";
+  const lowered = parsed.toLowerCase();
+  return ["-", "token", "new token", "unknown", "null", "undefined"].includes(
+    lowered,
+  )
+    ? ""
+    : parsed;
 }
 
 function stringify(value: unknown): string {
@@ -1090,251 +1178,291 @@ function stringify(value: unknown): string {
   );
 }
 
+function parseJson<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeMayhem(value: unknown): number {
+  if (typeof value === "boolean") return value ? 1 : 0;
+  const parsed = finite(value);
+  return parsed != null && parsed > 0 ? 1 : 0;
+}
+
+function cleanPinnedMints(
+  values: Iterable<string> | null | undefined,
+): string[] {
+  return [
+    ...new Set(
+      [...(values ?? [])].map((value) => String(value).trim()).filter(Boolean),
+    ),
+  ].slice(0, 250);
+}
+
 function sourceMatches(
   requested: string | null | undefined,
-  actual: string,
+  actual: unknown,
 ): boolean {
   const source = String(requested ?? "both")
     .trim()
     .toLowerCase();
-
-  if (!source || source === "both") {
-    return true;
-  }
+  if (!source || source === "both") return true;
 
   const value = String(actual ?? "")
     .trim()
     .toLowerCase();
-
-  if (source === "helius" || source.includes("helius")) {
-    return value.includes("helius");
+  if (source.includes("helius")) {
+    return value.includes("helius") || value.startsWith("telegram");
   }
-
-  if (source === "pumpportal" || source.includes("pumpportal")) {
-    return value.includes("pumpportal") || value === "pump";
+  if (source.includes("pump")) {
+    return (
+      value.includes("pumpportal") ||
+      value === "pump" ||
+      value.startsWith("telegram")
+    );
   }
-
   return value === source;
 }
 
-function isUsdc(token: TerminalToken): boolean {
-  const value = [token.quoteAsset, token.quoteMint].join(" ").toLowerCase();
+function chunked<T>(values: readonly T[], size = 250): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
 
+function normalizeTerminalToken(
+  row: Record<string, unknown> | null | undefined,
+): TerminalToken | null {
+  if (!row) return null;
+  const mint = text(row.mint);
+  if (!mint) return null;
+
+  return TerminalTokenSchema.parse({
+    ...row,
+    mint,
+    supplyUi: finite(row.supplyUi) ?? 1_000_000_000,
+    priceSol: finite(row.priceSol),
+    priceUsd: finite(row.priceUsd),
+    marketCapSol: finite(row.marketCapSol),
+    marketCapUsd: finite(row.marketCapUsd),
+    initialMarketCapUsd: finite(row.initialMarketCapUsd),
+    lastSlot: integer(row.lastSlot, 0),
+    isMayhemMode: normalizeMayhem(row.isMayhemMode),
+    mayhemCheckedAtMs: integer(row.mayhemCheckedAtMs, 0),
+    createdAtMs: integer(row.createdAtMs, 0),
+    observedAtMs: integer(row.observedAtMs, 0),
+    priceUpdatedAtMs: integer(row.priceUpdatedAtMs, 0),
+    updatedAtMs: integer(row.updatedAtMs, 0),
+  });
+}
+
+export function isDuplicateTradeError(error: unknown): boolean {
+  const message = sqliteErrorMessage(error);
   return (
-    value.includes("usdc") ||
-    value.includes("epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v")
+    message.includes("unique constraint failed") &&
+    (message.includes("tokentradesv2.eventkey") || message.includes("eventkey"))
   );
 }
 
-function hasPrice(token: TerminalToken): boolean {
-  return (
-    token.priceSol != null ||
-    token.priceUsd != null ||
-    token.marketCapSol != null ||
-    token.marketCapUsd != null
+export function getTerminalToken(mint: string): TerminalToken | null {
+  const key = mint.trim();
+  if (!key) return null;
+  return normalizeTerminalToken(
+    db.terminalTokensLive.select().where({ mint: key }).get() as Record<
+      string,
+      unknown
+    > | null,
   );
 }
 
 export function upsertTerminalToken(
-  input: Partial<TerminalToken> & {
-    mint: string;
-  },
+  input: Partial<TerminalToken> & { mint: string },
 ): TerminalToken {
   const now = Date.now();
-
+  const existing = getTerminalToken(input.mint);
+  const source = text(input.source) ?? existing?.source ?? "unknown";
   const incomingHasPrice = [
     input.priceSol,
     input.priceUsd,
     input.marketCapSol,
     input.marketCapUsd,
   ].some((value) => finite(value) != null);
-
-  const incomingSource = text(input.source) ?? "unknown";
-
-  const hasExplicitMayhemFlag =
-    Object.prototype.hasOwnProperty.call(input, "isMayhemMode") &&
-    input.isMayhemMode != null;
-
   const discoveryObservation =
-    /(?:create|discovery|new-token|telegram-signal|probe)/i.test(incomingSource)
+    /(?:create|discovery|new-token|telegram-signal|probe)/i.test(source)
       ? now
       : 0;
 
-  const row: TerminalToken = {
-    mint: text(input.mint) ?? "",
-
-    symbol: displayText(input.symbol),
-    name: displayText(input.name),
-    image: text(input.image),
-    uri: text(input.uri),
-
-    description: text(input.description),
-    website: text(input.website),
-    twitter: text(input.twitter),
-    telegram: text(input.telegram),
-
-    creator: text(input.creator),
-    bondingCurveKey: text(input.bondingCurveKey),
-
-    source: incomingSource,
-
-    phase: input.phase ?? "unknown",
-
-    isMayhemMode: integer(input.isMayhemMode, 0),
-
+  const row = TerminalTokenSchema.parse({
+    mint: input.mint,
+    symbol: displayText(input.symbol) || existing?.symbol || "",
+    name: displayText(input.name) || existing?.name || "",
+    image: text(input.image) ?? existing?.image ?? null,
+    uri: text(input.uri) ?? existing?.uri ?? null,
+    description: text(input.description) ?? existing?.description ?? null,
+    website: text(input.website) ?? existing?.website ?? null,
+    twitter: text(input.twitter) ?? existing?.twitter ?? null,
+    telegram: text(input.telegram) ?? existing?.telegram ?? null,
+    creator: text(input.creator) ?? existing?.creator ?? null,
+    bondingCurveKey:
+      text(input.bondingCurveKey) ?? existing?.bondingCurveKey ?? null,
+    source,
+    phase:
+      input.phase && input.phase !== "unknown"
+        ? input.phase
+        : (existing?.phase ?? "unknown"),
+    isMayhemMode:
+      input.isMayhemMode == null
+        ? (existing?.isMayhemMode ?? 0)
+        : normalizeMayhem(input.isMayhemMode),
     mayhemCheckedAtMs: integer(
-      input.mayhemCheckedAtMs ?? (hasExplicitMayhemFlag ? now : 0),
-      0,
+      input.mayhemCheckedAtMs,
+      existing?.mayhemCheckedAtMs ?? 0,
     ),
-
-    quoteAsset: text(input.quoteAsset),
-
-    quoteMint: text(input.quoteMint),
-
-    supplyUi: finite(input.supplyUi) ?? 1_000_000_000,
-
+    quoteAsset: text(input.quoteAsset) ?? existing?.quoteAsset ?? null,
+    quoteMint: text(input.quoteMint) ?? existing?.quoteMint ?? null,
+    supplyUi:
+      finite(input.supplyUi) ?? finite(existing?.supplyUi) ?? 1_000_000_000,
     priceSol: finite(input.priceSol),
-
     priceUsd: finite(input.priceUsd),
-
     marketCapSol: finite(input.marketCapSol),
-
     marketCapUsd: finite(input.marketCapUsd),
-
     initialMarketCapUsd: finite(
       input.initialMarketCapUsd ?? input.marketCapUsd,
     ),
-
     lastSlot: integer(input.lastSlot, 0),
-
     signature: text(input.signature),
-
-    createdAtMs: integer(input.createdAtMs, now),
-
-    observedAtMs: integer(input.observedAtMs ?? discoveryObservation, 0),
-
+    createdAtMs:
+      positiveTime(existing?.createdAtMs) || integer(input.createdAtMs, now),
+    observedAtMs: Math.max(
+      positiveTime(existing?.observedAtMs),
+      integer(input.observedAtMs ?? discoveryObservation, 0),
+    ),
     priceUpdatedAtMs: integer(
       input.priceUpdatedAtMs ??
         (incomingHasPrice ? (input.updatedAtMs ?? now) : 0),
       0,
     ),
-
     updatedAtMs: integer(input.updatedAtMs, now),
-  };
+  });
 
-  return db.terminalTokensLive.upsert(row, {
+  const saved = db.terminalTokensLive.upsert(row, {
     on: "mint",
-    merge: (t) => ({
-      symbol: t.excludedIfNotEmpty("symbol"),
-
-      name: t.excludedIfNotEmpty("name"),
-
-      image: t.excludedIfNotEmpty("image"),
-
-      uri: t.excludedIfNotEmpty("uri"),
-
-      description: t.excludedIfNotNull("description"),
-
-      website: t.excludedIfNotNull("website"),
-
-      twitter: t.excludedIfNotNull("twitter"),
-
-      telegram: t.excludedIfNotNull("telegram"),
-
-      creator: t.excludedIfNotNull("creator"),
-
-      bondingCurveKey: t.excludedIfNotNull("bondingCurveKey"),
-
-      source: t.excluded("source"),
-
-      phase: t.excluded("phase"),
-
-      isMayhemMode: t.max("isMayhemMode"),
-
-      mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
-
-      quoteAsset: t.excludedIfNotNull("quoteAsset"),
-
-      quoteMint: t.excludedIfNotNull("quoteMint"),
-
-      supplyUi: t.excluded("supplyUi"),
-
-      priceSol: t.excludedIfNotNull("priceSol"),
-
-      priceUsd: t.excludedIfNotNull("priceUsd"),
-
-      marketCapSol: t.excludedIfNotNull("marketCapSol"),
-
-      marketCapUsd: t.excludedIfNotNull("marketCapUsd"),
-
-      initialMarketCapUsd: t.keepFirst("initialMarketCapUsd"),
-
-      lastSlot: t.max("lastSlot"),
-
-      signature: t.excludedIfNotNull("signature"),
-
-      createdAtMs: t.keepFirst("createdAtMs"),
-
-      observedAtMs: t.max("observedAtMs"),
-
-      priceUpdatedAtMs: t.max("priceUpdatedAtMs"),
-
-      updatedAtMs: t.excluded("updatedAtMs"),
+    merge: (table) => ({
+      symbol: table.excludedIfNotEmpty("symbol"),
+      name: table.excludedIfNotEmpty("name"),
+      image: table.excludedIfNotEmpty("image"),
+      uri: table.excludedIfNotEmpty("uri"),
+      description: table.excludedIfNotNull("description"),
+      website: table.excludedIfNotNull("website"),
+      twitter: table.excludedIfNotNull("twitter"),
+      telegram: table.excludedIfNotNull("telegram"),
+      creator: table.excludedIfNotNull("creator"),
+      bondingCurveKey: table.excludedIfNotNull("bondingCurveKey"),
+      source: table.excludedIfNotEmpty("source"),
+      phase: table.excludedIfNotEmpty("phase"),
+      isMayhemMode: table.max("isMayhemMode", 0),
+      mayhemCheckedAtMs: table.max("mayhemCheckedAtMs", 0),
+      quoteAsset: table.excludedIfNotNull("quoteAsset"),
+      quoteMint: table.excludedIfNotNull("quoteMint"),
+      supplyUi: table.max("supplyUi", 1_000_000_000),
+      priceSol: table.excludedIfNotNull("priceSol"),
+      priceUsd: table.excludedIfNotNull("priceUsd"),
+      marketCapSol: table.excludedIfNotNull("marketCapSol"),
+      marketCapUsd: table.excludedIfNotNull("marketCapUsd"),
+      initialMarketCapUsd: table.keepFirst("initialMarketCapUsd"),
+      lastSlot: table.max("lastSlot", 0),
+      signature: table.excludedIfNotNull("signature"),
+      createdAtMs: table.keepFirst("createdAtMs"),
+      observedAtMs: table.max("observedAtMs", 0),
+      priceUpdatedAtMs: table.max("priceUpdatedAtMs", 0),
+      updatedAtMs: table.max("updatedAtMs", 0),
     }),
-  }) as TerminalToken;
-}
+  });
 
-export function getTerminalToken(mint: string): TerminalToken | null {
-  const key = mint.trim();
-
-  if (!key) {
-    return null;
+  const normalized = normalizeTerminalToken(saved as Record<string, unknown>);
+  if (!normalized) {
+    throw new Error(
+      `terminal token upsert returned an invalid row for ${row.mint}`,
+    );
   }
-
-  return db.terminalTokensLive
-    .select()
-    .where({
-      mint: key,
-    })
-    .get() as TerminalToken | null;
+  return normalized;
 }
 
-/**
- * Append-only trade write.
- *
- * Duplicate websocket delivery is ignored by the unique eventKey. No SMA or
- * other aggregation runs in this write transaction.
- */
+export function setTerminalTokenMayhem(input: {
+  mint: string;
+  isMayhemMode: boolean;
+  checkedAtMs?: number;
+}): TerminalToken | null {
+  const existing = getTerminalToken(input.mint);
+  if (!existing) return null;
+  return upsertTerminalToken({
+    ...existing,
+    mint: input.mint,
+    isMayhemMode: input.isMayhemMode ? 1 : 0,
+    mayhemCheckedAtMs: input.checkedAtMs ?? Date.now(),
+    updatedAtMs: Date.now(),
+  });
+}
+
+export function listTokensNeedingMayhemCheck(
+  limit = 250,
+): Array<
+  Pick<
+    TerminalToken,
+    | "mint"
+    | "bondingCurveKey"
+    | "phase"
+    | "observedAtMs"
+    | "updatedAtMs"
+    | "mayhemCheckedAtMs"
+  >
+> {
+  const capped = Math.max(1, Math.min(integer(limit, 250), 1_000));
+  const now = Date.now();
+  return (
+    db.terminalTokensLive
+      .select()
+      .orderBy("updatedAtMs", "desc")
+      .all() as Record<string, unknown>[]
+  )
+    .map(normalizeTerminalToken)
+    .filter((token): token is TerminalToken => token != null)
+    .filter((token) => {
+      if (
+        token.phase === "migrated" ||
+        token.observedAtMs <= 0 ||
+        token.isMayhemMode > 0
+      ) {
+        return false;
+      }
+      if (token.mayhemCheckedAtMs <= 0) return true;
+      return (
+        now - token.observedAtMs <= 15 * 60_000 &&
+        now - token.mayhemCheckedAtMs >= 10_000
+      );
+    })
+    .slice(0, capped)
+    .map((token) => ({
+      mint: token.mint,
+      bondingCurveKey: token.bondingCurveKey,
+      phase: token.phase,
+      observedAtMs: token.observedAtMs,
+      updatedAtMs: token.updatedAtMs,
+      mayhemCheckedAtMs: token.mayhemCheckedAtMs,
+    }));
+}
+
 export type AppendTokenTradeResult = {
   row: TokenTrade;
   inserted: boolean;
 };
 
-export type ObservedHolderPosition = {
-  owner: string;
-
-  buySol: number;
-  sellSol: number;
-  netSpentSol: number;
-
-  boughtTokens: number;
-  soldTokens: number;
-  netTokens: number;
-
-  buys: number;
-  sells: number;
-  trades: number;
-
-  firstTradeAtMs: number | null;
-  lastTradeAtMs: number | null;
-};
-
-/**
- * Append-only trade write with explicit duplicate result.
- *
- * Duplicate websocket delivery is ignored by the unique eventKey. No SMA,
- * cache invalidation, token lookup, or aggregation runs in this transaction.
- */
 export function appendTokenTradeOnce(
   input: Partial<TokenTrade> & {
     eventKey: string;
@@ -1344,67 +1472,42 @@ export function appendTokenTradeOnce(
   },
 ): AppendTokenTradeResult {
   const now = Date.now();
-
-  const row: TokenTrade = {
-    eventKey: text(input.eventKey) ?? "",
-
-    mint: text(input.mint) ?? "",
-
-    signature: text(input.signature) ?? "",
-
+  const row = TokenTradeSchema.parse({
+    ...input,
+    eventKey: input.eventKey,
+    mint: input.mint,
+    signature: input.signature,
     slot: integer(input.slot, 0),
-
     owner: text(input.owner),
-
     side:
       input.side === "buy" || input.side === "sell" ? input.side : "unknown",
-
     tokenDeltaUi: finite(input.tokenDeltaUi) ?? 0,
-
     solDeltaUi: finite(input.solDeltaUi) ?? 0,
-
     priceSol: finite(input.priceSol),
-
     priceUsd: finite(input.priceUsd),
-
     marketCapUsd: finite(input.marketCapUsd),
-
     confidence: input.confidence ?? "processed",
-
     source: text(input.source) ?? "unknown",
-
     rawJson:
       typeof input.rawJson === "string"
         ? input.rawJson
         : stringify(input.rawJson ?? {}),
-
     tradedAtMs: integer(input.tradedAtMs, now),
-
     updatedAtMs: integer(input.updatedAtMs, now),
-  };
+  });
 
   try {
-    /**
-     * sqlite-zod-orm insert() executes synchronously.
-     *
-     * tokenTrades is append-only. A duplicate eventKey is normal websocket
-     * redelivery and is handled by the UNIQUE exception below.
-     */
-    const inserted = db.tokenTradesV2.insert(row) as TokenTrade;
-
     return {
-      row: inserted,
+      row: db.tokenTradesV2.insert(row) as TokenTrade,
       inserted: true,
     };
   } catch (error) {
-    if (isDuplicateTradeError(error)) {
-      return {
-        row,
-        inserted: false,
-      };
-    }
-
-    throw error;
+    if (!isDuplicateTradeError(error)) throw error;
+    const existing = db.tokenTradesV2
+      .select()
+      .where({ eventKey: row.eventKey })
+      .get() as TokenTrade | null;
+    return { row: existing ?? row, inserted: false };
   }
 }
 
@@ -1424,16 +1527,12 @@ export function getTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows | null {
   const key = mint.trim();
-
   if (!key) return null;
-
   return (
     (db.tokenPriceWindowsV8
       .select()
       .where({ mint: key })
-      .cache({
-        ttlMs: Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS)),
-      })
+      .cache({ ttlMs: Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS)) })
       .get() as TokenPriceWindows | null) ?? null
   );
 }
@@ -1443,241 +1542,15 @@ export function listTokenPriceWindows(
 ): TokenPriceWindows[] {
   return db.tokenPriceWindowsV8
     .select()
-    .orderBy("latestTradeAtMs", "DESC")
-    .cache({
-      ttlMs: Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS)),
-    })
+    .orderBy("latestTradeAtMs", "desc")
+    .cache({ ttlMs: Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS)) })
     .all() as TokenPriceWindows[];
-}
-
-export function listTokensNeedingMayhemCheck(
-  limit = 250,
-): Array<
-  Pick<
-    TerminalToken,
-    | "mint"
-    | "bondingCurveKey"
-    | "phase"
-    | "observedAtMs"
-    | "updatedAtMs"
-    | "mayhemCheckedAtMs"
-  >
-> {
-  const capped = Math.max(1, Math.min(integer(limit, 250), 1_000));
-
-  const now = Date.now();
-
-  const falseRecheckAfterMs = 10_000;
-
-  const falseRecheckWindowMs = 15 * 60_000;
-
-  return (
-    db.terminalTokensLive
-      .select()
-      .orderBy("updatedAtMs", "DESC")
-      .limit(capped * 8)
-      .all() as TerminalToken[]
-  )
-    .filter((token) => {
-      if (
-        token.phase === "migrated" ||
-        Number(token.observedAtMs ?? 0) <= 0 ||
-        terminalTokenIsMayhem(token)
-      ) {
-        return false;
-      }
-
-      const checkedAtMs = Number(token.mayhemCheckedAtMs ?? 0);
-
-      if (checkedAtMs <= 0) {
-        return true;
-      }
-
-      return (
-        now - Number(token.observedAtMs ?? 0) <= falseRecheckWindowMs &&
-        now - checkedAtMs >= falseRecheckAfterMs
-      );
-    })
-    .slice(0, capped)
-    .map((token) => ({
-      mint: token.mint,
-
-      bondingCurveKey: token.bondingCurveKey,
-
-      phase: token.phase,
-
-      observedAtMs: token.observedAtMs,
-
-      updatedAtMs: token.updatedAtMs,
-
-      mayhemCheckedAtMs: token.mayhemCheckedAtMs,
-    }));
-}
-
-/**
- * Update only the authoritative Mayhem fields. This intentionally preserves
- * source, phase, metadata timestamps, and feed-observation timestamps.
- */
-export function setTerminalTokenMayhem(input: {
-  mint: string;
-  isMayhemMode: boolean;
-  checkedAtMs?: number;
-}): TerminalToken | null {
-  const existing = db.terminalTokensLive
-    .select()
-    .where({
-      mint: input.mint,
-    })
-    .get() as TerminalToken | null;
-
-  if (!existing) {
-    return null;
-  }
-
-  const row: TerminalToken = {
-    ...existing,
-
-    isMayhemMode: input.isMayhemMode ? 1 : 0,
-
-    mayhemCheckedAtMs: integer(input.checkedAtMs, Date.now()),
-  };
-
-  return db.terminalTokensLive.upsert(row, {
-    on: "mint",
-    merge: (t) => ({
-      isMayhemMode: t.max("isMayhemMode"),
-
-      mayhemCheckedAtMs: t.max("mayhemCheckedAtMs"),
-    }),
-  }) as TerminalToken;
-}
-
-function terminalTokenIsMayhem(token: TerminalToken): boolean {
-  return Number(token.isMayhemMode ?? 0) > 0;
-}
-
-function terminalTokenMayhemKnown(token: TerminalToken): boolean {
-  return Number(token.mayhemCheckedAtMs ?? 0) > 0;
-}
-
-const TERMINAL_FEED_SCOPE = "pump";
-
-function cleanPinnedMints(
-  values: Iterable<string> | null | undefined,
-): string[] {
-  return [
-    ...new Set(
-      [...(values ?? [])].map((value) => String(value).trim()).filter(Boolean),
-    ),
-  ].slice(0, 250);
-}
-
-/**
- * First deployment starts with only tokens observed during the current active
- * window. Historical rows have observedAtMs=0 and are therefore excluded.
- */
-export function getTerminalFeedState(
-  scope = TERMINAL_FEED_SCOPE,
-): TerminalFeedState {
-  const existing = db.terminalFeedState
-    .select()
-    .where({ scope })
-    .get() as TerminalFeedState | null;
-
-  if (existing) {
-    return existing;
-  }
-
-  const now = Date.now();
-
-  const row: TerminalFeedState = {
-    scope,
-    resetAtMs:
-      now -
-      Math.max(
-        1_000,
-        integer(process.env.SOLARD_TERMINAL_ACTIVE_WINDOW_MS, 300_000),
-      ),
-    updatedAtMs: now,
-  };
-
-  try {
-    /**
-     * Initialization is a plain synchronous insert.
-     * If another process wins the race, return the row it inserted.
-     */
-    return db.terminalFeedState.insert(row) as TerminalFeedState;
-  } catch (error) {
-    const existingAfterRace = db.terminalFeedState
-      .select()
-      .where({ scope })
-      .get() as TerminalFeedState | null;
-
-    if (existingAfterRace) {
-      return existingAfterRace;
-    }
-
-    throw error;
-  }
-}
-
-/**
- * Logical reset only. Append-only trades and historical token metadata remain
- * available for audit/debugging, but cease to be feed members.
- */
-export function resetTerminalFeed(
-  input: {
-    scope?: string;
-    now?: number;
-    pinnedMints?: Iterable<string>;
-  } = {},
-): {
-  state: TerminalFeedState;
-  pinnedMints: string[];
-} {
-  const scope = text(input.scope) ?? TERMINAL_FEED_SCOPE;
-
-  const now = integer(input.now, Date.now());
-
-  const pinnedMints = cleanPinnedMints(input.pinnedMints);
-
-  const state = db.terminalFeedState.upsert(
-    {
-      scope,
-      resetAtMs: now,
-      updatedAtMs: now,
-    },
-    {
-      on: "scope",
-      merge: (t) => ({
-        resetAtMs: t.excluded("resetAtMs"),
-        updatedAtMs: t.excluded("updatedAtMs"),
-      }),
-    },
-  ) as TerminalFeedState;
-
-  return {
-    state,
-    pinnedMints,
-  };
-}
-
-function isTerminalFeedMember(
-  token: TerminalToken,
-  resetAtMs: number,
-  pinnedMints: ReadonlySet<string>,
-): boolean {
-  return (
-    pinnedMints.has(token.mint) || Number(token.observedAtMs ?? 0) >= resetAtMs
-  );
 }
 
 export function listTokenMarketExtrema(ttlMs = 2_000): TokenMarketExtrema[] {
   return db.tokenMarketExtremaV4
     .select()
-    .cache({
-      ttlMs: Math.max(0, integer(ttlMs, 2_000)),
-    })
+    .cache({ ttlMs: Math.max(0, integer(ttlMs, 2_000)) })
     .all() as TokenMarketExtrema[];
 }
 
@@ -1688,18 +1561,395 @@ export function listTokenHolderWindows(
   const keys = [
     ...new Set([...mints].map((mint) => String(mint).trim()).filter(Boolean)),
   ].slice(0, 2_000);
-
-  if (!keys.length) {
-    return [];
-  }
-
+  if (!keys.length) return [];
   return db.tokenHolderWindowsV1
     .select()
     .whereIn("mint", keys)
-    .cache({
-      ttlMs: Math.max(0, integer(ttlMs, 5_000)),
-    })
+    .cache({ ttlMs: Math.max(0, integer(ttlMs, 5_000)) })
     .all() as TokenHolderWindows[];
+}
+
+export function getTerminalFeedState(
+  scope = TERMINAL_FEED_SCOPE,
+): TerminalFeedState {
+  const existing = db.terminalFeedState
+    .select()
+    .where({ scope })
+    .get() as TerminalFeedState | null;
+  if (existing) return existing;
+  const now = Date.now();
+  return db.terminalFeedState.upsert(
+    { scope, resetAtMs: 0, updatedAtMs: now },
+    { on: "scope", doNothing: true },
+  ) as TerminalFeedState;
+}
+
+export function resetTerminalFeed(
+  input: {
+    scope?: string;
+    now?: number;
+    pinnedMints?: Iterable<string>;
+  } = {},
+): {
+  state: TerminalFeedState;
+  pinnedMints: string[];
+  deletedTokens: number;
+  deletedTrades: number;
+} {
+  const scope = text(input.scope) ?? TERMINAL_FEED_SCOPE;
+  const pinnedMints = cleanPinnedMints(input.pinnedMints);
+  const result = clearTerminalLiveData({ source: "both", pinned: pinnedMints });
+  const now = integer(input.now, Date.now());
+  const state = db.terminalFeedState.upsert(
+    { scope, resetAtMs: now, updatedAtMs: now },
+    {
+      on: "scope",
+      merge: (table) => ({
+        resetAtMs: table.excluded("resetAtMs"),
+        updatedAtMs: table.excluded("updatedAtMs"),
+      }),
+    },
+  ) as TerminalFeedState;
+  return {
+    state,
+    pinnedMints,
+    deletedTokens: result.deletedTokens,
+    deletedTrades: result.deletedTrades,
+  };
+}
+
+export type ObservedHolderPosition = {
+  owner: string;
+  buySol: number;
+  sellSol: number;
+  netSpentSol: number;
+  boughtTokens: number;
+  soldTokens: number;
+  netTokens: number;
+  buys: number;
+  sells: number;
+  trades: number;
+  firstTradeAtMs: number | null;
+  lastTradeAtMs: number | null;
+};
+
+type UnifiedTrade = {
+  id: string;
+  mint: string;
+  signature: string;
+  slot: number;
+  owner: string | null;
+  side: "buy" | "sell" | "unknown";
+  tokenDeltaUi: number;
+  solDeltaUi: number;
+  priceSol: number | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+  confidence: TerminalConfidence;
+  source: string;
+  rawJson: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+function normalizeUnifiedTrade(
+  row: Record<string, unknown>,
+): UnifiedTrade | null {
+  const mint = text(row.mint);
+  if (!mint) return null;
+  const side = row.side === "buy" || row.side === "sell" ? row.side : "unknown";
+  const parsedConfidence = ConfidenceSchema.safeParse(row.confidence);
+  return {
+    id: text(row.tradeKey ?? row.eventKey ?? row.id ?? row.signature) ?? "",
+    mint,
+    signature: text(row.signature) ?? "",
+    slot: integer(row.slot, 0),
+    owner: text(row.owner),
+    side,
+    tokenDeltaUi: finite(row.tokenDeltaUi) ?? 0,
+    solDeltaUi: finite(row.solDeltaUi) ?? 0,
+    priceSol: finite(row.priceSol),
+    priceUsd: finite(row.priceUsd),
+    marketCapUsd: finite(row.marketCapUsd),
+    confidence: parsedConfidence.success ? parsedConfidence.data : "processed",
+    source: text(row.source) ?? "unknown",
+    rawJson: text(row.rawJson) ?? "{}",
+    createdAtMs: integer(row.createdAtMs ?? row.tradedAtMs, 0),
+    updatedAtMs: integer(row.updatedAtMs, 0),
+  };
+}
+
+function tradeQuality(row: UnifiedTrade): number {
+  return (
+    (row.marketCapUsd != null ? 8 : 0) +
+    (row.priceUsd != null ? 4 : 0) +
+    (row.priceSol != null ? 2 : 0) +
+    (row.owner ? 1 : 0)
+  );
+}
+
+function tradeDedupeKey(row: UnifiedTrade): string {
+  return [
+    row.mint,
+    row.signature,
+    row.owner ?? "",
+    row.side,
+    Math.round(row.createdAtMs / 1_000),
+    row.tokenDeltaUi.toPrecision(10),
+    row.solDeltaUi.toPrecision(10),
+  ].join("|");
+}
+
+function loadUnifiedTrades(
+  input: {
+    sinceMs?: number;
+    mints?: string[];
+    mint?: string | null;
+    owners?: string[];
+    source?: string | null;
+  } = {},
+): UnifiedTrade[] {
+  const sinceMs = positiveTime(input.sinceMs);
+  const mints = input.mint ? [input.mint] : (input.mints ?? []);
+  const owners = input.owners ?? [];
+  const combined: UnifiedTrade[] = [];
+  const mintChunks = chunked(mints.length ? mints : [""], 200);
+
+  for (const mintChunk of mintChunks) {
+    let indexed = db.tokenTradesV2.select();
+    let terminal = db.terminalTradesLive.select();
+    if (sinceMs > 0) {
+      indexed = indexed.where({ tradedAtMs: { $gte: sinceMs } });
+      terminal = terminal.where({ createdAtMs: { $gte: sinceMs } });
+    }
+    if (mints.length) {
+      indexed = indexed.whereIn("mint", mintChunk);
+      terminal = terminal.whereIn("mint", mintChunk);
+    }
+    if (owners.length) {
+      indexed = indexed.whereIn("owner", owners);
+      terminal = terminal.whereIn("owner", owners);
+    }
+
+    for (const row of [
+      ...indexed.orderBy("tradedAtMs", "desc").all(),
+      ...terminal.orderBy("createdAtMs", "desc").all(),
+    ]) {
+      const normalized = normalizeUnifiedTrade(row as Record<string, unknown>);
+      if (normalized && sourceMatches(input.source, normalized.source)) {
+        combined.push(normalized);
+      }
+    }
+    if (!mints.length) break;
+  }
+
+  const unique = new Map<string, UnifiedTrade>();
+  for (const trade of combined) {
+    const key = tradeDedupeKey(trade);
+    const previous = unique.get(key);
+    if (!previous || tradeQuality(trade) > tradeQuality(previous)) {
+      unique.set(key, trade);
+    }
+  }
+  return [...unique.values()].sort(
+    (left, right) =>
+      Math.max(right.createdAtMs, right.updatedAtMs) -
+      Math.max(left.createdAtMs, left.updatedAtMs),
+  );
+}
+
+export function insertTerminalTrade(
+  input: Partial<TerminalTrade> & {
+    id: string;
+    mint: string;
+    signature: string;
+  },
+): TerminalTrade {
+  const now = Date.now();
+  const parsedConfidence = ConfidenceSchema.safeParse(input.confidence);
+  const row = TerminalTradeSchema.parse({
+    tradeKey: input.id,
+    mint: input.mint,
+    signature: input.signature,
+    slot: integer(input.slot, 0),
+    owner: text(input.owner),
+    side:
+      input.side === "buy" || input.side === "sell" ? input.side : "unknown",
+    tokenDeltaUi: finite(input.tokenDeltaUi) ?? 0,
+    solDeltaUi: finite(input.solDeltaUi) ?? 0,
+    priceSol: finite(input.priceSol),
+    priceUsd: finite(input.priceUsd),
+    marketCapUsd: finite(input.marketCapUsd),
+    confidence: parsedConfidence.success ? parsedConfidence.data : "processed",
+    source: text(input.source) ?? "unknown",
+    rawJson:
+      typeof input.rawJson === "string"
+        ? input.rawJson
+        : stringify(input.rawJson ?? {}),
+    createdAtMs: integer(input.createdAtMs, now),
+    updatedAtMs: integer(input.updatedAtMs, now),
+  });
+
+  const saved = db.terminalTradesLive.upsert(row, {
+    on: "tradeKey",
+    merge: (table) => ({
+      owner: table.excludedIfNotNull("owner"),
+      side: table.excludedIfNotEmpty("side"),
+      tokenDeltaUi: table.excluded("tokenDeltaUi"),
+      solDeltaUi: table.excluded("solDeltaUi"),
+      priceSol: table.excludedIfNotNull("priceSol"),
+      priceUsd: table.excludedIfNotNull("priceUsd"),
+      marketCapUsd: table.excludedIfNotNull("marketCapUsd"),
+      confidence: table.excluded("confidence"),
+      source: table.excludedIfNotEmpty("source"),
+      rawJson: table.excludedIfNotEmpty("rawJson"),
+      updatedAtMs: table.max("updatedAtMs", 0),
+    }),
+  }) as TerminalTradeDbRow;
+
+  return { ...saved, id: saved.tradeKey };
+}
+
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1]! + sorted[middle]!) / 2
+    : sorted[middle]!;
+}
+
+function computeTerminalIndicatorsForMint(
+  mint: string,
+  now = Date.now(),
+): TerminalIndicator[] {
+  const token = getTerminalToken(mint);
+  const maxIntervalSec = TERMINAL_INDICATOR_INTERVALS.at(-1) ?? 86_400;
+  const trades = loadUnifiedTrades({
+    mint,
+    sinceMs: now - maxIntervalSec * 1_000,
+  }).filter((trade) => trade.priceUsd != null);
+
+  return TERMINAL_INDICATOR_INTERVALS.map((intervalSec) => {
+    const since = now - intervalSec * 1_000;
+    const rows = trades.filter((trade) => trade.createdAtMs >= since);
+    const prices = rows
+      .map((trade) => trade.priceUsd)
+      .filter((value): value is number => value != null && value > 0);
+    const volumeSol = rows.reduce(
+      (sum, trade) => sum + Math.abs(trade.solDeltaUi),
+      0,
+    );
+    const tokenVolume = rows.reduce(
+      (sum, trade) => sum + Math.abs(trade.tokenDeltaUi),
+      0,
+    );
+    const weighted = rows.reduce(
+      (sum, trade) =>
+        sum + (trade.priceUsd ?? 0) * Math.abs(trade.tokenDeltaUi),
+      0,
+    );
+    const smaPriceUsd = prices.length
+      ? prices.reduce((sum, value) => sum + value, 0) / prices.length
+      : (token?.priceUsd ?? null);
+    const indicatorKey = `${mint}:${intervalSec}`;
+    return {
+      id: indicatorKey,
+      indicatorKey,
+      mint,
+      intervalSec,
+      smaPriceUsd,
+      smaMarketCapUsd:
+        smaPriceUsd != null
+          ? smaPriceUsd * Number(token?.supplyUi ?? 1_000_000_000)
+          : (token?.marketCapUsd ?? null),
+      vwmaPriceUsd:
+        tokenVolume > 0 ? weighted / tokenVolume : (token?.priceUsd ?? null),
+      medianPriceUsd: median(prices) ?? token?.priceUsd ?? null,
+      tradeCount: rows.length,
+      volumeSol,
+      updatedAtMs: now,
+    };
+  });
+}
+
+function writeTerminalIndicators(
+  indicators: readonly TerminalIndicator[],
+): void {
+  for (const indicator of indicators) {
+    const row = TerminalIndicatorSchema.parse({
+      ...indicator,
+      indicatorKey: indicator.indicatorKey ?? indicator.id,
+    });
+    db.terminalIndicatorsLive.upsert(row, {
+      on: ["mint", "intervalSec"],
+      merge: (table) => ({
+        smaPriceUsd: table.excluded("smaPriceUsd"),
+        smaMarketCapUsd: table.excluded("smaMarketCapUsd"),
+        vwmaPriceUsd: table.excluded("vwmaPriceUsd"),
+        medianPriceUsd: table.excluded("medianPriceUsd"),
+        tradeCount: table.excluded("tradeCount"),
+        volumeSol: table.excluded("volumeSol"),
+        updatedAtMs: table.excluded("updatedAtMs"),
+      }),
+    });
+  }
+}
+
+export function recomputeTerminalIndicators(
+  mint: string,
+  now = Date.now(),
+): TerminalIndicator[] {
+  const indicators = computeTerminalIndicatorsForMint(mint, now);
+  db.transaction(() => writeTerminalIndicators(indicators));
+  return indicators;
+}
+
+export function recomputeTerminalIndicatorsBatch(
+  mints: Iterable<string>,
+  now = Date.now(),
+): TerminalIndicator[] {
+  const uniqueMints = [
+    ...new Set([...mints].map((mint) => mint.trim()).filter(Boolean)),
+  ];
+  const indicators = uniqueMints.flatMap((mint) =>
+    computeTerminalIndicatorsForMint(mint, now),
+  );
+  if (indicators.length)
+    db.transaction(() => writeTerminalIndicators(indicators));
+  return indicators;
+}
+
+export function listTerminalTrades(
+  input: {
+    limit?: number;
+    sinceMs?: number;
+    mint?: string | null;
+    source?: string | null;
+  } = {},
+): TerminalTrade[] {
+  const limit = Math.max(1, Math.min(integer(input.limit, 250), 100_000));
+  return loadUnifiedTrades(input)
+    .slice(0, limit)
+    .map((trade) => ({ ...trade, id: trade.id }));
+}
+
+function newestTime(row: Record<string, unknown>): number {
+  return Math.max(
+    positiveTime(row.lastTradeAtMs),
+    positiveTime(row.priceUpdatedAtMs),
+    positiveTime(row.updatedAtMs),
+    positiveTime(row.observedAtMs),
+    positiveTime(row.createdAtMs),
+  );
+}
+
+function isUsdc(token: TerminalToken): boolean {
+  const value = [token.quoteAsset, token.quoteMint].join(" ").toLowerCase();
+  return (
+    value.includes("usdc") ||
+    value.includes("epjfwdd5aufqssqem2qn1xzybapc8g4wegkgzwydt1v")
+  );
 }
 
 export function listTerminalFeed(
@@ -1713,335 +1963,176 @@ export function listTerminalFeed(
     maxMarketCapUsd?: number;
     priceWindowTtlMs?: number;
     pinnedMints?: Iterable<string>;
+    pinned?: string[];
+    hideMayhem?: boolean;
+    hideUsdc?: boolean;
   } = {},
 ): TerminalFeedRow[] {
   const now = Date.now();
+  const pinnedMints = cleanPinnedMints(input.pinnedMints ?? input.pinned);
+  const pinnedSet = new Set(pinnedMints);
+  const tokens = (
+    db.terminalTokensLive
+      .select()
+      .orderBy("updatedAtMs", "desc")
+      .all() as Record<string, unknown>[]
+  )
+    .map(normalizeTerminalToken)
+    .filter((token): token is TerminalToken => token != null);
+  const mints = tokens.map((token) => token.mint);
 
-  const limit = Math.max(1, Math.min(integer(input.limit, 160), 500));
-
-  const activeWindowMs = Math.max(
-    1_000,
-    integer(input.activeWindowMs, 900_000),
+  const windows = new Map(
+    (mints.length
+      ? (db.tokenPriceWindowsV8
+          .select()
+          .whereIn("mint", mints)
+          .cache({
+            ttlMs: Math.max(
+              0,
+              integer(input.priceWindowTtlMs, PRICE_WINDOW_TTL_MS),
+            ),
+          })
+          .all() as TokenPriceWindows[])
+      : []
+    ).map((row) => [row.mint, row]),
   );
+  const holders = new Map(
+    listTokenHolderWindows(mints).map((row) => [row.mint, row]),
+  );
+  const extrema = new Map(
+    listTokenMarketExtrema().map((row) => [row.mint, row]),
+  );
+  const latestTrades = new Map<string, UnifiedTrade>();
+  for (const trade of loadUnifiedTrades({ mints })) {
+    if (!latestTrades.has(trade.mint)) latestTrades.set(trade.mint, trade);
+  }
 
   const minUpdatedAt = Math.max(
-    integer(input.sinceMs, 0),
-    now - activeWindowMs,
+    positiveTime(input.sinceMs),
+    positiveTime(input.activeWindowMs) > 0
+      ? now - positiveTime(input.activeWindowMs)
+      : 0,
   );
+  const minMcap = Math.max(0, finite(input.minMarketCapUsd) ?? 0);
+  const maxMcap = Math.max(0, finite(input.maxMarketCapUsd) ?? 0);
 
-  const minMarketCapUsd = Math.max(0, finite(input.minMarketCapUsd) ?? 0);
-
-  const maxMarketCapUsd = Math.max(0, finite(input.maxMarketCapUsd) ?? 0);
-
-  const feedState = getTerminalFeedState();
-
-  const pinnedMints = cleanPinnedMints(input.pinnedMints);
-
-  const pinnedSet = new Set(pinnedMints);
-
-  const candidateLimit = Math.min(2_000, Math.max(limit * 4, 300));
-
-  /**
-   * One cached view query scans the 30-minute trade candidate set once,
-   * groups once, and supplies both latest prices and all SMA windows.
-   */
-  const allWindows = listTokenPriceWindows(
-    input.priceWindowTtlMs ?? PRICE_WINDOW_TTL_MS,
-  );
-
-  const activeWindows = allWindows
-    .filter((window) => Number(window.latestTradeAtMs ?? 0) >= minUpdatedAt)
-    .slice(0, candidateLimit);
-
-  const windowsByMint = new Map(
-    allWindows.map((window) => [window.mint, window]),
-  );
-
-  const extremaByMint = new Map(
-    listTokenMarketExtrema(2_000).map((extrema) => [extrema.mint, extrema]),
-  );
-
-  const recentTokens = db.terminalTokensLive
-    .select()
-    .where({
-      updatedAtMs: {
-        $gte: minUpdatedAt,
-      },
-    } as any)
-    .orderBy("updatedAtMs", "DESC")
-    .limit(candidateLimit)
-    .all() as TerminalToken[];
-
-  const activeTradeMints = activeWindows.map((window) => window.mint);
-
-  const tradedTokens = activeTradeMints.length
-    ? (db.terminalTokensLive
-        .select()
-        .whereIn("mint", activeTradeMints)
-        .all() as TerminalToken[])
-    : [];
-
-  const pinnedTokens = pinnedMints.length
-    ? (db.terminalTokensLive
-        .select()
-        .whereIn("mint", pinnedMints)
-        .all() as TerminalToken[])
-    : [];
-
-  const tokensByMint = new Map<string, TerminalToken>();
-
-  for (const token of [...recentTokens, ...tradedTokens, ...pinnedTokens]) {
-    tokensByMint.set(token.mint, token);
-  }
-
-  if (minMarketCapUsd > 0 || maxMarketCapUsd > 0) {
-    for (const [mint, token] of tokensByMint) {
-      if (pinnedSet.has(mint)) {
-        continue;
-      }
-
-      const windows = windowsByMint.get(mint);
-
-      const priceUsd = windows?.latestPriceUsd ?? token.priceUsd;
-
-      const currentMarketCapUsd =
-        windows?.latestMarketCapUsd ??
-        (priceUsd != null && token.supplyUi > 0
-          ? priceUsd * token.supplyUi
-          : token.marketCapUsd);
-
-      if (
-        currentMarketCapUsd == null ||
-        !Number.isFinite(currentMarketCapUsd) ||
-        (minMarketCapUsd > 0 && currentMarketCapUsd < minMarketCapUsd) ||
-        (maxMarketCapUsd > 0 && currentMarketCapUsd > maxMarketCapUsd)
-      ) {
-        tokensByMint.delete(mint);
-      }
-    }
-  }
-
-  /**
-   * Holder counts are observed from indexed owner balance changes. Query only
-   * current feed candidates and cache the typed view for five seconds.
-   */
-  const holderWindowsByMint = new Map(
-    listTokenHolderWindows(tokensByMint.keys(), 5_000).map((window) => [
-      window.mint,
-      window,
-    ]),
-  );
-
-  const rows = [...tokensByMint.values()]
-    .filter((token) =>
-      isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
-    )
+  const rows = tokens
     .map((token) => {
-      const windows = windowsByMint.get(token.mint) ?? null;
-
-      const extrema = extremaByMint.get(token.mint) ?? null;
-
-      const holderWindows = holderWindowsByMint.get(token.mint) ?? null;
-
-      const priceSol = windows?.latestPriceSol ?? token.priceSol;
-
-      const priceUsd = windows?.latestPriceUsd ?? token.priceUsd;
-
+      const window = windows.get(token.mint);
+      const holder = holders.get(token.mint);
+      const extremes = extrema.get(token.mint);
+      const latest = latestTrades.get(token.mint);
+      const supplyUi = finite(token.supplyUi) ?? 1_000_000_000;
+      const priceSol = latest?.priceSol ?? token.priceSol;
+      const priceUsd = latest?.priceUsd ?? token.priceUsd;
       const marketCapUsd =
-        windows?.latestMarketCapUsd ??
-        (priceUsd != null ? priceUsd * token.supplyUi : token.marketCapUsd) ??
-        null;
-
+        latest?.marketCapUsd ??
+        token.marketCapUsd ??
+        (priceUsd != null && supplyUi > 0 ? priceUsd * supplyUi : null);
       const marketCapSol =
-        priceSol != null ? priceSol * token.supplyUi : token.marketCapSol;
-
-      const extremaValues = [
-        extrema?.athMarketCapUsd,
-        extrema?.atlMarketCapUsd,
-        marketCapUsd,
-      ]
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value) && value > 0);
-
-      const athMarketCapUsd = extremaValues.length
-        ? Math.max(...extremaValues)
-        : null;
-
-      const atlMarketCapUsd = extremaValues.length
-        ? Math.min(...extremaValues)
-        : null;
-
-      const latestTradeAtMs = windows?.latestTradeAtMs ?? null;
-
-      const latestTradeSource = windows?.latestTradeSource ?? token.source;
-
-      const currentPhase = String(latestTradeSource ?? "").includes("pumpswap")
-        ? "migrated"
-        : token.phase;
-
-      const coverageCandidates = [
+        priceSol != null && supplyUi > 0
+          ? priceSol * supplyUi
+          : token.marketCapSol;
+      const lastTradeAtMs =
+        latest?.createdAtMs ?? window?.latestTradeAtMs ?? null;
+      const priceUpdatedAtMs = Math.max(
+        latest &&
+          (latest.priceSol != null ||
+            latest.priceUsd != null ||
+            latest.marketCapUsd != null)
+          ? latest.createdAtMs
+          : 0,
+        token.priceUpdatedAtMs,
+      );
+      const dataCoverageStartedAtMs = Math.max(
         token.createdAtMs,
         token.observedAtMs,
-        windows?.firstRecordedTradeAtMs,
-      ]
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value) && value > 0);
-
-      const dataCoverageStartedAtMs = coverageCandidates.length
-        ? Math.max(...coverageCandidates)
-        : null;
-
-      const priceUpdatedAtMs =
-        latestTradeAtMs ??
-        (token.priceUpdatedAtMs > 0
-          ? token.priceUpdatedAtMs
-          : priceSol != null ||
-              priceUsd != null ||
-              marketCapSol != null ||
-              marketCapUsd != null
-            ? token.updatedAtMs
-            : 0);
-
-      const priceAgeMs =
-        priceUpdatedAtMs > 0 ? Math.max(0, now - priceUpdatedAtMs) : null;
+        window?.firstRecordedTradeAtMs ?? 0,
+      );
 
       return {
         ...token,
-
-        source: latestTradeSource,
-
-        phase: currentPhase,
-
         priceSol,
+        priceSolPerToken: priceSol,
         priceUsd,
         marketCapSol,
         marketCapUsd,
-
-        sma1m: windows?.avgMarketCapUsd1m ?? null,
-
-        sma5m: windows?.avgMarketCapUsd5m ?? null,
-
-        sma15m: windows?.avgMarketCapUsd15m ?? null,
-
-        previousSma1m: windows?.previousAvgMarketCapUsd1m ?? null,
-
-        previousSma5m: windows?.previousAvgMarketCapUsd5m ?? null,
-
-        previousSma15m: windows?.previousAvgMarketCapUsd15m ?? null,
-
-        avgPriceUsd1m: windows?.avgPriceUsd1m ?? null,
-
-        avgPriceUsd5m: windows?.avgPriceUsd5m ?? null,
-
-        avgPriceUsd15m: windows?.avgPriceUsd15m ?? null,
-
-        tradeCount: windows?.trades15m ?? 0,
-
-        trades1m: windows?.trades1m ?? 0,
-
-        trades5m: windows?.trades5m ?? 0,
-
-        trades15m: windows?.trades15m ?? 0,
-
-        previousTrades1m: windows?.previousTrades1m ?? 0,
-
-        previousTrades5m: windows?.previousTrades5m ?? 0,
-
-        previousTrades15m: windows?.previousTrades15m ?? 0,
-
-        volumeSol1m: windows?.volumeSol1m ?? 0,
-
-        volumeSol5m: windows?.volumeSol5m ?? 0,
-
-        volumeSol15m: windows?.volumeSol15m ?? 0,
-
-        previousVolumeSol1m: windows?.previousVolumeSol1m ?? 0,
-
-        previousVolumeSol5m: windows?.previousVolumeSol5m ?? 0,
-
-        previousVolumeSol15m: windows?.previousVolumeSol15m ?? 0,
-
-        holdersNow: holderWindows?.holdersNow ?? 0,
-
-        holders1mAgo: holderWindows?.holders1mAgo ?? 0,
-
-        holders5mAgo: holderWindows?.holders5mAgo ?? 0,
-
-        holders15mAgo: holderWindows?.holders15mAgo ?? 0,
-
-        athMarketCapUsd,
-
-        atlMarketCapUsd,
-
-        lastTradeAtMs: latestTradeAtMs,
-
-        latestTradeSource,
-
-        dataCoverageStartedAtMs,
-
-        priceAgeMs,
-
+        sma1m: window?.avgMarketCapUsd1m ?? marketCapUsd,
+        sma5m: window?.avgMarketCapUsd5m ?? marketCapUsd,
+        sma15m: window?.avgMarketCapUsd15m ?? marketCapUsd,
+        previousSma1m: window?.previousAvgMarketCapUsd1m ?? null,
+        previousSma5m: window?.previousAvgMarketCapUsd5m ?? null,
+        previousSma15m: window?.previousAvgMarketCapUsd15m ?? null,
+        avgPriceUsd1m: window?.avgPriceUsd1m ?? null,
+        avgPriceUsd5m: window?.avgPriceUsd5m ?? null,
+        avgPriceUsd15m: window?.avgPriceUsd15m ?? null,
+        tradeCount: window?.trades15m ?? 0,
+        trades1m: window?.trades1m ?? 0,
+        trades5m: window?.trades5m ?? 0,
+        trades15m: window?.trades15m ?? 0,
+        previousTrades1m: window?.previousTrades1m ?? 0,
+        previousTrades5m: window?.previousTrades5m ?? 0,
+        previousTrades15m: window?.previousTrades15m ?? 0,
+        volumeSol1m: window?.volumeSol1m ?? 0,
+        volumeSol5m: window?.volumeSol5m ?? 0,
+        volumeSol15m: window?.volumeSol15m ?? 0,
+        previousVolumeSol1m: window?.previousVolumeSol1m ?? 0,
+        previousVolumeSol5m: window?.previousVolumeSol5m ?? 0,
+        previousVolumeSol15m: window?.previousVolumeSol15m ?? 0,
+        holdersNow: holder?.holdersNow ?? 0,
+        holders1mAgo: holder?.holders1mAgo ?? 0,
+        holders5mAgo: holder?.holders5mAgo ?? 0,
+        holders15mAgo: holder?.holders15mAgo ?? 0,
+        athMarketCapUsd: extremes?.athMarketCapUsd ?? marketCapUsd,
+        atlMarketCapUsd: extremes?.atlMarketCapUsd ?? marketCapUsd,
+        lastTradeAtMs,
+        latestTradeSource: latest?.source ?? window?.latestTradeSource ?? null,
+        dataCoverageStartedAtMs: dataCoverageStartedAtMs || null,
+        priceUpdatedAtMs: priceUpdatedAtMs || 0,
+        priceAgeMs:
+          priceUpdatedAtMs > 0 ? Math.max(0, now - priceUpdatedAtMs) : null,
         priceStatus:
           priceUpdatedAtMs <= 0
             ? "missing"
-            : priceAgeMs != null && priceAgeMs > 30_000
+            : now - priceUpdatedAtMs > 30_000
               ? "stale"
               : "live",
-
+        updatedAtMs: Math.max(
+          token.updatedAtMs,
+          latest?.createdAtMs ?? 0,
+          latest?.updatedAtMs ?? 0,
+        ),
         raw: token,
-      } satisfies TerminalFeedRow;
+      } as TerminalFeedRow;
     })
-    .filter((row) => sourceMatches(input.source, row.source))
     .filter((row) => {
-      if (pinnedSet.has(row.mint)) {
-        return true;
-      }
-
-      if (minMarketCapUsd <= 0 && maxMarketCapUsd <= 0) {
-        return true;
-      }
-
-      if (row.marketCapUsd == null || !Number.isFinite(row.marketCapUsd)) {
+      if (pinnedSet.has(row.mint)) return true;
+      // if (minUpdatedAt > 0 && newestTime(row) < minUpdatedAt) return false;
+      if (!sourceMatches(input.source, row.source)) return false;
+      if (input.hideMayhem && row.isMayhemMode > 0) return false;
+      if (input.hideUsdc && isUsdc(row)) return false;
+      const mcap = finite(row.marketCapUsd);
+      if (
+        input.includeUnpriced === false &&
+        mcap == null &&
+        finite(row.priceSol) == null &&
+        finite(row.priceUsd) == null
+      ) {
         return false;
       }
-
-      return (
-        (minMarketCapUsd <= 0 || row.marketCapUsd >= minMarketCapUsd) &&
-        (maxMarketCapUsd <= 0 || row.marketCapUsd <= maxMarketCapUsd)
-      );
+      if (minMcap > 0 && (mcap == null || mcap < minMcap)) return false;
+      if (maxMcap > 0 && (mcap == null || mcap > maxMcap)) return false;
+      return true;
     })
-    .filter(
-      (row) =>
-        pinnedSet.has(row.mint) ||
-        input.includeUnpriced ||
-        hasPrice(row) ||
-        Boolean(row.image),
-    )
     .sort((left, right) => {
       const leftPinned = pinnedSet.has(left.mint);
-
       const rightPinned = pinnedSet.has(right.mint);
+      if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
+      return newestTime(right) - newestTime(left);
+    });
 
-      if (leftPinned !== rightPinned) {
-        return leftPinned ? -1 : 1;
-      }
-
-      return (
-        Math.max(right.updatedAtMs, right.lastTradeAtMs ?? 0) -
-        Math.max(left.updatedAtMs, left.lastTradeAtMs ?? 0)
-      );
-    })
-    .slice(0, Math.max(limit, pinnedSet.size));
-
-  return rows;
-}
-
-function cleanOwners(values: Iterable<string>): string[] {
-  return [
-    ...new Set(
-      [...values].map((value) => String(value).trim()).filter(Boolean),
-    ),
-  ].slice(0, 100);
+  const limit = Math.max(0, integer(input.limit, 0));
+  return limit > 0 ? rows.slice(0, limit) : rows;
 }
 
 export function listObservedHolderPositions(input: {
@@ -2049,85 +2140,72 @@ export function listObservedHolderPositions(input: {
   owners: Iterable<string>;
 }): ObservedHolderPosition[] {
   const mint = text(input.mint) ?? "";
-
-  const owners = cleanOwners(input.owners);
-
-  if (!mint || !owners.length) {
-    return [];
-  }
-
-  const rows = db.tokenTradesV2
-    .select()
-    .where({
-      mint,
-    })
-    .whereIn("owner", owners)
-    .orderBy("tradedAtMs", "ASC")
-    .all() as TokenTrade[];
-
+  const owners = [
+    ...new Set([...input.owners].map((owner) => owner.trim()).filter(Boolean)),
+  ].slice(0, 100);
+  if (!mint || !owners.length) return [];
+  const trades = loadUnifiedTrades({ mint, owners }).sort(
+    (left, right) => left.createdAtMs - right.createdAtMs,
+  );
   const positions = new Map<string, ObservedHolderPosition>();
 
-  for (const trade of rows) {
-    const owner = text(trade.owner);
-
-    if (!owner) {
-      continue;
-    }
-
-    const position = positions.get(owner) ?? {
-      owner,
-
+  for (const trade of trades) {
+    if (!trade.owner) continue;
+    const current = positions.get(trade.owner) ?? {
+      owner: trade.owner,
       buySol: 0,
       sellSol: 0,
       netSpentSol: 0,
-
       boughtTokens: 0,
       soldTokens: 0,
       netTokens: 0,
-
       buys: 0,
       sells: 0,
       trades: 0,
-
       firstTradeAtMs: null,
-
       lastTradeAtMs: null,
     };
-
-    const sol = Math.abs(finite(trade.solDeltaUi) ?? 0);
-
-    const tokens = Math.abs(finite(trade.tokenDeltaUi) ?? 0);
-
+    const sol = Math.abs(trade.solDeltaUi);
+    const tokens = Math.abs(trade.tokenDeltaUi);
     if (trade.side === "buy") {
-      position.buySol += sol;
-      position.boughtTokens += tokens;
-      position.buys++;
+      current.buySol += sol;
+      current.boughtTokens += tokens;
+      current.buys++;
     } else if (trade.side === "sell") {
-      position.sellSol += sol;
-      position.soldTokens += tokens;
-      position.sells++;
+      current.sellSol += sol;
+      current.soldTokens += tokens;
+      current.sells++;
     }
-
-    position.trades++;
-
-    position.firstTradeAtMs =
-      position.firstTradeAtMs == null
-        ? trade.tradedAtMs
-        : Math.min(position.firstTradeAtMs, trade.tradedAtMs);
-
-    position.lastTradeAtMs =
-      position.lastTradeAtMs == null
-        ? trade.tradedAtMs
-        : Math.max(position.lastTradeAtMs, trade.tradedAtMs);
-
-    position.netSpentSol = position.buySol - position.sellSol;
-
-    position.netTokens = position.boughtTokens - position.soldTokens;
-
-    positions.set(owner, position);
+    current.trades++;
+    current.firstTradeAtMs =
+      current.firstTradeAtMs == null
+        ? trade.createdAtMs
+        : Math.min(current.firstTradeAtMs, trade.createdAtMs);
+    current.lastTradeAtMs =
+      current.lastTradeAtMs == null
+        ? trade.createdAtMs
+        : Math.max(current.lastTradeAtMs, trade.createdAtMs);
+    current.netSpentSol = current.buySol - current.sellSol;
+    current.netTokens = current.boughtTokens - current.soldTokens;
+    positions.set(trade.owner, current);
   }
-
-  return [...positions.values()];
+  return owners.map(
+    (owner) =>
+      positions.get(owner) ?? {
+        owner,
+        buySol: 0,
+        sellSol: 0,
+        netSpentSol: 0,
+        boughtTokens: 0,
+        soldTokens: 0,
+        netTokens: 0,
+        buys: 0,
+        sells: 0,
+        trades: 0,
+        firstTradeAtMs: null,
+        lastTradeAtMs: null,
+      },
+  );
 }
 
 export function upsertProcessStatus(
@@ -2135,61 +2213,66 @@ export function upsertProcessStatus(
     name: string;
     kind: string;
     status: string;
+    data?: Record<string, unknown>;
+    error?: unknown;
   },
 ): ProcessStatus {
   const now = Date.now();
-
-  const row: ProcessStatus = {
-    name: text(input.name) ?? "",
-
-    kind: text(input.kind) ?? "worker",
-
-    status: text(input.status) ?? "unknown",
-
+  const existing = db.processStatus
+    .select()
+    .where({ name: input.name })
+    .get() as ProcessStatus | null;
+  const mergedData = {
+    ...parseJson(existing?.dataJson, {}),
+    ...(input.data ?? {}),
+  };
+  const row = ProcessStatusSchema.parse({
+    name: input.name,
+    kind: input.kind,
+    status: input.status,
     heartbeatAtMs: integer(input.heartbeatAtMs, now),
-
     pid: integer(input.pid, process.pid),
-
-    buildId: text(input.buildId),
-
-    error: text(input.error),
-
+    buildId: text(input.buildId) ?? text((input.data ?? {}).buildId),
+    error:
+      input.error == null
+        ? null
+        : input.error instanceof Error
+          ? input.error.message
+          : String(input.error),
     dataJson:
       typeof input.dataJson === "string"
         ? input.dataJson
-        : stringify(input.dataJson ?? {}),
-
+        : stringify(mergedData),
     updatedAtMs: integer(input.updatedAtMs, now),
-  };
-
+  });
   return db.processStatus.upsert(row, {
     on: "name",
-    merge: (t) => ({
-      kind: t.excluded("kind"),
-
-      status: t.excluded("status"),
-
-      heartbeatAtMs: t.excluded("heartbeatAtMs"),
-
-      pid: t.excluded("pid"),
-
-      buildId: t.excludedIfNotNull("buildId"),
-
-      error: t.excluded("error"),
-
-      dataJson: t.excluded("dataJson"),
-
-      updatedAtMs: t.excluded("updatedAtMs"),
+    merge: (table) => ({
+      kind: table.excluded("kind"),
+      status: table.excluded("status"),
+      heartbeatAtMs: table.max("heartbeatAtMs", 0),
+      pid: table.excluded("pid"),
+      buildId: table.excludedIfNotNull("buildId"),
+      error: table.excluded("error"),
+      dataJson: table.excluded("dataJson"),
+      updatedAtMs: table.max("updatedAtMs", 0),
     }),
   }) as ProcessStatus;
 }
 
-export function listProcessStatus(limit = 50): ProcessStatus[] {
-  return db.processStatus
-    .select()
-    .orderBy("heartbeatAtMs", "DESC")
-    .limit(Math.max(1, Math.min(integer(limit, 50), 250)))
-    .all() as ProcessStatus[];
+export function listProcessStatus(
+  limit = 50,
+): Array<ProcessStatus & { data: Record<string, unknown> }> {
+  return (
+    db.processStatus
+      .select()
+      .orderBy("heartbeatAtMs", "desc")
+      .limit(Math.max(1, Math.min(integer(limit, 50), 250)))
+      .all() as ProcessStatus[]
+  ).map((row) => ({
+    ...row,
+    data: parseJson(row.dataJson, {}),
+  }));
 }
 
 export function recordWorkerError(
@@ -2198,127 +2281,639 @@ export function recordWorkerError(
   data: Record<string, unknown> = {},
 ): WorkerError {
   const now = Date.now();
-
   const value = error instanceof Error ? error : new Error(String(error));
-
-  const row: WorkerError = {
-    errorKey: [worker, now, Math.random().toString(36).slice(2, 10)].join(":"),
-
+  const row = WorkerErrorSchema.parse({
+    errorKey: `${worker}:${now}:${Math.random().toString(36).slice(2, 10)}`,
     worker,
-
     message: value.message,
-
     stack: value.stack ?? null,
-
     dataJson: stringify(data),
-
     createdAtMs: now,
-  };
-
+  });
   try {
     return db.workerErrors.insert(row) as WorkerError;
   } catch (writeError) {
-    /**
-     * Error telemetry must never crash the worker that is already handling a
-     * database problem. Keep the original error visible on stderr and skip the
-     * telemetry row during a transient lock.
-     */
     if (isSqliteBusyError(writeError)) {
       console.error(`[solard:indexer] ${worker}: ${value.message}`);
-
       return row;
     }
-
     throw writeError;
   }
 }
 
 export function listWorkerErrors(
-  input: {
-    worker?: string | null;
-    limit?: number;
-  } = {},
+  input: { worker?: string | null; limit?: number } = {},
 ): WorkerError[] {
-  const limit = Math.max(1, Math.min(integer(input.limit, 25), 250));
-
-  const query = db.workerErrors
+  let query = db.workerErrors
     .select()
-    .orderBy("createdAtMs", "DESC")
-    .limit(limit);
+    .orderBy("createdAtMs", "desc")
+    .limit(Math.max(1, Math.min(integer(input.limit, 25), 250)));
+  if (input.worker) query = query.where({ worker: input.worker });
+  return query.all() as WorkerError[];
+}
 
+export function getCursor(key: string): string | null {
+  const row = db.workerCursors.select().where({ key }).get() as z.infer<
+    typeof WorkerCursorSchema
+  > | null;
+  return row?.value ?? null;
+}
+
+export function setCursor(key: string, value: string): void {
+  db.workerCursors.upsert(
+    { key, value, updatedAtMs: Date.now() },
+    {
+      on: "key",
+      merge: (table) => ({
+        value: table.excluded("value"),
+        updatedAtMs: table.excluded("updatedAtMs"),
+      }),
+    },
+  );
+}
+
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+export async function dbWrite<T>(label: string, fn: () => T): Promise<T> {
+  const execute = async (): Promise<T> => {
+    let attempt = 0;
+    while (true) {
+      try {
+        return fn();
+      } catch (error) {
+        if (!isSqliteBusyError(error) || attempt >= 5) throw error;
+        await sleep(Math.min(500, 20 * 2 ** attempt++));
+      }
+    }
+  };
+  const result = writeQueue.then(execute, execute);
+  writeQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+export function withTerminalDbTransaction<T>(fn: () => T): T {
+  return db.transaction(fn);
+}
+
+export async function dbWriteBatch<T>(label: string, fn: () => T): Promise<T> {
+  return dbWrite(label, () => db.transaction(fn));
+}
+
+export function initTerminalStore(): void {
+  // Database construction owns table/view creation and migrations.
+}
+
+export function clearTerminalLiveData(
+  input: {
+    source?: string | null;
+    keepSignals?: boolean;
+    pinned?: string[];
+  } = {},
+): {
+  resetAtMs: number;
+  deletedTokens: number;
+  deletedTrades: number;
+  deletedIndexedTrades: number;
+  deletedTerminalTrades: number;
+  deletedIndicators: number;
+  pinned: string[];
+} {
+  const pinned = cleanPinnedMints(input.pinned);
+  const pinnedSet = new Set(pinned);
+  const tokens = (
+    db.terminalTokensLive.select().all() as Record<string, unknown>[]
+  )
+    .map(normalizeTerminalToken)
+    .filter((token): token is TerminalToken => token != null)
+    .filter((token) => sourceMatches(input.source, token.source));
+  const deletedMints = tokens
+    .map((token) => token.mint)
+    .filter((mint) => !pinnedSet.has(mint));
+  const resetAtMs = Date.now();
+  let deletedTokens = 0;
+  let deletedIndexedTrades = 0;
+  let deletedTerminalTrades = 0;
+  let deletedIndicators = 0;
+
+  db.transaction(() => {
+    for (const mintChunk of chunked(deletedMints)) {
+      deletedIndexedTrades += db.tokenTradesV2
+        .delete()
+        .where({ mint: { $in: mintChunk } })
+        .exec();
+      deletedTerminalTrades += db.terminalTradesLive
+        .delete()
+        .where({ mint: { $in: mintChunk } })
+        .exec();
+      deletedIndicators += db.terminalIndicatorsLive
+        .delete()
+        .where({ mint: { $in: mintChunk } })
+        .exec();
+      deletedTokens += db.terminalTokensLive
+        .delete()
+        .where({ mint: { $in: mintChunk } })
+        .exec();
+    }
+    if (
+      !input.keepSignals &&
+      (!input.source || String(input.source).includes("both"))
+    ) {
+      db.telegramSignals
+        .delete()
+        .where({ receivedAtMs: { $gte: 0 } })
+        .exec();
+    }
+    db.terminalFeedState.upsert(
+      { scope: TERMINAL_FEED_SCOPE, resetAtMs, updatedAtMs: resetAtMs },
+      {
+        on: "scope",
+        merge: (table) => ({
+          resetAtMs: table.excluded("resetAtMs"),
+          updatedAtMs: table.excluded("updatedAtMs"),
+        }),
+      },
+    );
+  });
+
+  return {
+    resetAtMs,
+    deletedTokens,
+    deletedTrades: deletedIndexedTrades + deletedTerminalTrades,
+    deletedIndexedTrades,
+    deletedTerminalTrades,
+    deletedIndicators,
+    pinned,
+  };
+}
+
+export type TerminalCurveSnapshotCandidate = Pick<
+  TerminalToken,
+  | "mint"
+  | "bondingCurveKey"
+  | "supplyUi"
+  | "marketCapUsd"
+  | "priceUsd"
+  | "updatedAtMs"
+  | "source"
+  | "phase"
+>;
+
+export function listTerminalCurveSnapshotCandidates(
+  input: {
+    limit?: number;
+    source?: string | null;
+    activeWindowMs?: number;
+    includeMigrated?: boolean;
+  } = {},
+): TerminalCurveSnapshotCandidate[] {
+  const limit = Math.max(1, Math.min(integer(input.limit, 80), 500));
+  const activeWindowMs = Math.max(
+    0,
+    integer(
+      input.activeWindowMs,
+      Number(process.env.SOLARD_CURVE_SNAPSHOT_ACTIVE_WINDOW_MS ?? "0"),
+    ),
+  );
+  const minUpdatedAt = activeWindowMs > 0 ? Date.now() - activeWindowMs : 0;
   return (
-    input.worker
-      ? query
-          .where({
-            worker: input.worker,
-          })
-          .all()
-      : query.all()
-  ) as WorkerError[];
+    db.terminalTokensLive
+      .select()
+      .orderBy("updatedAtMs", "asc")
+      .all() as Record<string, unknown>[]
+  )
+    .map(normalizeTerminalToken)
+    .filter((token): token is TerminalToken => token != null)
+    .filter((token) => token.updatedAtMs >= minUpdatedAt)
+    .filter((token) => sourceMatches(input.source, token.source))
+    .filter((token) => input.includeMigrated || token.phase !== "migrated")
+    .slice(0, limit)
+    .map((token) => ({
+      mint: token.mint,
+      bondingCurveKey: token.bondingCurveKey,
+      supplyUi: token.supplyUi,
+      marketCapUsd: token.marketCapUsd,
+      priceUsd: token.priceUsd,
+      updatedAtMs: token.updatedAtMs,
+      source: token.source,
+      phase: token.phase,
+    }));
+}
+
+export function applyTerminalCurveSnapshot(input: {
+  mint: string;
+  bondingCurveKey?: string | null;
+  priceSol: number | null;
+  priceUsd: number | null;
+  marketCapSol: number | null;
+  marketCapUsd: number | null;
+  realTokenReservesUi?: number | null;
+  realSolReservesUi?: number | null;
+  virtualTokenReservesUi?: number | null;
+  virtualSolReservesUi?: number | null;
+  progressPct?: number | null;
+  complete?: boolean | null;
+  creator?: string | null;
+  source?: string | null;
+  slot?: number | null;
+  now?: number;
+}): TerminalToken {
+  const now = input.now ?? Date.now();
+  const source = text(input.source) ?? "curve-snapshot";
+  const token = upsertTerminalToken({
+    mint: input.mint,
+    bondingCurveKey: input.bondingCurveKey,
+    creator: input.creator,
+    source,
+    phase: input.complete ? "migrated" : "pump",
+    priceSol: input.priceSol,
+    priceUsd: input.priceUsd,
+    marketCapSol: input.marketCapSol,
+    marketCapUsd: input.marketCapUsd,
+    lastSlot: input.slot,
+    updatedAtMs: now,
+  });
+  upsertProcessStatus({
+    name: "solard-curve-snapshot-last",
+    kind: "snapshot",
+    status: input.complete ? "complete" : "updated",
+    data: { ...input, source },
+  });
+  return token;
+}
+
+export function pendingTradeSignatures(limit = 100): string[] {
+  return [
+    ...new Set(
+      (
+        db.terminalTradesLive
+          .select()
+          .orderBy("updatedAtMs", "asc")
+          .all() as TerminalTradeDbRow[]
+      )
+        .filter(
+          (trade) =>
+            trade.confidence === "processed" ||
+            trade.confidence === "confirmed",
+        )
+        .map((trade) => trade.signature)
+        .filter(Boolean),
+    ),
+  ].slice(0, Math.max(1, integer(limit, 100)));
+}
+
+export function updateTradeConfidence(
+  signature: string,
+  confidence: TerminalConfidence,
+): void {
+  db.terminalTradesLive
+    .update({ confidence, updatedAtMs: Date.now() })
+    .where({ signature })
+    .exec();
+}
+
+export function listTerminalTokensNeedingMetadata(
+  limit = 20,
+): Array<
+  Pick<
+    TerminalToken,
+    "mint" | "uri" | "name" | "symbol" | "image" | "updatedAtMs"
+  >
+> {
+  return (
+    db.terminalTokensLive
+      .select()
+      .orderBy("updatedAtMs", "desc")
+      .all() as Record<string, unknown>[]
+  )
+    .map(normalizeTerminalToken)
+    .filter((token): token is TerminalToken => token != null)
+    .filter(
+      (token) =>
+        !token.image || !displayText(token.name) || !displayText(token.symbol),
+    )
+    .slice(0, Math.max(1, Math.min(integer(limit, 20), 100)))
+    .map(({ mint, uri, name, symbol, image, updatedAtMs }) => ({
+      mint,
+      uri,
+      name,
+      symbol,
+      image,
+      updatedAtMs,
+    }));
+}
+
+export function insertTerminalProbeRow(
+  input: { source?: string | null; now?: number } = {},
+): Record<string, unknown> {
+  const now = input.now ?? Date.now();
+  const helius = String(input.source ?? "pumpportal")
+    .toLowerCase()
+    .includes("helius");
+  const source = helius ? "helius-probe" : "pumpportal-probe";
+  const mint = helius
+    ? "So11111111111111111111111111111111111111112"
+    : "11111111111111111111111111111111";
+  const marketCapUsd = helius ? 43_210 : 32_100;
+  const token = upsertTerminalToken({
+    mint,
+    symbol: helius ? "H-PROBE" : "P-PROBE",
+    name: helius ? "Helius probe row" : "PumpPortal probe row",
+    source,
+    phase: "pump",
+    priceUsd: marketCapUsd / 1_000_000_000,
+    marketCapUsd,
+    initialMarketCapUsd: marketCapUsd,
+    signature: `probe-${source}-${now}`,
+    createdAtMs: now,
+    observedAtMs: now,
+    updatedAtMs: now,
+  });
+  const trade = insertTerminalTrade({
+    id: `probe:${source}:${now}`,
+    mint,
+    signature: `probe-${source}-${now}`,
+    source,
+    side: "buy",
+    solDeltaUi: 0.01,
+    tokenDeltaUi: 1,
+    priceUsd: token.priceUsd,
+    marketCapUsd,
+    createdAtMs: now,
+    updatedAtMs: now,
+  });
+  recomputeTerminalIndicators(mint, now);
+  return { token, trade };
+}
+
+export function upsertTelegramSignal(input: {
+  id: string;
+  sourceId?: string | null;
+  sourceName?: string | null;
+  chatRef?: string | null;
+  text: string;
+  mints: string[];
+  symbols?: string[];
+  urls?: string[];
+  raw?: Record<string, unknown> | null;
+  receivedAtMs?: number;
+}): TelegramSignal {
+  const row = TelegramSignalSchema.parse({
+    signalKey: input.id,
+    sourceId: input.sourceId ?? null,
+    sourceName: input.sourceName ?? null,
+    chatRef: input.chatRef ?? null,
+    text: input.text,
+    mintsJson: stringify(input.mints),
+    symbolsJson: stringify(input.symbols ?? []),
+    urlsJson: stringify(input.urls ?? []),
+    status: "new",
+    receivedAtMs: input.receivedAtMs ?? Date.now(),
+    rawJson: stringify(input.raw ?? {}),
+  });
+  const saved = db.telegramSignals.upsert(row, {
+    on: "signalKey",
+    merge: (table) => ({
+      status: table.excluded("status"),
+      receivedAtMs: table.excluded("receivedAtMs"),
+      rawJson: table.excluded("rawJson"),
+    }),
+  }) as TelegramSignalDbRow;
+  for (const mint of input.mints) {
+    upsertTerminalToken({
+      mint,
+      symbol: input.symbols?.[0] ?? "",
+      name: input.symbols?.[0] ?? "telegram signal",
+      source: "telegram-signal",
+      observedAtMs: row.receivedAtMs,
+      updatedAtMs: row.receivedAtMs,
+    });
+  }
+  return { ...saved, id: saved.signalKey };
+}
+
+export function listTelegramSignals(
+  limit = 100,
+): Array<
+  TelegramSignal & { mints: string[]; symbols: string[]; urls: string[] }
+> {
+  return (
+    db.telegramSignals
+      .select()
+      .orderBy("receivedAtMs", "desc")
+      .limit(Math.max(1, integer(limit, 100)))
+      .all() as TelegramSignalDbRow[]
+  ).map((row) => ({
+    ...row,
+    id: row.signalKey,
+    mints: parseJson<string[]>(row.mintsJson, []),
+    symbols: parseJson<string[]>(row.symbolsJson, []),
+    urls: parseJson<string[]>(row.urlsJson, []),
+  }));
+}
+
+export type TerminalLatestActivity = {
+  token: Pick<
+    TerminalToken,
+    | "mint"
+    | "symbol"
+    | "name"
+    | "image"
+    | "marketCapUsd"
+    | "priceUsd"
+    | "source"
+    | "updatedAtMs"
+  > | null;
+  pricedToken: Pick<
+    TerminalToken,
+    | "mint"
+    | "symbol"
+    | "name"
+    | "image"
+    | "marketCapUsd"
+    | "priceUsd"
+    | "source"
+    | "updatedAtMs"
+  > | null;
+  imagedToken: Pick<
+    TerminalToken,
+    | "mint"
+    | "symbol"
+    | "name"
+    | "image"
+    | "marketCapUsd"
+    | "priceUsd"
+    | "source"
+    | "updatedAtMs"
+  > | null;
+  trade: {
+    mint: string;
+    side: "buy" | "sell" | "unknown";
+    marketCapUsd: number | null;
+    priceUsd: number | null;
+    createdAtMs: number;
+  } | null;
+  signal: {
+    sourceName: string | null;
+    text: string;
+    receivedAtMs: number;
+  } | null;
+};
+
+type TerminalLatestToken = NonNullable<TerminalLatestActivity["token"]>;
+
+function terminalLatestTokenRow(token: TerminalToken): TerminalLatestToken {
+  return {
+    mint: token.mint,
+    symbol: token.symbol,
+    name: token.name,
+    image: token.image,
+    marketCapUsd: token.marketCapUsd,
+    priceUsd: token.priceUsd,
+    source: token.source,
+    updatedAtMs: token.updatedAtMs,
+  };
+}
+
+/**
+ * ORM-only replacement for the old terminal-health raw SELECT statements.
+ * This deliberately exposes a narrow, normalized snapshot rather than the
+ * database object so callers cannot fall back to raw SQL.
+ */
+export function terminalLatestActivity(): TerminalLatestActivity {
+  const tokens = (
+    db.terminalTokensLive
+      .select()
+      .orderBy("updatedAtMs", "desc")
+      .all() as Record<string, unknown>[]
+  )
+    .map(normalizeTerminalToken)
+    .filter((token): token is TerminalToken => token != null);
+
+  const latestTrade =
+    (
+      db.terminalTradesLive
+        .select()
+        .orderBy("createdAtMs", "desc")
+        .limit(1)
+        .all() as Record<string, unknown>[]
+    )
+      .map(normalizeUnifiedTrade)
+      .find((trade): trade is UnifiedTrade => trade != null) ?? null;
+
+  const latestSignal =
+    (
+      db.telegramSignals
+        .select()
+        .orderBy("receivedAtMs", "desc")
+        .limit(1)
+        .all() as Record<string, unknown>[]
+    )[0] ?? null;
+
+  const pricedToken = tokens.find(
+    (token) => token.marketCapUsd != null || token.priceUsd != null,
+  );
+  const imagedToken = tokens.find((token) => Boolean(token.image?.trim()));
+
+  return {
+    token: tokens[0] ? terminalLatestTokenRow(tokens[0]) : null,
+    pricedToken: pricedToken ? terminalLatestTokenRow(pricedToken) : null,
+    imagedToken: imagedToken ? terminalLatestTokenRow(imagedToken) : null,
+    trade: latestTrade
+      ? {
+          mint: latestTrade.mint,
+          side: latestTrade.side,
+          marketCapUsd: latestTrade.marketCapUsd,
+          priceUsd: latestTrade.priceUsd,
+          createdAtMs: latestTrade.createdAtMs,
+        }
+      : null,
+    signal: latestSignal
+      ? {
+          sourceName: text(latestSignal.sourceName),
+          text: text(latestSignal.text) ?? "",
+          receivedAtMs: integer(latestSignal.receivedAtMs, 0),
+        }
+      : null,
+  };
+}
+
+/** Database-only health payload for feed endpoints. Runtime/process health lives
+ * on /api/terminal/health and must not be pulled into feed module evaluation. */
+export function terminalDatabaseHealth(): Record<string, unknown> {
+  return {
+    ok: true,
+    databaseOnly: true,
+    store: terminalStoreStats(),
+    latest: terminalLatestActivity(),
+  };
 }
 
 export function terminalStoreStats(
-  input: {
-    pinnedMints?: Iterable<string>;
-  } = {},
-): {
-  tokens: number;
-  storedTokens: number;
-  pricedTokens: number;
-  trades: number;
-  storedTrades: number;
-  workerErrors: number;
-  feedResetAtMs: number;
-} {
-  const feedState = getTerminalFeedState();
-
-  const pinnedSet = new Set(cleanPinnedMints(input.pinnedMints));
-
-  const storedTokens = db.terminalTokensLive.select().all() as TerminalToken[];
-
-  const memberTokens = storedTokens.filter((token) =>
-    isTerminalFeedMember(token, feedState.resetAtMs, pinnedSet),
-  );
-
-  const memberMints = new Set(memberTokens.map((token) => token.mint));
-
-  const windows = listTokenPriceWindows(PRICE_WINDOW_TTL_MS).filter((window) =>
-    memberMints.has(window.mint),
-  );
-
-  const pricedMints = new Set(
-    windows
-      .filter(
-        (window) =>
-          window.latestPriceSol != null ||
-          window.latestPriceUsd != null ||
-          window.latestMarketCapUsd != null,
-      )
-      .map((window) => window.mint),
-  );
-
-  for (const token of memberTokens) {
-    if (hasPrice(token)) {
-      pricedMints.add(token.mint);
+  _input: { pinnedMints?: Iterable<string> } = {},
+): Record<string, unknown> {
+  const tokens = (
+    db.terminalTokensLive.select().all() as Record<string, unknown>[]
+  )
+    .map(normalizeTerminalToken)
+    .filter((token): token is TerminalToken => token != null);
+  const bySource = new Map<
+    string,
+    {
+      source: string;
+      tokens: number;
+      priced: number;
+      images: number;
+      latest: number | null;
     }
+  >();
+  for (const token of tokens) {
+    const source = token.source || "unknown";
+    const current = bySource.get(source) ?? {
+      source,
+      tokens: 0,
+      priced: 0,
+      images: 0,
+      latest: null,
+    };
+    current.tokens++;
+    if (
+      token.marketCapUsd != null ||
+      token.priceUsd != null ||
+      token.priceSol != null
+    ) {
+      current.priced++;
+    }
+    if (token.image) current.images++;
+    current.latest = Math.max(current.latest ?? 0, token.updatedAtMs) || null;
+    bySource.set(source, current);
   }
-
+  const feedState = getTerminalFeedState();
   return {
-    tokens: memberTokens.length,
-
-    storedTokens: storedTokens.length,
-
-    pricedTokens: pricedMints.size,
-
-    trades: windows.reduce(
-      (total, window) => total + Number(window.trades15m ?? 0),
-      0,
-    ),
-
-    storedTrades: db.tokenTradesV2.count(),
-
+    dbPath: SOLARD_DB_PATH,
+    tokens: tokens.length,
+    storedTokens: tokens.length,
+    pricedTokens: tokens.filter(
+      (token) => token.marketCapUsd != null || token.priceUsd != null,
+    ).length,
+    imagedTokens: tokens.filter((token) => Boolean(token.image)).length,
+    indexedTrades: db.tokenTradesV2.count(),
+    terminalTrades: db.terminalTradesLive.count(),
+    trades: db.tokenTradesV2.count() + db.terminalTradesLive.count(),
+    indicators: db.terminalIndicatorsLive.count(),
+    signals: db.telegramSignals.count(),
+    processes: db.processStatus.count(),
     workerErrors: db.workerErrors.count(),
-
     feedResetAtMs: feedState.resetAtMs,
+    latestUpdatedAtMs:
+      tokens.reduce(
+        (latest, token) => Math.max(latest, token.updatedAtMs),
+        0,
+      ) || null,
+    bySource: [...bySource.values()].sort(
+      (left, right) => (right.latest ?? 0) - (left.latest ?? 0),
+    ),
   };
 }

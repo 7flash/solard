@@ -7,7 +7,7 @@ import {
   insertTerminalProbeRow,
   listTerminalFeed,
   terminalStoreStats,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 import { listWorkerErrors } from "../db/terminal-ingestion.js";
 import { cliMeasure, summarizeForMeasure } from "../measure.js";
 

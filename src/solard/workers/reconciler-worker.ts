@@ -4,7 +4,7 @@ import {
   pendingTradeSignatures,
   updateTradeConfidence,
   upsertProcessStatus,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 import {
   workerMeasure,
   measureRetry,

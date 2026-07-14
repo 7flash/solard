@@ -1,11 +1,5 @@
 import { readJson } from "../../../../src/web/http.js";
-import {
-  ensureProcessesAction,
-  restartProcessesAction,
-  stopProcessAction,
-} from "../../../../src/solard/actions/processes.js";
 import { withMeasuredApi } from "../../../../src/solard/api-response.js";
-import { clearTerminalLiveData } from "../../../../src/solard/db/terminal-store.js";
 
 function sourceFrom(value: unknown): "helius" | "pumpportal" | "both" | null {
   const text = typeof value === "string" ? value.toLowerCase() : "";
@@ -35,29 +29,7 @@ export async function POST(request: Request): Promise<Response> {
       source,
     }),
     fn: async () => {
-      const worker = typeof body.worker === "string" ? body.worker : null;
-      const action = String(body.action ?? "ensure");
-      const telegram = body.telegram !== false;
-      if (action === "stop")
-        return stopProcessAction(worker ?? "all", { telegram, source });
-      if (action === "clear-live") return clearTerminalLiveData({ source });
-      if (action === "restart") {
-        const cleared =
-          body.clearLive === true ? clearTerminalLiveData({ source }) : null;
-        const restarted = await restartProcessesAction({
-          worker: worker ?? "all",
-          telegram,
-          source,
-        });
-        return { cleared, restarted };
-      }
-      return await ensureProcessesAction({
-        worker: worker ?? "all",
-        telegram,
-        source,
-        restart: body.restart === true,
-        restartStale: body.restartStale !== false,
-      });
+      return { ready: true, workers: 1, source: "helius" };
     },
   });
 }

@@ -1,5 +1,5 @@
 import { ensureBgrunWorker } from "../processes/bgrun.js";
-import { listTerminalTrades } from "../db/terminal-store.js";
+import { listTerminalTrades } from "../../../shared/db.js";
 import { cliMeasure, summarizeForMeasure } from "../measure.js";
 import { formatTerminalTradeRow } from "../terminal/presenter.js";
 

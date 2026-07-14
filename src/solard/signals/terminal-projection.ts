@@ -4,7 +4,7 @@ import {
   upsertTerminalToken,
   recomputeTerminalIndicators,
   listTelegramSignals,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 
 const signalMeasure = createMeasure("solard:signals");
 

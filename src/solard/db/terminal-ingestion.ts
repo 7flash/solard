@@ -1,4 +1,4 @@
-import { terminalDb } from "./terminal-store.js";
+import { terminalDb } from "../../../shared/db.js";
 import { dbMeasure, summarizeForMeasure } from "../measure.js";
 
 let initialized = false;
@@ -41,6 +41,13 @@ export function initTerminalIngestionTables(): void {
 }
 
 initTerminalIngestionTables();
+
+function isSqliteBusyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /database is locked|database table is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(
+    message,
+  );
+}
 
 function json(value: unknown): string {
   return JSON.stringify(value, (_, item) =>
@@ -136,19 +143,29 @@ export function recordWorkerError(
   error: unknown,
   data: Record<string, unknown> = {},
 ): void {
-  initTerminalIngestionTables();
   const err = error instanceof Error ? error : new Error(String(error));
-  const id = `${worker}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
-  terminalDb.exec(
-    `INSERT INTO terminalWorkerErrors (id, worker, message, stack, dataJson, createdAtMs)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    id,
-    worker,
-    err.message,
-    err.stack ?? null,
-    json(data),
-    Date.now(),
-  );
+  try {
+    initTerminalIngestionTables();
+    const id = `${worker}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+    terminalDb.exec(
+      `INSERT INTO terminalWorkerErrors (id, worker, message, stack, dataJson, createdAtMs)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      id,
+      worker,
+      err.message,
+      err.stack ?? null,
+      json(data),
+      Date.now(),
+    );
+  } catch (writeError) {
+    // Error telemetry must never terminate the worker already handling another
+    // SQLite collision. The original error remains visible on stderr.
+    if (isSqliteBusyError(writeError)) {
+      console.error(`[solard:${worker}] ${err.message}`);
+      return;
+    }
+    throw writeError;
+  }
 }
 
 export function listWorkerErrors(

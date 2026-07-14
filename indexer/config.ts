@@ -3,31 +3,17 @@ import { SOLARD_DB_PATH } from "../shared/db.js";
 export const OFFICIAL_PUMP_PROGRAM_ID =
   "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
-/**
- * This value shipped in an earlier Solard patch but is not the Pump program.
- * Auto-correct it so an old .env does not silently subscribe to an inactive
- * address forever.
- */
-export const KNOWN_BAD_PUMP_PROGRAM_ID =
-  "6EF8rrecthR5DkL6sKJGWMWYg32R56HsZ6uC9h8Cqd5";
-
 export type IndexerConfig = {
   name: string;
   buildId: string;
   dbPath: string;
 
   programId: string;
-  programIdCorrected: boolean;
-  programIdSource: "env" | "default" | "corrected";
-
   rpcUrl: string;
   wsUrl: string;
-  commitment: string;
+  commitment: "processed" | "confirmed" | "finalized";
 
-  mayhemFetch: boolean;
-  mayhemTimeoutMs: number;
-  mayhemConcurrency: number;
-  mayhemSweepMs: number;
+  pumpPortalUrl: string;
 
   reconnectMinMs: number;
   reconnectMaxMs: number;
@@ -43,72 +29,57 @@ export type IndexerConfig = {
 
   tokenDecimals: number;
   pumpSupplyUi: number;
+
+  maxConnections: number;
+  maxSubscriptionsPerConnection: number;
+  maxTrackedTokens: number;
+  lifecycleRefreshMs: number;
+  activeWindowMs: number;
+  interestWindowMs: number;
+  minInterestScore: number;
+  requireInterestSignal: boolean;
+  curveRepairPollMs: number;
+  curvePollMs: number;
+  curveRpcTimeoutMs: number;
 };
 
 function env(name: string): string | undefined {
   const value = process.env[name]?.trim();
-
   return value || undefined;
 }
 
 function numberEnv(name: string, fallback: number): number {
   const parsed = Number(env(name) ?? fallback);
-
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function boolEnv(name: string, fallback = false): boolean {
   const value = env(name);
-
-  if (value == null) {
-    return fallback;
-  }
-
+  if (value == null) return fallback;
   return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
 function wsToRpc(value: string): string {
-  if (value.startsWith("wss://")) {
-    return `https://${value.slice("wss://".length)}`;
-  }
-
-  if (value.startsWith("ws://")) {
-    return `http://${value.slice("ws://".length)}`;
-  }
-
+  if (value.startsWith("wss://")) return `https://${value.slice(6)}`;
+  if (value.startsWith("ws://")) return `http://${value.slice(5)}`;
   return value;
 }
 
 function rpcToWs(value: string): string {
-  if (value.startsWith("wss://") || value.startsWith("ws://")) {
-    return value;
-  }
-
-  if (value.startsWith("https://")) {
-    return `wss://${value.slice("https://".length)}`;
-  }
-
-  if (value.startsWith("http://")) {
-    return `ws://${value.slice("http://".length)}`;
-  }
-
+  if (value.startsWith("wss://") || value.startsWith("ws://")) return value;
+  if (value.startsWith("https://")) return `wss://${value.slice(8)}`;
+  if (value.startsWith("http://")) return `ws://${value.slice(7)}`;
   return value;
 }
 
 export function redactedUrl(value: string): string {
   try {
     const url = new URL(value);
-
     for (const key of [...url.searchParams.keys()]) {
-      if (/key|token|secret|auth|jwt/i.test(key)) {
+      if (/key|token|secret|auth|jwt/i.test(key))
         url.searchParams.set(key, "***");
-      }
     }
-
-    if (url.password) {
-      url.password = "***";
-    }
-
+    if (url.password) url.password = "***";
     return url.toString();
   } catch {
     return value.replace(/(api[-_]?key=)[^&\s]+/gi, "$1***");
@@ -116,91 +87,120 @@ export function redactedUrl(value: string): string {
 }
 
 export function loadConfig(): IndexerConfig {
-  const apiKey = env("HELIUS_API_KEY");
-
-  const explicitWs = env("SOLARD_HELIUS_LOGS_WS_URL") ?? env("HELIUS_WS_URL");
-
+  const heliusApiKey = env("HELIUS_API_KEY");
+  const explicitWs =
+    env("SOLARD_HELIUS_ACCOUNT_WS_URL") ?? env("HELIUS_WS_URL");
   const rpc =
     env("HELIUS_RPC_URL") ??
     env("RPC_ENDPOINT") ??
     env("SOLANA_RPC_URL") ??
-    (apiKey ? `https://mainnet.helius-rpc.com/?api-key=${apiKey}` : undefined);
-
+    (heliusApiKey
+      ? `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`
+      : undefined);
   const wsUrl = explicitWs ?? (rpc ? rpcToWs(rpc) : undefined);
-
   const rpcUrl = rpc ?? (explicitWs ? wsToRpc(explicitWs) : undefined);
-
   if (!wsUrl || !rpcUrl) {
+    throw new Error("Missing Helius RPC/WS URL or HELIUS_API_KEY");
+  }
+
+  const pumpPortalApiKey = env("PUMPPORTAL_API_KEY");
+  const pumpPortalUrl =
+    env("SOLARD_PUMPPORTAL_WS_URL") ??
+    (pumpPortalApiKey
+      ? `wss://pumpportal.fun/api/data?api-key=${encodeURIComponent(pumpPortalApiKey)}`
+      : undefined);
+  if (!pumpPortalUrl) {
     throw new Error(
-      "Missing Helius websocket URL. Set SOLARD_HELIUS_LOGS_WS_URL, HELIUS_WS_URL, HELIUS_RPC_URL, RPC_ENDPOINT, SOLANA_RPC_URL, or HELIUS_API_KEY.",
+      "Missing PumpPortal creation source. Set PUMPPORTAL_API_KEY or SOLARD_PUMPPORTAL_WS_URL.",
     );
   }
+
+  const commitmentRaw = env("SOLARD_INDEXER_COMMITMENT") ?? "processed";
+  const commitment = (
+    ["processed", "confirmed", "finalized"] as const
+  ).includes(commitmentRaw as any)
+    ? (commitmentRaw as IndexerConfig["commitment"])
+    : "processed";
+
+  const maxConnections = Math.max(
+    1,
+    Math.min(5, Math.trunc(numberEnv("SOLARD_PUMP_WS_CONNECTIONS", 5))),
+  );
+  const maxSubscriptionsPerConnection = Math.max(
+    1,
+    Math.min(
+      1000,
+      Math.trunc(numberEnv("SOLARD_PUMP_SUBSCRIPTIONS_PER_CONNECTION", 1000)),
+    ),
+  );
+  const hardCapacity = maxConnections * maxSubscriptionsPerConnection;
 
   const parsedSolUsd = Number(env("SOLARD_SOL_USD") ?? "");
 
   return {
-    name: env("SOLARD_INDEXER_NAME") ?? "solard-indexer-helius",
-
-    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v16-mayhem-hydration",
-
+    name: env("SOLARD_INDEXER_NAME") ?? "solard-indexer-pumpportal",
+    buildId: env("SOLARD_INDEXER_BUILD_ID") ?? "indexer-v19-exact-token-logs",
     dbPath: SOLARD_DB_PATH,
-
-    ...(() => {
-      const configured = env("SOLARD_PUMPFUN_PROGRAM_ID");
-
-      if (configured === KNOWN_BAD_PUMP_PROGRAM_ID) {
-        console.warn(
-          `[solard:indexer] replacing invalid Pump program ${configured} with ${OFFICIAL_PUMP_PROGRAM_ID}`,
-        );
-
-        return {
-          programId: OFFICIAL_PUMP_PROGRAM_ID,
-          programIdCorrected: true,
-          programIdSource: "corrected" as const,
-        };
-      }
-
-      return {
-        programId: configured ?? OFFICIAL_PUMP_PROGRAM_ID,
-        programIdCorrected: false,
-        programIdSource: configured ? ("env" as const) : ("default" as const),
-      };
-    })(),
-
+    programId: env("SOLARD_PUMPFUN_PROGRAM_ID") ?? OFFICIAL_PUMP_PROGRAM_ID,
     rpcUrl,
     wsUrl,
-
-    commitment: env("SOLARD_INDEXER_COMMITMENT") ?? "processed",
-
-    reconnectMinMs: numberEnv("SOLARD_INDEXER_RECONNECT_MIN_MS", 750),
-
-    reconnectMaxMs: numberEnv("SOLARD_INDEXER_RECONNECT_MAX_MS", 30_000),
-
-    heartbeatMs: numberEnv("SOLARD_INDEXER_HEARTBEAT_MS", 5_000),
-
-    mayhemFetch: boolEnv("SOLARD_INDEXER_MAYHEM", true),
-
-    mayhemTimeoutMs: numberEnv("SOLARD_INDEXER_MAYHEM_TIMEOUT_MS", 3_500),
-
-    mayhemConcurrency: numberEnv("SOLARD_INDEXER_MAYHEM_CONCURRENCY", 4),
-
-    mayhemSweepMs: numberEnv("SOLARD_INDEXER_MAYHEM_SWEEP_MS", 2_000),
-
+    commitment,
+    pumpPortalUrl,
+    reconnectMinMs: Math.max(
+      250,
+      numberEnv("SOLARD_INDEXER_RECONNECT_MIN_MS", 750),
+    ),
+    reconnectMaxMs: Math.max(
+      1000,
+      numberEnv("SOLARD_INDEXER_RECONNECT_MAX_MS", 30_000),
+    ),
+    heartbeatMs: Math.max(1000, numberEnv("SOLARD_INDEXER_HEARTBEAT_MS", 5000)),
     metadataFetch: boolEnv("SOLARD_INDEXER_METADATA", true),
-
-    metadataTimeoutMs: numberEnv("SOLARD_INDEXER_METADATA_TIMEOUT_MS", 3_500),
-
+    metadataTimeoutMs: numberEnv("SOLARD_INDEXER_METADATA_TIMEOUT_MS", 3500),
     metadataMaxBytes: numberEnv("SOLARD_INDEXER_METADATA_MAX_BYTES", 1_000_000),
-
     metadataConcurrency: numberEnv("SOLARD_INDEXER_METADATA_CONCURRENCY", 4),
-
     solUsd:
       Number.isFinite(parsedSolUsd) && parsedSolUsd > 0 ? parsedSolUsd : null,
-
-    solUsdRefreshMs: numberEnv("SOLARD_SOL_USD_REFRESH_MS", 30_000),
-
+    solUsdRefreshMs: Math.max(
+      5000,
+      numberEnv("SOLARD_SOL_USD_REFRESH_MS", 30_000),
+    ),
     tokenDecimals: numberEnv("SOLARD_PUMP_TOKEN_DECIMALS", 6),
-
     pumpSupplyUi: numberEnv("SOLARD_PUMP_SUPPLY_UI", 1_000_000_000),
+    maxConnections,
+    maxSubscriptionsPerConnection,
+    maxTrackedTokens: Math.max(
+      1,
+      Math.min(
+        hardCapacity,
+        Math.trunc(numberEnv("SOLARD_PUMP_MAX_TRACKED_TOKENS", hardCapacity)),
+      ),
+    ),
+    lifecycleRefreshMs: Math.max(
+      500,
+      numberEnv("SOLARD_PUMP_LIFECYCLE_REFRESH_MS", 2000),
+    ),
+    activeWindowMs: Math.max(
+      60_000,
+      numberEnv("SOLARD_PUMP_ACTIVE_WINDOW_MS", 60 * 60_000),
+    ),
+    interestWindowMs: Math.max(
+      60_000,
+      numberEnv("SOLARD_PUMP_INTEREST_WINDOW_MS", 30 * 60_000),
+    ),
+    minInterestScore: numberEnv("SOLARD_PUMP_MIN_INTEREST_SCORE", 0),
+    requireInterestSignal: boolEnv(
+      "SOLARD_PUMP_REQUIRE_INTEREST_SIGNAL",
+      false,
+    ),
+    curveRepairPollMs: Math.max(
+      10_000,
+      numberEnv("SOLARD_PUMP_CURVE_REPAIR_POLL_MS", 60_000),
+    ),
+    curvePollMs: Math.max(1_000, numberEnv("SOLARD_PUMP_CURVE_POLL_MS", 5_000)),
+    curveRpcTimeoutMs: Math.max(
+      500,
+      numberEnv("SOLARD_PUMP_CURVE_RPC_TIMEOUT_MS", 4000),
+    ),
   };
 }

@@ -7,39 +7,6 @@ It does **not** import:
 ```txt
 src/*
 ../src/*
-```
 
-The worker entrypoint is now only a compatibility shim:
 
-```txt
-workers/helius-logs-worker.ts -> indexer/main.ts
-```
-
-Run:
-
-```bash
-bun indexer/main.ts
-```
-
-Existing process managers can keep running:
-
-```bash
-bun workers/helius-logs-worker.ts
-```
-
-Important env:
-
-```bash
-HELIUS_API_KEY=...
-SOWL_DB_PATH=./sowl.db
-SOLARD_SOL_USD=150 # optional; needed for USD market cap
-```
-
-The indexer writes:
-
-- `terminalTokensLive`
-- `terminalTradesLive`
-- `terminalIndicatorsLive`
-- `terminalProcessStatus`
-- `terminalWorkerErrors`
-- `terminalIngestionKeys`
+Database ownership lives in `shared/db.ts`. All tables are declared through sqlite-zod-orm schemas; indexer code must not issue raw SQL or manage schema compatibility itself.

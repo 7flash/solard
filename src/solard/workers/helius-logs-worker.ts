@@ -9,10 +9,10 @@
 import {
   dbWrite,
   insertTerminalTrade,
-  recomputeTerminalIndicators,
+  recomputeTerminalIndicatorsBatch,
   upsertProcessStatus,
   upsertTerminalToken,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 import { recordWorkerError } from "../db/terminal-ingestion.js";
 import {
   fetchHeliusAssetMetadata,
@@ -30,7 +30,7 @@ import { resolveSolUsd } from "../prices/sol-usd.js";
 import { workerMeasure as m } from "../measure.js";
 
 const WORKER = "solard-helius-logs-v1";
-const BUILD_ID = "helius-logs-v1-standard-logs-subscribe";
+const BUILD_ID = "helius-logs-v12-single-shared-db";
 
 const COMMITMENT = (process.env.SOLARD_HELIUS_LOGS_COMMITMENT ??
   process.env.SOLARD_HELIUS_COMMITMENT ??
@@ -38,7 +38,7 @@ const COMMITMENT = (process.env.SOLARD_HELIUS_LOGS_COMMITMENT ??
 
 const CONCURRENCY = Math.max(
   1,
-  Math.min(32, Number(process.env.SOLARD_HELIUS_LOGS_CONCURRENCY ?? "8")),
+  Math.min(32, Number(process.env.SOLARD_HELIUS_LOGS_CONCURRENCY ?? "2")),
 );
 
 const MAX_QUEUED = Math.max(
@@ -53,7 +53,7 @@ const DEDUPE_TTL_MS = Math.max(
 
 const INDICATOR_FLUSH_MS = Math.max(
   50,
-  Number(process.env.SOLARD_HELIUS_LOGS_INDICATOR_FLUSH_MS ?? "250"),
+  Number(process.env.SOLARD_HELIUS_LOGS_INDICATOR_FLUSH_MS ?? "750"),
 );
 
 const HEARTBEAT_MS = Math.max(
@@ -231,10 +231,8 @@ async function flushIndicators(): Promise<void> {
   try {
     await dbWrite("helius_logs_indicators_flush", () => {
       const now = Date.now();
-      for (const mint of mints) {
-        recomputeTerminalIndicators(mint, now);
-      }
-      return { mints: mints.length };
+      const indicators = recomputeTerminalIndicatorsBatch(mints, now);
+      return { mints: mints.length, indicators: indicators.length };
     });
   } catch (error) {
     for (const mint of mints) dirtyIndicatorMints.add(mint);
@@ -338,28 +336,15 @@ async function applyCreateEvents(
   creates: ReturnType<typeof parsePumpLogs>["creates"],
   counters: Counters,
 ): Promise<number> {
-  let imaged = 0;
-
   for (const create of creates) {
     await m(`create:${create.mint}`, async () => {
-      const [uriMeta, assetMeta] = await Promise.all([
-        fetchUriMetadata(create.uri),
-        fetchHeliusAssetMetadata(create.mint),
-      ]);
-
-      const merged = { ...assetMeta, ...uriMeta };
-
+      // Persist first. Metadata HTTP calls must never block the Pump log queue.
       await dbWrite("helius_logs_create", () =>
         upsertTerminalToken({
           mint: create.mint,
-          symbol: merged.symbol ?? create.symbol ?? "",
-          name: merged.name ?? create.name ?? create.symbol ?? create.mint,
-          image: merged.image ?? null,
+          symbol: create.symbol ?? "",
+          name: create.name ?? create.symbol ?? create.mint,
           uri: create.uri,
-          description: merged.description ?? null,
-          website: merged.website ?? null,
-          twitter: merged.twitter ?? null,
-          telegram: merged.telegram ?? null,
           creator: create.creator,
           bondingCurveKey: create.bondingCurveKey,
           source: "helius-logs-create",
@@ -373,40 +358,53 @@ async function applyCreateEvents(
         }),
       );
 
-      if (merged.image) imaged++;
-      counters.lastMint = create.mint;
+      // Metadata is optional enrichment. Run it after persistence and do not
+      // await it, otherwise a slow DAS/URI request stalls every following trade.
+      void Promise.all([
+        fetchUriMetadata(create.uri),
+        fetchHeliusAssetMetadata(create.mint),
+      ])
+        .then(async ([uriMeta, assetMeta]) => {
+          const merged = { ...assetMeta, ...uriMeta };
+          if (!hasMetadata(merged as Record<string, unknown>)) return;
+          await dbWrite("helius_logs_create_metadata", () =>
+            upsertTerminalToken({
+              mint: create.mint,
+              symbol: merged.symbol ?? create.symbol ?? "",
+              name: merged.name ?? create.name ?? create.symbol ?? create.mint,
+              image: merged.image ?? undefined,
+              description: merged.description ?? undefined,
+              website: merged.website ?? undefined,
+              twitter: merged.twitter ?? undefined,
+              telegram: merged.telegram ?? undefined,
+              updatedAtMs: Date.now(),
+            }),
+          );
+        })
+        .catch((error) => {
+          counters.hydrationErrors++;
+          counters.lastHydrationError = compactError(error);
+          recordWorkerError(WORKER, error, {
+            phase: "create-metadata",
+            mint: create.mint,
+          });
+        });
 
-      return {
-        mint: create.mint,
-        symbol: merged.symbol ?? create.symbol ?? null,
-        hasImage: !!merged.image,
-      };
+      counters.lastMint = create.mint;
+      return { mint: create.mint, symbol: create.symbol ?? null };
     });
   }
 
-  return imaged;
+  return 0;
 }
 
 async function applyTradeEvents(
   trades: ReturnType<typeof parsePumpLogs>["trades"],
   counters: Counters,
 ): Promise<number> {
-  let imaged = 0;
-
   for (const trade of trades) {
     await m(`trade:${trade.mint}`, async () => {
-      const hydrated = await hydrateTradeMint(trade.mint).catch((error) => {
-        counters.hydrationErrors++;
-        counters.lastHydrationError = compactError(error);
-        recordWorkerError(WORKER, error, {
-          phase: "trade-metadata",
-          mint: trade.mint,
-        });
-        return { imaged: false };
-      });
-
-      if (hydrated.imaged) imaged++;
-
+      // Price/trade persistence is the hot path. Never wait for metadata here.
       await dbWrite("helius_logs_trade_apply", () => {
         insertTerminalTrade({
           id: trade.id,
@@ -444,20 +442,31 @@ async function applyTradeEvents(
       });
 
       markIndicatorsDirty(trade.mint);
-
       counters.lastMint = trade.mint;
       counters.lastMcapUsd = trade.marketCapUsd ?? counters.lastMcapUsd;
+
+      // The metadata-repair worker owns normal enrichment. An opt-in fallback is
+      // available for deployments that do not run that worker.
+      if (process.env.SOLARD_TRADE_METADATA_HOT_PATH === "1") {
+        void hydrateTradeMint(trade.mint).catch((error) => {
+          counters.hydrationErrors++;
+          counters.lastHydrationError = compactError(error);
+          recordWorkerError(WORKER, error, {
+            phase: "trade-metadata",
+            mint: trade.mint,
+          });
+        });
+      }
 
       return {
         mint: trade.mint,
         side: trade.side,
         marketCapUsd: trade.marketCapUsd,
-        imaged: hydrated.imaged,
       };
     });
   }
 
-  return imaged;
+  return 0;
 }
 
 async function applyCompleteEvents(

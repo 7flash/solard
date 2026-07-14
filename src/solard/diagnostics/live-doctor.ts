@@ -3,7 +3,7 @@ import {
   insertTerminalProbeRow,
   listTerminalFeed,
   upsertProcessStatus,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 import { parsePumpLogs } from "../helius/pump-log-events.js";
 import {
   parsePumpTransaction,

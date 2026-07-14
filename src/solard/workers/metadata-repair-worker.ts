@@ -1,9 +1,6 @@
 #!/usr/bin/env bun
 import { hydrateMissingTerminalMetadata } from "../actions/terminal-metadata.js";
-import {
-  terminalStoreStats,
-  upsertProcessStatus,
-} from "../db/terminal-store.js";
+import { terminalStoreStats, upsertProcessStatus } from "../../../shared/db.js";
 import { workerMeasure, summarizeForMeasure } from "../measure.js";
 
 const WORKER = process.env.SOLARD_WORKER_NAME || "solard-metadata-repair";

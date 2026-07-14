@@ -3,7 +3,7 @@ import {
   getCursor,
   setCursor,
   upsertProcessStatus,
-} from "../db/terminal-store.js";
+} from "../../../shared/db.js";
 import {
   workerMeasure,
   measureRetry,

@@ -9,10 +9,7 @@ import {
   restartProcessesAction,
   stopProcessAction,
 } from "../actions/processes.js";
-import {
-  listTelegramSignals,
-  terminalStoreStats,
-} from "../db/terminal-store.js";
+import { listTelegramSignals, terminalStoreStats } from "../../../shared/db.js";
 import { formatProcessRow } from "../terminal/presenter.js";
 
 export type ParsedCli = {

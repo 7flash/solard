@@ -1,4 +1,4 @@
-import { upsertProcessStatus } from "../db/terminal-store.js";
+import { upsertProcessStatus } from "../../../shared/db.js";
 import { workerMeasure, summarizeForMeasure } from "../measure.js";
 import { resolveSolUsd } from "../prices/sol-usd.js";
 import {

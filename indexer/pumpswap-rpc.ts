@@ -3,30 +3,39 @@ import type { PumpSwapConfig } from "./pumpswap-config.js";
 
 type AnyRow = Record<string, any>;
 
+export type AddressTransactionPage = {
+  data: AnyRow[];
+  paginationToken: string | null;
+};
+
+export type MultipleAccountValue = {
+  data?: [string, string] | string;
+  owner?: string;
+  executable?: boolean;
+  lamports?: number;
+} | null;
+
+export type MultipleAccountsResult = {
+  context?: { slot?: number };
+  value?: MultipleAccountValue[];
+};
+
 export async function rpcCall<T>(
   config: PumpSwapConfig,
   method: string,
   params: unknown[],
 ): Promise<T> {
   const controller = new AbortController();
-
   const timer = setTimeout(() => controller.abort(), config.rpcTimeoutMs);
 
   try {
     const response = await fetch(config.rpcUrl, {
       method: "POST",
-
-      headers: {
-        "content-type": "application/json",
-      },
-
+      headers: { "content-type": "application/json" },
       signal: controller.signal,
-
       body: JSON.stringify({
         jsonrpc: "2.0",
-
-        id: `${method}:${Date.now()}`,
-
+        id: `${method}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
         method,
         params,
       }),
@@ -50,30 +59,87 @@ export async function rpcCall<T>(
   }
 }
 
-export async function fetchTransaction(
+export async function getTransactionsForAddress(
   config: PumpSwapConfig,
-  signature: string,
-): Promise<AnyRow | null> {
-  for (let attempt = 1; attempt <= config.transactionFetchAttempts; attempt++) {
-    const result = await rpcCall<AnyRow | null>(config, "getTransaction", [
-      signature,
-      {
-        encoding: "jsonParsed",
+  address: string,
+  input: {
+    afterSlot: number;
+    limit: number;
+    paginationToken?: string | null;
+  },
+): Promise<AddressTransactionPage> {
+  const options: Record<string, unknown> = {
+    transactionDetails: "full",
+    encoding: "jsonParsed",
+    maxSupportedTransactionVersion: 0,
+    commitment: config.commitment,
+    sortOrder: "asc",
+    limit: Math.max(1, Math.min(1_000, Math.trunc(input.limit))),
+    filters: {
+      status: "succeeded",
+      ...(input.afterSlot > 0 ? { slot: { gt: input.afterSlot } } : {}),
+    },
+  };
 
-        commitment: config.commitment,
-
-        maxSupportedTransactionVersion: 0,
-      },
-    ]).catch(() => null);
-
-    if (result) {
-      return result;
-    }
-
-    await Bun.sleep(config.transactionFetchDelayMs * attempt);
+  if (input.paginationToken) {
+    options.paginationToken = input.paginationToken;
   }
 
-  return null;
+  const result = await rpcCall<AnyRow>(config, "getTransactionsForAddress", [
+    address,
+    options,
+  ]);
+
+  return {
+    data: Array.isArray(result?.data) ? result.data : [],
+    paginationToken:
+      typeof result?.paginationToken === "string"
+        ? result.paginationToken
+        : null,
+  };
+}
+
+export async function getTokenAccountAmounts(
+  config: PumpSwapConfig,
+  addresses: string[],
+): Promise<{ slot: number; amounts: Array<bigint | null> }> {
+  if (addresses.length === 0) return { slot: 0, amounts: [] };
+  if (addresses.length > 100) {
+    throw new Error(
+      `getMultipleAccounts supports at most 100 addresses, got ${addresses.length}`,
+    );
+  }
+
+  // SPL token account amount is the u64 at byte offset 64. dataSlice keeps
+  // Helius response traffic tiny: 8 bytes per account instead of the full
+  // 165-byte token account.
+  const result = await rpcCall<MultipleAccountsResult>(
+    config,
+    "getMultipleAccounts",
+    [
+      addresses,
+      {
+        encoding: "base64",
+        commitment: config.commitment,
+        dataSlice: { offset: 64, length: 8 },
+      },
+    ],
+  );
+
+  const values = Array.isArray(result?.value) ? result.value : [];
+
+  return {
+    slot: Number(result?.context?.slot ?? 0) || 0,
+    amounts: addresses.map((_address, index) => {
+      const encoded = values[index]?.data;
+      const base64 = Array.isArray(encoded) ? encoded[0] : encoded;
+      if (typeof base64 !== "string") return null;
+
+      const bytes = Buffer.from(base64, "base64");
+      if (bytes.length < 8) return null;
+      return bytes.readBigUInt64LE(0);
+    }),
+  };
 }
 
 type PoolValidation = {
@@ -104,11 +170,7 @@ export class CanonicalPoolValidator {
 
     const result = await rpcCall<AnyRow>(this.config, "getAccountInfo", [
       pool,
-      {
-        encoding: "base64",
-
-        commitment: this.config.commitment,
-      },
+      { encoding: "base64", commitment: this.config.commitment },
     ]).catch(() => null);
 
     const value = result?.value;
@@ -116,20 +178,14 @@ export class CanonicalPoolValidator {
     if (!value || value.owner !== this.config.programId) {
       this.cache.set(pool, {
         canonical: false,
-
         baseMint: null,
-
         quoteMint: null,
       });
-
       return false;
     }
 
     const encoded = Array.isArray(value.data) ? value.data[0] : null;
-
-    if (typeof encoded !== "string") {
-      return false;
-    }
+    if (typeof encoded !== "string") return false;
 
     const bytes = Uint8Array.from(Buffer.from(encoded, "base64"));
 
@@ -141,23 +197,16 @@ export class CanonicalPoolValidator {
      * base_mint:          43..74
      * quote_mint:         75..106
      */
-    if (bytes.length < 107) {
-      return false;
-    }
+    if (bytes.length < 107) return false;
 
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-
     const index = view.getUint16(9, true);
-
     const decodedBase = encodeBase58(bytes.subarray(43, 75));
-
     const decodedQuote = encodeBase58(bytes.subarray(75, 107));
 
-    const validation = {
+    const validation: PoolValidation = {
       canonical: index === 0,
-
       baseMint: decodedBase,
-
       quoteMint: decodedQuote,
     };
 
@@ -173,7 +222,6 @@ export class CanonicalPoolValidator {
 
 export class SolUsdOracle {
   private value: number | null;
-
   private updatedAtMs = 0;
 
   constructor(private readonly config: PumpSwapConfig) {
@@ -189,7 +237,6 @@ export class SolUsdOracle {
     }
 
     const controller = new AbortController();
-
     const timer = setTimeout(
       () => controller.abort(),
       Math.min(3_000, this.config.rpcTimeoutMs),
@@ -197,29 +244,21 @@ export class SolUsdOracle {
 
     try {
       const mint = "So11111111111111111111111111111111111111112";
-
       const response = await fetch(
         `https://lite-api.jup.ag/price/v3?ids=${mint}`,
         {
           signal: controller.signal,
-
-          headers: {
-            accept: "application/json",
-          },
+          headers: { accept: "application/json" },
         },
       );
 
-      if (!response.ok) {
-        return this.value;
-      }
+      if (!response.ok) return this.value;
 
       const data = (await response.json()) as AnyRow;
-
       const next = Number(data?.[mint]?.usdPrice ?? data?.[mint]?.price);
 
       if (Number.isFinite(next) && next > 0) {
         this.value = next;
-
         this.updatedAtMs = Date.now();
       }
 

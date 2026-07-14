@@ -1,7 +1,4 @@
-import {
-  listProcessStatus,
-  upsertProcessStatus,
-} from "../db/terminal-store.js";
+import { listProcessStatus, upsertProcessStatus } from "../../../shared/db.js";
 import { clearWorkerErrors } from "../db/terminal-ingestion.js";
 import { processMeasure, summarizeForMeasure } from "../measure.js";
 import bgrun, {
@@ -67,7 +64,7 @@ export const WORKER_SPECS: Record<SolardWorkerName, WorkerSpec> = {
     kind: "stream",
     command: "bun run ./src/solard/workers/helius-logs-worker.ts",
     staleAfterMs: Number(process.env.SOLARD_HELIUS_LOGS_STALE_MS ?? "12000"),
-    buildId: "helius-logs-v1-standard-logs-subscribe",
+    buildId: "helius-logs-v12-single-shared-db",
   },
   "solard-helius-live-v2": {
     name: "solard-helius-live-v2",

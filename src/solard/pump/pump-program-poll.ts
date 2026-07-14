@@ -8,7 +8,7 @@ import {
   workerMeasure,
   summarizeForMeasure,
 } from "../measure.js";
-import { getCursor, setCursor } from "../db/terminal-store.js";
+import { getCursor, setCursor } from "../../../shared/db.js";
 import { hasIngestionKey } from "../db/terminal-ingestion.js";
 import { PUMP_PROGRAM_ID } from "./parse-terminal-tx.js";
 

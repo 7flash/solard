@@ -1,8 +1,5 @@
 #!/usr/bin/env bun
-import {
-  terminalStoreStats,
-  upsertProcessStatus,
-} from "../db/terminal-store.js";
+import { terminalStoreStats, upsertProcessStatus } from "../../../shared/db.js";
 import { workerMeasure, summarizeForMeasure } from "../measure.js";
 import { refreshTerminalCurveSnapshots } from "../helius/curve-snapshot.js";
 

@@ -70,6 +70,21 @@ function readBool(
   return { value: buf[offset] !== 0, offset: offset + 1 };
 }
 
+function pumpEventStart(buf: Buffer): number {
+  for (const start of [0, 8, 16]) {
+    if (buf.length < start + 8) continue;
+    const candidate = buf.subarray(start, start + 8);
+    if (
+      candidate.equals(CREATE_EVENT_DISC) ||
+      candidate.equals(TRADE_EVENT_DISC) ||
+      candidate.equals(COMPLETE_EVENT_DISC)
+    ) {
+      return start;
+    }
+  }
+  return -1;
+}
+
 function programDataBuffers(logs: string[]): Buffer[] {
   const out: Buffer[] = [];
   for (const line of logs ?? []) {
@@ -132,9 +147,10 @@ export function parsePumpLogs(input: {
 
   const buffers = programDataBuffers(input.logs ?? []);
   for (const buf of buffers) {
-    if (buf.length < 8) continue;
-    const d = buf.subarray(0, 8);
-    let offset = 8;
+    const eventStart = pumpEventStart(buf);
+    if (eventStart < 0) continue;
+    const d = buf.subarray(eventStart, eventStart + 8);
+    let offset = eventStart + 8;
 
     if (d.equals(CREATE_EVENT_DISC)) {
       const name = readBorshString(buf, offset);
@@ -222,7 +238,12 @@ export function parsePumpLogs(input: {
         priceSol,
         priceUsd,
         marketCapUsd: priceUsd != null ? priceUsd * supplyUi : null,
-        createdAtMs: now,
+        createdAtMs:
+          timestamp?.value != null &&
+          Number(timestamp.value) > 1_000_000_000 &&
+          Number(timestamp.value) < 10_000_000_000
+            ? Number(timestamp.value) * 1000
+            : now,
         raw: {
           source: "helius-logs",
           event: "TradeEvent",

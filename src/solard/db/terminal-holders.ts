@@ -4,7 +4,7 @@ import {
   terminalDb,
   upsertProcessStatus,
   type TerminalToken,
-} from "./terminal-store.js";
+} from "../../../shared/db.js";
 
 export type TerminalHolderRow = {
   mint: string;
