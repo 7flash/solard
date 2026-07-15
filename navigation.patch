@@ -1,0 +1,21 @@
+*** Begin Patch
+*** Update File: app/layout.tsx
+@@
+   { href: "/portfolio", label: "Portfolio", page: "portfolio" },
+   { href: "/trade", label: "Trade", page: "trade" },
++  { href: "/airdrops", label: "Airdrops", page: "airdrops" },
+   { href: "/activity", label: "Activity", page: "jobs" },
+ ];
+*** Update File: app/page-host.tsx
+@@
+   | "portfolio"
+   | "trade"
++  | "airdrops"
+   | "jobs";
+@@
+   portfolio: "portfolio",
+   trade: "trade",
++  airdrops: "airdrops",
+   jobs: "activity",
+ };
+*** End Patch

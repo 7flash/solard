@@ -1,0 +1,256 @@
+.airdrops-page {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.airdrops-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: end;
+  padding: 18px;
+  border: 1px solid var(--line);
+  background: #05080d;
+}
+
+.airdrops-hero h2,
+.airdrops-config-card h3,
+.airdrops-holder-card h3,
+.airdrops-execute-card h3 {
+  margin: 0;
+}
+
+.airdrops-hero h2 {
+  font-size: 42px;
+  letter-spacing: -.055em;
+}
+
+.airdrops-hero p {
+  max-width: 760px;
+  margin-bottom: 0;
+}
+
+.airdrops-hero-actions,
+.airdrops-status-row,
+.airdrops-inline-check,
+.airdrops-execute-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.airdrops-status-row {
+  min-height: 42px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  background: #070a0f;
+}
+
+.airdrops-status-row .airdrops-inline-check {
+  margin-left: auto;
+}
+
+.airdrops-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.airdrops-config-card,
+.airdrops-execute-card {
+  display: grid;
+  align-content: start;
+  gap: 13px;
+}
+
+.airdrops-config-card label,
+.airdrops-execute-card label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.airdrops-config-card input,
+.airdrops-config-card select,
+.airdrops-config-card textarea,
+.airdrops-execute-card input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line-strong);
+  background: #0b1018;
+  color: var(--text);
+  padding: 8px 10px;
+}
+
+.airdrops-config-card textarea {
+  resize: vertical;
+}
+
+.airdrops-form-row {
+  display: grid;
+  gap: 10px;
+}
+
+.airdrops-form-row.two {
+  grid-template-columns: .45fr 1fr;
+}
+
+.airdrops-form-row.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.airdrops-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.airdrops-summary > div {
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: #05080d;
+}
+
+.airdrops-summary span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.airdrops-summary b {
+  display: block;
+  margin-top: 4px;
+  font-size: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.airdrops-holder-card {
+  min-width: 0;
+}
+
+.airdrops-table-wrap {
+  margin-top: 12px;
+  overflow: auto;
+  max-height: 54vh;
+  border: 1px solid var(--line);
+}
+
+.airdrops-table {
+  width: 100%;
+  min-width: 900px;
+  border-collapse: collapse;
+}
+
+.airdrops-table th,
+.airdrops-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.airdrops-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #0a0f15;
+  color: var(--green);
+  font-size: 11px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.airdrops-table tbody tr:hover {
+  background: rgba(44, 255, 154, .045);
+}
+
+.airdrops-table .positive {
+  color: var(--green);
+}
+
+.airdrops-table .negative {
+  color: var(--red, #ff4b69);
+}
+
+.airdrops-empty {
+  padding: 30px;
+  color: var(--muted);
+}
+
+.airdrops-execute-card {
+  grid-template-columns: minmax(280px, 1fr) minmax(240px, .7fr) auto;
+  align-items: end;
+  border-color: rgba(255, 75, 105, .45);
+}
+
+.airdrops-live-toggle {
+  display: flex !important;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  color: var(--text) !important;
+}
+
+.airdrops-live-toggle input,
+.airdrops-inline-check input {
+  width: auto;
+  min-height: auto;
+}
+
+.airdrops-execute-summary {
+  align-self: center;
+}
+
+.airdrops-execute-summary span {
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  background: #05080d;
+}
+
+.danger-action {
+  border-color: #ff4b69;
+  background: #2a0b13;
+  color: #ffdce4;
+}
+
+.danger-action:not(:disabled):hover {
+  background: #ff4b69;
+  color: #090b0f;
+}
+
+@media (max-width: 1250px) {
+  .airdrops-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .airdrops-grid > :last-child {
+    grid-column: 1 / -1;
+  }
+
+  .airdrops-execute-card {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 850px) {
+  .airdrops-hero,
+  .airdrops-grid,
+  .airdrops-execute-card,
+  .airdrops-form-row.two,
+  .airdrops-form-row.three {
+    grid-template-columns: 1fr;
+  }
+
+  .airdrops-grid > :last-child {
+    grid-column: auto;
+  }
+
+  .airdrops-status-row .airdrops-inline-check {
+    margin-left: 0;
+  }
+}
