@@ -1,6 +1,11 @@
 import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database, defineView, z } from "sqlite-zod-orm";
+import {
+  dbMeasure,
+  measureRetry,
+  summarizeForMeasure,
+} from "../src/solard/measure.js";
 
 const DEFAULT_DB_PATH = join(
   process.env.HOME || process.env.USERPROFILE || ".",
@@ -99,6 +104,68 @@ export const TokenTradeSchema = z.object({
 
   tradedAtMs: z.coerce.number(),
   updatedAtMs: z.coerce.number(),
+});
+
+export const WatchedWalletSchema = z.object({
+  address: z.string(),
+  label: z.string().nullable().default(null),
+  enabled: z.coerce.number().default(1),
+  backfillEnabled: z.coerce.number().default(1),
+  lastBackfillSignature: z.string().nullable().default(null),
+  lastBackfillAtMs: z.coerce.number().default(0),
+  lastSeenSlot: z.coerce.number().default(0),
+  createdAtMs: z.coerce.number(),
+  updatedAtMs: z.coerce.number(),
+});
+
+export const WalletTransactionSchema = z.object({
+  walletTxKey: z.string(),
+  wallet: z.string(),
+  signature: z.string(),
+  slot: z.coerce.number().default(0),
+  confidence: z
+    .enum(["processed", "confirmed", "finalized", "dropped"])
+    .default("confirmed"),
+  parseStatus: z
+    .enum(["pending", "parsed", "ignored", "error"])
+    .default("pending"),
+  parserVersion: z.string().default("wallet-v1"),
+  rawJson: z.string().default("{}"),
+  error: z.string().nullable().default(null),
+  tradedAtMs: z.coerce.number().default(0),
+  updatedAtMs: z.coerce.number().default(0),
+});
+
+export const WalletSwapSchema = z.object({
+  eventKey: z.string(),
+  wallet: z.string(),
+  signature: z.string(),
+  slot: z.coerce.number().default(0),
+
+  inputMint: z.string(),
+  inputAmountUi: z.coerce.number().default(0),
+  outputMint: z.string(),
+  outputAmountUi: z.coerce.number().default(0),
+
+  subjectMint: z.string(),
+  quoteMint: z.string().nullable().default(null),
+  side: z.enum(["buy", "sell", "swap", "unknown"]).default("unknown"),
+
+  venue: z.string().default("unknown"),
+  programId: z.string().nullable().default(null),
+  parser: z.string().default("unknown"),
+  classificationConfidence: z
+    .enum(["exact", "inferred", "ambiguous"])
+    .default("ambiguous"),
+  copyable: z.coerce.number().default(0),
+
+  priceSol: z.coerce.number().nullable().default(null),
+  priceUsd: z.coerce.number().nullable().default(null),
+  marketCapUsd: z.coerce.number().nullable().default(null),
+
+  rawJson: z.string().default("{}"),
+  tradedAtMs: z.coerce.number().default(0),
+  updatedAtMs: z.coerce.number().default(0),
 });
 
 export const ProcessStatusSchema = z.object({
@@ -341,6 +408,10 @@ export const TokenPriceWindowsSchema = z.object({
 export type TerminalToken = z.infer<typeof TerminalTokenSchema>;
 
 export type TokenTrade = z.infer<typeof TokenTradeSchema>;
+
+export type WatchedWallet = z.infer<typeof WatchedWalletSchema>;
+export type WalletTransaction = z.infer<typeof WalletTransactionSchema>;
+export type WalletSwap = z.infer<typeof WalletSwapSchema>;
 
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>;
 
@@ -599,6 +670,9 @@ export const db = await openDatabaseWithRetry(
       {
         terminalTokensLive: TerminalTokenSchema,
         tokenTradesV2: TokenTradeSchema,
+        watchedWalletsV1: WatchedWalletSchema,
+        walletTransactionsV1: WalletTransactionSchema,
+        walletSwapsV1: WalletSwapSchema,
         terminalTradesLive: TerminalTradeSchema,
         terminalIndicatorsLive: TerminalIndicatorSchema,
         processStatus: ProcessStatusSchema,
@@ -620,6 +694,9 @@ export const db = await openDatabaseWithRetry(
         unique: {
           terminalTokensLive: [["mint"]],
           tokenTradesV2: [["eventKey"]],
+          watchedWalletsV1: [["address"]],
+          walletTransactionsV1: [["walletTxKey"]],
+          walletSwapsV1: [["eventKey"]],
           terminalTradesLive: [["tradeKey"]],
           terminalIndicatorsLive: [["indicatorKey"], ["mint", "intervalSec"]],
           processStatus: [["name"]],
@@ -653,6 +730,23 @@ export const db = await openDatabaseWithRetry(
             ["signature"],
             ["eventKey"],
             ["mint", "marketCapUsd"],
+          ],
+
+          watchedWalletsV1: [["enabled", "updatedAtMs"], ["lastBackfillAtMs"]],
+
+          walletTransactionsV1: [
+            ["wallet", "tradedAtMs"],
+            ["signature"],
+            ["parseStatus", "updatedAtMs"],
+          ],
+
+          walletSwapsV1: [
+            ["wallet", "tradedAtMs"],
+            ["subjectMint", "tradedAtMs"],
+            ["inputMint", "tradedAtMs"],
+            ["outputMint", "tradedAtMs"],
+            ["signature"],
+            ["copyable", "tradedAtMs"],
           ],
 
           terminalTradesLive: [
@@ -1453,6 +1547,258 @@ export function listTokensNeedingMayhemCheck(
       updatedAtMs: token.updatedAtMs,
       mayhemCheckedAtMs: token.mayhemCheckedAtMs,
     }));
+}
+
+export function listWatchedWallets(
+  input: { enabledOnly?: boolean; limit?: number } = {},
+): WatchedWallet[] {
+  let query = db.watchedWalletsV1
+    .select()
+    .orderBy("updatedAtMs", "desc")
+    .limit(Math.max(1, Math.min(integer(input.limit, 10_000), 50_000)));
+  if (input.enabledOnly) query = query.where({ enabled: 1 });
+  return query.all() as WatchedWallet[];
+}
+
+export function getWatchedWallet(address: string): WatchedWallet | null {
+  const key = address.trim();
+  if (!key) return null;
+  return (
+    (db.watchedWalletsV1
+      .select()
+      .where({ address: key })
+      .get() as WatchedWallet | null) ?? null
+  );
+}
+
+export function upsertWatchedWallet(
+  input: Partial<WatchedWallet> & { address: string },
+): WatchedWallet {
+  const now = Date.now();
+  const address = input.address.trim();
+  if (!address) throw new Error("Wallet address is required");
+  const existing = getWatchedWallet(address);
+  const row = WatchedWalletSchema.parse({
+    address,
+    label:
+      input.label === null
+        ? null
+        : (text(input.label) ?? existing?.label ?? null),
+    enabled:
+      input.enabled == null
+        ? (existing?.enabled ?? 1)
+        : Number(input.enabled) > 0
+          ? 1
+          : 0,
+    backfillEnabled:
+      input.backfillEnabled == null
+        ? (existing?.backfillEnabled ?? 1)
+        : Number(input.backfillEnabled) > 0
+          ? 1
+          : 0,
+    lastBackfillSignature:
+      input.lastBackfillSignature === null
+        ? null
+        : (text(input.lastBackfillSignature) ??
+          existing?.lastBackfillSignature ??
+          null),
+    lastBackfillAtMs: integer(
+      input.lastBackfillAtMs,
+      existing?.lastBackfillAtMs ?? 0,
+    ),
+    lastSeenSlot: Math.max(
+      integer(input.lastSeenSlot, 0),
+      existing?.lastSeenSlot ?? 0,
+    ),
+    createdAtMs: existing?.createdAtMs ?? integer(input.createdAtMs, now),
+    updatedAtMs: integer(input.updatedAtMs, now),
+  });
+  return db.watchedWalletsV1.upsert(row, {
+    on: "address",
+    merge: (table) => ({
+      label: table.excluded("label"),
+      enabled: table.excluded("enabled"),
+      backfillEnabled: table.excluded("backfillEnabled"),
+      lastBackfillSignature: table.excluded("lastBackfillSignature"),
+      lastBackfillAtMs: table.max("lastBackfillAtMs", 0),
+      lastSeenSlot: table.max("lastSeenSlot", 0),
+      updatedAtMs: table.max("updatedAtMs", 0),
+    }),
+  }) as WatchedWallet;
+}
+
+export function updateWatchedWalletCursor(
+  address: string,
+  input: {
+    signature?: string | null;
+    slot?: number;
+    backfilledAtMs?: number;
+  },
+): WatchedWallet {
+  const existing = getWatchedWallet(address);
+  if (!existing) throw new Error(`Unknown watched wallet: ${address}`);
+  return upsertWatchedWallet({
+    ...existing,
+    lastBackfillSignature:
+      input.signature === undefined
+        ? existing.lastBackfillSignature
+        : input.signature,
+    lastBackfillAtMs: integer(input.backfilledAtMs, Date.now()),
+    lastSeenSlot: Math.max(existing.lastSeenSlot, integer(input.slot, 0)),
+    updatedAtMs: Date.now(),
+  });
+}
+
+export function upsertWalletTransaction(
+  input: Partial<WalletTransaction> & {
+    wallet: string;
+    signature: string;
+  },
+): WalletTransaction {
+  const now = Date.now();
+  const wallet = input.wallet.trim();
+  const signature = input.signature.trim();
+  if (!wallet || !signature) {
+    throw new Error("Wallet transaction requires wallet and signature");
+  }
+  const walletTxKey = text(input.walletTxKey) ?? `${wallet}:${signature}`;
+  const existing = db.walletTransactionsV1
+    .select()
+    .where({ walletTxKey })
+    .get() as WalletTransaction | null;
+  const row = WalletTransactionSchema.parse({
+    walletTxKey,
+    wallet,
+    signature,
+    slot: Math.max(integer(input.slot, 0), existing?.slot ?? 0),
+    confidence: input.confidence ?? existing?.confidence ?? "confirmed",
+    parseStatus: input.parseStatus ?? existing?.parseStatus ?? "pending",
+    parserVersion:
+      text(input.parserVersion) ?? existing?.parserVersion ?? "wallet-v1",
+    rawJson:
+      typeof input.rawJson === "string"
+        ? input.rawJson
+        : (existing?.rawJson ?? stringify(input.rawJson ?? {})),
+    error:
+      input.error === null
+        ? null
+        : (text(input.error) ?? existing?.error ?? null),
+    tradedAtMs: integer(input.tradedAtMs, existing?.tradedAtMs ?? now),
+    updatedAtMs: integer(input.updatedAtMs, now),
+  });
+  return db.walletTransactionsV1.upsert(row, {
+    on: "walletTxKey",
+    merge: (table) => ({
+      slot: table.max("slot", 0),
+      confidence: table.excluded("confidence"),
+      parseStatus: table.excluded("parseStatus"),
+      parserVersion: table.excluded("parserVersion"),
+      rawJson: table.excludedIfNotEmpty("rawJson"),
+      error: table.excluded("error"),
+      tradedAtMs: table.max("tradedAtMs", 0),
+      updatedAtMs: table.max("updatedAtMs", 0),
+    }),
+  }) as WalletTransaction;
+}
+
+export type AppendWalletSwapResult = {
+  row: WalletSwap;
+  inserted: boolean;
+};
+
+function isDuplicateWalletSwapError(error: unknown): boolean {
+  const message = sqliteErrorMessage(error);
+  return (
+    message.includes("unique constraint failed") &&
+    (message.includes("walletswapsv1.eventkey") || message.includes("eventkey"))
+  );
+}
+
+export function appendWalletSwapOnce(
+  input: Partial<WalletSwap> & {
+    eventKey: string;
+    wallet: string;
+    signature: string;
+    inputMint: string;
+    outputMint: string;
+    subjectMint: string;
+  },
+): AppendWalletSwapResult {
+  const now = Date.now();
+  const row = WalletSwapSchema.parse({
+    ...input,
+    eventKey: input.eventKey,
+    wallet: input.wallet.trim(),
+    signature: input.signature.trim(),
+    slot: integer(input.slot, 0),
+    inputMint: input.inputMint.trim(),
+    inputAmountUi: finite(input.inputAmountUi) ?? 0,
+    outputMint: input.outputMint.trim(),
+    outputAmountUi: finite(input.outputAmountUi) ?? 0,
+    subjectMint: input.subjectMint.trim(),
+    quoteMint: text(input.quoteMint),
+    side:
+      input.side === "buy" || input.side === "sell" || input.side === "swap"
+        ? input.side
+        : "unknown",
+    venue: text(input.venue) ?? "unknown",
+    programId: text(input.programId),
+    parser: text(input.parser) ?? "unknown",
+    classificationConfidence:
+      input.classificationConfidence === "exact" ||
+      input.classificationConfidence === "inferred"
+        ? input.classificationConfidence
+        : "ambiguous",
+    copyable: Number(input.copyable) > 0 ? 1 : 0,
+    priceSol: finite(input.priceSol),
+    priceUsd: finite(input.priceUsd),
+    marketCapUsd: finite(input.marketCapUsd),
+    rawJson:
+      typeof input.rawJson === "string"
+        ? input.rawJson
+        : stringify(input.rawJson ?? {}),
+    tradedAtMs: integer(input.tradedAtMs, now),
+    updatedAtMs: integer(input.updatedAtMs, now),
+  });
+
+  try {
+    return {
+      row: db.walletSwapsV1.insert(row) as WalletSwap,
+      inserted: true,
+    };
+  } catch (error) {
+    if (!isDuplicateWalletSwapError(error)) throw error;
+    const existing = db.walletSwapsV1
+      .select()
+      .where({ eventKey: row.eventKey })
+      .get() as WalletSwap | null;
+    return { row: existing ?? row, inserted: false };
+  }
+}
+
+export function listWalletSwaps(
+  input: {
+    wallet?: string | null;
+    mint?: string | null;
+    side?: "buy" | "sell" | "swap" | "unknown" | null;
+    sinceMs?: number;
+    copyableOnly?: boolean;
+    limit?: number;
+  } = {},
+): WalletSwap[] {
+  let query = db.walletSwapsV1.select();
+  if (input.wallet?.trim())
+    query = query.where({ wallet: input.wallet.trim() });
+  if (input.side) query = query.where({ side: input.side });
+  if (positiveTime(input.sinceMs) > 0) {
+    query = query.where({ tradedAtMs: { $gte: positiveTime(input.sinceMs) } });
+  }
+  if (input.copyableOnly) query = query.where({ copyable: 1 });
+
+  const mint = input.mint?.trim();
+  if (mint) query = query.where({ subjectMint: mint });
+  const limit = Math.max(1, Math.min(integer(input.limit, 250), 100_000));
+  return query.orderBy("tradedAtMs", "desc").limit(limit).all() as WalletSwap[];
 }
 
 export type AppendTokenTradeResult = {
@@ -2897,6 +3243,15 @@ export function terminalStoreStats(
     ).length,
     imagedTokens: tokens.filter((token) => Boolean(token.image)).length,
     indexedTrades: db.tokenTradesV2.count(),
+    watchedWallets: db.watchedWalletsV1.count(),
+    enabledWatchedWallets: (
+      db.watchedWalletsV1
+        .select()
+        .where({ enabled: 1 })
+        .all() as WatchedWallet[]
+    ).length,
+    walletTransactions: db.walletTransactionsV1.count(),
+    walletSwaps: db.walletSwapsV1.count(),
     terminalTrades: db.terminalTradesLive.count(),
     trades: db.tokenTradesV2.count() + db.terminalTradesLive.count(),
     indicators: db.terminalIndicatorsLive.count(),
