@@ -1,11 +1,6 @@
 import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database, defineView, z } from "sqlite-zod-orm";
-import {
-  dbMeasure,
-  measureRetry,
-  summarizeForMeasure,
-} from "../src/solard/measure.js";
 
 const DEFAULT_DB_PATH = join(
   process.env.HOME || process.env.USERPROFILE || ".",
@@ -1132,6 +1127,8 @@ export const db = await openDatabaseWithRetry(
       },
     ),
 );
+
+export const terminalDb = db;
 
 const PRICE_WINDOW_TTL_MS = 1_000;
 const TERMINAL_FEED_SCOPE = "pump";
