@@ -78,6 +78,13 @@ type TrackerPayload = {
   swaps?: SwapRow[];
   positions?: PositionRow[];
   worker?: AnyRow | null;
+  transactionStats?: {
+    total?: number;
+    parsed?: number;
+    ignored?: number;
+    errors?: number;
+    latestAtMs?: number | null;
+  };
   stats?: {
     trackedWallets?: number;
     activeWallets?: number;
@@ -121,7 +128,13 @@ const SELECTED_WALLET_KEY = "solard:wallet-tracker:selected-wallet";
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 const state: PageState = {
-  payload: { wallets: [], swaps: [], positions: [], stats: {} },
+  payload: {
+    wallets: [],
+    swaps: [],
+    positions: [],
+    transactionStats: {},
+    stats: {},
+  },
   loading: true,
   refreshing: false,
   saving: false,
@@ -244,12 +257,9 @@ function formatAmount(value: unknown): string {
   const amount = number(value);
   const absolute = Math.abs(amount);
   if (absolute === 0) return "0";
-  if (absolute >= 1_000_000)
-    return amount.toLocaleString(undefined, { maximumFractionDigits: 0 });
-  if (absolute >= 1_000)
-    return amount.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  if (absolute >= 1)
-    return amount.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  if (absolute >= 1_000_000) return amount.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (absolute >= 1_000) return amount.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (absolute >= 1) return amount.toLocaleString(undefined, { maximumFractionDigits: 4 });
   return amount.toLocaleString(undefined, { maximumSignificantDigits: 5 });
 }
 
@@ -312,17 +322,11 @@ function walletName(address: string): string {
   return text(wallet?.label) || shortAddress(address);
 }
 
-function tokenLabel(
-  token: TokenSummary | null | undefined,
-  mint: string,
-): string {
+function tokenLabel(token: TokenSummary | null | undefined, mint: string): string {
   return text(token?.symbol) || text(token?.name) || shortAddress(mint);
 }
 
-function tokenSubLabel(
-  token: TokenSummary | null | undefined,
-  mint: string,
-): string {
+function tokenSubLabel(token: TokenSummary | null | undefined, mint: string): string {
   const name = text(token?.name);
   const symbol = text(token?.symbol);
   if (name && symbol) return name;
@@ -396,13 +400,17 @@ async function refresh(manual = true): Promise<void> {
       swaps: Array.isArray(payload.swaps) ? payload.swaps : [],
       positions: Array.isArray(payload.positions) ? payload.positions : [],
       worker: payload.worker ?? null,
+      transactionStats: payload.transactionStats ?? {},
       stats: payload.stats ?? {},
       generatedAtMs: payload.generatedAtMs ?? Date.now(),
     };
     state.lastLoadedAtMs = Date.now();
     state.error = null;
 
-    if (state.selectedWallet && !walletByAddress(state.selectedWallet)) {
+    if (
+      state.selectedWallet &&
+      !walletByAddress(state.selectedWallet)
+    ) {
       state.selectedWallet = "";
       localStorage.removeItem(SELECTED_WALLET_KEY);
     }
@@ -499,10 +507,7 @@ async function saveWallet(): Promise<void> {
   }
 }
 
-async function setWalletEnabled(
-  wallet: WalletRow,
-  nextEnabled: boolean,
-): Promise<void> {
+async function setWalletEnabled(wallet: WalletRow, nextEnabled: boolean): Promise<void> {
   if (state.actionAddress) return;
   state.actionAddress = wallet.address;
   state.error = null;
@@ -520,6 +525,31 @@ async function setWalletEnabled(
     state.notice = nextEnabled
       ? `${walletName(wallet.address)} is being tracked.`
       : `${walletName(wallet.address)} is paused.`;
+    await refresh(false);
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.actionAddress = null;
+    rerender();
+  }
+}
+
+async function reindexWallet(wallet: WalletRow): Promise<void> {
+  if (state.actionAddress) return;
+  state.actionAddress = wallet.address;
+  state.error = null;
+  state.notice = null;
+  rerender();
+
+  try {
+    await api<WalletRow>("/api/wallet-tracker", {
+      method: "PATCH",
+      body: JSON.stringify({
+        action: "reindex",
+        address: wallet.address,
+      }),
+    });
+    state.notice = `${walletName(wallet.address)} was queued for a fresh backfill.`;
     await refresh(false);
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
@@ -560,8 +590,7 @@ function workerHealth(): {
     };
   }
   const heartbeat = number(worker.heartbeatAtMs ?? worker.updatedAtMs);
-  const ageMs =
-    heartbeat > 0 ? Date.now() - heartbeat : Number.POSITIVE_INFINITY;
+  const ageMs = heartbeat > 0 ? Date.now() - heartbeat : Number.POSITIVE_INFINITY;
   const status = text(worker.status).toLowerCase();
   if ((status === "ok" || status === "running") && ageMs < 30_000) {
     return {
@@ -580,8 +609,7 @@ function workerHealth(): {
   return {
     label: text(worker.status) || "Indexer offline",
     phase: "bad",
-    detail:
-      heartbeat > 0 ? `Last heartbeat ${timeAgo(heartbeat)}` : "No heartbeat",
+    detail: heartbeat > 0 ? `Last heartbeat ${timeAgo(heartbeat)}` : "No heartbeat",
   };
 }
 
@@ -608,8 +636,7 @@ function filteredSwaps(): SwapRow[] {
 function filteredPositions(): PositionRow[] {
   const query = text(state.search).toLowerCase();
   return positions().filter((position) => {
-    if (!state.showClosedPositions && number(position.netTokenUi) <= 0)
-      return false;
+    if (!state.showClosedPositions && number(position.netTokenUi) <= 0) return false;
     if (!query) return true;
     return [
       position.wallet,
@@ -623,13 +650,7 @@ function filteredPositions(): PositionRow[] {
   });
 }
 
-function TokenIdentity({
-  token,
-  mint,
-}: {
-  token?: TokenSummary | null;
-  mint: string;
-}) {
+function TokenIdentity({ token, mint }: { token?: TokenSummary | null; mint: string }) {
   const label = tokenLabel(token, mint);
   return (
     <div className="tracker-token-identity">
@@ -663,8 +684,8 @@ function TrackerHero() {
         <span className="section-kicker">Wallet intelligence</span>
         <h2>Tracked wallets</h2>
         <p>
-          Subscribe to selected wallets, record their buys and sells, and build
-          a clean activity history before enabling copy-trade policies.
+          Subscribe to selected wallets, record their buys and sells, and build a
+          clean activity history before enabling copy-trade policies.
         </p>
       </div>
       <div className="tracker-hero-actions">
@@ -717,6 +738,11 @@ function StatsGrid() {
       value: formatInteger(stats.copyableTrades),
       detail: "Exact supported parsers",
     },
+    {
+      label: "Transactions scanned",
+      value: formatInteger(state.payload.transactionStats?.total),
+      detail: `${formatInteger(state.payload.transactionStats?.ignored)} ignored · ${formatInteger(state.payload.transactionStats?.errors)} errors`,
+    },
   ];
 
   return (
@@ -744,9 +770,7 @@ function WalletCard({ wallet }: { wallet: WalletRow; key?: string }) {
           className="tracker-wallet-primary"
           onClick={() => selectWallet(selected ? "" : wallet.address)}
         >
-          <span
-            className={`tracker-wallet-avatar ${active ? "active" : "paused"}`}
-          >
+          <span className={`tracker-wallet-avatar ${active ? "active" : "paused"}`}>
             {(text(wallet.label) || wallet.address).slice(0, 1).toUpperCase()}
           </span>
           <span>
@@ -816,6 +840,14 @@ function WalletCard({ wallet }: { wallet: WalletRow; key?: string }) {
         <button
           type="button"
           className="secondary compact"
+          disabled={acting}
+          onClick={() => void reindexWallet(wallet)}
+        >
+          {acting ? "Queueing…" : "Reindex"}
+        </button>
+        <button
+          type="button"
+          className="secondary compact"
           onClick={() => editWallet(wallet)}
         >
           Edit
@@ -864,9 +896,7 @@ function WalletList() {
 
 function WalletEditor() {
   return (
-    <section
-      className={`tracker-panel tracker-editor ${state.editorOpen ? "open" : ""}`}
-    >
+    <section className={`tracker-panel tracker-editor ${state.editorOpen ? "open" : ""}`}>
       <header className="tracker-section-head">
         <div>
           <span className="tracker-step">02</span>
@@ -874,11 +904,7 @@ function WalletEditor() {
           <p>Labels are local. Only public wallet addresses are required.</p>
         </div>
         {state.editorOpen ? (
-          <button
-            type="button"
-            className="secondary compact"
-            onClick={closeEditor}
-          >
+          <button type="button" className="secondary compact" onClick={closeEditor}>
             Close
           </button>
         ) : null}
@@ -959,11 +985,7 @@ function WalletEditor() {
             <button type="button" className="secondary" onClick={closeEditor}>
               Cancel
             </button>
-            <button
-              type="submit"
-              className="primary-large"
-              disabled={state.saving}
-            >
+            <button type="submit" className="primary-large" disabled={state.saving}>
               {state.saving
                 ? "Saving…"
                 : state.editingAddress
@@ -973,15 +995,9 @@ function WalletEditor() {
           </footer>
         </form>
       ) : (
-        <button
-          type="button"
-          className="tracker-empty editor"
-          onClick={openNewWallet}
-        >
+        <button type="button" className="tracker-empty editor" onClick={openNewWallet}>
           <b>Add another wallet</b>
-          <span>
-            Track any public Solana address without importing a keypair.
-          </span>
+          <span>Track any public Solana address without importing a keypair.</span>
         </button>
       )}
     </section>
@@ -1009,9 +1025,7 @@ function FilterBar() {
         <span>Side</span>
         <select
           value={state.side}
-          onInput={(event: any) =>
-            setSide(event.currentTarget.value as SideFilter)
-          }
+          onInput={(event: any) => setSide(event.currentTarget.value as SideFilter)}
         >
           <option value="all">All activity</option>
           <option value="buy">Buys</option>
@@ -1024,9 +1038,7 @@ function FilterBar() {
         <span>Window</span>
         <select
           value={state.horizon}
-          onInput={(event: any) =>
-            setHorizon(event.currentTarget.value as Horizon)
-          }
+          onInput={(event: any) => setHorizon(event.currentTarget.value as Horizon)}
         >
           <option value="1h">Last hour</option>
           <option value="24h">Last 24 hours</option>
@@ -1070,17 +1082,11 @@ function ActivityRow({ swap }: { swap: SwapRow; key?: string }) {
       </div>
       <div className="tracker-activity-amount">
         <b>{formatAmount(tokenAmount)}</b>
-        <small>
-          {swap.quoteMint
-            ? `${formatAmount(quoteAmount)} quote`
-            : "Quote unavailable"}
-        </small>
+        <small>{swap.quoteMint ? `${formatAmount(quoteAmount)} quote` : "Quote unavailable"}</small>
       </div>
       <div className="tracker-activity-price">
         <b>{formatUsd(swap.priceUsd ?? swap.token?.priceUsd)}</b>
-        <small>
-          {formatUsd(swap.marketCapUsd ?? swap.token?.marketCapUsd)} mcap
-        </small>
+        <small>{formatUsd(swap.marketCapUsd ?? swap.token?.marketCapUsd)} mcap</small>
       </div>
       <div className="tracker-activity-wallet">
         <b>{walletName(swap.wallet)}</b>
@@ -1144,21 +1150,14 @@ function ActivityPanel() {
       ) : (
         <div className="tracker-empty static">
           <b>No trades match these filters</b>
-          <span>
-            The indexer will populate this list as watched wallets trade.
-          </span>
+          <span>The indexer will populate this list as watched wallets trade.</span>
         </div>
       )}
     </section>
   );
 }
 
-function PositionRowView({
-  position,
-}: {
-  position: PositionRow;
-  key?: string;
-}) {
+function PositionRowView({ position }: { position: PositionRow; key?: string }) {
   const open = number(position.netTokenUi) > 0;
   return (
     <article className="tracker-position-row">
@@ -1216,9 +1215,8 @@ function PositionsPanel() {
       </header>
 
       <div className="tracker-position-disclaimer" role="note">
-        Transfers, deposits, and trades before the configured backfill window
-        can make these balances differ from the wallet’s actual on-chain
-        holdings.
+        Transfers, deposits, and trades before the configured backfill window can
+        make these balances differ from the wallet’s actual on-chain holdings.
       </div>
 
       {rows.length ? (
@@ -1282,9 +1280,7 @@ export function WalletTrackerPage() {
             ? `Updated ${timeAgo(state.lastLoadedAtMs)}`
             : "Waiting for tracker data"}
         </span>
-        <span>
-          Automatic refresh every {POLL_VISIBLE_MS / 1_000}s while visible.
-        </span>
+        <span>Automatic refresh every {POLL_VISIBLE_MS / 1_000}s while visible.</span>
       </footer>
     </main>
   );

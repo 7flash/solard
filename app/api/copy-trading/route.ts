@@ -62,6 +62,13 @@ function finite(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function optionalNonNegative(value: unknown, label: string): number | null {
+  const parsed = finite(value);
+  if (parsed == null) return null;
+  if (parsed < 0) throw new Error(`${label} cannot be negative.`);
+  return parsed;
+}
+
 function bool(value: unknown, fallback: boolean): boolean {
   if (value == null || value === "") return fallback;
   if (typeof value === "boolean") return value;
@@ -188,12 +195,74 @@ function profileInput(
     throw new Error("Minimum market cap cannot exceed maximum market cap.");
   }
 
+  const maxPriceAgeMs = optionalNonNegative(
+    body.maxPriceAgeMs,
+    "Maximum price age",
+  );
+  const minTokenAgeMs = optionalNonNegative(
+    body.minTokenAgeMs,
+    "Minimum token age",
+  );
+  const maxTokenAgeMs = optionalNonNegative(
+    body.maxTokenAgeMs,
+    "Maximum token age",
+  );
+  if (
+    minTokenAgeMs != null &&
+    maxTokenAgeMs != null &&
+    minTokenAgeMs > maxTokenAgeMs
+  ) {
+    throw new Error("Minimum token age cannot exceed maximum token age.");
+  }
+
+  const minLeaderQuoteAmountUi = optionalNonNegative(
+    body.minLeaderQuoteAmountUi,
+    "Minimum leader trade amount",
+  );
+  const maxLeaderQuoteAmountUi = optionalNonNegative(
+    body.maxLeaderQuoteAmountUi,
+    "Maximum leader trade amount",
+  );
+  if (
+    minLeaderQuoteAmountUi != null &&
+    maxLeaderQuoteAmountUi != null &&
+    minLeaderQuoteAmountUi > maxLeaderQuoteAmountUi
+  ) {
+    throw new Error(
+      "Minimum leader trade amount cannot exceed maximum leader trade amount.",
+    );
+  }
+
   const allowedMints = cleanStringArray(body.allowedMints);
   const blockedMints = cleanStringArray(body.blockedMints);
   const allowedQuotes = cleanStringArray(body.allowedQuoteMints);
+  const allowedPhases = cleanStringArray(body.allowedPhases).map((value) =>
+    value.toLowerCase(),
+  );
+  const allowedVenues = cleanStringArray(body.allowedVenues).map((value) =>
+    value.toLowerCase(),
+  );
+  const allowedParsers = cleanStringArray(body.allowedParsers).map((value) =>
+    value.toLowerCase(),
+  );
+  const invalidPhase = allowedPhases.find(
+    (value) => !["pump", "migrated", "unknown"].includes(value),
+  );
+  if (invalidPhase)
+    throw new Error(`Unsupported token phase: ${invalidPhase}.`);
+
   const overlap = allowedMints.find((mint) => blockedMints.includes(mint));
   if (overlap) {
     throw new Error(`Mint ${overlap} cannot be both allowed and blocked.`);
+  }
+
+  const trackedLeader = listWatchedWallets({ limit: 50_000 }).find(
+    (wallet) => wallet.address === leaderWallet,
+  );
+  if (!trackedLeader) {
+    throw new Error(
+      "Leader wallet is not in tracked wallets. Add it on the Tracked Wallets page first.",
+    );
   }
 
   return {
@@ -249,11 +318,47 @@ function profileInput(
       1_000,
       integer(body.maxEventAgeMs, existing?.maxEventAgeMs ?? 30_000),
     ),
+    requirePriceData: bool(
+      body.requirePriceData,
+      existing ? Number(existing.requirePriceData) > 0 : true,
+    )
+      ? 1
+      : 0,
+    allowMayhem: bool(
+      body.allowMayhem,
+      existing ? Number(existing.allowMayhem) > 0 : false,
+    )
+      ? 1
+      : 0,
     minMarketCapUsd,
     maxMarketCapUsd,
+    maxPriceAgeMs,
+    minTokenAgeMs,
+    maxTokenAgeMs,
+    minHolders: optionalNonNegative(body.minHolders, "Minimum holders"),
+    minTrades1m: optionalNonNegative(body.minTrades1m, "Minimum trades 1m"),
+    minTrades5m: optionalNonNegative(body.minTrades5m, "Minimum trades 5m"),
+    minTrades15m: optionalNonNegative(body.minTrades15m, "Minimum trades 15m"),
+    minVolumeSol1m: optionalNonNegative(
+      body.minVolumeSol1m,
+      "Minimum volume 1m",
+    ),
+    minVolumeSol5m: optionalNonNegative(
+      body.minVolumeSol5m,
+      "Minimum volume 5m",
+    ),
+    minVolumeSol15m: optionalNonNegative(
+      body.minVolumeSol15m,
+      "Minimum volume 15m",
+    ),
+    minLeaderQuoteAmountUi,
+    maxLeaderQuoteAmountUi,
     allowedMintsJson: JSON.stringify(allowedMints),
     blockedMintsJson: JSON.stringify(blockedMints),
     allowedQuoteMintsJson: JSON.stringify(allowedQuotes),
+    allowedPhasesJson: JSON.stringify(allowedPhases),
+    allowedVenuesJson: JSON.stringify(allowedVenues),
+    allowedParsersJson: JSON.stringify(allowedParsers),
     updatedAtMs: Date.now(),
   };
 }
@@ -287,6 +392,10 @@ export async function GET(request: Request): Promise<Response> {
       processes.find((row) =>
         /copy/i.test(`${row.name ?? ""} ${row.kind ?? ""}`),
       ) ?? null;
+    const walletWorker =
+      processes.find((row) =>
+        /wallet/i.test(`${row.name ?? ""} ${row.kind ?? ""}`),
+      ) ?? null;
     const trackedWallets = listWatchedWallets({ limit: 50_000 });
     const global = liveSettings();
 
@@ -295,6 +404,7 @@ export async function GET(request: Request): Promise<Response> {
       intents,
       trackedWallets,
       worker,
+      walletWorker,
       global,
       stats: {
         profiles: profiles.length,

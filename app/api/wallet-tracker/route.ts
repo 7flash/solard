@@ -3,7 +3,9 @@ import {
   getWatchedWallet,
   listProcessStatus,
   listWalletSwaps,
+  listWalletTransactions,
   listWatchedWallets,
+  resetWatchedWalletBackfill,
   upsertWatchedWallet,
   type WalletSwap,
   type WatchedWallet,
@@ -300,6 +302,11 @@ export async function GET(request: Request): Promise<Response> {
     const summarySwaps = wallet
       ? decorateSwaps(listWalletSwaps({ limit: positionLimit }))
       : portfolioSwaps;
+    const transactions = listWalletTransactions({
+      wallet,
+      sinceMs,
+      limit: Math.max(limit, 1_000),
+    });
     const processes = listProcessStatus(100);
     const worker =
       processes.find((row) =>
@@ -317,6 +324,16 @@ export async function GET(request: Request): Promise<Response> {
       swaps: recentSwaps,
       positions,
       worker,
+      transactionStats: {
+        total: transactions.length,
+        parsed: transactions.filter((row) => row.parseStatus === "parsed")
+          .length,
+        ignored: transactions.filter((row) => row.parseStatus === "ignored")
+          .length,
+        errors: transactions.filter((row) => row.parseStatus === "error")
+          .length,
+        latestAtMs: transactions[0]?.tradedAtMs ?? null,
+      },
       stats: {
         trackedWallets: wallets.length,
         activeWallets,
@@ -358,6 +375,18 @@ export async function PATCH(request: Request): Promise<Response> {
     const address = cleanAddress(body.address);
     const existing = getWatchedWallet(address);
     if (!existing) return response("Watched wallet not found.", 404);
+
+    if (text(body.action) === "reindex") {
+      const reset = resetWatchedWalletBackfill(address);
+      return response(
+        upsertWatchedWallet({
+          ...reset,
+          enabled: 1,
+          backfillEnabled: 1,
+          updatedAtMs: Date.now(),
+        }),
+      );
+    }
 
     const wallet = upsertWatchedWallet({
       ...existing,

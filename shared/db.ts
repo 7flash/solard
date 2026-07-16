@@ -168,6 +168,93 @@ export const WalletSwapSchema = z.object({
   updatedAtMs: z.coerce.number().default(0),
 });
 
+export const CopyTradeProfileSchema = z.object({
+  profileKey: z.string(),
+  leaderWallet: z.string(),
+  followerRef: z.string(),
+  label: z.string().nullable().default(null),
+
+  enabled: z.coerce.number().default(1),
+  mode: z.enum(["paper", "live"]).default("paper"),
+  copyBuys: z.coerce.number().default(1),
+  copySells: z.coerce.number().default(1),
+
+  buySizing: z.enum(["fixed", "leader-ratio"]).default("fixed"),
+  fixedBuyAmountUi: z.coerce.number().default(0.05),
+  leaderScaleBps: z.coerce.number().default(10_000),
+  maxBuyAmountUi: z.coerce.number().default(1),
+  sellBalanceBps: z.coerce.number().default(10_000),
+
+  slippageBps: z.coerce.number().default(500),
+  maxEventAgeMs: z.coerce.number().default(30_000),
+
+  // Terminal-style token and market filters.
+  requirePriceData: z.coerce.number().default(1),
+  allowMayhem: z.coerce.number().default(0),
+  minMarketCapUsd: z.coerce.number().nullable().default(null),
+  maxMarketCapUsd: z.coerce.number().nullable().default(null),
+  maxPriceAgeMs: z.coerce.number().nullable().default(null),
+  minTokenAgeMs: z.coerce.number().nullable().default(null),
+  maxTokenAgeMs: z.coerce.number().nullable().default(null),
+  minHolders: z.coerce.number().nullable().default(null),
+  minTrades1m: z.coerce.number().nullable().default(null),
+  minTrades5m: z.coerce.number().nullable().default(null),
+  minTrades15m: z.coerce.number().nullable().default(null),
+  minVolumeSol1m: z.coerce.number().nullable().default(null),
+  minVolumeSol5m: z.coerce.number().nullable().default(null),
+  minVolumeSol15m: z.coerce.number().nullable().default(null),
+  minLeaderQuoteAmountUi: z.coerce.number().nullable().default(null),
+  maxLeaderQuoteAmountUi: z.coerce.number().nullable().default(null),
+
+  allowedMintsJson: z.string().default("[]"),
+  blockedMintsJson: z.string().default("[]"),
+  allowedQuoteMintsJson: z.string().default("[]"),
+  allowedPhasesJson: z.string().default("[]"),
+  allowedVenuesJson: z.string().default("[]"),
+  allowedParsersJson: z.string().default("[]"),
+
+  createdAtMs: z.coerce.number(),
+  updatedAtMs: z.coerce.number(),
+});
+
+export const CopyTradeIntentSchema = z.object({
+  intentKey: z.string(),
+  profileKey: z.string(),
+  leaderEventKey: z.string(),
+  leaderWallet: z.string(),
+  followerRef: z.string(),
+
+  sourceSignature: z.string(),
+  sourceSlot: z.coerce.number().default(0),
+  sourceTradedAtMs: z.coerce.number().default(0),
+
+  side: z.enum(["buy", "sell"]).default("buy"),
+  inputMint: z.string(),
+  outputMint: z.string(),
+  subjectMint: z.string(),
+  quoteMint: z.string().nullable().default(null),
+
+  amountKind: z.enum(["exact-input-ui", "balance-bps"]),
+  amountUi: z.coerce.number().nullable().default(null),
+  balanceBps: z.coerce.number().nullable().default(null),
+  slippageBps: z.coerce.number().default(500),
+
+  mode: z.enum(["paper", "live"]).default("paper"),
+  status: z
+    .enum(["queued", "paper", "sending", "sent", "skipped", "failed"])
+    .default("queued"),
+  reason: z.string().nullable().default(null),
+
+  attempts: z.coerce.number().default(0),
+  nextAttemptAtMs: z.coerce.number().default(0),
+  executionSignature: z.string().nullable().default(null),
+  requestJson: z.string().default("{}"),
+  resultJson: z.string().default("{}"),
+
+  createdAtMs: z.coerce.number(),
+  updatedAtMs: z.coerce.number(),
+});
+
 export const ProcessStatusSchema = z.object({
   name: z.string(),
   kind: z.string(),
@@ -412,6 +499,9 @@ export type TokenTrade = z.infer<typeof TokenTradeSchema>;
 export type WatchedWallet = z.infer<typeof WatchedWalletSchema>;
 export type WalletTransaction = z.infer<typeof WalletTransactionSchema>;
 export type WalletSwap = z.infer<typeof WalletSwapSchema>;
+
+export type CopyTradeProfile = z.infer<typeof CopyTradeProfileSchema>;
+export type CopyTradeIntent = z.infer<typeof CopyTradeIntentSchema>;
 
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>;
 
@@ -673,6 +763,8 @@ export const db = await openDatabaseWithRetry(
         watchedWalletsV1: WatchedWalletSchema,
         walletTransactionsV1: WalletTransactionSchema,
         walletSwapsV1: WalletSwapSchema,
+        copyTradeProfilesV1: CopyTradeProfileSchema,
+        copyTradeIntentsV1: CopyTradeIntentSchema,
         terminalTradesLive: TerminalTradeSchema,
         terminalIndicatorsLive: TerminalIndicatorSchema,
         processStatus: ProcessStatusSchema,
@@ -697,6 +789,8 @@ export const db = await openDatabaseWithRetry(
           watchedWalletsV1: [["address"]],
           walletTransactionsV1: [["walletTxKey"]],
           walletSwapsV1: [["eventKey"]],
+          copyTradeProfilesV1: [["profileKey"]],
+          copyTradeIntentsV1: [["intentKey"]],
           terminalTradesLive: [["tradeKey"]],
           terminalIndicatorsLive: [["indicatorKey"], ["mint", "intervalSec"]],
           processStatus: [["name"]],
@@ -747,6 +841,20 @@ export const db = await openDatabaseWithRetry(
             ["outputMint", "tradedAtMs"],
             ["signature"],
             ["copyable", "tradedAtMs"],
+          ],
+
+          copyTradeProfilesV1: [
+            ["enabled", "updatedAtMs"],
+            ["leaderWallet", "enabled"],
+            ["followerRef", "enabled"],
+          ],
+
+          copyTradeIntentsV1: [
+            ["profileKey", "createdAtMs"],
+            ["leaderWallet", "sourceTradedAtMs"],
+            ["status", "nextAttemptAtMs"],
+            ["sourceSignature"],
+            ["leaderEventKey"],
           ],
 
           terminalTradesLive: [
@@ -1649,6 +1757,30 @@ export function updateWatchedWalletCursor(
   });
 }
 
+export function resetWatchedWalletBackfill(address: string): WatchedWallet {
+  const key = address.trim();
+  const existing = getWatchedWallet(key);
+  if (!existing) throw new Error(`Unknown watched wallet: ${address}`);
+
+  db.watchedWalletsV1
+    .update({
+      lastBackfillSignature: null,
+      lastBackfillAtMs: 0,
+      updatedAtMs: Date.now(),
+    })
+    .where({ address: key })
+    .exec();
+
+  return (
+    getWatchedWallet(key) ?? {
+      ...existing,
+      lastBackfillSignature: null,
+      lastBackfillAtMs: 0,
+      updatedAtMs: Date.now(),
+    }
+  );
+}
+
 export function upsertWalletTransaction(
   input: Partial<WalletTransaction> & {
     wallet: string;
@@ -1699,6 +1831,31 @@ export function upsertWalletTransaction(
       updatedAtMs: table.max("updatedAtMs", 0),
     }),
   }) as WalletTransaction;
+}
+
+export function listWalletTransactions(
+  input: {
+    wallet?: string | null;
+    parseStatus?: WalletTransaction["parseStatus"] | null;
+    sinceMs?: number;
+    limit?: number;
+  } = {},
+): WalletTransaction[] {
+  let query = db.walletTransactionsV1.select();
+  if (input.wallet?.trim()) {
+    query = query.where({ wallet: input.wallet.trim() });
+  }
+  if (input.parseStatus) {
+    query = query.where({ parseStatus: input.parseStatus });
+  }
+  const sinceMs = positiveTime(input.sinceMs);
+  if (sinceMs > 0) {
+    query = query.where({ tradedAtMs: { $gte: sinceMs } });
+  }
+  return query
+    .orderBy("tradedAtMs", "desc")
+    .limit(Math.max(1, Math.min(integer(input.limit, 1_000), 50_000)))
+    .all() as WalletTransaction[];
 }
 
 export type AppendWalletSwapResult = {
@@ -1799,6 +1956,447 @@ export function listWalletSwaps(
   if (mint) query = query.where({ subjectMint: mint });
   const limit = Math.max(1, Math.min(integer(input.limit, 250), 100_000));
   return query.orderBy("tradedAtMs", "desc").limit(limit).all() as WalletSwap[];
+}
+
+function cleanJsonStringArray(value: unknown): string {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return JSON.stringify([
+          ...new Set(parsed.map((item) => String(item).trim()).filter(Boolean)),
+        ]);
+      }
+    } catch {}
+  }
+  if (Array.isArray(value)) {
+    return JSON.stringify([
+      ...new Set(value.map((item) => String(item).trim()).filter(Boolean)),
+    ]);
+  }
+  return "[]";
+}
+
+export function listCopyTradeProfiles(
+  input: {
+    enabledOnly?: boolean;
+    leaderWallet?: string | null;
+    followerRef?: string | null;
+    limit?: number;
+  } = {},
+): CopyTradeProfile[] {
+  let query = db.copyTradeProfilesV1.select();
+  if (input.enabledOnly) query = query.where({ enabled: 1 });
+  if (input.leaderWallet?.trim()) {
+    query = query.where({ leaderWallet: input.leaderWallet.trim() });
+  }
+  if (input.followerRef?.trim()) {
+    query = query.where({ followerRef: input.followerRef.trim() });
+  }
+  return query
+    .orderBy("updatedAtMs", "desc")
+    .limit(Math.max(1, Math.min(integer(input.limit, 10_000), 50_000)))
+    .all() as CopyTradeProfile[];
+}
+
+export function getCopyTradeProfile(
+  profileKey: string,
+): CopyTradeProfile | null {
+  const key = profileKey.trim();
+  if (!key) return null;
+  return (
+    (db.copyTradeProfilesV1
+      .select()
+      .where({ profileKey: key })
+      .get() as CopyTradeProfile | null) ?? null
+  );
+}
+
+export function upsertCopyTradeProfile(
+  input: Partial<CopyTradeProfile> & {
+    profileKey?: string;
+    leaderWallet: string;
+    followerRef: string;
+  },
+): CopyTradeProfile {
+  const now = Date.now();
+  const leaderWallet = input.leaderWallet.trim();
+  const followerRef = input.followerRef.trim();
+  if (!leaderWallet || !followerRef) {
+    throw new Error("Copy profile requires leaderWallet and followerRef");
+  }
+  const profileKey = text(input.profileKey) ?? `${leaderWallet}:${followerRef}`;
+  const existing = getCopyTradeProfile(profileKey);
+  const row = CopyTradeProfileSchema.parse({
+    profileKey,
+    leaderWallet,
+    followerRef,
+    label:
+      input.label === null
+        ? null
+        : (text(input.label) ?? existing?.label ?? null),
+    enabled:
+      input.enabled == null
+        ? (existing?.enabled ?? 1)
+        : Number(input.enabled) > 0
+          ? 1
+          : 0,
+    mode:
+      input.mode === "live"
+        ? "live"
+        : input.mode === "paper"
+          ? "paper"
+          : (existing?.mode ?? "paper"),
+    copyBuys:
+      input.copyBuys == null
+        ? (existing?.copyBuys ?? 1)
+        : Number(input.copyBuys) > 0
+          ? 1
+          : 0,
+    copySells:
+      input.copySells == null
+        ? (existing?.copySells ?? 1)
+        : Number(input.copySells) > 0
+          ? 1
+          : 0,
+    buySizing:
+      input.buySizing === "leader-ratio" || input.buySizing === "fixed"
+        ? input.buySizing
+        : (existing?.buySizing ?? "fixed"),
+    fixedBuyAmountUi: Math.max(
+      0,
+      finite(input.fixedBuyAmountUi) ?? existing?.fixedBuyAmountUi ?? 0.05,
+    ),
+    leaderScaleBps: Math.max(
+      1,
+      Math.min(
+        100_000,
+        integer(input.leaderScaleBps, existing?.leaderScaleBps ?? 10_000),
+      ),
+    ),
+    maxBuyAmountUi: Math.max(
+      0,
+      finite(input.maxBuyAmountUi) ?? existing?.maxBuyAmountUi ?? 1,
+    ),
+    sellBalanceBps: Math.max(
+      1,
+      Math.min(
+        10_000,
+        integer(input.sellBalanceBps, existing?.sellBalanceBps ?? 10_000),
+      ),
+    ),
+    slippageBps: Math.max(
+      1,
+      Math.min(
+        10_000,
+        integer(input.slippageBps, existing?.slippageBps ?? 500),
+      ),
+    ),
+    maxEventAgeMs: Math.max(
+      1_000,
+      integer(input.maxEventAgeMs, existing?.maxEventAgeMs ?? 30_000),
+    ),
+    requirePriceData:
+      input.requirePriceData == null
+        ? (existing?.requirePriceData ?? 1)
+        : Number(input.requirePriceData) > 0
+          ? 1
+          : 0,
+    allowMayhem:
+      input.allowMayhem == null
+        ? (existing?.allowMayhem ?? 0)
+        : Number(input.allowMayhem) > 0
+          ? 1
+          : 0,
+    minMarketCapUsd:
+      input.minMarketCapUsd === null
+        ? null
+        : (finite(input.minMarketCapUsd) ?? existing?.minMarketCapUsd ?? null),
+    maxMarketCapUsd:
+      input.maxMarketCapUsd === null
+        ? null
+        : (finite(input.maxMarketCapUsd) ?? existing?.maxMarketCapUsd ?? null),
+    maxPriceAgeMs:
+      input.maxPriceAgeMs === null
+        ? null
+        : (finite(input.maxPriceAgeMs) ?? existing?.maxPriceAgeMs ?? null),
+    minTokenAgeMs:
+      input.minTokenAgeMs === null
+        ? null
+        : (finite(input.minTokenAgeMs) ?? existing?.minTokenAgeMs ?? null),
+    maxTokenAgeMs:
+      input.maxTokenAgeMs === null
+        ? null
+        : (finite(input.maxTokenAgeMs) ?? existing?.maxTokenAgeMs ?? null),
+    minHolders:
+      input.minHolders === null
+        ? null
+        : (finite(input.minHolders) ?? existing?.minHolders ?? null),
+    minTrades1m:
+      input.minTrades1m === null
+        ? null
+        : (finite(input.minTrades1m) ?? existing?.minTrades1m ?? null),
+    minTrades5m:
+      input.minTrades5m === null
+        ? null
+        : (finite(input.minTrades5m) ?? existing?.minTrades5m ?? null),
+    minTrades15m:
+      input.minTrades15m === null
+        ? null
+        : (finite(input.minTrades15m) ?? existing?.minTrades15m ?? null),
+    minVolumeSol1m:
+      input.minVolumeSol1m === null
+        ? null
+        : (finite(input.minVolumeSol1m) ?? existing?.minVolumeSol1m ?? null),
+    minVolumeSol5m:
+      input.minVolumeSol5m === null
+        ? null
+        : (finite(input.minVolumeSol5m) ?? existing?.minVolumeSol5m ?? null),
+    minVolumeSol15m:
+      input.minVolumeSol15m === null
+        ? null
+        : (finite(input.minVolumeSol15m) ?? existing?.minVolumeSol15m ?? null),
+    minLeaderQuoteAmountUi:
+      input.minLeaderQuoteAmountUi === null
+        ? null
+        : (finite(input.minLeaderQuoteAmountUi) ??
+          existing?.minLeaderQuoteAmountUi ??
+          null),
+    maxLeaderQuoteAmountUi:
+      input.maxLeaderQuoteAmountUi === null
+        ? null
+        : (finite(input.maxLeaderQuoteAmountUi) ??
+          existing?.maxLeaderQuoteAmountUi ??
+          null),
+    allowedMintsJson:
+      input.allowedMintsJson === undefined
+        ? (existing?.allowedMintsJson ?? "[]")
+        : cleanJsonStringArray(input.allowedMintsJson),
+    blockedMintsJson:
+      input.blockedMintsJson === undefined
+        ? (existing?.blockedMintsJson ?? "[]")
+        : cleanJsonStringArray(input.blockedMintsJson),
+    allowedQuoteMintsJson:
+      input.allowedQuoteMintsJson === undefined
+        ? (existing?.allowedQuoteMintsJson ?? "[]")
+        : cleanJsonStringArray(input.allowedQuoteMintsJson),
+    allowedPhasesJson:
+      input.allowedPhasesJson === undefined
+        ? (existing?.allowedPhasesJson ?? "[]")
+        : cleanJsonStringArray(input.allowedPhasesJson),
+    allowedVenuesJson:
+      input.allowedVenuesJson === undefined
+        ? (existing?.allowedVenuesJson ?? "[]")
+        : cleanJsonStringArray(input.allowedVenuesJson),
+    allowedParsersJson:
+      input.allowedParsersJson === undefined
+        ? (existing?.allowedParsersJson ?? "[]")
+        : cleanJsonStringArray(input.allowedParsersJson),
+    createdAtMs: existing?.createdAtMs ?? integer(input.createdAtMs, now),
+    updatedAtMs: integer(input.updatedAtMs, now),
+  });
+  return db.copyTradeProfilesV1.upsert(row, {
+    on: "profileKey",
+    merge: (table) => ({
+      leaderWallet: table.excluded("leaderWallet"),
+      followerRef: table.excluded("followerRef"),
+      label: table.excluded("label"),
+      enabled: table.excluded("enabled"),
+      mode: table.excluded("mode"),
+      copyBuys: table.excluded("copyBuys"),
+      copySells: table.excluded("copySells"),
+      buySizing: table.excluded("buySizing"),
+      fixedBuyAmountUi: table.excluded("fixedBuyAmountUi"),
+      leaderScaleBps: table.excluded("leaderScaleBps"),
+      maxBuyAmountUi: table.excluded("maxBuyAmountUi"),
+      sellBalanceBps: table.excluded("sellBalanceBps"),
+      slippageBps: table.excluded("slippageBps"),
+      maxEventAgeMs: table.excluded("maxEventAgeMs"),
+      requirePriceData: table.excluded("requirePriceData"),
+      allowMayhem: table.excluded("allowMayhem"),
+      minMarketCapUsd: table.excluded("minMarketCapUsd"),
+      maxMarketCapUsd: table.excluded("maxMarketCapUsd"),
+      maxPriceAgeMs: table.excluded("maxPriceAgeMs"),
+      minTokenAgeMs: table.excluded("minTokenAgeMs"),
+      maxTokenAgeMs: table.excluded("maxTokenAgeMs"),
+      minHolders: table.excluded("minHolders"),
+      minTrades1m: table.excluded("minTrades1m"),
+      minTrades5m: table.excluded("minTrades5m"),
+      minTrades15m: table.excluded("minTrades15m"),
+      minVolumeSol1m: table.excluded("minVolumeSol1m"),
+      minVolumeSol5m: table.excluded("minVolumeSol5m"),
+      minVolumeSol15m: table.excluded("minVolumeSol15m"),
+      minLeaderQuoteAmountUi: table.excluded("minLeaderQuoteAmountUi"),
+      maxLeaderQuoteAmountUi: table.excluded("maxLeaderQuoteAmountUi"),
+      allowedMintsJson: table.excluded("allowedMintsJson"),
+      blockedMintsJson: table.excluded("blockedMintsJson"),
+      allowedQuoteMintsJson: table.excluded("allowedQuoteMintsJson"),
+      allowedPhasesJson: table.excluded("allowedPhasesJson"),
+      allowedVenuesJson: table.excluded("allowedVenuesJson"),
+      allowedParsersJson: table.excluded("allowedParsersJson"),
+      updatedAtMs: table.max("updatedAtMs", 0),
+    }),
+  }) as CopyTradeProfile;
+}
+
+export function getCopyTradeIntent(intentKey: string): CopyTradeIntent | null {
+  const key = intentKey.trim();
+  if (!key) return null;
+  return (
+    (db.copyTradeIntentsV1
+      .select()
+      .where({ intentKey: key })
+      .get() as CopyTradeIntent | null) ?? null
+  );
+}
+
+export type AppendCopyTradeIntentResult = {
+  row: CopyTradeIntent;
+  inserted: boolean;
+};
+
+function isDuplicateCopyTradeIntentError(error: unknown): boolean {
+  const message = sqliteErrorMessage(error);
+  return (
+    message.includes("unique constraint failed") &&
+    (message.includes("copytradeintentsv1.intentkey") ||
+      message.includes("intentkey"))
+  );
+}
+
+export function appendCopyTradeIntentOnce(
+  input: Partial<CopyTradeIntent> & {
+    intentKey: string;
+    profileKey: string;
+    leaderEventKey: string;
+    leaderWallet: string;
+    followerRef: string;
+    sourceSignature: string;
+    side: "buy" | "sell";
+    inputMint: string;
+    outputMint: string;
+    subjectMint: string;
+    amountKind: "exact-input-ui" | "balance-bps";
+  },
+): AppendCopyTradeIntentResult {
+  const now = Date.now();
+  const row = CopyTradeIntentSchema.parse({
+    ...input,
+    intentKey: input.intentKey.trim(),
+    profileKey: input.profileKey.trim(),
+    leaderEventKey: input.leaderEventKey.trim(),
+    leaderWallet: input.leaderWallet.trim(),
+    followerRef: input.followerRef.trim(),
+    sourceSignature: input.sourceSignature.trim(),
+    sourceSlot: integer(input.sourceSlot, 0),
+    sourceTradedAtMs: integer(input.sourceTradedAtMs, 0),
+    side: input.side,
+    inputMint: input.inputMint.trim(),
+    outputMint: input.outputMint.trim(),
+    subjectMint: input.subjectMint.trim(),
+    quoteMint: text(input.quoteMint),
+    amountKind: input.amountKind,
+    amountUi: finite(input.amountUi),
+    balanceBps:
+      input.balanceBps == null
+        ? null
+        : Math.max(1, Math.min(10_000, integer(input.balanceBps, 10_000))),
+    slippageBps: Math.max(1, Math.min(10_000, integer(input.slippageBps, 500))),
+    mode: input.mode === "live" ? "live" : "paper",
+    status:
+      input.status === "paper" ||
+      input.status === "sending" ||
+      input.status === "sent" ||
+      input.status === "skipped" ||
+      input.status === "failed"
+        ? input.status
+        : "queued",
+    reason: text(input.reason),
+    attempts: Math.max(0, integer(input.attempts, 0)),
+    nextAttemptAtMs: Math.max(0, integer(input.nextAttemptAtMs, 0)),
+    executionSignature: text(input.executionSignature),
+    requestJson:
+      typeof input.requestJson === "string"
+        ? input.requestJson
+        : stringify(input.requestJson ?? {}),
+    resultJson:
+      typeof input.resultJson === "string"
+        ? input.resultJson
+        : stringify(input.resultJson ?? {}),
+    createdAtMs: integer(input.createdAtMs, now),
+    updatedAtMs: integer(input.updatedAtMs, now),
+  });
+  try {
+    return {
+      row: db.copyTradeIntentsV1.insert(row) as CopyTradeIntent,
+      inserted: true,
+    };
+  } catch (error) {
+    if (!isDuplicateCopyTradeIntentError(error)) throw error;
+    return {
+      row: getCopyTradeIntent(row.intentKey) ?? row,
+      inserted: false,
+    };
+  }
+}
+
+export function updateCopyTradeIntent(
+  intentKey: string,
+  patch: Partial<CopyTradeIntent>,
+): CopyTradeIntent {
+  const existing = getCopyTradeIntent(intentKey);
+  if (!existing) throw new Error(`Unknown copy-trade intent: ${intentKey}`);
+  const row = CopyTradeIntentSchema.parse({
+    ...existing,
+    ...patch,
+    intentKey: existing.intentKey,
+    updatedAtMs: integer(patch.updatedAtMs, Date.now()),
+  });
+  return db.copyTradeIntentsV1.upsert(row, {
+    on: "intentKey",
+    merge: (table) => ({
+      status: table.excluded("status"),
+      reason: table.excluded("reason"),
+      attempts: table.excluded("attempts"),
+      nextAttemptAtMs: table.excluded("nextAttemptAtMs"),
+      executionSignature: table.excluded("executionSignature"),
+      requestJson: table.excludedIfNotEmpty("requestJson"),
+      resultJson: table.excludedIfNotEmpty("resultJson"),
+      updatedAtMs: table.max("updatedAtMs", 0),
+    }),
+  }) as CopyTradeIntent;
+}
+
+export function listCopyTradeIntents(
+  input: {
+    profileKey?: string | null;
+    leaderWallet?: string | null;
+    status?: CopyTradeIntent["status"] | null;
+    sinceMs?: number;
+    dueAtMs?: number;
+    limit?: number;
+  } = {},
+): CopyTradeIntent[] {
+  let query = db.copyTradeIntentsV1.select();
+  if (input.profileKey?.trim()) {
+    query = query.where({ profileKey: input.profileKey.trim() });
+  }
+  if (input.leaderWallet?.trim()) {
+    query = query.where({ leaderWallet: input.leaderWallet.trim() });
+  }
+  if (input.status) query = query.where({ status: input.status });
+  if (positiveTime(input.sinceMs) > 0) {
+    query = query.where({ createdAtMs: { $gte: positiveTime(input.sinceMs) } });
+  }
+  if (positiveTime(input.dueAtMs) > 0) {
+    query = query.where({
+      nextAttemptAtMs: { $lte: positiveTime(input.dueAtMs) },
+    });
+  }
+  return query
+    .orderBy("createdAtMs", "desc")
+    .limit(Math.max(1, Math.min(integer(input.limit, 250), 100_000)))
+    .all() as CopyTradeIntent[];
 }
 
 export type AppendTokenTradeResult = {
@@ -1910,6 +2508,67 @@ export function listTokenHolderWindows(
     .whereIn("mint", keys)
     .cache({ ttlMs: Math.max(0, integer(ttlMs, 5_000)) })
     .all() as TokenHolderWindows[];
+}
+
+export type CopyTradeTokenContext = {
+  mint: string;
+  token: TerminalToken | null;
+  window: TokenPriceWindows | null;
+  holders: TokenHolderWindows | null;
+  phase: TerminalToken["phase"] | "unknown";
+  source: string;
+  isMayhemMode: boolean;
+  observedAtMs: number;
+  tokenAgeMs: number | null;
+  priceUpdatedAtMs: number;
+  priceAgeMs: number | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+};
+
+export function getCopyTradeTokenContext(
+  mint: string,
+  now = Date.now(),
+): CopyTradeTokenContext {
+  const key = mint.trim();
+  const token = key ? getTerminalToken(key) : null;
+  const window = key ? getTokenPriceWindows(key, 0) : null;
+  const holders = key ? (listTokenHolderWindows([key], 0)[0] ?? null) : null;
+
+  const observedAtMs = Math.max(
+    positiveTime(token?.observedAtMs),
+    positiveTime(token?.createdAtMs),
+    positiveTime(window?.firstRecordedTradeAtMs),
+  );
+  const priceUpdatedAtMs = Math.max(
+    positiveTime(token?.priceUpdatedAtMs),
+    positiveTime(window?.latestTradeAtMs),
+  );
+  const priceUsd = finite(window?.latestPriceUsd) ?? finite(token?.priceUsd);
+  const marketCapUsd =
+    finite(window?.currentMarketCapUsd) ??
+    finite(window?.latestMarketCapUsd) ??
+    finite(token?.marketCapUsd) ??
+    (priceUsd != null && finite(token?.supplyUi) != null
+      ? priceUsd * Math.max(0, finite(token?.supplyUi) ?? 0)
+      : null);
+
+  return {
+    mint: key,
+    token,
+    window,
+    holders,
+    phase: token?.phase ?? "unknown",
+    source: token?.source ?? window?.latestTradeSource ?? "unknown",
+    isMayhemMode: Number(token?.isMayhemMode ?? 0) > 0,
+    observedAtMs,
+    tokenAgeMs: observedAtMs > 0 ? Math.max(0, now - observedAtMs) : null,
+    priceUpdatedAtMs,
+    priceAgeMs:
+      priceUpdatedAtMs > 0 ? Math.max(0, now - priceUpdatedAtMs) : null,
+    priceUsd,
+    marketCapUsd,
+  };
 }
 
 export function getTerminalFeedState(
@@ -3252,6 +3911,14 @@ export function terminalStoreStats(
     ).length,
     walletTransactions: db.walletTransactionsV1.count(),
     walletSwaps: db.walletSwapsV1.count(),
+    copyTradeProfiles: db.copyTradeProfilesV1.count(),
+    enabledCopyTradeProfiles: (
+      db.copyTradeProfilesV1
+        .select()
+        .where({ enabled: 1 })
+        .all() as CopyTradeProfile[]
+    ).length,
+    copyTradeIntents: db.copyTradeIntentsV1.count(),
     terminalTrades: db.terminalTradesLive.count(),
     trades: db.tokenTradesV2.count() + db.terminalTradesLive.count(),
     indicators: db.terminalIndicatorsLive.count(),

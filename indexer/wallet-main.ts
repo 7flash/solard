@@ -109,10 +109,18 @@ function rawSignature(message: any): string {
   );
 }
 
-export async function runWalletIndexer(): Promise<void> {
+export type WalletIndexerRunOptions = {
+  signal?: AbortSignal;
+  installSignalHandlers?: boolean;
+};
+
+export async function runWalletIndexer(
+  options: WalletIndexerRunOptions = {},
+): Promise<void> {
   const config = loadWalletIndexerConfig();
   const counters = createCounters();
-  const controller = new AbortController();
+  const ownController = options.signal ? null : new AbortController();
+  const signal = options.signal ?? ownController!.signal;
 
   let watchedRows: WatchedWallet[] = [];
   let watchedSet = new Set<string>();
@@ -169,14 +177,26 @@ export async function runWalletIndexer(): Promise<void> {
 
   const refreshWallets = (): void => {
     try {
+      const previousKey = [...watchedSet].sort().join(",");
       watchedRows = listWatchedWallets({
         enabledOnly: true,
         limit: config.maxWallets,
       });
       watchedSet = new Set(watchedRows.map((wallet) => wallet.address));
+      const nextKey = [...watchedSet].sort().join(",");
       counters.walletRefreshes++;
       counters.enabledWallets = watchedRows.length;
       subscription.setWallets([...watchedSet]);
+
+      // A newly-added wallet should not wait for the periodic backfill timer.
+      if (nextKey !== previousKey && watchedRows.length > 0) {
+        void backfill.runCycle(watchedRows).catch((error) => {
+          counters.errors++;
+          recordWorkerError(config.name, error, {
+            phase: "wallet-change-backfill",
+          });
+        });
+      }
     } catch (error) {
       counters.errors++;
       recordWorkerError(config.name, error, { phase: "wallet-refresh" });
@@ -196,7 +216,7 @@ export async function runWalletIndexer(): Promise<void> {
   const stop = (reason: string): void => {
     if (stopping) return;
     stopping = true;
-    controller.abort();
+    ownController?.abort();
     subscription.stop();
     if (walletTimer) clearInterval(walletTimer);
     if (backfillTimer) clearInterval(backfillTimer);
@@ -212,8 +232,12 @@ export async function runWalletIndexer(): Promise<void> {
     }).catch(() => undefined);
   };
 
-  process.once("SIGINT", () => stop("SIGINT"));
-  process.once("SIGTERM", () => stop("SIGTERM"));
+  const onAbort = () => stop("parent-abort");
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (!options.signal && options.installSignalHandlers !== false) {
+    process.once("SIGINT", () => stop("SIGINT"));
+    process.once("SIGTERM", () => stop("SIGTERM"));
+  }
 
   await writeStatus({
     name: config.name,
@@ -272,11 +296,13 @@ export async function runWalletIndexer(): Promise<void> {
   (heartbeat as any).unref?.();
 
   await new Promise<void>((resolve) => {
-    if (controller.signal.aborted) return resolve();
-    controller.signal.addEventListener("abort", () => resolve(), {
+    if (signal.aborted) return resolve();
+    signal.addEventListener("abort", () => resolve(), {
       once: true,
     });
   });
+  signal.removeEventListener("abort", onAbort);
+  stop("loop-ended");
 }
 
 if (import.meta.main) {

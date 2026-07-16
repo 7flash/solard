@@ -610,3 +610,77 @@
     justify-self: start;
   }
 }
+
+/* Terminal-style copy strategy filters. */
+.copy-system-status {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.copy-terminal-flags {
+  display: flex;
+  align-items: center;
+  gap: 10px 18px;
+  flex-wrap: wrap;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-2, #171717);
+}
+
+.copy-terminal-flags label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.copy-terminal-flags input {
+  width: auto;
+}
+
+.copy-filter-matrix {
+  display: grid;
+  gap: 8px;
+}
+
+.copy-filter-matrix > div,
+.copy-filter-matrix > label {
+  display: grid;
+  grid-template-columns: minmax(150px, .9fr) repeat(3, minmax(100px, 1fr));
+  align-items: center;
+  gap: 8px;
+}
+
+.copy-filter-matrix > div {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.copy-filter-matrix > label > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.copy-list-grid small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+@media (max-width: 900px) {
+  .copy-system-status {
+    grid-template-columns: 1fr;
+  }
+
+  .copy-filter-matrix > div,
+  .copy-filter-matrix > label {
+    grid-template-columns: 1fr;
+  }
+
+  .copy-filter-matrix > div b {
+    display: none;
+  }
+}

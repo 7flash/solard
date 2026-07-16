@@ -14,6 +14,8 @@ import { PumpDiscoveryState } from "./pump-discovery-state.js";
 import { runPumpPortalSession } from "./pumpportal-ws.js";
 import { startMetadataHydrator } from "./metadata.js";
 import { refreshSolUsd } from "./sol-usd.js";
+import { runWalletIndexer } from "./wallet-main.js";
+import { runCopyTradeWorker } from "./copy-main.js";
 import type { Counters, IndexedCreate, TrackedPumpToken } from "./types.js";
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -27,6 +29,12 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener("abort", done, { once: true });
   });
+}
+
+function embeddedWorkerEnabled(name: string, fallback = true): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (!value) return fallback;
+  return !["0", "false", "no", "off", "disabled"].includes(value);
 }
 
 async function writeStatus(
@@ -236,6 +244,44 @@ export async function runIndexer(): Promise<void> {
   const config = loadConfig();
   const counters = createCounters();
   const controller = new AbortController();
+  const embeddedWalletIndexer = embeddedWorkerEnabled(
+    "SOLARD_EMBED_WALLET_INDEXER",
+    true,
+  );
+  const embeddedCopyWorker = embeddedWorkerEnabled(
+    "SOLARD_EMBED_COPY_WORKER",
+    true,
+  );
+  const auxiliaryTasks: Promise<void>[] = [];
+
+  if (embeddedWalletIndexer) {
+    auxiliaryTasks.push(
+      runWalletIndexer({
+        signal: controller.signal,
+        installSignalHandlers: false,
+      }).catch((error) => {
+        recordWorkerError(config.name, error, {
+          phase: "embedded-wallet-indexer",
+        });
+        console.error("[solard:indexer] embedded wallet indexer failed", error);
+      }),
+    );
+  }
+
+  if (embeddedCopyWorker) {
+    auxiliaryTasks.push(
+      runCopyTradeWorker({
+        signal: controller.signal,
+        installSignalHandlers: false,
+      }).catch((error) => {
+        recordWorkerError(config.name, error, {
+          phase: "embedded-copy-worker",
+        });
+        console.error("[solard:indexer] embedded copy worker failed", error);
+      }),
+    );
+  }
+
   const discovery = new PumpDiscoveryState(
     `${config.dbPath}.pumpportal-discovered.json`,
   );
@@ -311,6 +357,8 @@ export async function runIndexer(): Promise<void> {
       dataJson: JSON.stringify({
         source: "pumpportal+helius-exact-logs+curve-poll",
         globalPumpSubscription: false,
+        embeddedWalletIndexer,
+        embeddedCopyWorker,
         pumpPortal: redactedUrl(config.pumpPortalUrl),
         heliusRpc: redactedUrl(config.rpcUrl),
         curvePollMs: config.curvePollMs,
@@ -351,6 +399,8 @@ export async function runIndexer(): Promise<void> {
     dataJson: JSON.stringify({
       source: "pumpportal+helius-exact-logs+curve-poll",
       globalPumpSubscription: false,
+      embeddedWalletIndexer,
+      embeddedCopyWorker,
       dbPath: SOLARD_DB_PATH,
       maxConnections: config.maxConnections,
       maxSubscriptionsPerConnection: config.maxSubscriptionsPerConnection,
@@ -411,6 +461,7 @@ export async function runIndexer(): Promise<void> {
   }
 
   stop("loop-ended");
+  await Promise.allSettled(auxiliaryTasks);
 }
 
 if (import.meta.main) {

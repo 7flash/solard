@@ -28,11 +28,28 @@ type CopyProfile = {
   sellBalanceBps?: number | null;
   slippageBps?: number | null;
   maxEventAgeMs?: number | null;
+  requirePriceData?: number | boolean | null;
+  allowMayhem?: number | boolean | null;
   minMarketCapUsd?: number | null;
   maxMarketCapUsd?: number | null;
+  maxPriceAgeMs?: number | null;
+  minTokenAgeMs?: number | null;
+  maxTokenAgeMs?: number | null;
+  minHolders?: number | null;
+  minTrades1m?: number | null;
+  minTrades5m?: number | null;
+  minTrades15m?: number | null;
+  minVolumeSol1m?: number | null;
+  minVolumeSol5m?: number | null;
+  minVolumeSol15m?: number | null;
+  minLeaderQuoteAmountUi?: number | null;
+  maxLeaderQuoteAmountUi?: number | null;
   allowedMintsJson?: string | null;
   blockedMintsJson?: string | null;
   allowedQuoteMintsJson?: string | null;
+  allowedPhasesJson?: string | null;
+  allowedVenuesJson?: string | null;
+  allowedParsersJson?: string | null;
   intentCount?: number | null;
   paperCount?: number | null;
   sentCount?: number | null;
@@ -78,6 +95,7 @@ type CopyPayload = {
   intents?: CopyIntent[];
   trackedWallets?: TrackedWallet[];
   worker?: AnyRow | null;
+  walletWorker?: AnyRow | null;
   global?: {
     allowLive?: boolean;
     gatewayConfigured?: boolean;
@@ -116,8 +134,25 @@ type ProfileDraft = {
   sellBalancePct: string;
   slippagePct: string;
   maxEventAgeSec: string;
+  requirePriceData: boolean;
+  allowMayhem: boolean;
   minMarketCapUsd: string;
   maxMarketCapUsd: string;
+  maxPriceAgeSec: string;
+  minTokenAgeMin: string;
+  maxTokenAgeMin: string;
+  minHolders: string;
+  minTrades1m: string;
+  minTrades5m: string;
+  minTrades15m: string;
+  minVolumeSol1m: string;
+  minVolumeSol5m: string;
+  minVolumeSol15m: string;
+  minLeaderQuoteAmountUi: string;
+  maxLeaderQuoteAmountUi: string;
+  allowedPhases: string;
+  allowedVenues: string;
+  allowedParsers: string;
   allowedMints: string;
   blockedMints: string;
   allowedQuoteMints: string;
@@ -193,8 +228,25 @@ function emptyDraft(): ProfileDraft {
     sellBalancePct: "100",
     slippagePct: "5",
     maxEventAgeSec: "30",
+    requirePriceData: true,
+    allowMayhem: false,
     minMarketCapUsd: "",
     maxMarketCapUsd: "",
+    maxPriceAgeSec: "30",
+    minTokenAgeMin: "",
+    maxTokenAgeMin: "",
+    minHolders: "",
+    minTrades1m: "",
+    minTrades5m: "",
+    minTrades15m: "",
+    minVolumeSol1m: "",
+    minVolumeSol5m: "",
+    minVolumeSol15m: "",
+    minLeaderQuoteAmountUi: "",
+    maxLeaderQuoteAmountUi: "",
+    allowedPhases: "pump\nmigrated",
+    allowedVenues: "pump\npumpswap",
+    allowedParsers: "pump-event\npumpswap-instruction",
     allowedMints: "",
     blockedMints: "",
     allowedQuoteMints: "",
@@ -428,11 +480,14 @@ function profileByKey(key: string): CopyProfile | null {
   return profiles().find((profile) => profile.profileKey === key) ?? null;
 }
 
-function workerAlive(): boolean {
-  const worker = state.payload.worker;
+function processAlive(worker: AnyRow | null | undefined): boolean {
   if (!worker) return false;
-  const heartbeat = number(worker.heartbeatAtMs);
+  const heartbeat = number(worker.heartbeatAtMs ?? worker.updatedAtMs);
   return heartbeat > 0 && Date.now() - heartbeat < 30_000;
+}
+
+function workerAlive(): boolean {
+  return processAlive(state.payload.worker);
 }
 
 function globalLiveReady(): boolean {
@@ -582,10 +637,46 @@ function editProfile(profile: CopyProfile): void {
     sellBalancePct: String(number(profile.sellBalanceBps) / 100),
     slippagePct: String(number(profile.slippageBps) / 100),
     maxEventAgeSec: String(number(profile.maxEventAgeMs) / 1_000),
+    requirePriceData: enabled(profile.requirePriceData),
+    allowMayhem: enabled(profile.allowMayhem),
     minMarketCapUsd:
       profile.minMarketCapUsd == null ? "" : String(profile.minMarketCapUsd),
     maxMarketCapUsd:
       profile.maxMarketCapUsd == null ? "" : String(profile.maxMarketCapUsd),
+    maxPriceAgeSec:
+      profile.maxPriceAgeMs == null
+        ? ""
+        : String(number(profile.maxPriceAgeMs) / 1_000),
+    minTokenAgeMin:
+      profile.minTokenAgeMs == null
+        ? ""
+        : String(number(profile.minTokenAgeMs) / 60_000),
+    maxTokenAgeMin:
+      profile.maxTokenAgeMs == null
+        ? ""
+        : String(number(profile.maxTokenAgeMs) / 60_000),
+    minHolders: profile.minHolders == null ? "" : String(profile.minHolders),
+    minTrades1m: profile.minTrades1m == null ? "" : String(profile.minTrades1m),
+    minTrades5m: profile.minTrades5m == null ? "" : String(profile.minTrades5m),
+    minTrades15m:
+      profile.minTrades15m == null ? "" : String(profile.minTrades15m),
+    minVolumeSol1m:
+      profile.minVolumeSol1m == null ? "" : String(profile.minVolumeSol1m),
+    minVolumeSol5m:
+      profile.minVolumeSol5m == null ? "" : String(profile.minVolumeSol5m),
+    minVolumeSol15m:
+      profile.minVolumeSol15m == null ? "" : String(profile.minVolumeSol15m),
+    minLeaderQuoteAmountUi:
+      profile.minLeaderQuoteAmountUi == null
+        ? ""
+        : String(profile.minLeaderQuoteAmountUi),
+    maxLeaderQuoteAmountUi:
+      profile.maxLeaderQuoteAmountUi == null
+        ? ""
+        : String(profile.maxLeaderQuoteAmountUi),
+    allowedPhases: listText(profile.allowedPhasesJson),
+    allowedVenues: listText(profile.allowedVenuesJson),
+    allowedParsers: listText(profile.allowedParsersJson),
     allowedMints: listText(profile.allowedMintsJson),
     blockedMints: listText(profile.blockedMintsJson),
     allowedQuoteMints: listText(profile.allowedQuoteMintsJson),
@@ -637,6 +728,44 @@ function profileRequest(): Record<string, unknown> {
     throw new Error("Minimum market cap cannot exceed maximum market cap.");
   }
 
+  const maxPriceAgeSec = optionalNumber(
+    draft.maxPriceAgeSec,
+    "Maximum price age",
+  );
+  const minTokenAgeMin = optionalNumber(
+    draft.minTokenAgeMin,
+    "Minimum token age",
+  );
+  const maxTokenAgeMin = optionalNumber(
+    draft.maxTokenAgeMin,
+    "Maximum token age",
+  );
+  if (
+    minTokenAgeMin != null &&
+    maxTokenAgeMin != null &&
+    minTokenAgeMin > maxTokenAgeMin
+  ) {
+    throw new Error("Minimum token age cannot exceed maximum token age.");
+  }
+
+  const minLeaderQuoteAmountUi = optionalNumber(
+    draft.minLeaderQuoteAmountUi,
+    "Minimum leader trade amount",
+  );
+  const maxLeaderQuoteAmountUi = optionalNumber(
+    draft.maxLeaderQuoteAmountUi,
+    "Maximum leader trade amount",
+  );
+  if (
+    minLeaderQuoteAmountUi != null &&
+    maxLeaderQuoteAmountUi != null &&
+    minLeaderQuoteAmountUi > maxLeaderQuoteAmountUi
+  ) {
+    throw new Error(
+      "Minimum leader trade amount cannot exceed maximum leader trade amount.",
+    );
+  }
+
   return {
     profileKey: draft.profileKey || undefined,
     label: text(draft.label) || null,
@@ -670,8 +799,31 @@ function profileRequest(): Record<string, unknown> {
     maxEventAgeMs: Math.round(
       numberField(draft.maxEventAgeSec, "Maximum event age", 1) * 1_000,
     ),
+    requirePriceData: draft.requirePriceData,
+    allowMayhem: draft.allowMayhem,
     minMarketCapUsd,
     maxMarketCapUsd,
+    maxPriceAgeMs:
+      maxPriceAgeSec == null ? null : Math.round(maxPriceAgeSec * 1_000),
+    minTokenAgeMs:
+      minTokenAgeMin == null ? null : Math.round(minTokenAgeMin * 60_000),
+    maxTokenAgeMs:
+      maxTokenAgeMin == null ? null : Math.round(maxTokenAgeMin * 60_000),
+    minHolders: optionalNumber(draft.minHolders, "Minimum holders"),
+    minTrades1m: optionalNumber(draft.minTrades1m, "Minimum trades 1m"),
+    minTrades5m: optionalNumber(draft.minTrades5m, "Minimum trades 5m"),
+    minTrades15m: optionalNumber(draft.minTrades15m, "Minimum trades 15m"),
+    minVolumeSol1m: optionalNumber(draft.minVolumeSol1m, "Minimum volume 1m"),
+    minVolumeSol5m: optionalNumber(draft.minVolumeSol5m, "Minimum volume 5m"),
+    minVolumeSol15m: optionalNumber(
+      draft.minVolumeSol15m,
+      "Minimum volume 15m",
+    ),
+    minLeaderQuoteAmountUi,
+    maxLeaderQuoteAmountUi,
+    allowedPhases: draft.allowedPhases,
+    allowedVenues: draft.allowedVenues,
+    allowedParsers: draft.allowedParsers,
     allowedMints: draft.allowedMints,
     blockedMints: draft.blockedMints,
     allowedQuoteMints: draft.allowedQuoteMints,
@@ -792,6 +944,23 @@ function WorkerStatus() {
             {state.payload.worker?.heartbeatAtMs
               ? `Heartbeat ${timeAgo(state.payload.worker.heartbeatAtMs)}`
               : "No worker heartbeat found"}
+          </small>
+        </div>
+      </div>
+      <div>
+        <span
+          className={`copy-status-dot ${processAlive(state.payload.walletWorker) ? "ok" : "bad"}`}
+        />
+        <div>
+          <b>
+            {processAlive(state.payload.walletWorker)
+              ? "Wallet indexer online"
+              : "Wallet indexer offline"}
+          </b>
+          <small>
+            {state.payload.walletWorker?.heartbeatAtMs
+              ? `Heartbeat ${timeAgo(state.payload.walletWorker.heartbeatAtMs)}`
+              : "Start the main indexer or wallet worker to populate trades"}
           </small>
         </div>
       </div>
@@ -1269,6 +1438,64 @@ function ProfileEditor() {
               />
             </label>
             <label>
+              <span>Minimum leader quote amount</span>
+              <input
+                type="number"
+                min="0"
+                step="0.001"
+                placeholder="Any"
+                value={draft.minLeaderQuoteAmountUi}
+                onInput={(event: any) =>
+                  setDraft({
+                    minLeaderQuoteAmountUi: event.currentTarget.value,
+                  })
+                }
+              />
+            </label>
+            <label>
+              <span>Maximum leader quote amount</span>
+              <input
+                type="number"
+                min="0"
+                step="0.001"
+                placeholder="Any"
+                value={draft.maxLeaderQuoteAmountUi}
+                onInput={(event: any) =>
+                  setDraft({
+                    maxLeaderQuoteAmountUi: event.currentTarget.value,
+                  })
+                }
+              />
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Terminal market filters</legend>
+          <div className="copy-terminal-flags">
+            <label>
+              <input
+                type="checkbox"
+                checked={draft.requirePriceData}
+                onInput={(event: any) =>
+                  setDraft({ requirePriceData: event.currentTarget.checked })
+                }
+              />
+              <span>Require price or market-cap data</span>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={draft.allowMayhem}
+                onInput={(event: any) =>
+                  setDraft({ allowMayhem: event.currentTarget.checked })
+                }
+              />
+              <span>Allow Mayhem tokens</span>
+            </label>
+          </div>
+          <div className="copy-form-grid four">
+            <label>
               <span>Minimum market cap USD</span>
               <input
                 type="number"
@@ -1294,11 +1521,187 @@ function ProfileEditor() {
                 }
               />
             </label>
+            <label>
+              <span>Maximum price age sec</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="Any"
+                value={draft.maxPriceAgeSec}
+                onInput={(event: any) =>
+                  setDraft({ maxPriceAgeSec: event.currentTarget.value })
+                }
+              />
+            </label>
+            <label>
+              <span>Minimum holders</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="Any"
+                value={draft.minHolders}
+                onInput={(event: any) =>
+                  setDraft({ minHolders: event.currentTarget.value })
+                }
+              />
+            </label>
+            <label>
+              <span>Minimum token age min</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="Any"
+                value={draft.minTokenAgeMin}
+                onInput={(event: any) =>
+                  setDraft({ minTokenAgeMin: event.currentTarget.value })
+                }
+              />
+            </label>
+            <label>
+              <span>Maximum token age min</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="Any"
+                value={draft.maxTokenAgeMin}
+                onInput={(event: any) =>
+                  setDraft({ maxTokenAgeMin: event.currentTarget.value })
+                }
+              />
+            </label>
           </div>
         </fieldset>
 
+        <fieldset>
+          <legend>Terminal activity filters</legend>
+          <div className="copy-filter-matrix">
+            <div>
+              <span>Window</span>
+              <b>1 minute</b>
+              <b>5 minutes</b>
+              <b>15 minutes</b>
+            </div>
+            <label>
+              <span>Minimum trades</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="Any"
+                value={draft.minTrades1m}
+                onInput={(event: any) =>
+                  setDraft({ minTrades1m: event.currentTarget.value })
+                }
+              />
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="Any"
+                value={draft.minTrades5m}
+                onInput={(event: any) =>
+                  setDraft({ minTrades5m: event.currentTarget.value })
+                }
+              />
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="Any"
+                value={draft.minTrades15m}
+                onInput={(event: any) =>
+                  setDraft({ minTrades15m: event.currentTarget.value })
+                }
+              />
+            </label>
+            <label>
+              <span>Minimum volume SOL</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="Any"
+                value={draft.minVolumeSol1m}
+                onInput={(event: any) =>
+                  setDraft({ minVolumeSol1m: event.currentTarget.value })
+                }
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="Any"
+                value={draft.minVolumeSol5m}
+                onInput={(event: any) =>
+                  setDraft({ minVolumeSol5m: event.currentTarget.value })
+                }
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="Any"
+                value={draft.minVolumeSol15m}
+                onInput={(event: any) =>
+                  setDraft({ minVolumeSol15m: event.currentTarget.value })
+                }
+              />
+            </label>
+          </div>
+        </fieldset>
+
+        <details className="copy-advanced" open>
+          <summary>Terminal source and token filters</summary>
+          <div className="copy-list-grid">
+            <label>
+              <span>Allowed phases</span>
+              <textarea
+                rows={4}
+                placeholder={"pump\nmigrated\nunknown"}
+                value={draft.allowedPhases}
+                onInput={(event: any) =>
+                  setDraft({ allowedPhases: event.currentTarget.value })
+                }
+              />
+              <small>Empty allows every phase.</small>
+            </label>
+            <label>
+              <span>Allowed venues</span>
+              <textarea
+                rows={4}
+                placeholder={"pump\npumpswap"}
+                value={draft.allowedVenues}
+                onInput={(event: any) =>
+                  setDraft({ allowedVenues: event.currentTarget.value })
+                }
+              />
+              <small>
+                Known values: pump, pumpswap, jupiter, raydium, unknown.
+              </small>
+            </label>
+            <label>
+              <span>Allowed parsers</span>
+              <textarea
+                rows={4}
+                placeholder={"pump-event\npumpswap-instruction"}
+                value={draft.allowedParsers}
+                onInput={(event: any) =>
+                  setDraft({ allowedParsers: event.currentTarget.value })
+                }
+              />
+              <small>
+                Exact copyable parsers are pump-event and pumpswap-instruction.
+              </small>
+            </label>
+          </div>
+        </details>
+
         <details className="copy-advanced">
-          <summary>Token allowlists and blocklists</summary>
+          <summary>Mint and quote allowlists</summary>
           <div className="copy-list-grid">
             <label>
               <span>Allowed subject mints</span>
