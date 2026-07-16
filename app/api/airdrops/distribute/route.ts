@@ -4,14 +4,17 @@ import {
   errorResponse,
   jsonResponse,
   readJson,
+  withSowl,
 } from "../../../../src/web/http.js";
-
-type Recipient = {
-  owner: string;
-  amountUi: string;
-  sourceBalanceUi?: number;
-  sourceSharePct?: number;
-};
+import {
+  getAirdropJob,
+  listAirdropJobs,
+} from "../../../../src/solard/airdrops/job-store.js";
+import { startAirdropJob } from "../../../../src/solard/airdrops/executor.js";
+import type {
+  AirdropPlan,
+  AirdropRecipient,
+} from "../../../../src/solard/airdrops/types.js";
 
 type AirdropRequest = {
   name?: unknown;
@@ -29,8 +32,9 @@ type AirdropRequest = {
 
 function requiredString(value: unknown, label: string): string {
   const text = typeof value === "string" ? value.trim() : "";
-  if (!text)
+  if (!text) {
     throw Object.assign(new Error(`${label} is required.`), { status: 400 });
+  }
   return text;
 }
 
@@ -86,7 +90,10 @@ function planId(value: unknown): string {
   return `airdrop-${hash.toString(16).padStart(16, "0")}`;
 }
 
-function cleanRecipients(value: unknown): Recipient[] {
+function cleanRecipients(
+  value: unknown,
+  payoutDecimals: number,
+): AirdropRecipient[] {
   if (!Array.isArray(value) || !value.length) {
     throw Object.assign(new Error("At least one recipient is required."), {
       status: 400,
@@ -110,9 +117,18 @@ function cleanRecipients(value: unknown): Recipient[] {
       });
     }
     seen.add(owner);
+    const amountUi = decimalString(
+      row.amountUi,
+      `recipients[${index}].amountUi`,
+    );
     return {
       owner,
-      amountUi: decimalString(row.amountUi, `recipients[${index}].amountUi`),
+      amountUi,
+      amountRaw: uiAmountToUnits(
+        amountUi,
+        payoutDecimals,
+        `recipients[${index}].amountUi`,
+      ).toString(),
       sourceBalanceUi: Number.isFinite(Number(row.sourceBalanceUi))
         ? Number(row.sourceBalanceUi)
         : undefined,
@@ -123,7 +139,7 @@ function cleanRecipients(value: unknown): Recipient[] {
   });
 }
 
-function normalize(body: AirdropRequest) {
+function normalize(body: AirdropRequest): AirdropPlan {
   const payoutDecimals = Math.floor(Number(body.payoutDecimals));
   if (
     !Number.isFinite(payoutDecimals) ||
@@ -135,7 +151,7 @@ function normalize(body: AirdropRequest) {
     });
   }
 
-  const mode = String(body.mode ?? "fixed");
+  const mode = String(body.mode ?? "fixed") as AirdropPlan["mode"];
   if (!["fixed", "equal-total", "pro-rata"].includes(mode)) {
     throw Object.assign(new Error("Unknown distribution mode."), {
       status: 400,
@@ -143,7 +159,7 @@ function normalize(body: AirdropRequest) {
   }
 
   const bankWallet = publicKeyString(body.bankWallet, "bankWallet");
-  const recipients = cleanRecipients(body.recipients);
+  const recipients = cleanRecipients(body.recipients, payoutDecimals);
   if (recipients.some((recipient) => recipient.owner === bankWallet)) {
     throw Object.assign(
       new Error("The bank wallet cannot also be an airdrop recipient."),
@@ -153,13 +169,7 @@ function normalize(body: AirdropRequest) {
 
   const totalAmountUi = decimalString(body.totalAmountUi, "totalAmountUi");
   const calculatedRaw = recipients.reduce(
-    (sum, recipient, index) =>
-      sum +
-      uiAmountToUnits(
-        recipient.amountUi,
-        payoutDecimals,
-        `recipients[${index}].amountUi`,
-      ),
+    (sum, recipient) => sum + BigInt(recipient.amountRaw),
     0n,
   );
   const declaredRaw = uiAmountToUnits(
@@ -175,8 +185,8 @@ function normalize(body: AirdropRequest) {
   }
 
   const core = {
-    schema: "solard.airdrop-plan",
-    version: 1,
+    schema: "solard.airdrop-plan" as const,
+    version: 2 as const,
     name: requiredString(body.name, "name").slice(0, 120),
     bankWallet,
     sourceMint: publicKeyString(body.sourceMint, "sourceMint"),
@@ -191,7 +201,6 @@ function normalize(body: AirdropRequest) {
     recipientCount: recipients.length,
     totalAmountUi,
     totalAmountRaw: calculatedRaw.toString(),
-    live: body.live === true,
   };
 
   return {
@@ -201,83 +210,29 @@ function normalize(body: AirdropRequest) {
   };
 }
 
-async function executeWithConfiguredService(
-  plan: ReturnType<typeof normalize>,
-) {
-  const executorUrl = process.env.SOLARD_AIRDROP_EXECUTOR_URL?.trim();
-  if (!executorUrl) {
-    throw Object.assign(
-      new Error(
-        "Live airdrop executor is not configured. Set SOLARD_AIRDROP_EXECUTOR_URL to the server-side wallet signing service.",
-      ),
-      { status: 501 },
-    );
-  }
-
-  const token = process.env.SOLARD_AIRDROP_EXECUTOR_TOKEN?.trim();
-  const response = await fetch(executorUrl, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "idempotency-key": plan.planId,
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(plan),
-    signal: AbortSignal.timeout(120_000),
-  });
-
-  const text = await response.text();
-  let value: unknown = text;
-  try {
-    value = text ? JSON.parse(text) : null;
-  } catch {
-    // Preserve non-JSON executor responses for diagnostics.
-  }
-
-  if (!response.ok) {
-    const message =
-      value && typeof value === "object" && "error" in value
-        ? String((value as { error: unknown }).error)
-        : `Airdrop executor returned HTTP ${response.status}.`;
-    throw Object.assign(new Error(message), { status: 502 });
-  }
-
-  return value;
-}
-
-export async function POST(request: Request): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
   try {
     assertWebAuth(request);
-    const body = (await readJson(request)) as AirdropRequest;
-    const plan = normalize(body);
-
-    if (!plan.live) {
-      return jsonResponse({
-        ok: true,
-        value: {
-          status: "validated",
-          plan,
-        },
-      });
+    const url = new URL(request.url);
+    const id = (url.searchParams.get("id") ?? "").trim();
+    if (id) {
+      const job = await getAirdropJob(id);
+      if (!job) {
+        return Response.json(
+          { ok: false, error: "Airdrop job not found." },
+          { status: 404 },
+        );
+      }
+      return jsonResponse({ ok: true, value: job });
     }
 
-    if (body.confirmation !== "AIRDROP") {
-      throw Object.assign(
-        new Error('confirmation must equal "AIRDROP" for live execution.'),
-        {
-          status: 400,
-        },
-      );
-    }
-
-    const result = await executeWithConfiguredService(plan);
+    const limit = Math.max(
+      1,
+      Math.min(100, Number(url.searchParams.get("limit") ?? "20") || 20),
+    );
     return jsonResponse({
       ok: true,
-      value: {
-        status: "submitted",
-        plan,
-        result,
-      },
+      value: await listAirdropJobs(limit),
     });
   } catch (error) {
     return errorResponse(
@@ -287,4 +242,28 @@ export async function POST(request: Request): Promise<Response> {
         : 500,
     );
   }
+}
+
+export async function POST(request: Request): Promise<Response> {
+  const body = (await readJson(request)) as AirdropRequest;
+  return withSowl(request, async (sowl) => {
+    const plan = normalize(body);
+
+    if (body.live !== true) {
+      return { status: "validated", plan };
+    }
+
+    if (body.confirmation !== "AIRDROP") {
+      throw Object.assign(
+        new Error('confirmation must equal "AIRDROP" for live execution.'),
+        { status: 400 },
+      );
+    }
+
+    const job = await startAirdropJob(plan, sowl);
+    return {
+      status: job.status,
+      job,
+    };
+  });
 }

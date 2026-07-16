@@ -254,3 +254,112 @@
     margin-left: 0;
   }
 }
+
+.airdrops-job-card {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.airdrops-job-card h3,
+.airdrops-job-card h4 {
+  margin: 0;
+}
+
+.airdrops-job-summary,
+.airdrops-signatures {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.airdrops-job-summary > span,
+.airdrops-signatures > a {
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  background: #05080d;
+}
+
+.airdrops-progress {
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: #05080d;
+}
+
+.airdrops-progress > span {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  background: var(--green);
+  transition: width .2s ease;
+}
+
+.airdrops-job-columns {
+  display: grid;
+  grid-template-columns: 1.15fr .85fr;
+  gap: 14px;
+  min-width: 0;
+}
+
+.airdrops-job-columns > div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: #05080d;
+}
+
+.airdrops-job-log,
+.airdrops-recipient-runs,
+.airdrops-recent-jobs {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.airdrops-job-log > div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 9px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+}
+
+.airdrops-job-log time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.airdrops-job-log .error span {
+  color: var(--red, #ff4b69);
+}
+
+.airdrops-job-log .warn span {
+  color: var(--yellow, #ffd166);
+}
+
+.airdrops-recipient-runs > div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+}
+
+.airdrops-recent-jobs button {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  text-align: left;
+}
+
+@media (max-width: 850px) {
+  .airdrops-job-columns {
+    grid-template-columns: 1fr;
+  }
+}

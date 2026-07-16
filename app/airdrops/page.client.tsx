@@ -68,6 +68,38 @@ type AirdropPlan = {
   recipients: Recipient[];
 };
 
+type AirdropJob = {
+  id: string;
+  planId: string;
+  status: "queued" | "running" | "completed" | "partial" | "failed";
+  createdAtMs: number;
+  updatedAtMs: number;
+  startedAtMs?: number | null;
+  finishedAtMs?: number | null;
+  progress: {
+    total: number;
+    attempted: number;
+    sent: number;
+    failed: number;
+    batchesTotal: number;
+    batchesComplete: number;
+  };
+  signatures: string[];
+  recipients: Array<
+    Recipient & {
+      status: "queued" | "sending" | "sent" | "failed";
+      signature?: string;
+      error?: string;
+    }
+  >;
+  logs: Array<{
+    atMs: number;
+    level: "info" | "warn" | "error";
+    message: string;
+  }>;
+  error?: string | null;
+};
+
 const DRAFT_KEY = "solard:airdrops:draft:v1";
 const AUTO_REFRESH_KEY = "solard:airdrops:auto-refresh";
 const BANK_SAVED_KEY = "solard:airdrops:bank-saved";
@@ -106,10 +138,14 @@ const state = {
   loadedAtMs: null as number | null,
   autoRefresh: storageFlag(AUTO_REFRESH_KEY, false),
   bankSaved: storageFlag(BANK_SAVED_KEY, false),
+  currentJob: null as AirdropJob | null,
+  recentJobs: [] as AirdropJob[],
+  jobsLoading: false,
 };
 
 let unmounted = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
+let jobTimer: ReturnType<typeof setTimeout> | null = null;
 
 function rootElement(): HTMLElement {
   const value = document.getElementById("app-root");
@@ -410,24 +446,100 @@ async function submitPlan(live: boolean): Promise<void> {
 
   state.executing = true;
   state.error = null;
-  state.message = live ? "Submitting live airdrop…" : "Validating payout plan…";
+  state.message = live
+    ? "Starting the server airdrop job…"
+    : "Validating payout plan…";
   rerender();
 
+  let polling = false;
   try {
     const result = await api<AnyRow>("/api/airdrops/distribute", {
       method: "POST",
       body: JSON.stringify({ ...plan, live, confirmation: draft.confirmation }),
     });
-    state.message = live
-      ? `Airdrop submitted: ${String(result?.status ?? "accepted")}.`
-      : `Plan validated: ${plan.recipientCount} recipients, ${plan.totalAmountUi} tokens.`;
+
+    if (live) {
+      const job = result?.job as AirdropJob | undefined;
+      if (!job?.id)
+        throw new Error("The server did not return an airdrop job.");
+      state.currentJob = job;
+      polling = !jobFinished(job);
+      state.message = `Server job ${job.id} is ${job.status}.`;
+      if (polling) scheduleJobPoll(job.id);
+      void loadRecentJobs();
+    } else {
+      state.message = `Plan validated: ${plan.recipientCount} recipients, ${plan.totalAmountUi} tokens.`;
+    }
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
     state.message = live
-      ? "Live distribution was not submitted."
+      ? "Server airdrop job was not started."
       : "Plan validation failed.";
   } finally {
+    if (!polling) state.executing = false;
+    rerender();
+  }
+}
+
+function jobFinished(job: AirdropJob): boolean {
+  return ["completed", "partial", "failed"].includes(job.status);
+}
+
+function jobStatusClass(job: AirdropJob): string {
+  if (job.status === "completed") return "ok";
+  if (job.status === "failed") return "bad";
+  if (job.status === "partial") return "warn";
+  return "";
+}
+
+function scheduleJobPoll(id: string): void {
+  if (jobTimer) clearTimeout(jobTimer);
+  jobTimer = null;
+  if (unmounted) return;
+  jobTimer = setTimeout(() => void pollJob(id), 1_250);
+}
+
+async function pollJob(id: string): Promise<void> {
+  try {
+    const job = await api<AirdropJob>(
+      `/api/airdrops/distribute?id=${encodeURIComponent(id)}`,
+      { cache: "no-store" },
+    );
+    state.currentJob = job;
+    state.executing = !jobFinished(job);
+    state.message = jobFinished(job)
+      ? `Airdrop ${job.status}: ${job.progress.sent}/${job.progress.total} recipients sent.`
+      : `Airdrop ${job.status}: batch ${job.progress.batchesComplete}/${job.progress.batchesTotal}.`;
+    if (job.error) state.error = job.error;
+    rerender();
+    if (!jobFinished(job)) scheduleJobPoll(job.id);
+    else void loadRecentJobs();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
     state.executing = false;
+    rerender();
+  }
+}
+
+async function loadRecentJobs(): Promise<void> {
+  if (state.jobsLoading) return;
+  state.jobsLoading = true;
+  try {
+    const jobs = await api<AirdropJob[]>("/api/airdrops/distribute?limit=12", {
+      cache: "no-store",
+    });
+    state.recentJobs = Array.isArray(jobs) ? jobs : [];
+    if (!state.currentJob && state.recentJobs[0]) {
+      state.currentJob = state.recentJobs[0];
+      if (!jobFinished(state.currentJob)) {
+        state.executing = true;
+        scheduleJobPoll(state.currentJob.id);
+      }
+    }
+  } catch {
+    // Airdrop history is secondary to the holder and planning UI.
+  } finally {
+    state.jobsLoading = false;
     rerender();
   }
 }
@@ -853,8 +965,9 @@ function AirdropsPage() {
           <div className="section-kicker">4 · Distribute</div>
           <h3>Execute from the bank</h3>
           <p className="muted">
-            Live execution is sent only to the configured server-side airdrop
-            executor. Validate and export the plan before enabling it.
+            This Solard server is the executor. It resolves the selected managed
+            wallet, creates recipient token accounts when needed, signs transfer
+            batches, and reports progress back here.
           </p>
         </div>
 
@@ -908,8 +1021,133 @@ function AirdropsPage() {
           }
           onClick={() => void submitPlan(true)}
         >
-          {state.executing ? "Submitting…" : "Execute airdrop"}
+          {state.executing ? "Server executing…" : "Execute airdrop"}
         </button>
+      </section>
+
+      <section className="card airdrops-job-card">
+        <div className="row between">
+          <div>
+            <div className="section-kicker">Server execution</div>
+            <h3>Run progress</h3>
+          </div>
+          {state.currentJob ? (
+            <span className={`pill ${jobStatusClass(state.currentJob)}`}>
+              {state.currentJob.status}
+            </span>
+          ) : (
+            <span className="pill">idle</span>
+          )}
+        </div>
+
+        {state.currentJob ? (
+          <>
+            <div className="airdrops-job-summary">
+              <span>
+                <b>{state.currentJob.progress.sent}</b> sent
+              </span>
+              <span>
+                <b>{state.currentJob.progress.failed}</b> failed
+              </span>
+              <span>
+                <b>
+                  {state.currentJob.progress.batchesComplete}/
+                  {state.currentJob.progress.batchesTotal}
+                </b>{" "}
+                batches
+              </span>
+              <span className="code" title={state.currentJob.id}>
+                {short(state.currentJob.id, 12, 8)}
+              </span>
+            </div>
+            <div className="airdrops-progress" aria-label="Airdrop progress">
+              <span
+                style={{
+                  width: `${state.currentJob.progress.total ? Math.round((state.currentJob.progress.attempted / state.currentJob.progress.total) * 100) : 0}%`,
+                }}
+              />
+            </div>
+
+            {state.currentJob.signatures.length ? (
+              <div className="airdrops-signatures">
+                {state.currentJob.signatures.map((signature) => (
+                  <a
+                    className="code"
+                    href={`https://solscan.io/tx/${signature}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {short(signature, 10, 10)}
+                  </a>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="airdrops-job-columns">
+              <div>
+                <h4>Latest events</h4>
+                <div className="airdrops-job-log">
+                  {state.currentJob.logs
+                    .slice(-12)
+                    .reverse()
+                    .map((entry) => (
+                      <div className={entry.level}>
+                        <time>{new Date(entry.atMs).toLocaleTimeString()}</time>
+                        <span>{entry.message}</span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+              <div>
+                <h4>Recipient status</h4>
+                <div className="airdrops-recipient-runs">
+                  {state.currentJob.recipients.slice(0, 50).map((recipient) => (
+                    <div>
+                      <span
+                        className={`pill ${recipient.status === "sent" ? "ok" : recipient.status === "failed" ? "bad" : ""}`}
+                      >
+                        {recipient.status}
+                      </span>
+                      <span className="code" title={recipient.owner}>
+                        {short(recipient.owner, 6, 6)}
+                      </span>
+                      <b>{recipient.amountUi}</b>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </>
+        ) : (
+          <p className="muted">No server airdrop run has been started yet.</p>
+        )}
+
+        {state.recentJobs.length ? (
+          <details>
+            <summary>Recent server runs ({state.recentJobs.length})</summary>
+            <div className="airdrops-recent-jobs">
+              {state.recentJobs.map((job) => (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    state.currentJob = job;
+                    rerender();
+                    if (!jobFinished(job)) scheduleJobPoll(job.id);
+                  }}
+                >
+                  <span className={`pill ${jobStatusClass(job)}`}>
+                    {job.status}
+                  </span>
+                  <span>{job.planId}</span>
+                  <b>
+                    {job.progress.sent}/{job.progress.total}
+                  </b>
+                </button>
+              ))}
+            </div>
+          </details>
+        ) : null}
       </section>
     </div>
   );
@@ -922,10 +1160,13 @@ export default function mount() {
     rerender();
     if (draft.sourceMint.trim()) void loadHolders(false);
   });
+  void loadRecentJobs();
 
   return () => {
     unmounted = true;
     if (timer) clearTimeout(timer);
     timer = null;
+    if (jobTimer) clearTimeout(jobTimer);
+    jobTimer = null;
   };
 }
