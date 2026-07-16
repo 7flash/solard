@@ -675,6 +675,9 @@ function TrackerHero() {
             <small>{health.detail}</small>
           </div>
         </div>
+        <a className="button-link secondary" href="/copy">
+          Copy trading
+        </a>
         <button
           type="button"
           className="secondary"
@@ -797,6 +800,12 @@ function WalletCard({ wallet }: { wallet: WalletRow; key?: string }) {
       </dl>
 
       <footer>
+        <a
+          className="button-link secondary compact"
+          href={`/copy?leader=${encodeURIComponent(wallet.address)}`}
+        >
+          Copy strategy
+        </a>
         <button
           type="button"
           className="secondary compact"
