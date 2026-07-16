@@ -30,6 +30,7 @@
   "dependencies": {
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
+    "@subsquid/solana-stream": "^1.1.2",
     "bgrun": "3.13.1",
     "bs58": "^6.0.0",
     "measure-fn": "5",
