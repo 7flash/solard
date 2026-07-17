@@ -38,7 +38,8 @@ function publicKey(value: unknown, label: string): string {
 }
 
 function decimal(value: unknown, label: string, allowZero = true): string {
-  const result = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  const result =
+    typeof value === "string" ? value.trim() : String(value ?? "").trim();
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(result)) {
     return bad(`${label} must be a non-negative decimal amount.`);
   }
@@ -48,13 +49,23 @@ function decimal(value: unknown, label: string, allowZero = true): string {
   return result;
 }
 
-function integer(value: unknown, label: string, fallback: number, min: number, max: number): number {
+function integer(
+  value: unknown,
+  label: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
   const parsed = Number(value ?? fallback);
   if (!Number.isFinite(parsed)) bad(`${label} must be a number.`);
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
-function decimalToUnits(value: string, decimals: number, label: string): bigint {
+function decimalToUnits(
+  value: string,
+  decimals: number,
+  label: string,
+): bigint {
   const [whole, fraction = ""] = value.split(".");
   if (fraction.length > decimals) {
     bad(`${label} has more than ${decimals} decimal places.`);
@@ -69,7 +80,10 @@ function unitsToDecimal(value: bigint, decimals: number): string {
   if (decimals === 0) return value.toString();
   const divisor = 10n ** BigInt(decimals);
   const whole = value / divisor;
-  const fraction = (value % divisor).toString().padStart(decimals, "0").replace(/0+$/, "");
+  const fraction = (value % divisor)
+    .toString()
+    .padStart(decimals, "0")
+    .replace(/0+$/, "");
   return fraction ? `${whole}.${fraction}` : whole.toString();
 }
 
@@ -144,7 +158,10 @@ export function normalizeAirdropRules(body: Input): AirdropRules {
   };
 }
 
-async function mintInfo(connection: Connection, address: string): Promise<{
+async function mintInfo(
+  connection: Connection,
+  address: string,
+): Promise<{
   decimals: number;
   supply: bigint;
   programId: PublicKey;
@@ -159,9 +176,15 @@ async function mintInfo(connection: Connection, address: string): Promise<{
       ? "spl-token"
       : null;
   if (!tokenProgram) bad(`${address} is not an SPL Token mint.`);
-  const programId = tokenProgram === "token-2022" ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+  const programId =
+    tokenProgram === "token-2022" ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
   const value = await getMint(connection, mint, "confirmed", programId);
-  return { decimals: value.decimals, supply: value.supply, programId, tokenProgram };
+  return {
+    decimals: value.decimals,
+    supply: value.supply,
+    programId,
+    tokenProgram,
+  };
 }
 
 function allocateEqual(total: bigint, count: number): bigint[] {
@@ -169,7 +192,10 @@ function allocateEqual(total: bigint, count: number): bigint[] {
   const divisor = BigInt(count);
   const base = total / divisor;
   const remainder = Number(total % divisor);
-  return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1n : 0n));
+  return Array.from(
+    { length: count },
+    (_, index) => base + (index < remainder ? 1n : 0n),
+  );
 }
 
 function allocateProRata(total: bigint, weights: bigint[]): bigint[] {
@@ -177,7 +203,11 @@ function allocateProRata(total: bigint, weights: bigint[]): bigint[] {
   if (weightTotal <= 0n) bad("Eligible holder balances total zero.");
   const rows = weights.map((weight, index) => {
     const numerator = total * weight;
-    return { index, units: numerator / weightTotal, remainder: numerator % weightTotal };
+    return {
+      index,
+      units: numerator / weightTotal,
+      remainder: numerator % weightTotal,
+    };
   });
   let allocated = rows.reduce((sum, row) => sum + row.units, 0n);
   let left = total - allocated;
@@ -213,7 +243,11 @@ export async function buildAirdropPlan(
 
   const bank = rules.bankWallet;
   const excluded = new Set(rules.excludedOwners);
-  const minimumBalance = decimalToUnits(rules.minBalanceUi, source.decimals, "minBalanceUi");
+  const minimumBalance = decimalToUnits(
+    rules.minBalanceUi,
+    source.decimals,
+    "minBalanceUi",
+  );
   const minimumShareMicros = percentageMicros(rules.minSharePct, "minSharePct");
   const supply = source.supply;
   const holderRows = Array.isArray(holderPayload?.holders)
@@ -227,31 +261,45 @@ export async function buildAirdropPlan(
       sourceAmountRaw: holderAmountRaw(row),
     }))
     .filter((row) => {
-      if (!row.owner || row.owner === bank || excluded.has(row.owner)) return false;
+      if (!row.owner || row.owner === bank || excluded.has(row.owner))
+        return false;
       try {
         new PublicKey(row.owner);
       } catch {
         return false;
       }
       if (row.sourceAmountRaw < minimumBalance) return false;
-      const shareMicros = supply > 0n ? (row.sourceAmountRaw * 100_000_000n) / supply : 0n;
+      const shareMicros =
+        supply > 0n ? (row.sourceAmountRaw * 100_000_000n) / supply : 0n;
       return shareMicros >= minimumShareMicros;
     });
 
-  if (!eligible.length) bad("No holders match the current server-side filters.");
+  if (!eligible.length)
+    bad("No holders match the current server-side filters.");
 
   let amounts: bigint[];
   if (rules.mode === "fixed") {
-    const fixed = decimalToUnits(rules.fixedAmountUi, payout.decimals, "fixedAmountUi");
+    const fixed = decimalToUnits(
+      rules.fixedAmountUi,
+      payout.decimals,
+      "fixedAmountUi",
+    );
     if (fixed <= 0n) bad("fixedAmountUi must be greater than zero.");
     amounts = eligible.map(() => fixed);
   } else {
-    const total = decimalToUnits(rules.totalAmountUi, payout.decimals, "totalAmountUi");
+    const total = decimalToUnits(
+      rules.totalAmountUi,
+      payout.decimals,
+      "totalAmountUi",
+    );
     if (total <= 0n) bad("totalAmountUi must be greater than zero.");
     amounts =
       rules.mode === "equal-total"
         ? allocateEqual(total, eligible.length)
-        : allocateProRata(total, eligible.map((row) => row.sourceAmountRaw));
+        : allocateProRata(
+            total,
+            eligible.map((row) => row.sourceAmountRaw),
+          );
   }
 
   if (amounts.some((value) => value <= 0n)) {
@@ -262,7 +310,8 @@ export async function buildAirdropPlan(
   }
 
   const recipients: AirdropRecipient[] = eligible.map((row, index) => {
-    const shareMicros = supply > 0n ? (row.sourceAmountRaw * 100_000_000n) / supply : 0n;
+    const shareMicros =
+      supply > 0n ? (row.sourceAmountRaw * 100_000_000n) / supply : 0n;
     return {
       owner: row.owner,
       rank: row.rank,

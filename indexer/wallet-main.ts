@@ -2,6 +2,7 @@
 import {
   SOLARD_DB_PATH,
   isSqliteBusyError,
+  listWalletTransactions,
   listWatchedWallets,
   recordWorkerError,
   upsertProcessStatus,
@@ -97,15 +98,20 @@ function confidenceFromMessage(
   config: WalletIndexerConfig,
 ): WalletConfidence {
   const value =
-    message?.params?.result?.commitment ?? message?.result?.commitment;
-  return value === "processed" || value === "confirmed" || value === "finalized"
+    message?.params?.result?.commitment ??
+    message?.result?.commitment;
+  return value === "processed" ||
+    value === "confirmed" ||
+    value === "finalized"
     ? value
     : config.commitment;
 }
 
 function rawSignature(message: any): string {
   return String(
-    message?.params?.result?.signature ?? message?.result?.signature ?? "",
+    message?.params?.result?.signature ??
+      message?.result?.signature ??
+      "",
   );
 }
 
@@ -127,8 +133,13 @@ export async function runWalletIndexer(
   let stopping = false;
   let walletTimer: ReturnType<typeof setInterval> | null = null;
   let backfillTimer: ReturnType<typeof setInterval> | null = null;
+  let reparseTimer: ReturnType<typeof setInterval> | null = null;
   let solTimer: ReturnType<typeof setInterval> | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let reparseRunning = false;
+  const reparseIntervalMs = Math.max(500, Number(process.env.SOLARD_WALLET_REPARSE_INTERVAL_MS ?? 2_500) || 2_500);
+  const reparseBatch = Math.max(1, Math.min(100, Number(process.env.SOLARD_WALLET_REPARSE_BATCH ?? 10) || 10));
+  const reparseStats = { queued: 0, completed: 0, errors: 0, lastAtMs: 0 };
 
   const processMessage = async (message: any): Promise<void> => {
     const parsed = parseWatchedWalletTransaction(message, {
@@ -165,6 +176,54 @@ export async function runWalletIndexer(
         signature,
         wallets: parsed.wallets,
       });
+    }
+  };
+
+  const runReparseCycle = async (): Promise<void> => {
+    if (reparseRunning || stopping) return;
+    reparseRunning = true;
+    try {
+      const pending = listWalletTransactions({
+        parseStatus: "pending",
+        limit: reparseBatch,
+      });
+      reparseStats.queued = pending.length;
+      for (const row of pending) {
+        try {
+          const raw = JSON.parse(row.rawJson || "{}");
+          const parsed = parseWatchedWalletTransaction(raw, {
+            watchedWallets: new Set([row.wallet]),
+            config,
+            solUsd: counters.solUsd,
+            confidence: row.confidence,
+          });
+          if (!parsed) {
+            throw new Error(
+              "Stored transaction could not be normalized for the watched wallet",
+            );
+          }
+          await applyWalletTransaction(parsed, counters);
+          reparseStats.completed++;
+          reparseStats.lastAtMs = Date.now();
+        } catch (error) {
+          reparseStats.errors++;
+          reparseStats.lastAtMs = Date.now();
+          upsertWalletTransaction({
+            ...row,
+            parseStatus: "error",
+            parserVersion: "wallet-v2-reparse",
+            error: error instanceof Error ? error.message : String(error),
+            updatedAtMs: Date.now(),
+          });
+          recordWorkerError(config.name, error, {
+            phase: "wallet-reparse",
+            wallet: row.wallet,
+            signature: row.signature,
+          });
+        }
+      }
+    } finally {
+      reparseRunning = false;
     }
   };
 
@@ -220,6 +279,7 @@ export async function runWalletIndexer(
     subscription.stop();
     if (walletTimer) clearInterval(walletTimer);
     if (backfillTimer) clearInterval(backfillTimer);
+    if (reparseTimer) clearInterval(reparseTimer);
     if (solTimer) clearInterval(solTimer);
     if (heartbeat) clearInterval(heartbeat);
     void writeStatus({
@@ -252,6 +312,8 @@ export async function runWalletIndexer(
       commitment: config.commitment,
       backfillEnabled: config.backfillEnabled,
       backfillLimit: config.backfillLimit,
+      reparseIntervalMs,
+      reparseBatch,
     }),
     updatedAtMs: Date.now(),
   });
@@ -272,7 +334,16 @@ export async function runWalletIndexer(
   (backfillTimer as any).unref?.();
   void backfill.runCycle(watchedRows);
 
-  solTimer = setInterval(() => void refreshPrice(), config.solUsdRefreshMs);
+  reparseTimer = setInterval(() => {
+    void runReparseCycle();
+  }, reparseIntervalMs);
+  (reparseTimer as any).unref?.();
+  void runReparseCycle();
+
+  solTimer = setInterval(
+    () => void refreshPrice(),
+    config.solUsdRefreshMs,
+  );
   (solTimer as any).unref?.();
 
   heartbeat = setInterval(() => {
@@ -286,6 +357,7 @@ export async function runWalletIndexer(
         rpc: redactedWalletUrl(config.rpcUrl),
         websocket: redactedWalletUrl(config.wsUrl),
         commitment: config.commitment,
+        reparse: { ...reparseStats, running: reparseRunning },
         ...counters,
       }),
       updatedAtMs: Date.now(),

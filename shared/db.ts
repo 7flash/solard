@@ -106,6 +106,7 @@ export const TokenTradeSchema = z.object({
   updatedAtMs: z.coerce.number(),
 });
 
+
 export const WatchedWalletSchema = z.object({
   address: z.string(),
   label: z.string().nullable().default(null),
@@ -167,6 +168,7 @@ export const WalletSwapSchema = z.object({
   tradedAtMs: z.coerce.number().default(0),
   updatedAtMs: z.coerce.number().default(0),
 });
+
 
 export const CopyTradeProfileSchema = z.object({
   profileKey: z.string(),
@@ -826,7 +828,10 @@ export const db = await openDatabaseWithRetry(
             ["mint", "marketCapUsd"],
           ],
 
-          watchedWalletsV1: [["enabled", "updatedAtMs"], ["lastBackfillAtMs"]],
+          watchedWalletsV1: [
+            ["enabled", "updatedAtMs"],
+            ["lastBackfillAtMs"],
+          ],
 
           walletTransactionsV1: [
             ["wallet", "tradedAtMs"],
@@ -1657,6 +1662,7 @@ export function listTokensNeedingMayhemCheck(
     }));
 }
 
+
 export function listWatchedWallets(
   input: { enabledOnly?: boolean; limit?: number } = {},
 ): WatchedWallet[] {
@@ -1691,7 +1697,7 @@ export function upsertWatchedWallet(
     label:
       input.label === null
         ? null
-        : (text(input.label) ?? existing?.label ?? null),
+        : text(input.label) ?? existing?.label ?? null,
     enabled:
       input.enabled == null
         ? (existing?.enabled ?? 1)
@@ -1707,9 +1713,9 @@ export function upsertWatchedWallet(
     lastBackfillSignature:
       input.lastBackfillSignature === null
         ? null
-        : (text(input.lastBackfillSignature) ??
+        : text(input.lastBackfillSignature) ??
           existing?.lastBackfillSignature ??
-          null),
+          null,
     lastBackfillAtMs: integer(
       input.lastBackfillAtMs,
       existing?.lastBackfillAtMs ?? 0,
@@ -1771,14 +1777,12 @@ export function resetWatchedWalletBackfill(address: string): WatchedWallet {
     .where({ address: key })
     .exec();
 
-  return (
-    getWatchedWallet(key) ?? {
-      ...existing,
-      lastBackfillSignature: null,
-      lastBackfillAtMs: 0,
-      updatedAtMs: Date.now(),
-    }
-  );
+  return getWatchedWallet(key) ?? {
+    ...existing,
+    lastBackfillSignature: null,
+    lastBackfillAtMs: 0,
+    updatedAtMs: Date.now(),
+  };
 }
 
 export function upsertWalletTransaction(
@@ -1810,12 +1814,15 @@ export function upsertWalletTransaction(
     rawJson:
       typeof input.rawJson === "string"
         ? input.rawJson
-        : (existing?.rawJson ?? stringify(input.rawJson ?? {})),
+        : existing?.rawJson ?? stringify(input.rawJson ?? {}),
     error:
       input.error === null
         ? null
-        : (text(input.error) ?? existing?.error ?? null),
-    tradedAtMs: integer(input.tradedAtMs, existing?.tradedAtMs ?? now),
+        : text(input.error) ?? existing?.error ?? null,
+    tradedAtMs: integer(
+      input.tradedAtMs,
+      existing?.tradedAtMs ?? now,
+    ),
     updatedAtMs: integer(input.updatedAtMs, now),
   });
   return db.walletTransactionsV1.upsert(row, {
@@ -1858,6 +1865,110 @@ export function listWalletTransactions(
     .all() as WalletTransaction[];
 }
 
+export function getWalletTransaction(
+  wallet: string,
+  signature: string,
+): WalletTransaction | null {
+  const cleanWallet = wallet.trim();
+  const cleanSignature = signature.trim();
+  if (!cleanWallet || !cleanSignature) return null;
+  return (
+    (db.walletTransactionsV1
+      .select()
+      .where({ wallet: cleanWallet, signature: cleanSignature })
+      .get() as WalletTransaction | null) ?? null
+  );
+}
+
+export type RequeueWalletTransactionsResult = {
+  queued: number;
+  deletedSwaps: number;
+  transactions: WalletTransaction[];
+};
+
+export function requeueWalletTransactions(
+  input: {
+    wallet?: string | null;
+    signature?: string | null;
+    parseStatuses?: WalletTransaction["parseStatus"][];
+    limit?: number;
+    deleteSwaps?: boolean;
+  } = {},
+): RequeueWalletTransactionsResult {
+  const wallet = input.wallet?.trim() ?? "";
+  const signature = input.signature?.trim() ?? "";
+  const statuses = new Set<WalletTransaction["parseStatus"]>(
+    input.parseStatuses?.length
+      ? input.parseStatuses
+      : ["error"],
+  );
+  const limit = Math.max(1, Math.min(integer(input.limit, 250), 5_000));
+
+  let query = db.walletTransactionsV1.select();
+  if (wallet) query = query.where({ wallet });
+  if (signature) query = query.where({ signature });
+  const selected = (query
+    .orderBy("tradedAtMs", "desc")
+    .limit(Math.max(limit * 4, limit))
+    .all() as WalletTransaction[])
+    .filter((row) => statuses.has(row.parseStatus))
+    .slice(0, limit);
+
+  let deletedSwaps = 0;
+  const transactions: WalletTransaction[] = [];
+  for (const row of selected) {
+    if (input.deleteSwaps !== false) {
+      deletedSwaps += db.walletSwapsV1
+        .delete()
+        .where({ wallet: row.wallet, signature: row.signature })
+        .exec();
+    }
+    db.walletTransactionsV1
+      .update({
+        parseStatus: "pending",
+        error: null,
+        parserVersion: "wallet-v2-reparse",
+        updatedAtMs: Date.now(),
+      })
+      .where({ walletTxKey: row.walletTxKey })
+      .exec();
+    const updated = getWalletTransaction(row.wallet, row.signature);
+    if (updated) transactions.push(updated);
+  }
+
+  return { queued: transactions.length, deletedSwaps, transactions };
+}
+
+export function requeueWalletTransaction(input: {
+  wallet: string;
+  signature: string;
+  deleteSwaps?: boolean;
+}): WalletTransaction {
+  const existing = getWalletTransaction(input.wallet, input.signature);
+  if (!existing) {
+    throw new Error(
+      `Wallet transaction not found: ${input.wallet}:${input.signature}`,
+    );
+  }
+  const result = requeueWalletTransactions({
+    wallet: input.wallet,
+    signature: input.signature,
+    parseStatuses: [
+      "pending",
+      "parsed",
+      "ignored",
+      "error",
+    ],
+    limit: 1,
+    deleteSwaps: input.deleteSwaps,
+  });
+  if (!result.transactions[0]) {
+    throw new Error("Failed to queue wallet transaction for reparse");
+  }
+  return result.transactions[0];
+}
+
+
 export type AppendWalletSwapResult = {
   row: WalletSwap;
   inserted: boolean;
@@ -1895,7 +2006,9 @@ export function appendWalletSwapOnce(
     subjectMint: input.subjectMint.trim(),
     quoteMint: text(input.quoteMint),
     side:
-      input.side === "buy" || input.side === "sell" || input.side === "swap"
+      input.side === "buy" ||
+      input.side === "sell" ||
+      input.side === "swap"
         ? input.side
         : "unknown",
     venue: text(input.venue) ?? "unknown",
@@ -1936,6 +2049,7 @@ export function appendWalletSwapOnce(
 export function listWalletSwaps(
   input: {
     wallet?: string | null;
+    signature?: string | null;
     mint?: string | null;
     side?: "buy" | "sell" | "swap" | "unknown" | null;
     sinceMs?: number;
@@ -1944,8 +2058,10 @@ export function listWalletSwaps(
   } = {},
 ): WalletSwap[] {
   let query = db.walletSwapsV1.select();
-  if (input.wallet?.trim())
-    query = query.where({ wallet: input.wallet.trim() });
+  if (input.wallet?.trim()) query = query.where({ wallet: input.wallet.trim() });
+  if (input.signature?.trim()) {
+    query = query.where({ signature: input.signature.trim() });
+  }
   if (input.side) query = query.where({ side: input.side });
   if (positiveTime(input.sinceMs) > 0) {
     query = query.where({ tradedAtMs: { $gte: positiveTime(input.sinceMs) } });
@@ -1955,24 +2071,29 @@ export function listWalletSwaps(
   const mint = input.mint?.trim();
   if (mint) query = query.where({ subjectMint: mint });
   const limit = Math.max(1, Math.min(integer(input.limit, 250), 100_000));
-  return query.orderBy("tradedAtMs", "desc").limit(limit).all() as WalletSwap[];
+  return query
+    .orderBy("tradedAtMs", "desc")
+    .limit(limit)
+    .all() as WalletSwap[];
 }
+
+
 
 function cleanJsonStringArray(value: unknown): string {
   if (typeof value === "string") {
     try {
       const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) {
-        return JSON.stringify([
-          ...new Set(parsed.map((item) => String(item).trim()).filter(Boolean)),
-        ]);
+        return JSON.stringify(
+          [...new Set(parsed.map((item) => String(item).trim()).filter(Boolean))],
+        );
       }
     } catch {}
   }
   if (Array.isArray(value)) {
-    return JSON.stringify([
-      ...new Set(value.map((item) => String(item).trim()).filter(Boolean)),
-    ]);
+    return JSON.stringify(
+      [...new Set(value.map((item) => String(item).trim()).filter(Boolean))],
+    );
   }
   return "[]";
 }
@@ -1999,9 +2120,7 @@ export function listCopyTradeProfiles(
     .all() as CopyTradeProfile[];
 }
 
-export function getCopyTradeProfile(
-  profileKey: string,
-): CopyTradeProfile | null {
+export function getCopyTradeProfile(profileKey: string): CopyTradeProfile | null {
   const key = profileKey.trim();
   if (!key) return null;
   return (
@@ -2025,7 +2144,8 @@ export function upsertCopyTradeProfile(
   if (!leaderWallet || !followerRef) {
     throw new Error("Copy profile requires leaderWallet and followerRef");
   }
-  const profileKey = text(input.profileKey) ?? `${leaderWallet}:${followerRef}`;
+  const profileKey =
+    text(input.profileKey) ?? `${leaderWallet}:${followerRef}`;
   const existing = getCopyTradeProfile(profileKey);
   const row = CopyTradeProfileSchema.parse({
     profileKey,
@@ -2034,19 +2154,14 @@ export function upsertCopyTradeProfile(
     label:
       input.label === null
         ? null
-        : (text(input.label) ?? existing?.label ?? null),
+        : text(input.label) ?? existing?.label ?? null,
     enabled:
       input.enabled == null
         ? (existing?.enabled ?? 1)
         : Number(input.enabled) > 0
           ? 1
           : 0,
-    mode:
-      input.mode === "live"
-        ? "live"
-        : input.mode === "paper"
-          ? "paper"
-          : (existing?.mode ?? "paper"),
+    mode: input.mode === "live" ? "live" : input.mode === "paper" ? "paper" : existing?.mode ?? "paper",
     copyBuys:
       input.copyBuys == null
         ? (existing?.copyBuys ?? 1)
@@ -2062,17 +2177,14 @@ export function upsertCopyTradeProfile(
     buySizing:
       input.buySizing === "leader-ratio" || input.buySizing === "fixed"
         ? input.buySizing
-        : (existing?.buySizing ?? "fixed"),
+        : existing?.buySizing ?? "fixed",
     fixedBuyAmountUi: Math.max(
       0,
       finite(input.fixedBuyAmountUi) ?? existing?.fixedBuyAmountUi ?? 0.05,
     ),
     leaderScaleBps: Math.max(
       1,
-      Math.min(
-        100_000,
-        integer(input.leaderScaleBps, existing?.leaderScaleBps ?? 10_000),
-      ),
+      Math.min(100_000, integer(input.leaderScaleBps, existing?.leaderScaleBps ?? 10_000)),
     ),
     maxBuyAmountUi: Math.max(
       0,
@@ -2080,17 +2192,11 @@ export function upsertCopyTradeProfile(
     ),
     sellBalanceBps: Math.max(
       1,
-      Math.min(
-        10_000,
-        integer(input.sellBalanceBps, existing?.sellBalanceBps ?? 10_000),
-      ),
+      Math.min(10_000, integer(input.sellBalanceBps, existing?.sellBalanceBps ?? 10_000)),
     ),
     slippageBps: Math.max(
       1,
-      Math.min(
-        10_000,
-        integer(input.slippageBps, existing?.slippageBps ?? 500),
-      ),
+      Math.min(10_000, integer(input.slippageBps, existing?.slippageBps ?? 500)),
     ),
     maxEventAgeMs: Math.max(
       1_000,
@@ -2111,86 +2217,86 @@ export function upsertCopyTradeProfile(
     minMarketCapUsd:
       input.minMarketCapUsd === null
         ? null
-        : (finite(input.minMarketCapUsd) ?? existing?.minMarketCapUsd ?? null),
+        : finite(input.minMarketCapUsd) ?? existing?.minMarketCapUsd ?? null,
     maxMarketCapUsd:
       input.maxMarketCapUsd === null
         ? null
-        : (finite(input.maxMarketCapUsd) ?? existing?.maxMarketCapUsd ?? null),
+        : finite(input.maxMarketCapUsd) ?? existing?.maxMarketCapUsd ?? null,
     maxPriceAgeMs:
       input.maxPriceAgeMs === null
         ? null
-        : (finite(input.maxPriceAgeMs) ?? existing?.maxPriceAgeMs ?? null),
+        : finite(input.maxPriceAgeMs) ?? existing?.maxPriceAgeMs ?? null,
     minTokenAgeMs:
       input.minTokenAgeMs === null
         ? null
-        : (finite(input.minTokenAgeMs) ?? existing?.minTokenAgeMs ?? null),
+        : finite(input.minTokenAgeMs) ?? existing?.minTokenAgeMs ?? null,
     maxTokenAgeMs:
       input.maxTokenAgeMs === null
         ? null
-        : (finite(input.maxTokenAgeMs) ?? existing?.maxTokenAgeMs ?? null),
+        : finite(input.maxTokenAgeMs) ?? existing?.maxTokenAgeMs ?? null,
     minHolders:
       input.minHolders === null
         ? null
-        : (finite(input.minHolders) ?? existing?.minHolders ?? null),
+        : finite(input.minHolders) ?? existing?.minHolders ?? null,
     minTrades1m:
       input.minTrades1m === null
         ? null
-        : (finite(input.minTrades1m) ?? existing?.minTrades1m ?? null),
+        : finite(input.minTrades1m) ?? existing?.minTrades1m ?? null,
     minTrades5m:
       input.minTrades5m === null
         ? null
-        : (finite(input.minTrades5m) ?? existing?.minTrades5m ?? null),
+        : finite(input.minTrades5m) ?? existing?.minTrades5m ?? null,
     minTrades15m:
       input.minTrades15m === null
         ? null
-        : (finite(input.minTrades15m) ?? existing?.minTrades15m ?? null),
+        : finite(input.minTrades15m) ?? existing?.minTrades15m ?? null,
     minVolumeSol1m:
       input.minVolumeSol1m === null
         ? null
-        : (finite(input.minVolumeSol1m) ?? existing?.minVolumeSol1m ?? null),
+        : finite(input.minVolumeSol1m) ?? existing?.minVolumeSol1m ?? null,
     minVolumeSol5m:
       input.minVolumeSol5m === null
         ? null
-        : (finite(input.minVolumeSol5m) ?? existing?.minVolumeSol5m ?? null),
+        : finite(input.minVolumeSol5m) ?? existing?.minVolumeSol5m ?? null,
     minVolumeSol15m:
       input.minVolumeSol15m === null
         ? null
-        : (finite(input.minVolumeSol15m) ?? existing?.minVolumeSol15m ?? null),
+        : finite(input.minVolumeSol15m) ?? existing?.minVolumeSol15m ?? null,
     minLeaderQuoteAmountUi:
       input.minLeaderQuoteAmountUi === null
         ? null
-        : (finite(input.minLeaderQuoteAmountUi) ??
+        : finite(input.minLeaderQuoteAmountUi) ??
           existing?.minLeaderQuoteAmountUi ??
-          null),
+          null,
     maxLeaderQuoteAmountUi:
       input.maxLeaderQuoteAmountUi === null
         ? null
-        : (finite(input.maxLeaderQuoteAmountUi) ??
+        : finite(input.maxLeaderQuoteAmountUi) ??
           existing?.maxLeaderQuoteAmountUi ??
-          null),
+          null,
     allowedMintsJson:
       input.allowedMintsJson === undefined
-        ? (existing?.allowedMintsJson ?? "[]")
+        ? existing?.allowedMintsJson ?? "[]"
         : cleanJsonStringArray(input.allowedMintsJson),
     blockedMintsJson:
       input.blockedMintsJson === undefined
-        ? (existing?.blockedMintsJson ?? "[]")
+        ? existing?.blockedMintsJson ?? "[]"
         : cleanJsonStringArray(input.blockedMintsJson),
     allowedQuoteMintsJson:
       input.allowedQuoteMintsJson === undefined
-        ? (existing?.allowedQuoteMintsJson ?? "[]")
+        ? existing?.allowedQuoteMintsJson ?? "[]"
         : cleanJsonStringArray(input.allowedQuoteMintsJson),
     allowedPhasesJson:
       input.allowedPhasesJson === undefined
-        ? (existing?.allowedPhasesJson ?? "[]")
+        ? existing?.allowedPhasesJson ?? "[]"
         : cleanJsonStringArray(input.allowedPhasesJson),
     allowedVenuesJson:
       input.allowedVenuesJson === undefined
-        ? (existing?.allowedVenuesJson ?? "[]")
+        ? existing?.allowedVenuesJson ?? "[]"
         : cleanJsonStringArray(input.allowedVenuesJson),
     allowedParsersJson:
       input.allowedParsersJson === undefined
-        ? (existing?.allowedParsersJson ?? "[]")
+        ? existing?.allowedParsersJson ?? "[]"
         : cleanJsonStringArray(input.allowedParsersJson),
     createdAtMs: existing?.createdAtMs ?? integer(input.createdAtMs, now),
     updatedAtMs: integer(input.updatedAtMs, now),
@@ -2301,7 +2407,10 @@ export function appendCopyTradeIntentOnce(
       input.balanceBps == null
         ? null
         : Math.max(1, Math.min(10_000, integer(input.balanceBps, 10_000))),
-    slippageBps: Math.max(1, Math.min(10_000, integer(input.slippageBps, 500))),
+    slippageBps: Math.max(
+      1,
+      Math.min(10_000, integer(input.slippageBps, 500)),
+    ),
     mode: input.mode === "live" ? "live" : "paper",
     status:
       input.status === "paper" ||
@@ -2389,9 +2498,7 @@ export function listCopyTradeIntents(
     query = query.where({ createdAtMs: { $gte: positiveTime(input.sinceMs) } });
   }
   if (positiveTime(input.dueAtMs) > 0) {
-    query = query.where({
-      nextAttemptAtMs: { $lte: positiveTime(input.dueAtMs) },
-    });
+    query = query.where({ nextAttemptAtMs: { $lte: positiveTime(input.dueAtMs) } });
   }
   return query
     .orderBy("createdAtMs", "desc")
@@ -2544,7 +2651,9 @@ export function getCopyTradeTokenContext(
     positiveTime(token?.priceUpdatedAtMs),
     positiveTime(window?.latestTradeAtMs),
   );
-  const priceUsd = finite(window?.latestPriceUsd) ?? finite(token?.priceUsd);
+  const priceUsd =
+    finite(window?.latestPriceUsd) ??
+    finite(token?.priceUsd);
   const marketCapUsd =
     finite(window?.currentMarketCapUsd) ??
     finite(window?.latestMarketCapUsd) ??
@@ -3904,19 +4013,13 @@ export function terminalStoreStats(
     indexedTrades: db.tokenTradesV2.count(),
     watchedWallets: db.watchedWalletsV1.count(),
     enabledWatchedWallets: (
-      db.watchedWalletsV1
-        .select()
-        .where({ enabled: 1 })
-        .all() as WatchedWallet[]
+      db.watchedWalletsV1.select().where({ enabled: 1 }).all() as WatchedWallet[]
     ).length,
     walletTransactions: db.walletTransactionsV1.count(),
     walletSwaps: db.walletSwapsV1.count(),
     copyTradeProfiles: db.copyTradeProfilesV1.count(),
     enabledCopyTradeProfiles: (
-      db.copyTradeProfilesV1
-        .select()
-        .where({ enabled: 1 })
-        .all() as CopyTradeProfile[]
+      db.copyTradeProfilesV1.select().where({ enabled: 1 }).all() as CopyTradeProfile[]
     ).length,
     copyTradeIntents: db.copyTradeIntentsV1.count(),
     terminalTrades: db.terminalTradesLive.count(),

@@ -846,6 +846,12 @@ function WalletCard({ wallet }: { wallet: WalletRow; key?: string }) {
       <footer>
         <a
           className="button-link secondary compact"
+          href={`/wallets/detail?wallet=${encodeURIComponent(wallet.address)}`}
+        >
+          Inspect
+        </a>
+        <a
+          className="button-link secondary compact"
           href={`/copy?leader=${encodeURIComponent(wallet.address)}`}
         >
           Copy strategy

@@ -1,13 +1,19 @@
 import {
   getTerminalToken,
   getWatchedWallet,
+  getWalletTransaction,
+  listCopyTradeIntents,
+  listCopyTradeProfiles,
   listProcessStatus,
   listWalletSwaps,
   listWalletTransactions,
   listWatchedWallets,
+  requeueWalletTransaction,
+  requeueWalletTransactions,
   resetWatchedWalletBackfill,
   upsertWatchedWallet,
   type WalletSwap,
+  type WalletTransaction,
   type WatchedWallet,
 } from "../../../shared/db.js";
 
@@ -59,12 +65,7 @@ const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 function response(value: unknown, status = 200): Response {
   return Response.json(
     status >= 400 ? { ok: false, error: value } : { ok: true, value },
-    {
-      status,
-      headers: {
-        "cache-control": "no-store",
-      },
-    },
+    { status, headers: { "cache-control": "no-store" } },
   );
 }
 
@@ -106,9 +107,20 @@ async function requestBody(request: Request): Promise<Record<string, unknown>> {
       ? (parsed as Record<string, unknown>)
       : {};
   }
-
   const form = await request.formData();
   return Object.fromEntries(form.entries());
+}
+
+function parseObject(value: string | null | undefined): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function tokenSummary(mint: string): TokenSummary {
@@ -143,7 +155,6 @@ function decorateSwaps(swaps: readonly WalletSwap[]): DecoratedSwap[] {
 
 function positionRows(swaps: readonly DecoratedSwap[]): WalletPosition[] {
   const rows = new Map<string, WalletPosition>();
-
   for (const swap of [...swaps].sort(
     (left, right) => left.tradedAtMs - right.tradedAtMs,
   )) {
@@ -173,12 +184,10 @@ function positionRows(swaps: readonly DecoratedSwap[]): WalletPosition[] {
     if (swap.inputMint === swap.subjectMint) {
       subjectDelta -= Math.abs(Number(swap.inputAmountUi) || 0);
     }
-
-    const quoteMint = swap.quoteMint || null;
-    if (quoteMint && swap.inputMint === quoteMint) {
+    if (swap.quoteMint && swap.inputMint === swap.quoteMint) {
       current.spentQuoteUi += Math.abs(Number(swap.inputAmountUi) || 0);
     }
-    if (quoteMint && swap.outputMint === quoteMint) {
+    if (swap.quoteMint && swap.outputMint === swap.quoteMint) {
       current.receivedQuoteUi += Math.abs(Number(swap.outputAmountUi) || 0);
     }
 
@@ -189,9 +198,8 @@ function positionRows(swaps: readonly DecoratedSwap[]): WalletPosition[] {
     current.copyableTrades += Number(swap.copyable) > 0 ? 1 : 0;
     current.lastSide = swap.side;
     current.lastTradeAtMs = Math.max(current.lastTradeAtMs, swap.tradedAtMs);
-    current.lastPriceUsd =
-      swap.priceUsd ?? swap.token.priceUsd ?? current.lastPriceUsd;
-    current.quoteMint = quoteMint ?? current.quoteMint;
+    current.lastPriceUsd = swap.priceUsd ?? swap.token.priceUsd ?? current.lastPriceUsd;
+    current.quoteMint = swap.quoteMint ?? current.quoteMint;
     current.token = swap.token;
     rows.set(key, current);
   }
@@ -215,17 +223,18 @@ function walletSummaries(
   wallets: readonly WatchedWallet[],
   swaps: readonly DecoratedSwap[],
 ): WalletSummary[] {
-  type WalletAggregate = {
-    tradeCount: number;
-    buyCount: number;
-    sellCount: number;
-    swapCount: number;
-    copyableTrades: number;
-    uniqueTokens: number;
-    lastTradeAtMs: number | null;
-    mints: Set<string>;
-  };
-  const stats = new Map<string, WalletAggregate>();
+  const stats = new Map<
+    string,
+    {
+      tradeCount: number;
+      buyCount: number;
+      sellCount: number;
+      swapCount: number;
+      copyableTrades: number;
+      lastTradeAtMs: number | null;
+      mints: Set<string>;
+    }
+  >();
 
   for (const swap of swaps) {
     const current = stats.get(swap.wallet) ?? {
@@ -234,21 +243,16 @@ function walletSummaries(
       sellCount: 0,
       swapCount: 0,
       copyableTrades: 0,
-      uniqueTokens: 0,
       lastTradeAtMs: null,
       mints: new Set<string>(),
     };
-    current.tradeCount += 1;
-    if (swap.side === "buy") current.buyCount += 1;
-    if (swap.side === "sell") current.sellCount += 1;
-    if (swap.side === "swap") current.swapCount += 1;
+    current.tradeCount++;
+    if (swap.side === "buy") current.buyCount++;
+    if (swap.side === "sell") current.sellCount++;
+    if (swap.side === "swap") current.swapCount++;
     current.copyableTrades += Number(swap.copyable) > 0 ? 1 : 0;
     current.mints.add(swap.subjectMint);
-    current.uniqueTokens = current.mints.size;
-    current.lastTradeAtMs = Math.max(
-      current.lastTradeAtMs ?? 0,
-      swap.tradedAtMs,
-    );
+    current.lastTradeAtMs = Math.max(current.lastTradeAtMs ?? 0, swap.tradedAtMs);
     stats.set(swap.wallet, current);
   }
 
@@ -261,7 +265,7 @@ function walletSummaries(
       sellCount: current?.sellCount ?? 0,
       swapCount: current?.swapCount ?? 0,
       copyableTrades: current?.copyableTrades ?? 0,
-      uniqueTokens: current?.uniqueTokens ?? 0,
+      uniqueTokens: current?.mints.size ?? 0,
       lastTradeAtMs: current?.lastTradeAtMs ?? null,
     };
   });
@@ -276,21 +280,67 @@ function sideValue(value: string | null): Side | null {
     : null;
 }
 
+function statusValue(
+  value: string | null,
+): WalletTransaction["parseStatus"] | null {
+  return value === "pending" ||
+    value === "parsed" ||
+    value === "ignored" ||
+    value === "error"
+    ? value
+    : null;
+}
+
+function countBy<T>(values: readonly T[], read: (value: T) => string): Array<{
+  key: string;
+  count: number;
+}> {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    const key = read(value) || "unknown";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((left, right) => right.count - left.count || left.key.localeCompare(right.key));
+}
+
+function workerStatus(): Record<string, unknown> | null {
+  const processes = listProcessStatus(100);
+  const row =
+    processes.find((item) =>
+      /wallet/i.test(`${item.name ?? ""} ${item.kind ?? ""}`),
+    ) ?? null;
+  if (!row) return null;
+  return { ...row, data: parseObject(row.dataJson) };
+}
+
 export async function GET(request: Request): Promise<Response> {
   try {
     const url = new URL(request.url);
     const wallet = text(url.searchParams.get("wallet")) || null;
     const mint = text(url.searchParams.get("mint")) || null;
+    const signature = text(url.searchParams.get("signature")) || null;
     const side = sideValue(url.searchParams.get("side"));
+    const transactionStatus = statusValue(url.searchParams.get("transactionStatus"));
     const sinceMs = Math.max(0, integer(url.searchParams.get("sinceMs"), 0));
     const limit = Math.max(
       1,
       Math.min(integer(url.searchParams.get("limit"), 250), 2_000),
     );
+    const transactionLimit = Math.max(
+      1,
+      Math.min(integer(url.searchParams.get("transactionLimit"), 500), 5_000),
+    );
     const positionLimit = Math.max(
       limit,
       Math.min(integer(url.searchParams.get("positionLimit"), 10_000), 50_000),
     );
+    const includeTransactions = bool(
+      url.searchParams.get("includeTransactions"),
+      false,
+    );
+    const includeRaw = bool(url.searchParams.get("includeRaw"), false);
 
     const wallets = listWatchedWallets({ limit: 50_000 });
     const recentSwaps = decorateSwaps(
@@ -302,37 +352,51 @@ export async function GET(request: Request): Promise<Response> {
     const summarySwaps = wallet
       ? decorateSwaps(listWalletSwaps({ limit: positionLimit }))
       : portfolioSwaps;
-    const transactions = listWalletTransactions({
-      wallet,
-      sinceMs,
-      limit: Math.max(limit, 1_000),
-    });
-    const processes = listProcessStatus(100);
-    const worker =
-      processes.find((row) =>
-        /wallet/i.test(`${row.name ?? ""} ${row.kind ?? ""}`),
-      ) ?? null;
-
     const summaries = walletSummaries(wallets, summarySwaps);
     const positions = positionRows(portfolioSwaps);
-    const activeWallets = wallets.filter(
-      (row) => Number(row.enabled) > 0,
-    ).length;
+    const activeWallets = wallets.filter((row) => Number(row.enabled) > 0).length;
+
+    const allTransactions = listWalletTransactions({
+      wallet,
+      sinceMs,
+      limit: Math.max(transactionLimit, 1_000),
+    });
+    const transactions = transactionStatus
+      ? allTransactions.filter((row) => row.parseStatus === transactionStatus)
+      : allTransactions;
+    const selectedTransaction =
+      wallet && signature ? getWalletTransaction(wallet, signature) : null;
+    const selectedSwaps =
+      wallet && signature
+        ? decorateSwaps(listWalletSwaps({ wallet, signature, limit: 100 }))
+        : [];
+    const profiles = wallet
+      ? listCopyTradeProfiles({ leaderWallet: wallet, limit: 250 })
+      : [];
+    const intents = wallet
+      ? listCopyTradeIntents({ leaderWallet: wallet, limit: 500 })
+      : [];
+    const swapCountByTransaction = new Map<string, number>();
+    for (const swap of portfolioSwaps) {
+      const key = `${swap.wallet}:${swap.signature}`;
+      swapCountByTransaction.set(
+        key,
+        (swapCountByTransaction.get(key) ?? 0) + 1,
+      );
+    }
 
     return response({
       wallets: summaries,
       swaps: recentSwaps,
       positions,
-      worker,
+      worker: workerStatus(),
       transactionStats: {
-        total: transactions.length,
-        parsed: transactions.filter((row) => row.parseStatus === "parsed")
-          .length,
-        ignored: transactions.filter((row) => row.parseStatus === "ignored")
-          .length,
-        errors: transactions.filter((row) => row.parseStatus === "error")
-          .length,
-        latestAtMs: transactions[0]?.tradedAtMs ?? null,
+        total: allTransactions.length,
+        pending: allTransactions.filter((row) => row.parseStatus === "pending").length,
+        parsed: allTransactions.filter((row) => row.parseStatus === "parsed").length,
+        ignored: allTransactions.filter((row) => row.parseStatus === "ignored").length,
+        errors: allTransactions.filter((row) => row.parseStatus === "error").length,
+        latestAtMs: allTransactions[0]?.tradedAtMs ?? null,
       },
       stats: {
         trackedWallets: wallets.length,
@@ -342,8 +406,43 @@ export async function GET(request: Request): Promise<Response> {
         portfolioTrades: portfolioSwaps.length,
         copyableTrades: portfolioSwaps.filter((row) => Number(row.copyable) > 0)
           .length,
-        uniqueTokens: new Set(portfolioSwaps.map((row) => row.subjectMint))
-          .size,
+        uniqueTokens: new Set(portfolioSwaps.map((row) => row.subjectMint)).size,
+      },
+      diagnostics: {
+        transactions: includeTransactions
+          ? transactions.slice(0, transactionLimit).map((row) => ({
+              ...row,
+              rawJson: includeRaw ? row.rawJson : undefined,
+              swapCount:
+                swapCountByTransaction.get(`${row.wallet}:${row.signature}`) ?? 0,
+            }))
+          : undefined,
+        parseStatuses: countBy(allTransactions, (row) => row.parseStatus),
+        parserVersions: countBy(allTransactions, (row) => row.parserVersion),
+        swapParsers: countBy(portfolioSwaps, (row) => row.parser),
+        venues: countBy(portfolioSwaps, (row) => row.venue),
+        confidence: countBy(
+          portfolioSwaps,
+          (row) => row.classificationConfidence,
+        ),
+        errors: allTransactions
+          .filter((row) => row.parseStatus === "error")
+          .slice(0, 20)
+          .map((row) => ({
+            wallet: row.wallet,
+            signature: row.signature,
+            error: row.error,
+            tradedAtMs: row.tradedAtMs,
+          })),
+        selectedTransaction: selectedTransaction
+          ? {
+              ...selectedTransaction,
+              rawJson: includeRaw ? selectedTransaction.rawJson : undefined,
+              swaps: selectedSwaps,
+            }
+          : null,
+        copyProfiles: profiles,
+        copyIntents: intents,
       },
       generatedAtMs: Date.now(),
     });
@@ -372,11 +471,12 @@ export async function POST(request: Request): Promise<Response> {
 export async function PATCH(request: Request): Promise<Response> {
   try {
     const body = await requestBody(request);
+    const action = text(body.action);
     const address = cleanAddress(body.address);
     const existing = getWatchedWallet(address);
     if (!existing) return response("Watched wallet not found.", 404);
 
-    if (text(body.action) === "reindex") {
+    if (action === "reindex") {
       const reset = resetWatchedWalletBackfill(address);
       return response(
         upsertWatchedWallet({
@@ -384,6 +484,31 @@ export async function PATCH(request: Request): Promise<Response> {
           enabled: 1,
           backfillEnabled: 1,
           updatedAtMs: Date.now(),
+        }),
+      );
+    }
+
+    if (action === "reparse") {
+      const signature = text(body.signature);
+      if (!signature) throw new Error("Transaction signature is required.");
+      return response({
+        transaction: requeueWalletTransaction({
+          wallet: address,
+          signature,
+          deleteSwaps: bool(body.deleteSwaps, true),
+        }),
+      });
+    }
+
+    if (action === "reparse-errors" || action === "reparse-ignored") {
+      const parseStatuses: WalletTransaction["parseStatus"][] =
+        action === "reparse-errors" ? ["error"] : ["ignored"];
+      return response(
+        requeueWalletTransactions({
+          wallet: address,
+          parseStatuses,
+          limit: Math.max(1, Math.min(integer(body.limit, 500), 5_000)),
+          deleteSwaps: bool(body.deleteSwaps, true),
         }),
       );
     }
@@ -415,10 +540,6 @@ export async function PATCH(request: Request): Promise<Response> {
   }
 }
 
-/**
- * Removing a watched wallet is intentionally soft: historical observations stay
- * queryable while the realtime worker stops subscribing to the address.
- */
 export async function DELETE(request: Request): Promise<Response> {
   try {
     const url = new URL(request.url);
@@ -430,12 +551,13 @@ export async function DELETE(request: Request): Promise<Response> {
     address = cleanAddress(address);
     const existing = getWatchedWallet(address);
     if (!existing) return response("Watched wallet not found.", 404);
-    const wallet = upsertWatchedWallet({
-      ...existing,
-      enabled: 0,
-      updatedAtMs: Date.now(),
-    });
-    return response(wallet);
+    return response(
+      upsertWatchedWallet({
+        ...existing,
+        enabled: 0,
+        updatedAtMs: Date.now(),
+      }),
+    );
   } catch (error) {
     return response(errorMessage(error), 400);
   }
