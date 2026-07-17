@@ -1,0 +1,767 @@
+diff --git a/app/api/launch/pump/route.ts b/app/api/launch/pump/route.ts
+index 97adb9f..eec840a 100644
+--- a/app/api/launch/pump/route.ts
++++ b/app/api/launch/pump/route.ts
+@@ -89,6 +89,153 @@ function stringRecord(form: FormData): Record<string, unknown> {
+   return body;
+ }
+ 
++
++function badRequest(message: string): never {
++  throw Object.assign(new Error(message), { status: 400 });
++}
++
++function finiteNumber(
++  value: unknown,
++  label: string,
++  fallback: number,
++  minimum: number,
++  maximum: number,
++): number {
++  if (value == null || value === "") return fallback;
++  const parsed = Number(value);
++  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
++    badRequest(`${label} must be between ${minimum} and ${maximum}.`);
++  }
++  return parsed;
++}
++
++function buyPlanFromBody(body: Record<string, unknown>): unknown[] {
++  if (Array.isArray(body.buyPlan)) return body.buyPlan;
++  if (typeof body.buyPlanJson !== "string" || !body.buyPlanJson.trim()) return [];
++
++  let parsed: unknown;
++  try {
++    parsed = JSON.parse(body.buyPlanJson);
++  } catch {
++    badRequest("buyPlanJson must be valid JSON.");
++  }
++  if (!Array.isArray(parsed)) badRequest("buyPlanJson must contain an array.");
++  return parsed;
++}
++
++function normalizeJitoBuyPlan(
++  body: Record<string, unknown>,
++): Record<string, unknown>[] {
++  const rows = buyPlanFromBody(body);
++  if (rows.length < 1 || rows.length > 4) {
++    badRequest("An ordered Jito launch requires between one and four buyer wallets.");
++  }
++
++  const creator = String(body.creator ?? "").trim().toLowerCase();
++  const seen = new Set<string>();
++
++  return rows.map((value, index) => {
++    if (!value || typeof value !== "object" || Array.isArray(value)) {
++      badRequest(`Buyer ${index + 1} must be an object.`);
++    }
++    const row = value as Record<string, unknown>;
++    const wallet = String(
++      row.wallet ?? row.walletAddress ?? row.address ?? "",
++    ).trim();
++    if (!wallet) badRequest(`Buyer ${index + 1} wallet is required.`);
++
++    const normalized = wallet.toLowerCase();
++    if (creator && normalized === creator) {
++      badRequest(`Buyer ${index + 1} cannot use the deployer wallet.`);
++    }
++    if (seen.has(normalized)) {
++      badRequest(`Buyer wallet ${wallet} appears more than once.`);
++    }
++    seen.add(normalized);
++
++    const minBps = Math.round(
++      finiteNumber(row.minBps, `Buyer ${index + 1} minBps`, 5_000, 0, 10_000),
++    );
++    const maxBps = Math.round(
++      finiteNumber(row.maxBps, `Buyer ${index + 1} maxBps`, 8_000, 0, 10_000),
++    );
++    if (minBps > maxBps) {
++      badRequest(`Buyer ${index + 1} minBps cannot exceed maxBps.`);
++    }
++
++    const reserveSol = String(row.reserveSol ?? "0.02").trim();
++    finiteNumber(reserveSol, `Buyer ${index + 1} reserveSol`, 0.02, 0, 1_000_000);
++
++    return {
++      wallet,
++      label:
++        typeof row.label === "string" && row.label.trim()
++          ? row.label.trim().slice(0, 120)
++          : `Buyer ${index + 1}`,
++      amountMode: "range-bps",
++      minBps,
++      maxBps,
++      reserveSol,
++      cuLimit: Math.round(
++        finiteNumber(row.cuLimit, `Buyer ${index + 1} cuLimit`, 600_000, 1, 1_400_000),
++      ),
++      priorityMicroLamports: Math.round(
++        finiteNumber(
++          row.priorityMicroLamports,
++          `Buyer ${index + 1} priorityMicroLamports`,
++          1_000_000,
++          0,
++          Number.MAX_SAFE_INTEGER,
++        ),
++      ),
++      slippageBps: Math.round(
++        finiteNumber(
++          row.slippageBps,
++          `Buyer ${index + 1} slippageBps`,
++          2_500,
++          0,
++          10_000,
++        ),
++      ),
++    };
++  });
++}
++
++function forceOrderedJitoLaunch(
++  body: Record<string, unknown>,
++): Record<string, unknown> {
++  const normalized = { ...body };
++  normalized.buyPlan = normalizeJitoBuyPlan(normalized);
++  delete normalized.buyPlanJson;
++
++  // The browser selects wallets and amounts. Transport, endpoint, and tip policy
++  // remain server-owned and are resolved by the same launch core used by the CLI.
++  normalized.submitMode = "jito-bundle";
++  normalized.skipSimulation = true;
++  normalized.live = true;
++
++  for (const key of [
++    "deploymentSender",
++    "buyerSender",
++    "heliusTipSol",
++    "rpcUrl",
++    "jitoBlockEngineUrl",
++    "jitoTipAccount",
++    "jitoTipMode",
++    "jitoTipSol",
++    "jitoTipPercentile",
++    "jitoTipMultiplier",
++    "jitoTipMinSol",
++    "jitoTipMaxSol",
++    "jitoTipFloorUrl",
++    "jitoTipFloorMaxAgeMs",
++  ]) {
++    delete normalized[key];
++  }
++
++  return normalized;
++}
++
+ async function saveLaunchImage(file: File): Promise<string> {
+   const extension = IMAGE_EXTENSION[file.type];
+ 
+@@ -205,7 +352,9 @@ export async function POST(request: Request): Promise<Response> {
+ 
+     temporaryImagePath = parsed.temporaryImagePath;
+ 
+-    const input = pumpLaunchInputFromRecord(parsed.body);
++    const input = pumpLaunchInputFromRecord(
++      forceOrderedJitoLaunch(parsed.body),
++    );
+ 
+     validateLaunchInput(input);
+ 
+diff --git a/app/launch/page.client.tsx b/app/launch/page.client.tsx
+index 826bb54..ba16b12 100644
+--- a/app/launch/page.client.tsx
++++ b/app/launch/page.client.tsx
+@@ -27,15 +27,11 @@ type LaunchStart = {
+   runnerVersion?: string | null;
+ };
+ 
+-type Sender = "helius-fast" | "helius-rpc";
+-
+ type BundlerDraft = {
+   id: string;
+   wallet: string;
+   minPct: string;
+   maxPct: string;
+-  sender: Sender;
+-  priorityFeeSol: string;
+   slippagePct: string;
+ };
+ 
+@@ -49,7 +45,6 @@ type LaunchDraft = {
+   creator: string;
+   creatorBuySol: string;
+   mintSuffix: string;
+-  skipSimulation: boolean;
+   bundlers: BundlerDraft[];
+ };
+ 
+@@ -70,7 +65,6 @@ const ACTIVE_JOB_STORAGE_KEY = "solard:active-pump-launch-job";
+ const MAX_BUNDLERS = 4;
+ const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+ const BUYER_RESERVE_SOL = "0.02";
+-const HELIUS_SENDER_TIP_SOL = "0.0002";
+ const BUYER_CU_LIMIT = 600_000;
+ const POLL_INTERVAL_MS = 1_250;
+ const POLL_RETRY_MS = 3_000;
+@@ -98,7 +92,6 @@ let launchDraft: LaunchDraft = {
+   creator: "",
+   creatorBuySol: "0",
+   mintSuffix: "pump",
+-  skipSimulation: false,
+   bundlers: [],
+ };
+ 
+@@ -229,8 +222,6 @@ function newBundler(): BundlerDraft {
+     wallet: "",
+     minPct: "50",
+     maxPct: "80",
+-    sender: "helius-fast",
+-    priorityFeeSol: "0.0009",
+     slippagePct: "2.5",
+   };
+ }
+@@ -307,10 +298,6 @@ function percentToBps(value: string, label: string): number {
+   return Math.round(numberValue(value, label, 0, 100) * 100);
+ }
+ 
+-function priorityFeeSolToMicroLamports(value: string): number {
+-  const sol = numberValue(value, "Priority fee", 0);
+-  return Math.round((sol * 1_000_000_000 * 1_000_000) / BUYER_CU_LIMIT);
+-}
+ 
+ function cleanMintSuffix(): string {
+   const suffix = text(launchDraft.mintSuffix) || "pump";
+@@ -325,62 +312,51 @@ function cleanMintSuffix(): string {
+ 
+ function buyPlan(): AnyRow[] {
+   const creator = text(launchDraft.creator).toLowerCase();
++  const selected = launchDraft.bundlers.filter((bundler) => text(bundler.wallet));
++
++  if (selected.length < 1 || selected.length > MAX_BUNDLERS) {
++    throw new Error("Select between one and four bundler wallets.");
++  }
++
+   const seen = new Set<string>();
++  return selected.map((bundler, index) => {
++    const wallet = text(bundler.wallet);
++    const normalized = wallet.toLowerCase();
++    if (normalized === creator) {
++      throw new Error(`Bundler ${index + 1} cannot use the deployer wallet.`);
++    }
++    if (seen.has(normalized)) {
++      throw new Error(`Bundler wallet ${shortAddress(wallet)} is selected more than once.`);
++    }
++    seen.add(normalized);
+ 
+-  return launchDraft.bundlers
+-    .filter((bundler) => text(bundler.wallet))
+-    .map((bundler, index) => {
+-      const wallet = text(bundler.wallet);
+-      const normalized = wallet.toLowerCase();
+-      if (normalized === creator) {
+-        throw new Error(`Bundler ${index + 1} cannot use the deployer wallet.`);
+-      }
+-      if (seen.has(normalized)) {
+-        throw new Error(`Bundler wallet ${shortAddress(wallet)} is selected more than once.`);
+-      }
+-      seen.add(normalized);
+-
+-      const minBps = percentToBps(
+-        bundler.minPct,
+-        `Bundler ${index + 1} minimum balance percent`,
+-      );
+-      const maxBps = percentToBps(
+-        bundler.maxPct,
+-        `Bundler ${index + 1} maximum balance percent`,
+-      );
+-      if (minBps > maxBps) {
+-        throw new Error(`Bundler ${index + 1} minimum cannot exceed maximum.`);
+-      }
+-
+-      const priorityMicroLamports = priorityFeeSolToMicroLamports(
+-        bundler.priorityFeeSol,
+-      );
+-      if (bundler.sender === "helius-fast" && priorityMicroLamports <= 0) {
+-        throw new Error(`Bundler ${index + 1} needs a positive priority fee.`);
+-      }
+-
+-      return {
+-        wallet,
+-        label: walletName(wallet),
+-        amountMode: "range-bps",
+-        minBps,
+-        maxBps,
+-        reserveSol: BUYER_RESERVE_SOL,
+-        sender: bundler.sender,
+-        strategy: "fast-spam",
+-        tipSol:
+-          bundler.sender === "helius-fast" ? HELIUS_SENDER_TIP_SOL : undefined,
+-        priorityMicroLamports,
+-        slippageBps: percentToBps(
+-          bundler.slippagePct,
+-          `Bundler ${index + 1} slippage`,
+-        ),
+-        retryIntervalMs: 75,
+-        recompileIntervalMs: 750,
+-        freshQuoteDelayMs: -1,
+-        maxFailedAttempts: 0,
+-      };
+-    });
++    const minBps = percentToBps(
++      bundler.minPct,
++      `Bundler ${index + 1} minimum balance percent`,
++    );
++    const maxBps = percentToBps(
++      bundler.maxPct,
++      `Bundler ${index + 1} maximum balance percent`,
++    );
++    if (minBps > maxBps) {
++      throw new Error(`Bundler ${index + 1} minimum cannot exceed maximum.`);
++    }
++
++    return {
++      wallet,
++      label: walletName(wallet),
++      amountMode: "range-bps",
++      minBps,
++      maxBps,
++      reserveSol: BUYER_RESERVE_SOL,
++      cuLimit: BUYER_CU_LIMIT,
++      priorityMicroLamports: 1_000_000,
++      slippageBps: percentToBps(
++        bundler.slippagePct,
++        `Bundler ${index + 1} slippage`,
++      ),
++    };
++  });
+ }
+ 
+ function validateLaunch(): void {
+@@ -416,7 +392,8 @@ function launchFormData(): FormData {
+   form.set("mintSuffix", cleanMintSuffix());
+   form.set("alias", tokenAlias());
+   form.set("live", "true");
+-  if (launchDraft.skipSimulation) form.set("skipSimulation", "true");
++  form.set("submitMode", "jito-bundle");
++  form.set("skipSimulation", "true");
+ 
+   if (text(launchDraft.website)) form.set("website", text(launchDraft.website));
+   if (text(launchDraft.twitter)) form.set("twitter", text(launchDraft.twitter));
+@@ -456,15 +433,22 @@ function isTerminal(job: JobRow | null): boolean {
+   return phase === "success" || phase === "error";
+ }
+ 
++function resultRoots(job: JobRow | null): AnyRow[] {
++  const roots = [
++    job?.result,
++    job?.result?.result,
++    job?.result?.value,
++    job?.result?.value?.result,
++  ];
++  return roots.filter((value): value is AnyRow => Boolean(value && typeof value === "object"));
++}
++
+ function jobError(job: JobRow | null): string | null {
+   if (!job) return null;
+-  const candidates = [
+-    job.error,
+-    job.message,
+-    job.result?.error,
+-    job.result?.message,
+-    job.result?.reason,
+-  ];
++  const candidates: unknown[] = [job.error, job.message];
++  for (const root of resultRoots(job)) {
++    candidates.push(root.error, root.message, root.reason);
++  }
+   for (const candidate of candidates) {
+     if (!candidate) continue;
+     if (typeof candidate === "object" && "message" in candidate) {
+@@ -476,21 +460,54 @@ function jobError(job: JobRow | null): string | null {
+ }
+ 
+ function jobMint(job: JobRow | null): string {
+-  return text(
+-    job?.result?.token?.mint ??
+-      job?.result?.mint ??
+-      job?.result?.mintAddress ??
+-      job?.input?.mintAddress,
+-  );
++  for (const root of resultRoots(job)) {
++    const mint = text(root.token?.mint ?? root.mint ?? root.mintAddress);
++    if (mint) return mint;
++  }
++  return text(job?.input?.mintAddress);
+ }
+ 
+-function jobSignature(job: JobRow | null): string {
+-  return text(
+-    job?.result?.signature ??
+-      job?.result?.transactionSignature ??
+-      job?.result?.createSignature ??
+-      job?.result?.token?.signature,
+-  );
++function jobBundleId(job: JobRow | null): string {
++  for (const root of resultRoots(job)) {
++    const value = text(
++      root.bundleId ??
++        root.bundleSubmissionId ??
++        root.submissionId ??
++        root.jitoBundleId,
++    );
++    if (value) return value;
++  }
++  return "";
++}
++
++function jobSignatures(job: JobRow | null): string[] {
++  const output: string[] = [];
++  const seen = new Set<string>();
++  const add = (value: unknown) => {
++    const signature = text(value);
++    if (!signature || seen.has(signature)) return;
++    seen.add(signature);
++    output.push(signature);
++  };
++
++  for (const root of resultRoots(job)) {
++    add(root.signature);
++    add(root.transactionSignature);
++    add(root.createSignature);
++    add(root.token?.signature);
++    add(root.launchReceipt?.signature);
++
++    if (Array.isArray(root.signatures)) root.signatures.forEach(add);
++    if (Array.isArray(root.traderReceipts)) {
++      root.traderReceipts.forEach((receipt: AnyRow) => {
++        add(receipt?.signature);
++        add(receipt?.receipt?.signature);
++        add(receipt?.result?.signature);
++        add(receipt?.result?.receipt?.signature);
++      });
++    }
++  }
++  return output;
+ }
+ 
+ function clearPollTimer(): void {
+@@ -514,7 +531,7 @@ async function pollJob(id: string): Promise<void> {
+ 
+   try {
+     const job = await api<JobRow>(`/api/jobs?id=${encodeURIComponent(id)}`);
+-    if (!job?.id) throw new Error("Backend returned an invalid job status.");
++    if (!job?.id) throw new Error("The launch service returned an invalid job status.");
+ 
+     state.job = job;
+     state.pollError = null;
+@@ -548,7 +565,7 @@ async function submitLaunch(): Promise<void> {
+       method: "POST",
+       body: launchFormData(),
+     });
+-    if (!started?.id) throw new Error("Backend did not return a launch job ID.");
++    if (!started?.id) throw new Error("The launch service did not return a job ID.");
+ 
+     const job: JobRow = { id: started.id, status: started.status ?? "queued" };
+     state.job = job;
+@@ -648,12 +665,15 @@ function BundlerRow({ bundler, index }: { bundler: BundlerDraft; index: number;
+     <article className="launch-bundler-row">
+       <header>
+         <div>
+-          <span className="launch-step">Bundler {index + 1}</span>
+-          <b>{bundler.wallet ? walletName(bundler.wallet) : "Not selected"}</b>
++          <span className="launch-step">Transaction {index + 2}</span>
++          <b>{bundler.wallet ? walletName(bundler.wallet) : `Bundler ${index + 1}`}</b>
++        </div>
++        <div className="launch-bundler-actions">
++          <span className="launch-order-chip">Buy {index + 1}</span>
++          <button type="button" className="secondary compact" onClick={() => removeBundler(bundler.id)}>
++            Remove
++          </button>
+         </div>
+-        <button type="button" className="secondary compact" onClick={() => removeBundler(bundler.id)}>
+-          Remove
+-        </button>
+       </header>
+ 
+       <div className="launch-bundler-grid">
+@@ -694,47 +714,17 @@ function BundlerRow({ bundler, index }: { bundler: BundlerDraft; index: number;
+         </label>
+ 
+         <label>
+-          <span>Sender</span>
+-          <select
+-            value={bundler.sender}
+-            onInput={(event: any) =>
+-              updateBundler(bundler.id, {
+-                sender: event.currentTarget.value === "helius-rpc" ? "helius-rpc" : "helius-fast",
+-              })
+-            }
+-          >
+-            <option value="helius-fast">Helius Sender</option>
+-            <option value="helius-rpc">Helius RPC</option>
+-          </select>
++          <span>Slippage %</span>
++          <input
++            type="number"
++            min="0"
++            max="100"
++            step="0.1"
++            value={bundler.slippagePct}
++            onInput={(event: any) => updateBundler(bundler.id, { slippagePct: event.currentTarget.value })}
++          />
+         </label>
+       </div>
+-
+-      <details className="launch-advanced">
+-        <summary>Advanced transaction settings</summary>
+-        <div className="launch-advanced-grid">
+-          <label>
+-            <span>Priority fee SOL</span>
+-            <input
+-              type="number"
+-              min="0"
+-              step="0.0001"
+-              value={bundler.priorityFeeSol}
+-              onInput={(event: any) => updateBundler(bundler.id, { priorityFeeSol: event.currentTarget.value })}
+-            />
+-          </label>
+-          <label>
+-            <span>Slippage %</span>
+-            <input
+-              type="number"
+-              min="0"
+-              max="100"
+-              step="0.1"
+-              value={bundler.slippagePct}
+-              onInput={(event: any) => updateBundler(bundler.id, { slippagePct: event.currentTarget.value })}
+-            />
+-          </label>
+-        </div>
+-      </details>
+     </article>
+   );
+ }
+@@ -745,7 +735,8 @@ function LaunchStatus() {
+   const phase = jobPhase(state.job);
+   const status = text(state.job.status) || "queued";
+   const mint = jobMint(state.job);
+-  const signature = jobSignature(state.job);
++  const bundleId = jobBundleId(state.job);
++  const signatures = jobSignatures(state.job);
+   const error = jobError(state.job);
+ 
+   return (
+@@ -754,8 +745,8 @@ function LaunchStatus() {
+         <div>
+           <span className={`launch-status-dot ${phase}`} />
+           <div>
+-            <span className="section-kicker">Backend launch job</span>
+-            <h3>{phase === "success" ? "Launch completed" : phase === "error" ? "Launch failed" : "Launch in progress"}</h3>
++            <span className="section-kicker">Jito launch</span>
++            <h3>{phase === "success" ? "Bundle confirmed" : phase === "error" ? "Launch failed" : "Bundle in progress"}</h3>
+           </div>
+         </div>
+         <span className={`pill ${phase === "success" ? "ok" : phase === "error" ? "bad" : "warn"}`}>
+@@ -768,22 +759,33 @@ function LaunchStatus() {
+           <dt>Job</dt>
+           <dd className="code">{state.job.id}</dd>
+         </div>
+-        {mint ? (
++        {bundleId ? (
+           <div>
+-            <dt>Mint</dt>
+-            <dd><button type="button" className="copy-value code" onClick={() => copyValue(mint)}>{mint}</button></dd>
++            <dt>Jito bundle</dt>
++            <dd><button type="button" className="copy-value code" onClick={() => copyValue(bundleId)}>{bundleId}</button></dd>
+           </div>
+         ) : null}
+-        {signature ? (
++        {mint ? (
+           <div>
+-            <dt>Signature</dt>
+-            <dd><button type="button" className="copy-value code" onClick={() => copyValue(signature)}>{signature}</button></dd>
++            <dt>Mint</dt>
++            <dd><button type="button" className="copy-value code" onClick={() => copyValue(mint)}>{mint}</button></dd>
+           </div>
+         ) : null}
+       </dl>
+ 
++      {signatures.length ? (
++        <div className="launch-signature-list">
++          <b>Transactions</b>
++          {signatures.map((signature, index) => (
++            <button key={signature} type="button" className="copy-value code" onClick={() => copyValue(signature)}>
++              {index === 0 ? "Deployment" : `Buy ${index}`} · {signature}
++            </button>
++          ))}
++        </div>
++      ) : null}
++
+       {phase === "pending" ? (
+-        <p className="muted">The backend owns signing, sending, retries, and confirmation. This page will keep polling the job.</p>
++        <p className="muted">Solard is building, signing, submitting, and confirming the ordered Jito bundle. The deployment is transaction 1 and each buy follows in the displayed order.</p>
+       ) : null}
+       {state.pollError && phase === "pending" ? (
+         <p className="launch-inline-error">Status temporarily unavailable: {state.pollError}. Retrying automatically.</p>
+@@ -806,8 +808,8 @@ function LaunchStatus() {
+ 
+ function LaunchForm() {
+   const active = jobPhase(state.job) === "pending";
+-  const disabled = state.submitting || active;
+   const selectedBundlers = launchDraft.bundlers.filter((row) => row.wallet).length;
++  const disabled = state.submitting || active || selectedBundlers < 1;
+ 
+   return (
+     <form
+@@ -822,7 +824,7 @@ function LaunchForm() {
+         <div>
+           <span className="section-kicker">Pump launch</span>
+           <h2>Launch a token</h2>
+-          <p>Upload the image, choose the deployer, add up to four bundler wallets, and let the backend send the transaction.</p>
++          <p>Upload the image, choose the deployer, and add one to four buyer wallets. Solard submits the deployment and buys as one ordered Jito bundle.</p>
+         </div>
+         <div className="launch-hero-actions">
+           <button type="button" className="secondary" disabled={state.loadingWallets || disabled} onClick={() => void refreshWallets()}>
+@@ -877,7 +879,7 @@ function LaunchForm() {
+               <span className="launch-step">02</span>
+               <h3>Execution</h3>
+             </div>
+-            <span className="muted small">Backend-signed</span>
++            <span className="muted small">Ordered Jito bundle</span>
+           </header>
+ 
+           <div className="launch-execution-form">
+@@ -895,10 +897,6 @@ function LaunchForm() {
+               <span>Mint suffix</span>
+               <input maxLength={8} value={launchDraft.mintSuffix} onInput={(event: any) => setDraft({ mintSuffix: event.currentTarget.value })} />
+             </label>
+-            <label className="launch-checkbox">
+-              <input type="checkbox" checked={launchDraft.skipSimulation} onInput={(event: any) => setDraft({ skipSimulation: event.currentTarget.checked })} />
+-              <span>Skip simulation</span>
+-            </label>
+           </div>
+         </section>
+       </div>
+@@ -908,7 +906,7 @@ function LaunchForm() {
+           <div>
+             <span className="launch-step">03</span>
+             <h3>Bundler wallets</h3>
+-            <p>Optional. Each selected wallet submits its configured buy through the backend.</p>
++            <p>Transaction 1 deploys the token. These buys execute immediately after it in this exact order, with no outside transaction inserted between them when the bundle lands.</p>
+           </div>
+           <button type="button" className="secondary" disabled={disabled || launchDraft.bundlers.length >= MAX_BUNDLERS} onClick={addBundler}>
+             Add bundler ({launchDraft.bundlers.length}/{MAX_BUNDLERS})
+@@ -921,16 +919,16 @@ function LaunchForm() {
+           </div>
+         ) : (
+           <button type="button" className="launch-empty-bundlers" disabled={disabled} onClick={addBundler}>
+-            <b>No bundler wallets</b>
+-            <span>Launch with the deployer only, or add up to four wallets.</span>
++            <b>Add the first buyer</b>
++            <span>An ordered Jito launch requires one to four buyer wallets.</span>
+           </button>
+         )}
+       </section>
+ 
+       <footer className="launch-submit-bar">
+         <div>
+-          <b>{selectedBundlers ? `${selectedBundlers} bundler wallet${selectedBundlers === 1 ? "" : "s"} configured` : "Deployer-only launch"}</b>
+-          <span>The form stays locked while the backend job is running.</span>
++          <b>{selectedBundlers ? `${selectedBundlers} ordered buy${selectedBundlers === 1 ? "" : "s"}` : "Add at least one buyer"}</b>
++          <span>Deployment first, then every buy in the order shown.</span>
+         </div>
+         <button type="submit" className="primary-large" disabled={disabled}>
+           {state.submitting ? "Starting launch…" : active ? "Launch in progress" : "Launch token"}
+diff --git a/app/launch/page.css b/app/launch/page.css
+index bf7679b..50f8f9f 100644
+--- a/app/launch/page.css
++++ b/app/launch/page.css
+@@ -456,3 +456,48 @@
+     gap: 3px;
+   }
+ }
++
++/* Ordered Jito launch ----------------------------------------------------- */
++.launch-bundler-actions {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++}
++
++.launch-order-chip {
++  display: inline-flex;
++  align-items: center;
++  min-height: 28px;
++  padding: 0 9px;
++  border: 1px solid var(--line-strong);
++  background: var(--black);
++  color: var(--green);
++  font-size: 10px;
++  font-weight: 900;
++  letter-spacing: .06em;
++  text-transform: uppercase;
++}
++
++.launch-signature-list {
++  display: grid;
++  gap: 7px;
++  padding: 12px;
++  border: 1px solid var(--line);
++  background: var(--black);
++}
++
++.launch-signature-list > b {
++  color: var(--muted);
++  font-size: 10px;
++  letter-spacing: .06em;
++  text-transform: uppercase;
++}
++
++.launch-signature-list .copy-value {
++  width: 100%;
++  justify-content: flex-start;
++  overflow: hidden;
++  text-align: left;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
+diff --git a/solard-jito-new/tools/solard-launch-jito-web-smoke.mjs b/tools/solard-launch-jito-web-smoke.mjs
+new file mode 100644
+index 0000000..0e47542
+--- /dev/null
++++ b/tools/solard-launch-jito-web-smoke.mjs
+@@ -0,0 +1,34 @@
++import { readFileSync } from "node:fs";
++import { join } from "node:path";
++
++const root = process.argv[2] || process.cwd();
++const read = (path) => readFileSync(join(root, path), "utf8");
++const route = read("app/api/launch/pump/route.ts");
++const page = read("app/launch/page.client.tsx");
++
++const checks = [
++  ["route forces Jito bundle mode", route.includes('normalized.submitMode = "jito-bundle"')],
++  ["route forces live execution", route.includes("normalized.live = true")],
++  ["route forces skip simulation", route.includes("normalized.skipSimulation = true")],
++  ["route limits ordered buyers to four", route.includes("rows.length < 1 || rows.length > 4")],
++  ["route rejects deployer reuse", route.includes("cannot use the deployer wallet")],
++  ["route owns transport configuration", route.includes('delete normalized[key]') && route.includes('"jitoBlockEngineUrl"')],
++  ["page sends Jito mode", page.includes('form.set("submitMode", "jito-bundle")')],
++  ["page sends ordered plan", page.includes('form.set("buyPlanJson", JSON.stringify(plan))')],
++  ["page has no Helius sender choices", !page.toLowerCase().includes("helius")],
++  ["page has no CLI generator", !page.includes("Generate CLI") && !page.includes("PowerShell")],
++  ["page polls job status", page.includes('/api/jobs?id=${encodeURIComponent(id)}')],
++  ["page restores active job", page.includes("ACTIVE_JOB_STORAGE_KEY")],
++  ["page displays Jito bundle ID", page.includes("jobBundleId") && page.includes("Jito bundle")],
++  ["page displays all transaction signatures", page.includes("jobSignatures") && page.includes("traderReceipts")],
++];
++
++let failed = 0;
++for (const [label, ok] of checks) {
++  if (ok) console.log(`PASS ${label}`);
++  else {
++    console.error(`FAIL ${label}`);
++    failed += 1;
++  }
++}
++process.exitCode = failed ? 1 : 0;

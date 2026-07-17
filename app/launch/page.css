@@ -213,21 +213,6 @@
   user-select: none;
 }
 
-
-.launch-jito-note {
-  display: grid;
-  gap: 4px;
-  padding: 11px 13px;
-  border: 1px solid var(--line-strong, var(--line));
-  background: var(--panel-2, #151515);
-}
-
-.launch-jito-note span {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 .launch-bundler-row {
   display: grid;
   gap: 12px;
@@ -250,7 +235,7 @@
 
 .launch-bundler-grid {
   display: grid;
-  grid-template-columns: minmax(210px, 1.2fr) minmax(230px, .9fr);
+  grid-template-columns: minmax(210px, 1.2fr) minmax(230px, .9fr) minmax(160px, .6fr);
   gap: 10px;
   align-items: end;
 }
@@ -470,4 +455,49 @@
     grid-template-columns: 1fr;
     gap: 3px;
   }
+}
+
+/* Ordered Jito launch ----------------------------------------------------- */
+.launch-bundler-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.launch-order-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  background: var(--black);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.launch-signature-list {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--black);
+}
+
+.launch-signature-list > b {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.launch-signature-list .copy-value {
+  width: 100%;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

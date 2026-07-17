@@ -32,7 +32,6 @@ type BundlerDraft = {
   wallet: string;
   minPct: string;
   maxPct: string;
-  priorityFeeSol: string;
   slippagePct: string;
 };
 
@@ -46,7 +45,6 @@ type LaunchDraft = {
   creator: string;
   creatorBuySol: string;
   mintSuffix: string;
-  skipSimulation: boolean;
   bundlers: BundlerDraft[];
 };
 
@@ -94,7 +92,6 @@ let launchDraft: LaunchDraft = {
   creator: "",
   creatorBuySol: "0",
   mintSuffix: "pump",
-  skipSimulation: false,
   bundlers: [],
 };
 
@@ -232,7 +229,6 @@ function newBundler(): BundlerDraft {
     wallet: "",
     minPct: "50",
     maxPct: "80",
-    priorityFeeSol: "0.0009",
     slippagePct: "2.5",
   };
 }
@@ -310,11 +306,6 @@ function percentToBps(value: string, label: string): number {
   return Math.round(numberValue(value, label, 0, 100) * 100);
 }
 
-function priorityFeeSolToMicroLamports(value: string): number {
-  const sol = numberValue(value, "Priority fee", 0);
-  return Math.round((sol * 1_000_000_000 * 1_000_000) / BUYER_CU_LIMIT);
-}
-
 function cleanMintSuffix(): string {
   const suffix = text(launchDraft.mintSuffix) || "pump";
   if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(suffix)) {
@@ -328,56 +319,55 @@ function cleanMintSuffix(): string {
 
 function buyPlan(): AnyRow[] {
   const creator = text(launchDraft.creator).toLowerCase();
+  const selected = launchDraft.bundlers.filter((bundler) =>
+    text(bundler.wallet),
+  );
+
+  if (selected.length < 1 || selected.length > MAX_BUNDLERS) {
+    throw new Error("Select between one and four bundler wallets.");
+  }
+
   const seen = new Set<string>();
-
-  return launchDraft.bundlers
-    .filter((bundler) => text(bundler.wallet))
-    .map((bundler, index) => {
-      const wallet = text(bundler.wallet);
-      const normalized = wallet.toLowerCase();
-      if (normalized === creator) {
-        throw new Error(`Bundler ${index + 1} cannot use the deployer wallet.`);
-      }
-      if (seen.has(normalized)) {
-        throw new Error(
-          `Bundler wallet ${shortAddress(wallet)} is selected more than once.`,
-        );
-      }
-      seen.add(normalized);
-
-      const minBps = percentToBps(
-        bundler.minPct,
-        `Bundler ${index + 1} minimum balance percent`,
+  return selected.map((bundler, index) => {
+    const wallet = text(bundler.wallet);
+    const normalized = wallet.toLowerCase();
+    if (normalized === creator) {
+      throw new Error(`Bundler ${index + 1} cannot use the deployer wallet.`);
+    }
+    if (seen.has(normalized)) {
+      throw new Error(
+        `Bundler wallet ${shortAddress(wallet)} is selected more than once.`,
       );
-      const maxBps = percentToBps(
-        bundler.maxPct,
-        `Bundler ${index + 1} maximum balance percent`,
-      );
-      if (minBps > maxBps) {
-        throw new Error(`Bundler ${index + 1} minimum cannot exceed maximum.`);
-      }
+    }
+    seen.add(normalized);
 
-      const priorityMicroLamports = priorityFeeSolToMicroLamports(
-        bundler.priorityFeeSol,
-      );
-      return {
-        wallet,
-        label: walletName(wallet),
-        amountMode: "range-bps",
-        minBps,
-        maxBps,
-        reserveSol: BUYER_RESERVE_SOL,
-        priorityMicroLamports,
-        slippageBps: percentToBps(
-          bundler.slippagePct,
-          `Bundler ${index + 1} slippage`,
-        ),
-        retryIntervalMs: 75,
-        recompileIntervalMs: 750,
-        freshQuoteDelayMs: -1,
-        maxFailedAttempts: 0,
-      };
-    });
+    const minBps = percentToBps(
+      bundler.minPct,
+      `Bundler ${index + 1} minimum balance percent`,
+    );
+    const maxBps = percentToBps(
+      bundler.maxPct,
+      `Bundler ${index + 1} maximum balance percent`,
+    );
+    if (minBps > maxBps) {
+      throw new Error(`Bundler ${index + 1} minimum cannot exceed maximum.`);
+    }
+
+    return {
+      wallet,
+      label: walletName(wallet),
+      amountMode: "range-bps",
+      minBps,
+      maxBps,
+      reserveSol: BUYER_RESERVE_SOL,
+      cuLimit: BUYER_CU_LIMIT,
+      priorityMicroLamports: 1_000_000,
+      slippageBps: percentToBps(
+        bundler.slippagePct,
+        `Bundler ${index + 1} slippage`,
+      ),
+    };
+  });
 }
 
 function validateLaunch(): void {
@@ -418,7 +408,8 @@ function launchFormData(): FormData {
   form.set("mintSuffix", cleanMintSuffix());
   form.set("alias", tokenAlias());
   form.set("live", "true");
-  if (launchDraft.skipSimulation) form.set("skipSimulation", "true");
+  form.set("submitMode", "jito-bundle");
+  form.set("skipSimulation", "true");
 
   if (text(launchDraft.website)) form.set("website", text(launchDraft.website));
   if (text(launchDraft.twitter)) form.set("twitter", text(launchDraft.twitter));
@@ -467,15 +458,24 @@ function isTerminal(job: JobRow | null): boolean {
   return phase === "success" || phase === "error";
 }
 
+function resultRoots(job: JobRow | null): AnyRow[] {
+  const roots = [
+    job?.result,
+    job?.result?.result,
+    job?.result?.value,
+    job?.result?.value?.result,
+  ];
+  return roots.filter((value): value is AnyRow =>
+    Boolean(value && typeof value === "object"),
+  );
+}
+
 function jobError(job: JobRow | null): string | null {
   if (!job) return null;
-  const candidates = [
-    job.error,
-    job.message,
-    job.result?.error,
-    job.result?.message,
-    job.result?.reason,
-  ];
+  const candidates: unknown[] = [job.error, job.message];
+  for (const root of resultRoots(job)) {
+    candidates.push(root.error, root.message, root.reason);
+  }
   for (const candidate of candidates) {
     if (!candidate) continue;
     if (typeof candidate === "object" && "message" in candidate) {
@@ -487,21 +487,54 @@ function jobError(job: JobRow | null): string | null {
 }
 
 function jobMint(job: JobRow | null): string {
-  return text(
-    job?.result?.token?.mint ??
-      job?.result?.mint ??
-      job?.result?.mintAddress ??
-      job?.input?.mintAddress,
-  );
+  for (const root of resultRoots(job)) {
+    const mint = text(root.token?.mint ?? root.mint ?? root.mintAddress);
+    if (mint) return mint;
+  }
+  return text(job?.input?.mintAddress);
 }
 
-function jobSignature(job: JobRow | null): string {
-  return text(
-    job?.result?.signature ??
-      job?.result?.transactionSignature ??
-      job?.result?.createSignature ??
-      job?.result?.token?.signature,
-  );
+function jobBundleId(job: JobRow | null): string {
+  for (const root of resultRoots(job)) {
+    const value = text(
+      root.bundleId ??
+        root.bundleSubmissionId ??
+        root.submissionId ??
+        root.jitoBundleId,
+    );
+    if (value) return value;
+  }
+  return "";
+}
+
+function jobSignatures(job: JobRow | null): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: unknown) => {
+    const signature = text(value);
+    if (!signature || seen.has(signature)) return;
+    seen.add(signature);
+    output.push(signature);
+  };
+
+  for (const root of resultRoots(job)) {
+    add(root.signature);
+    add(root.transactionSignature);
+    add(root.createSignature);
+    add(root.token?.signature);
+    add(root.launchReceipt?.signature);
+
+    if (Array.isArray(root.signatures)) root.signatures.forEach(add);
+    if (Array.isArray(root.traderReceipts)) {
+      root.traderReceipts.forEach((receipt: AnyRow) => {
+        add(receipt?.signature);
+        add(receipt?.receipt?.signature);
+        add(receipt?.result?.signature);
+        add(receipt?.result?.receipt?.signature);
+      });
+    }
+  }
+  return output;
 }
 
 function clearPollTimer(): void {
@@ -526,7 +559,7 @@ async function pollJob(id: string): Promise<void> {
   try {
     const job = await api<JobRow>(`/api/jobs?id=${encodeURIComponent(id)}`);
     if (!job?.id)
-      throw new Error("Launch service returned an invalid job status.");
+      throw new Error("The launch service returned an invalid job status.");
 
     state.job = job;
     state.pollError = null;
@@ -563,7 +596,7 @@ async function submitLaunch(): Promise<void> {
       body: launchFormData(),
     });
     if (!started?.id)
-      throw new Error("Launch service did not return a launch job ID.");
+      throw new Error("The launch service did not return a job ID.");
 
     const job: JobRow = { id: started.id, status: started.status ?? "queued" };
     state.job = job;
@@ -678,16 +711,23 @@ function BundlerRow({
     <article className="launch-bundler-row">
       <header>
         <div>
-          <span className="launch-step">Bundler {index + 1}</span>
-          <b>{bundler.wallet ? walletName(bundler.wallet) : "Not selected"}</b>
+          <span className="launch-step">Transaction {index + 2}</span>
+          <b>
+            {bundler.wallet
+              ? walletName(bundler.wallet)
+              : `Bundler ${index + 1}`}
+          </b>
         </div>
-        <button
-          type="button"
-          className="secondary compact"
-          onClick={() => removeBundler(bundler.id)}
-        >
-          Remove
-        </button>
+        <div className="launch-bundler-actions">
+          <span className="launch-order-chip">Buy {index + 1}</span>
+          <button
+            type="button"
+            className="secondary compact"
+            onClick={() => removeBundler(bundler.id)}
+          >
+            Remove
+          </button>
+        </div>
       </header>
 
       <div className="launch-bundler-grid">
@@ -734,42 +774,23 @@ function BundlerRow({
             <span>%</span>
           </div>
         </label>
-      </div>
 
-      <details className="launch-advanced">
-        <summary>Advanced transaction settings</summary>
-        <div className="launch-advanced-grid">
-          <label>
-            <span>Priority fee SOL</span>
-            <input
-              type="number"
-              min="0"
-              step="0.0001"
-              value={bundler.priorityFeeSol}
-              onInput={(event: any) =>
-                updateBundler(bundler.id, {
-                  priorityFeeSol: event.currentTarget.value,
-                })
-              }
-            />
-          </label>
-          <label>
-            <span>Slippage %</span>
-            <input
-              type="number"
-              min="0"
-              max="100"
-              step="0.1"
-              value={bundler.slippagePct}
-              onInput={(event: any) =>
-                updateBundler(bundler.id, {
-                  slippagePct: event.currentTarget.value,
-                })
-              }
-            />
-          </label>
-        </div>
-      </details>
+        <label>
+          <span>Slippage %</span>
+          <input
+            type="number"
+            min="0"
+            max="100"
+            step="0.1"
+            value={bundler.slippagePct}
+            onInput={(event: any) =>
+              updateBundler(bundler.id, {
+                slippagePct: event.currentTarget.value,
+              })
+            }
+          />
+        </label>
+      </div>
     </article>
   );
 }
@@ -780,7 +801,8 @@ function LaunchStatus() {
   const phase = jobPhase(state.job);
   const status = text(state.job.status) || "queued";
   const mint = jobMint(state.job);
-  const signature = jobSignature(state.job);
+  const bundleId = jobBundleId(state.job);
+  const signatures = jobSignatures(state.job);
   const error = jobError(state.job);
 
   return (
@@ -789,13 +811,13 @@ function LaunchStatus() {
         <div>
           <span className={`launch-status-dot ${phase}`} />
           <div>
-            <span className="section-kicker">Jito bundle status</span>
+            <span className="section-kicker">Jito launch</span>
             <h3>
               {phase === "success"
-                ? "Launch completed"
+                ? "Bundle confirmed"
                 : phase === "error"
                   ? "Launch failed"
-                  : "Launch in progress"}
+                  : "Bundle in progress"}
             </h3>
           </div>
         </div>
@@ -811,6 +833,20 @@ function LaunchStatus() {
           <dt>Job</dt>
           <dd className="code">{state.job.id}</dd>
         </div>
+        {bundleId ? (
+          <div>
+            <dt>Jito bundle</dt>
+            <dd>
+              <button
+                type="button"
+                className="copy-value code"
+                onClick={() => copyValue(bundleId)}
+              >
+                {bundleId}
+              </button>
+            </dd>
+          </div>
+        ) : null}
         {mint ? (
           <div>
             <dt>Mint</dt>
@@ -825,26 +861,29 @@ function LaunchStatus() {
             </dd>
           </div>
         ) : null}
-        {signature ? (
-          <div>
-            <dt>Signature</dt>
-            <dd>
-              <button
-                type="button"
-                className="copy-value code"
-                onClick={() => copyValue(signature)}
-              >
-                {signature}
-              </button>
-            </dd>
-          </div>
-        ) : null}
       </dl>
+
+      {signatures.length ? (
+        <div className="launch-signature-list">
+          <b>Transactions</b>
+          {signatures.map((signature, index) => (
+            <button
+              key={signature}
+              type="button"
+              className="copy-value code"
+              onClick={() => copyValue(signature)}
+            >
+              {index === 0 ? "Deployment" : `Buy ${index}`} · {signature}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {phase === "pending" ? (
         <p className="muted">
-          Signing, Jito submission, and confirmation are in progress. Status
-          updates automatically.
+          Solard is building, signing, submitting, and confirming the ordered
+          Jito bundle. The deployment is transaction 1 and each buy follows in
+          the displayed order.
         </p>
       ) : null}
       {state.pollError && phase === "pending" ? (
@@ -886,10 +925,10 @@ function LaunchStatus() {
 
 function LaunchForm() {
   const active = jobPhase(state.job) === "pending";
-  const disabled = state.submitting || active;
   const selectedBundlers = launchDraft.bundlers.filter(
     (row) => row.wallet,
   ).length;
+  const disabled = state.submitting || active || selectedBundlers < 1;
 
   return (
     <form
@@ -905,8 +944,9 @@ function LaunchForm() {
           <span className="section-kicker">Pump launch</span>
           <h2>Launch a token</h2>
           <p>
-            Upload the image, choose the deployer, and optionally add up to four
-            buyers. The launch is sent as an ordered Jito bundle.
+            Upload the image, choose the deployer, and add one to four buyer
+            wallets. Solard submits the deployment and buys as one ordered Jito
+            bundle.
           </p>
         </div>
         <div className="launch-hero-actions">
@@ -1023,7 +1063,7 @@ function LaunchForm() {
               <span className="launch-step">02</span>
               <h3>Execution</h3>
             </div>
-            <span className="muted small">Jito bundle</span>
+            <span className="muted small">Ordered Jito bundle</span>
           </header>
 
           <div className="launch-execution-form">
@@ -1063,16 +1103,6 @@ function LaunchForm() {
                 }
               />
             </label>
-            <label className="launch-checkbox">
-              <input
-                type="checkbox"
-                checked={launchDraft.skipSimulation}
-                onInput={(event: any) =>
-                  setDraft({ skipSimulation: event.currentTarget.checked })
-                }
-              />
-              <span>Skip simulation</span>
-            </label>
           </div>
         </section>
       </div>
@@ -1083,7 +1113,9 @@ function LaunchForm() {
             <span className="launch-step">03</span>
             <h3>Bundler wallets</h3>
             <p>
-              Optional buys are placed after deployment in the same Jito bundle.
+              Transaction 1 deploys the token. These buys execute immediately
+              after it in this exact order, with no outside transaction inserted
+              between them when the bundle lands.
             </p>
           </div>
           <button
@@ -1095,14 +1127,6 @@ function LaunchForm() {
             Add bundler ({launchDraft.bundlers.length}/{MAX_BUNDLERS})
           </button>
         </header>
-
-        <div className="launch-jito-note" role="note">
-          <b>Ordered Jito bundle</b>
-          <span>
-            Jito guarantees sequential execution inside the bundle: deployment
-            runs first, then bundler wallet buys run in the order shown below.
-          </span>
-        </div>
 
         {launchDraft.bundlers.length ? (
           <div className="launch-bundlers-list">
@@ -1117,9 +1141,9 @@ function LaunchForm() {
             disabled={disabled}
             onClick={addBundler}
           >
-            <b>No bundler wallets</b>
+            <b>Add the first buyer</b>
             <span>
-              Launch with the deployer only, or add up to four wallets.
+              An ordered Jito launch requires one to four buyer wallets.
             </span>
           </button>
         )}
@@ -1129,10 +1153,10 @@ function LaunchForm() {
         <div>
           <b>
             {selectedBundlers
-              ? `${selectedBundlers} bundler wallet${selectedBundlers === 1 ? "" : "s"} configured`
-              : "Deployer-only launch"}
+              ? `${selectedBundlers} ordered buy${selectedBundlers === 1 ? "" : "s"}`
+              : "Add at least one buyer"}
           </b>
-          <span>Inputs stay locked while the launch is in progress.</span>
+          <span>Deployment first, then every buy in the order shown.</span>
         </div>
         <button type="submit" className="primary-large" disabled={disabled}>
           {state.submitting

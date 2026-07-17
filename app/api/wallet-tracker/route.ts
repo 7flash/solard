@@ -111,7 +111,9 @@ async function requestBody(request: Request): Promise<Record<string, unknown>> {
   return Object.fromEntries(form.entries());
 }
 
-function parseObject(value: string | null | undefined): Record<string, unknown> {
+function parseObject(
+  value: string | null | undefined,
+): Record<string, unknown> {
   if (!value) return {};
   try {
     const parsed = JSON.parse(value);
@@ -198,7 +200,8 @@ function positionRows(swaps: readonly DecoratedSwap[]): WalletPosition[] {
     current.copyableTrades += Number(swap.copyable) > 0 ? 1 : 0;
     current.lastSide = swap.side;
     current.lastTradeAtMs = Math.max(current.lastTradeAtMs, swap.tradedAtMs);
-    current.lastPriceUsd = swap.priceUsd ?? swap.token.priceUsd ?? current.lastPriceUsd;
+    current.lastPriceUsd =
+      swap.priceUsd ?? swap.token.priceUsd ?? current.lastPriceUsd;
     current.quoteMint = swap.quoteMint ?? current.quoteMint;
     current.token = swap.token;
     rows.set(key, current);
@@ -252,7 +255,10 @@ function walletSummaries(
     if (swap.side === "swap") current.swapCount++;
     current.copyableTrades += Number(swap.copyable) > 0 ? 1 : 0;
     current.mints.add(swap.subjectMint);
-    current.lastTradeAtMs = Math.max(current.lastTradeAtMs ?? 0, swap.tradedAtMs);
+    current.lastTradeAtMs = Math.max(
+      current.lastTradeAtMs ?? 0,
+      swap.tradedAtMs,
+    );
     stats.set(swap.wallet, current);
   }
 
@@ -291,7 +297,10 @@ function statusValue(
     : null;
 }
 
-function countBy<T>(values: readonly T[], read: (value: T) => string): Array<{
+function countBy<T>(
+  values: readonly T[],
+  read: (value: T) => string,
+): Array<{
   key: string;
   count: number;
 }> {
@@ -302,7 +311,10 @@ function countBy<T>(values: readonly T[], read: (value: T) => string): Array<{
   }
   return [...counts.entries()]
     .map(([key, count]) => ({ key, count }))
-    .sort((left, right) => right.count - left.count || left.key.localeCompare(right.key));
+    .sort(
+      (left, right) =>
+        right.count - left.count || left.key.localeCompare(right.key),
+    );
 }
 
 function workerStatus(): Record<string, unknown> | null {
@@ -322,7 +334,9 @@ export async function GET(request: Request): Promise<Response> {
     const mint = text(url.searchParams.get("mint")) || null;
     const signature = text(url.searchParams.get("signature")) || null;
     const side = sideValue(url.searchParams.get("side"));
-    const transactionStatus = statusValue(url.searchParams.get("transactionStatus"));
+    const transactionStatus = statusValue(
+      url.searchParams.get("transactionStatus"),
+    );
     const sinceMs = Math.max(0, integer(url.searchParams.get("sinceMs"), 0));
     const limit = Math.max(
       1,
@@ -354,7 +368,9 @@ export async function GET(request: Request): Promise<Response> {
       : portfolioSwaps;
     const summaries = walletSummaries(wallets, summarySwaps);
     const positions = positionRows(portfolioSwaps);
-    const activeWallets = wallets.filter((row) => Number(row.enabled) > 0).length;
+    const activeWallets = wallets.filter(
+      (row) => Number(row.enabled) > 0,
+    ).length;
 
     const allTransactions = listWalletTransactions({
       wallet,
@@ -392,10 +408,14 @@ export async function GET(request: Request): Promise<Response> {
       worker: workerStatus(),
       transactionStats: {
         total: allTransactions.length,
-        pending: allTransactions.filter((row) => row.parseStatus === "pending").length,
-        parsed: allTransactions.filter((row) => row.parseStatus === "parsed").length,
-        ignored: allTransactions.filter((row) => row.parseStatus === "ignored").length,
-        errors: allTransactions.filter((row) => row.parseStatus === "error").length,
+        pending: allTransactions.filter((row) => row.parseStatus === "pending")
+          .length,
+        parsed: allTransactions.filter((row) => row.parseStatus === "parsed")
+          .length,
+        ignored: allTransactions.filter((row) => row.parseStatus === "ignored")
+          .length,
+        errors: allTransactions.filter((row) => row.parseStatus === "error")
+          .length,
         latestAtMs: allTransactions[0]?.tradedAtMs ?? null,
       },
       stats: {
@@ -406,7 +426,8 @@ export async function GET(request: Request): Promise<Response> {
         portfolioTrades: portfolioSwaps.length,
         copyableTrades: portfolioSwaps.filter((row) => Number(row.copyable) > 0)
           .length,
-        uniqueTokens: new Set(portfolioSwaps.map((row) => row.subjectMint)).size,
+        uniqueTokens: new Set(portfolioSwaps.map((row) => row.subjectMint))
+          .size,
       },
       diagnostics: {
         transactions: includeTransactions
@@ -414,7 +435,8 @@ export async function GET(request: Request): Promise<Response> {
               ...row,
               rawJson: includeRaw ? row.rawJson : undefined,
               swapCount:
-                swapCountByTransaction.get(`${row.wallet}:${row.signature}`) ?? 0,
+                swapCountByTransaction.get(`${row.wallet}:${row.signature}`) ??
+                0,
             }))
           : undefined,
         parseStatuses: countBy(allTransactions, (row) => row.parseStatus),

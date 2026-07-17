@@ -89,6 +89,169 @@ function stringRecord(form: FormData): Record<string, unknown> {
   return body;
 }
 
+function badRequest(message: string): never {
+  throw Object.assign(new Error(message), { status: 400 });
+}
+
+function finiteNumber(
+  value: unknown,
+  label: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value == null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    badRequest(`${label} must be between ${minimum} and ${maximum}.`);
+  }
+  return parsed;
+}
+
+function buyPlanFromBody(body: Record<string, unknown>): unknown[] {
+  if (Array.isArray(body.buyPlan)) return body.buyPlan;
+  if (typeof body.buyPlanJson !== "string" || !body.buyPlanJson.trim())
+    return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.buyPlanJson);
+  } catch {
+    badRequest("buyPlanJson must be valid JSON.");
+  }
+  if (!Array.isArray(parsed)) badRequest("buyPlanJson must contain an array.");
+  return parsed;
+}
+
+function normalizeJitoBuyPlan(
+  body: Record<string, unknown>,
+): Record<string, unknown>[] {
+  const rows = buyPlanFromBody(body);
+  if (rows.length < 1 || rows.length > 4) {
+    badRequest(
+      "An ordered Jito launch requires between one and four buyer wallets.",
+    );
+  }
+
+  const creator = String(body.creator ?? "")
+    .trim()
+    .toLowerCase();
+  const seen = new Set<string>();
+
+  return rows.map((value, index) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      badRequest(`Buyer ${index + 1} must be an object.`);
+    }
+    const row = value as Record<string, unknown>;
+    const wallet = String(
+      row.wallet ?? row.walletAddress ?? row.address ?? "",
+    ).trim();
+    if (!wallet) badRequest(`Buyer ${index + 1} wallet is required.`);
+
+    const normalized = wallet.toLowerCase();
+    if (creator && normalized === creator) {
+      badRequest(`Buyer ${index + 1} cannot use the deployer wallet.`);
+    }
+    if (seen.has(normalized)) {
+      badRequest(`Buyer wallet ${wallet} appears more than once.`);
+    }
+    seen.add(normalized);
+
+    const minBps = Math.round(
+      finiteNumber(row.minBps, `Buyer ${index + 1} minBps`, 5_000, 0, 10_000),
+    );
+    const maxBps = Math.round(
+      finiteNumber(row.maxBps, `Buyer ${index + 1} maxBps`, 8_000, 0, 10_000),
+    );
+    if (minBps > maxBps) {
+      badRequest(`Buyer ${index + 1} minBps cannot exceed maxBps.`);
+    }
+
+    const reserveSol = String(row.reserveSol ?? "0.02").trim();
+    finiteNumber(
+      reserveSol,
+      `Buyer ${index + 1} reserveSol`,
+      0.02,
+      0,
+      1_000_000,
+    );
+
+    return {
+      wallet,
+      label:
+        typeof row.label === "string" && row.label.trim()
+          ? row.label.trim().slice(0, 120)
+          : `Buyer ${index + 1}`,
+      amountMode: "range-bps",
+      minBps,
+      maxBps,
+      reserveSol,
+      cuLimit: Math.round(
+        finiteNumber(
+          row.cuLimit,
+          `Buyer ${index + 1} cuLimit`,
+          600_000,
+          1,
+          1_400_000,
+        ),
+      ),
+      priorityMicroLamports: Math.round(
+        finiteNumber(
+          row.priorityMicroLamports,
+          `Buyer ${index + 1} priorityMicroLamports`,
+          1_000_000,
+          0,
+          Number.MAX_SAFE_INTEGER,
+        ),
+      ),
+      slippageBps: Math.round(
+        finiteNumber(
+          row.slippageBps,
+          `Buyer ${index + 1} slippageBps`,
+          2_500,
+          0,
+          10_000,
+        ),
+      ),
+    };
+  });
+}
+
+function forceOrderedJitoLaunch(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized = { ...body };
+  normalized.buyPlan = normalizeJitoBuyPlan(normalized);
+  delete normalized.buyPlanJson;
+
+  // The browser selects wallets and amounts. Transport, endpoint, and tip policy
+  // remain server-owned and are resolved by the same launch core used by the CLI.
+  normalized.submitMode = "jito-bundle";
+  normalized.skipSimulation = true;
+  normalized.live = true;
+
+  for (const key of [
+    "deploymentSender",
+    "buyerSender",
+    "heliusTipSol",
+    "rpcUrl",
+    "jitoBlockEngineUrl",
+    "jitoTipAccount",
+    "jitoTipMode",
+    "jitoTipSol",
+    "jitoTipPercentile",
+    "jitoTipMultiplier",
+    "jitoTipMinSol",
+    "jitoTipMaxSol",
+    "jitoTipFloorUrl",
+    "jitoTipFloorMaxAgeMs",
+  ]) {
+    delete normalized[key];
+  }
+
+  return normalized;
+}
+
 async function saveLaunchImage(file: File): Promise<string> {
   const extension = IMAGE_EXTENSION[file.type];
 
@@ -205,7 +368,9 @@ export async function POST(request: Request): Promise<Response> {
 
     temporaryImagePath = parsed.temporaryImagePath;
 
-    const input = pumpLaunchInputFromRecord(parsed.body);
+    const input = pumpLaunchInputFromRecord(
+      forceOrderedJitoLaunch(parsed.body),
+    );
 
     validateLaunchInput(input);
 
