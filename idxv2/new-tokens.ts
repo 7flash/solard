@@ -30,15 +30,13 @@ const HTTP_URL =
   process.env.RPC_HTTP_URL ??
   (process.env.HELIUS_API_KEY
     ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`
-    : WS_URL?.replace(/^wss:/, "https:") ?? null);
+    : (WS_URL?.replace(/^wss:/, "https:") ?? null));
 
 const CONFIG = {
   // "processed" = fastest (creates on forks are vanishingly rare and self-evident
   // when the curve account doesn't exist); "confirmed" if you feed automation.
   commitment: (process.env.COMMITMENT ?? "processed") as
-    | "processed"
-    | "confirmed"
-    | "finalized",
+    "processed" | "confirmed" | "finalized",
   pingIntervalMs: 25_000, // Helius idles out sockets; keep-alive well under 60s
   backoffBaseMs: 500,
   backoffMaxMs: 20_000,
@@ -90,7 +88,8 @@ class Reader {
     return this.buf.length - this.#off;
   }
   bytes(n: number): Uint8Array {
-    if (this.remaining < n) throw new Error(`buffer underrun (need ${n}, have ${this.remaining})`);
+    if (this.remaining < n)
+      throw new Error(`buffer underrun (need ${n}, have ${this.remaining})`);
     const out = this.buf.subarray(this.#off, this.#off + n);
     this.#off += n;
     return out;
@@ -112,7 +111,8 @@ class Reader {
   }
   string(): string {
     const len = this.u32();
-    if (len > this.remaining) throw new Error(`string len ${len} exceeds buffer`);
+    if (len > this.remaining)
+      throw new Error(`string len ${len} exceeds buffer`);
     return new TextDecoder().decode(this.bytes(len));
   }
   pubkey(): string {
@@ -324,7 +324,11 @@ export class PumpMonitor {
       // "unknown method" error reply is fine, it's traffic either way.
       try {
         this.#ws?.send(
-          JSON.stringify({ jsonrpc: "2.0", id: this.#nextId++, method: "ping" }),
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: this.#nextId++,
+            method: "ping",
+          }),
         );
       } catch {
         /* socket mid-close */
@@ -364,7 +368,9 @@ export class PumpMonitor {
     }
 
     if (!ev) {
-      console.warn(`[decode] create-looking tx with no CreateEvent: ${value.signature}`);
+      console.warn(
+        `[decode] create-looking tx with no CreateEvent: ${value.signature}`,
+      );
       return;
     }
     if (!this.#seenMints.has(ev.mint)) {

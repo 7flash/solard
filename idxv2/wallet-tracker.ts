@@ -117,10 +117,17 @@ function tokenDeltasForOwner(
   meta: TxMetaLike,
   owner: string,
 ): Map<string, { delta: bigint; decimals: number }> {
-  const acc = new Map<string, { pre: bigint; post: bigint; decimals: number }>();
+  const acc = new Map<
+    string,
+    { pre: bigint; post: bigint; decimals: number }
+  >();
   const touch = (e: TokenBalanceEntry, side: "pre" | "post") => {
     if (e.owner !== owner) return;
-    const cur = acc.get(e.mint) ?? { pre: 0n, post: 0n, decimals: e.uiTokenAmount.decimals };
+    const cur = acc.get(e.mint) ?? {
+      pre: 0n,
+      post: 0n,
+      decimals: e.uiTokenAmount.decimals,
+    };
     cur[side] += BigInt(e.uiTokenAmount.amount);
     acc.set(e.mint, cur);
   };
@@ -146,7 +153,9 @@ export function classifyActivity(
 ): WalletActivity {
   const idx = accountKeys.indexOf(wallet);
   const nativeDelta =
-    idx >= 0 ? BigInt(meta.postBalances[idx]) - BigInt(meta.preBalances[idx]) : 0n;
+    idx >= 0
+      ? BigInt(meta.postBalances[idx]) - BigInt(meta.preBalances[idx])
+      : 0n;
   const feePaid = accountKeys[0] === wallet ? BigInt(meta.fee) : 0n;
 
   const tokenDeltas = tokenDeltasForOwner(meta, wallet);
@@ -168,7 +177,10 @@ export function classifyActivity(
 
   let kind: ActivityKind;
   if (legs.length === 0) {
-    kind = solDelta !== 0n && (solDelta > 0n || -solDelta > feePaid) ? "SOL_TRANSFER" : "NONE";
+    kind =
+      solDelta !== 0n && (solDelta > 0n || -solDelta > feePaid)
+        ? "SOL_TRANSFER"
+        : "NONE";
   } else if (up.length > 0 && down.length > 0) {
     kind = "SWAP";
   } else if (up.length > 0) {
@@ -241,7 +253,15 @@ export class Ledger {
 
   position(wallet: string, mint: string) {
     const r = this.db
-      .query<{ qty: string; cost_lamports: string; realized_lamports: string; decimals: number }, [string, string]>(
+      .query<
+        {
+          qty: string;
+          cost_lamports: string;
+          realized_lamports: string;
+          decimals: number;
+        },
+        [string, string]
+      >(
         "SELECT qty, cost_lamports, realized_lamports, decimals FROM positions WHERE wallet = ? AND mint = ?",
       )
       .get(wallet, mint);
@@ -284,7 +304,10 @@ export class Ledger {
         // keep row if realized history exists
         const cur = this.position(wallet, mint);
         if (cur.realized === 0n) {
-          this.db.run("DELETE FROM positions WHERE wallet = ? AND mint = ?", [wallet, mint]);
+          this.db.run("DELETE FROM positions WHERE wallet = ? AND mint = ?", [
+            wallet,
+            mint,
+          ]);
           return;
         }
       }
@@ -294,11 +317,22 @@ export class Ledger {
          ON CONFLICT(wallet, mint) DO UPDATE SET
            qty = excluded.qty, cost_lamports = excluded.cost_lamports,
            decimals = excluded.decimals, realized_lamports = excluded.realized_lamports`,
-        [wallet, mint, qty.toString(), cost.toString(), decimals, realized.toString()],
+        [
+          wallet,
+          mint,
+          qty.toString(),
+          cost.toString(),
+          decimals,
+          realized.toString(),
+        ],
       );
     };
 
-    const record = (mint: string | null, tokenDelta: bigint | null, realized: bigint | null) => {
+    const record = (
+      mint: string | null,
+      tokenDelta: bigint | null,
+      realized: bigint | null,
+    ) => {
       this.db.run(
         `INSERT OR IGNORE INTO trades (ts, slot, signature, wallet, kind, mint, token_delta, sol_delta, realized_lamports)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -346,7 +380,14 @@ export class Ledger {
           cost -= costOut;
           if (qty === 0n) cost = 0n;
         }
-        upsert(a.wallet, leg.mint, qty, cost, realized, leg.decimals || p.decimals);
+        upsert(
+          a.wallet,
+          leg.mint,
+          qty,
+          cost,
+          realized,
+          leg.decimals || p.decimals,
+        );
         record(leg.mint, leg.delta, legRealized);
       }
     });
@@ -372,7 +413,16 @@ export class Ledger {
 
   pnlSummary(wallet: string) {
     return this.db
-      .query<{ mint: string; qty: string; cost_lamports: string; realized_lamports: string; decimals: number }, [string]>(
+      .query<
+        {
+          mint: string;
+          qty: string;
+          cost_lamports: string;
+          realized_lamports: string;
+          decimals: number;
+        },
+        [string]
+      >(
         "SELECT mint, qty, cost_lamports, realized_lamports, decimals FROM positions WHERE wallet = ?",
       )
       .all(wallet);
@@ -391,7 +441,13 @@ function accountKeysOf(txMsg: any): string[] {
 function processTx(
   ledger: Ledger,
   wallets: string[],
-  tx: { meta: TxMetaLike; msg: any; signature: string; slot: number; blockTime?: number },
+  tx: {
+    meta: TxMetaLike;
+    msg: any;
+    signature: string;
+    slot: number;
+    blockTime?: number;
+  },
   onActivity: (a: WalletActivity, realized: bigint | null, sig: string) => void,
 ) {
   const keys = accountKeysOf(tx.msg);
@@ -399,9 +455,10 @@ function processTx(
     // wallet may be involved only via its token accounts (owner field), so
     // check both the key list and token balance owners
     const inKeys = keys.includes(wallet);
-    const inTokens = [...(tx.meta.preTokenBalances ?? []), ...(tx.meta.postTokenBalances ?? [])].some(
-      (e) => e.owner === wallet,
-    );
+    const inTokens = [
+      ...(tx.meta.preTokenBalances ?? []),
+      ...(tx.meta.postTokenBalances ?? []),
+    ].some((e) => e.owner === wallet);
     if (!inKeys && !inTokens) continue;
     if (ledger.hasTx(tx.signature, wallet)) continue; // gap-fill/live overlap guard
     const a = classifyActivity(tx.meta, keys, wallet);
@@ -434,14 +491,20 @@ async function gapFill(
     const page = await rpc<any[]>("getSignaturesForAddress", [
       wallet,
       {
-        limit: until ? CONFIG.gapFillPageSize : Math.min(CONFIG.backfillLimit, 1000),
+        limit: until
+          ? CONFIG.gapFillPageSize
+          : Math.min(CONFIG.backfillLimit, 1000),
         commitment: CONFIG.commitment,
         ...(until ? { until } : {}),
         ...(before ? { before } : {}),
       },
     ]);
-    for (const s of page) if (!s.err) sigs.push({ signature: s.signature, slot: s.slot });
-    if (page.length < CONFIG.gapFillPageSize || (!until && sigs.length >= CONFIG.backfillLimit))
+    for (const s of page)
+      if (!s.err) sigs.push({ signature: s.signature, slot: s.slot });
+    if (
+      page.length < CONFIG.gapFillPageSize ||
+      (!until && sigs.length >= CONFIG.backfillLimit)
+    )
       break;
     if (page.length === 0) break;
     before = page[page.length - 1].signature;
@@ -458,7 +521,11 @@ async function gapFill(
     try {
       const tx = await rpc<any>("getTransaction", [
         signature,
-        { encoding: "jsonParsed", commitment: CONFIG.commitment, maxSupportedTransactionVersion: 0 },
+        {
+          encoding: "jsonParsed",
+          commitment: CONFIG.commitment,
+          maxSupportedTransactionVersion: 0,
+        },
       ]);
       if (!tx?.meta || tx.meta.err) continue;
       processTx(
@@ -498,7 +565,12 @@ class Feed {
 
   constructor(
     private wallets: string[],
-    private onTx: (tx: { meta: TxMetaLike; msg: any; signature: string; slot: number }) => void,
+    private onTx: (tx: {
+      meta: TxMetaLike;
+      msg: any;
+      signature: string;
+      slot: number;
+    }) => void,
     private onReconnect: () => void,
   ) {}
 
@@ -542,7 +614,11 @@ class Feed {
     try {
       const tx = await rpc<any>("getTransaction", [
         value.signature,
-        { encoding: "jsonParsed", commitment: CONFIG.commitment, maxSupportedTransactionVersion: 0 },
+        {
+          encoding: "jsonParsed",
+          commitment: CONFIG.commitment,
+          maxSupportedTransactionVersion: 0,
+        },
       ]);
       if (!tx?.meta) return;
       this.onTx({
@@ -552,7 +628,10 @@ class Feed {
         slot: tx.slot,
       });
     } catch (e) {
-      console.error(`[feed] getTransaction ${value.signature} (gap-fill will cover):`, e);
+      console.error(
+        `[feed] getTransaction ${value.signature} (gap-fill will cover):`,
+        e,
+      );
     } finally {
       // keep briefly to absorb the sibling subscription's duplicate, then free
       setTimeout(() => this.#inFlight.delete(value.signature), 30_000);
@@ -586,7 +665,9 @@ class Feed {
       );
       this.#ping = setInterval(() => {
         try {
-          ws.send(JSON.stringify({ jsonrpc: "2.0", id: this.#id++, method: "ping" }));
+          ws.send(
+            JSON.stringify({ jsonrpc: "2.0", id: this.#id++, method: "ping" }),
+          );
         } catch {}
       }, CONFIG.pingIntervalMs);
       console.log("[feed:enhanced] open");
@@ -610,14 +691,20 @@ class Feed {
       });
     };
 
-    ws.onerror = (e) => console.error("[feed:enhanced]", (e as any)?.message ?? e);
+    ws.onerror = (e) =>
+      console.error("[feed:enhanced]", (e as any)?.message ?? e);
     ws.onclose = () => {
       if (this.#ping) clearInterval(this.#ping);
       if (this.#stopped) return;
-      const d = Math.min(CONFIG.backoffBaseMs * 2 ** this.#attempt, CONFIG.backoffMaxMs);
+      const d = Math.min(
+        CONFIG.backoffBaseMs * 2 ** this.#attempt,
+        CONFIG.backoffMaxMs,
+      );
       const j = d / 2 + Math.random() * (d / 2);
       this.#attempt++;
-      console.warn(`[feed:enhanced] closed — reconnect in ${Math.round(j)}ms + gap-fill`);
+      console.warn(
+        `[feed:enhanced] closed — reconnect in ${Math.round(j)}ms + gap-fill`,
+      );
       setTimeout(() => {
         this.#connectEnhanced();
         this.onReconnect();
@@ -631,7 +718,8 @@ class Feed {
 // ---------------------------------------------------------------------------
 
 const SOL = (l: bigint) => `${(Number(l) / 1e9).toFixed(4)} SOL`;
-const uiAmt = (raw: bigint, dec: number) => (Number(raw < 0n ? -raw : raw) / 10 ** dec).toLocaleString();
+const uiAmt = (raw: bigint, dec: number) =>
+  (Number(raw < 0n ? -raw : raw) / 10 ** dec).toLocaleString();
 
 if (import.meta.main) {
   if (WALLETS.length === 0) {
@@ -639,24 +727,46 @@ if (import.meta.main) {
     process.exit(1);
   }
   if (!HTTP_URL) {
-    console.error("Set HELIUS_API_KEY or RPC_HTTP_URL (+ RPC_WS_URL, MODE=logs)");
+    console.error(
+      "Set HELIUS_API_KEY or RPC_HTTP_URL (+ RPC_WS_URL, MODE=logs)",
+    );
     process.exit(1);
   }
 
   const ledger = new Ledger(process.env.DB_PATH ?? "wallets.db");
 
   const short = (s: string) => `${s.slice(0, 4)}…${s.slice(-4)}`;
-  const onActivity = (a: WalletActivity, realized: bigint | null, sig: string) => {
+  const onActivity = (
+    a: WalletActivity,
+    realized: bigint | null,
+    sig: string,
+  ) => {
     const icon =
-      a.kind === "BUY" ? "🟩" : a.kind === "SELL" ? "🟥" : a.kind === "SWAP" ? "🔄" :
-      a.kind === "TRANSFER_IN" ? "⬅️" : a.kind === "TRANSFER_OUT" ? "➡️" : "◽";
+      a.kind === "BUY"
+        ? "🟩"
+        : a.kind === "SELL"
+          ? "🟥"
+          : a.kind === "SWAP"
+            ? "🔄"
+            : a.kind === "TRANSFER_IN"
+              ? "⬅️"
+              : a.kind === "TRANSFER_OUT"
+                ? "➡️"
+                : "◽";
     const legStr = a.legs
-      .map((l) => `${l.delta > 0n ? "+" : "-"}${uiAmt(l.delta, l.decimals)} ${short(l.mint)}`)
+      .map(
+        (l) =>
+          `${l.delta > 0n ? "+" : "-"}${uiAmt(l.delta, l.decimals)} ${short(l.mint)}`,
+      )
       .join(", ");
     console.log(
       `${icon} ${short(a.wallet)} ${a.kind.padEnd(12)} ${legStr || SOL(a.solDelta)}` +
-        (a.kind === "BUY" || a.kind === "SELL" ? `  for ${SOL(a.solDelta < 0n ? -a.solDelta : a.solDelta)}` : "") +
-        (realized !== null ? `  realized ${realized >= 0n ? "+" : ""}${SOL(realized)}` : "") +
+        (a.kind === "BUY" || a.kind === "SELL"
+          ? `  for ${SOL(a.solDelta < 0n ? -a.solDelta : a.solDelta)}`
+          : "") +
+        (realized !== null
+          ? `  realized ${realized >= 0n ? "+" : ""}${SOL(realized)}`
+          : "") +
         `  ${sig.slice(0, 12)}…`,
     );
     // copy-trade hook: on BUY, evaluate + mirror here. Enhanced mode delivers
@@ -685,7 +795,10 @@ if (import.meta.main) {
     for (const w of WALLETS) {
       const rows = ledger.pnlSummary(w);
       if (rows.length === 0) continue;
-      const realized = rows.reduce((a, r) => a + BigInt(r.realized_lamports), 0n);
+      const realized = rows.reduce(
+        (a, r) => a + BigInt(r.realized_lamports),
+        0n,
+      );
       console.log(
         `[pnl] ${short(w)}: ${rows.length} positions, realized ${realized >= 0n ? "+" : ""}${SOL(realized)}`,
       );

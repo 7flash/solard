@@ -3,6 +3,7 @@ import {
   PublicKey,
   Transaction,
   TransactionInstruction,
+  type Connection,
   type Signer,
 } from "@solana/web3.js";
 import {
@@ -18,25 +19,30 @@ import {
 
 import {
   createAirdropJob,
-  getMutableAirdropJob,
-  snapshotJob,
+  getAirdropJob,
   updateAirdropJob,
 } from "./job-store.js";
-import { openAirdropRuntime } from "./runtime.js";
-import type { AirdropJob, AirdropPlan } from "./types.js";
+import { openAirdropRuntime, type ManagedAirdropSigner } from "./runtime.js";
+import type { AirdropJob, AirdropRecipientRun } from "./types.js";
 
 const MEMO_PROGRAM_ID = new PublicKey(
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
 );
 
 const globalState = globalThis as typeof globalThis & {
-  __solardAirdropRunning?: Set<string>;
+  __solardAirdropRunningV3?: Set<string>;
 };
-const running = (globalState.__solardAirdropRunning ??= new Set<string>());
-const runtimes = new Map<
-  string,
-  Awaited<ReturnType<typeof openAirdropRuntime>>
->();
+const running = (globalState.__solardAirdropRunningV3 ??= new Set<string>());
+
+class ConfirmationUnknownError extends Error {
+  constructor(
+    message: string,
+    readonly signature: string,
+  ) {
+    super(message);
+    this.name = "ConfirmationUnknownError";
+  }
+}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -70,65 +76,275 @@ function memoInstruction(message: string): TransactionInstruction {
 
 async function signTransaction(
   transaction: Transaction,
-  signer:
-    | Signer
-    | {
-        publicKey: PublicKey;
-        signTransaction(
-          transaction: Transaction,
-        ): Promise<Transaction> | Transaction;
-      },
+  signer: ManagedAirdropSigner,
 ): Promise<Transaction> {
   if ("secretKey" in signer && signer.secretKey instanceof Uint8Array) {
-    transaction.sign(signer);
+    transaction.sign(signer as Signer);
     return transaction;
   }
-  return await signer.signTransaction(transaction);
+  const walletSigner = signer as {
+    signTransaction?: (
+      transaction: Transaction,
+    ) => Promise<Transaction> | Transaction;
+  };
+  if (typeof walletSigner.signTransaction !== "function") {
+    throw new Error("Managed wallet signer cannot sign a legacy transaction.");
+  }
+  return await walletSigner.signTransaction(transaction);
+}
+
+async function cancellationRequested(id: string): Promise<boolean> {
+  return Boolean((await getAirdropJob(id))?.cancelRequested);
+}
+
+async function markCancelledRemainder(id: string): Promise<void> {
+  await updateAirdropJob(id, (job) => {
+    for (const recipient of job.recipients) {
+      if (recipient.status === "queued" || recipient.status === "sending") {
+        recipient.status = "cancelled";
+        job.progress.cancelled += 1;
+      }
+    }
+    job.status = "cancelled";
+    job.finishedAtMs = Date.now();
+    job.logs.push({
+      atMs: Date.now(),
+      level: "warn",
+      message: `Airdrop cancelled after ${job.progress.sent} confirmed recipient transfers.`,
+    });
+  });
+}
+
+function tokenProgram(job: AirdropJob): PublicKey {
+  return job.plan.payoutTokenProgram === "token-2022"
+    ? TOKEN_2022_PROGRAM_ID
+    : TOKEN_PROGRAM_ID;
+}
+
+function buildTransaction(args: {
+  job: AirdropJob;
+  signer: ManagedAirdropSigner;
+  bankAta: PublicKey;
+  recipients: AirdropRecipientRun[];
+  batchLabel: string;
+}): Transaction {
+  const mint = new PublicKey(args.job.plan.payoutMint);
+  const programId = tokenProgram(args.job);
+  const transaction = new Transaction();
+  transaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 500_000 }));
+  if (args.job.plan.priorityMicroLamports > 0) {
+    transaction.add(
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: args.job.plan.priorityMicroLamports,
+      }),
+    );
+  }
+
+  for (const recipient of args.recipients) {
+    const owner = new PublicKey(recipient.owner);
+    const recipientAta = getAssociatedTokenAddressSync(
+      mint,
+      owner,
+      true,
+      programId,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+    );
+    transaction.add(
+      createAssociatedTokenAccountIdempotentInstruction(
+        args.signer.publicKey,
+        recipientAta,
+        owner,
+        mint,
+        programId,
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+      ),
+      createTransferCheckedInstruction(
+        args.bankAta,
+        mint,
+        recipientAta,
+        args.signer.publicKey,
+        BigInt(recipient.amountRaw),
+        args.job.plan.payoutDecimals,
+        [],
+        programId,
+      ),
+    );
+  }
+
+  transaction.add(
+    memoInstruction(
+      `${args.job.plan.memo ?? args.job.plan.name} | ${args.job.id} | ${args.batchLabel}`.slice(
+        0,
+        400,
+      ),
+    ),
+  );
+  return transaction;
+}
+
+async function submitAndConfirm(args: {
+  id: string;
+  connection: Connection;
+  transaction: Transaction;
+  signer: ManagedAirdropSigner;
+  recipientIndexes: number[];
+}): Promise<string> {
+  const latest = await args.connection.getLatestBlockhash("confirmed");
+  args.transaction.feePayer = args.signer.publicKey;
+  args.transaction.recentBlockhash = latest.blockhash;
+  const signed = await signTransaction(args.transaction, args.signer);
+  const signature = await args.connection.sendRawTransaction(
+    signed.serialize(),
+    {
+      skipPreflight: false,
+      maxRetries: 3,
+    },
+  );
+
+  await updateAirdropJob(args.id, (job) => {
+    if (!job.signatures.includes(signature)) job.signatures.push(signature);
+    for (const index of args.recipientIndexes) {
+      job.recipients[index].status = "submitted";
+      job.recipients[index].signature = signature;
+    }
+    job.logs.push({
+      atMs: Date.now(),
+      level: "info",
+      message: `Submitted ${args.recipientIndexes.length} recipient transfer${args.recipientIndexes.length === 1 ? "" : "s"}: ${signature}`,
+    });
+  });
+
+  let confirmation;
+  try {
+    confirmation = await args.connection.confirmTransaction(
+      {
+        signature,
+        blockhash: latest.blockhash,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
+      },
+      "confirmed",
+    );
+  } catch (error) {
+    throw new ConfirmationUnknownError(
+      `Transaction ${signature} was submitted but confirmation could not be established: ${errorText(error)}`,
+      signature,
+    );
+  }
+  if (confirmation.value.err) {
+    throw Object.assign(
+      new Error(
+        `Transaction ${signature} failed on-chain: ${JSON.stringify(confirmation.value.err)}`,
+      ),
+      { signature, confirmedFailure: true },
+    );
+  }
+  return signature;
+}
+
+async function sendRecipients(args: {
+  id: string;
+  job: AirdropJob;
+  signer: ManagedAirdropSigner;
+  connection: Connection;
+  bankAta: PublicKey;
+  recipientIndexes: number[];
+  label: string;
+}): Promise<string> {
+  const recipients = args.recipientIndexes.map(
+    (index) => args.job.recipients[index],
+  );
+  const transaction = buildTransaction({
+    job: args.job,
+    signer: args.signer,
+    bankAta: args.bankAta,
+    recipients,
+    batchLabel: args.label,
+  });
+  return await submitAndConfirm({
+    id: args.id,
+    connection: args.connection,
+    transaction,
+    signer: args.signer,
+    recipientIndexes: args.recipientIndexes,
+  });
+}
+
+async function confirmRecipients(
+  id: string,
+  indexes: number[],
+  signature: string,
+): Promise<void> {
+  await updateAirdropJob(id, (job) => {
+    for (const index of indexes) {
+      const recipient = job.recipients[index];
+      recipient.status = "sent";
+      recipient.signature = signature;
+      recipient.error = undefined;
+    }
+    job.progress.attempted += indexes.length;
+    job.progress.sent += indexes.length;
+    job.logs.push({
+      atMs: Date.now(),
+      level: "info",
+      message: `Confirmed ${indexes.length} recipient transfer${indexes.length === 1 ? "" : "s"}: ${signature}`,
+    });
+  });
+}
+
+async function failRecipients(
+  id: string,
+  indexes: number[],
+  error: unknown,
+): Promise<void> {
+  const message = errorText(error);
+  await updateAirdropJob(id, (job) => {
+    for (const index of indexes) {
+      const recipient = job.recipients[index];
+      recipient.status = "failed";
+      recipient.error = message;
+    }
+    job.progress.attempted += indexes.length;
+    job.progress.failed += indexes.length;
+    job.logs.push({ atMs: Date.now(), level: "error", message });
+  });
 }
 
 async function executeJob(id: string): Promise<void> {
-  const job = getMutableAirdropJob(id);
-  if (!job) return;
-
-  const runtime =
-    runtimes.get(id) ?? (await openAirdropRuntime(job.plan.bankWallet));
-  runtimes.delete(id);
+  const initial = await getAirdropJob(id);
+  if (!initial || initial.status !== "queued") return;
+  let runtime: Awaited<ReturnType<typeof openAirdropRuntime>>;
   try {
-    await updateAirdropJob(id, (current) => {
-      current.status = "running";
-      current.startedAtMs = Date.now();
-      current.logs.push({
+    runtime = await openAirdropRuntime(initial.plan.bankWallet);
+  } catch (error) {
+    const message = errorText(error);
+    await updateAirdropJob(id, (job) => {
+      job.status = "failed";
+      job.error = message;
+      job.finishedAtMs = Date.now();
+      job.logs.push({ atMs: Date.now(), level: "error", message });
+    });
+    return;
+  }
+
+  try {
+    await updateAirdropJob(id, (job) => {
+      job.status = "running";
+      job.startedAtMs = Date.now();
+      job.logs.push({
         atMs: Date.now(),
         level: "info",
         message: "Server executor opened the managed bank wallet.",
       });
     });
 
+    const job = (await getAirdropJob(id))!;
     const { connection, signer } = runtime;
     const mint = new PublicKey(job.plan.payoutMint);
-    const mintAccount = await connection.getAccountInfo(mint, "confirmed");
-    if (!mintAccount) throw new Error("Payout mint account does not exist.");
-
-    const tokenProgramId = mintAccount.owner.equals(TOKEN_2022_PROGRAM_ID)
-      ? TOKEN_2022_PROGRAM_ID
-      : mintAccount.owner.equals(TOKEN_PROGRAM_ID)
-        ? TOKEN_PROGRAM_ID
-        : null;
-    if (!tokenProgramId) {
-      throw new Error(
-        "Payout mint is not owned by the SPL Token or Token-2022 program.",
-      );
-    }
-
-    const mintState = await getMint(
-      connection,
-      mint,
-      "confirmed",
-      tokenProgramId,
-    );
+    const programId = tokenProgram(job);
+    const mintState = await getMint(connection, mint, "confirmed", programId);
     if (mintState.decimals !== job.plan.payoutDecimals) {
       throw new Error(
-        `Payout mint has ${mintState.decimals} decimals, but the plan declares ${job.plan.payoutDecimals}.`,
+        `Payout mint decimals changed from preview ${job.plan.payoutDecimals} to ${mintState.decimals}.`,
       );
     }
 
@@ -136,14 +352,14 @@ async function executeJob(id: string): Promise<void> {
       mint,
       signer.publicKey,
       false,
-      tokenProgramId,
+      programId,
       ASSOCIATED_TOKEN_PROGRAM_ID,
     );
     const bankAccount = await getAccount(
       connection,
       bankAta,
       "confirmed",
-      tokenProgramId,
+      programId,
     );
     const required = BigInt(job.plan.totalAmountRaw);
     if (bankAccount.amount < required) {
@@ -152,158 +368,145 @@ async function executeJob(id: string): Promise<void> {
       );
     }
 
-    const recipientBatches = chunks(job.recipients, batchSize());
-    for (
-      let batchIndex = 0;
-      batchIndex < recipientBatches.length;
-      batchIndex += 1
-    ) {
-      const batch = recipientBatches[batchIndex];
+    const solBalance = await connection.getBalance(
+      signer.publicKey,
+      "confirmed",
+    );
+    if (solBalance <= 0) {
+      throw new Error(
+        "The bank wallet has no SOL for transaction fees or recipient token-account rent.",
+      );
+    }
+
+    const batches = chunks(job.recipients, batchSize());
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      if (await cancellationRequested(id)) {
+        await markCancelledRemainder(id);
+        return;
+      }
+
+      const batch = batches[batchIndex];
+      const indexes = batch.rows.map(
+        (_recipient, offset) => batch.start + offset,
+      );
       await updateAirdropJob(id, (current) => {
-        for (
-          let index = batch.start;
-          index < batch.start + batch.rows.length;
-          index += 1
-        ) {
+        for (const index of indexes)
           current.recipients[index].status = "sending";
-        }
         current.logs.push({
           atMs: Date.now(),
           level: "info",
-          message: `Building batch ${batchIndex + 1}/${recipientBatches.length} for ${batch.rows.length} recipients.`,
+          message: `Building batch ${batchIndex + 1}/${batches.length} for ${indexes.length} recipients.`,
         });
       });
 
       try {
-        const transaction = new Transaction();
-        transaction.add(
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 500_000 }),
-        );
-
-        for (const recipient of batch.rows) {
-          const owner = new PublicKey(recipient.owner);
-          const recipientAta = getAssociatedTokenAddressSync(
-            mint,
-            owner,
-            true,
-            tokenProgramId,
-            ASSOCIATED_TOKEN_PROGRAM_ID,
-          );
-          transaction.add(
-            createAssociatedTokenAccountIdempotentInstruction(
-              signer.publicKey,
-              recipientAta,
-              owner,
-              mint,
-              tokenProgramId,
-              ASSOCIATED_TOKEN_PROGRAM_ID,
-            ),
-            createTransferCheckedInstruction(
-              bankAta,
-              mint,
-              recipientAta,
-              signer.publicKey,
-              BigInt(recipient.amountRaw),
-              job.plan.payoutDecimals,
-              [],
-              tokenProgramId,
-            ),
-          );
-        }
-
-        transaction.add(
-          memoInstruction(
-            `${job.plan.memo ?? job.plan.name} | ${job.id} | batch ${batchIndex + 1}/${recipientBatches.length}`.slice(
-              0,
-              400,
-            ),
-          ),
-        );
-
-        const latest = await connection.getLatestBlockhash("confirmed");
-        transaction.feePayer = signer.publicKey;
-        transaction.recentBlockhash = latest.blockhash;
-        const signed = await signTransaction(transaction, signer);
-        const signature = await connection.sendRawTransaction(
-          signed.serialize(),
-          {
-            skipPreflight: false,
-            maxRetries: 3,
-          },
-        );
-        const confirmation = await connection.confirmTransaction(
-          {
-            signature,
-            blockhash: latest.blockhash,
-            lastValidBlockHeight: latest.lastValidBlockHeight,
-          },
-          "confirmed",
-        );
-        if (confirmation.value.err) {
-          throw new Error(
-            `Transaction ${signature} failed: ${JSON.stringify(confirmation.value.err)}`,
-          );
-        }
-
-        await updateAirdropJob(id, (current) => {
-          current.signatures.push(signature);
-          for (
-            let index = batch.start;
-            index < batch.start + batch.rows.length;
-            index += 1
-          ) {
-            current.recipients[index].status = "sent";
-            current.recipients[index].signature = signature;
-          }
-          current.progress.attempted += batch.rows.length;
-          current.progress.sent += batch.rows.length;
-          current.progress.batchesComplete += 1;
-          current.logs.push({
-            atMs: Date.now(),
-            level: "info",
-            message: `Confirmed batch ${batchIndex + 1}: ${signature}`,
-          });
+        const current = (await getAirdropJob(id))!;
+        const signature = await sendRecipients({
+          id,
+          job: current,
+          signer,
+          connection,
+          bankAta,
+          recipientIndexes: indexes,
+          label: `batch ${batchIndex + 1}/${batches.length}`,
         });
+        await confirmRecipients(id, indexes, signature);
       } catch (error) {
-        const message = errorText(error);
+        if (error instanceof ConfirmationUnknownError) {
+          await updateAirdropJob(id, (current) => {
+            current.status = "attention";
+            current.error = error.message;
+            current.finishedAtMs = Date.now();
+            current.logs.push({
+              atMs: Date.now(),
+              level: "error",
+              message:
+                "Execution stopped to avoid duplicate transfers. Verify the submitted signature on-chain before retrying.",
+            });
+          });
+          return;
+        }
+
         await updateAirdropJob(id, (current) => {
-          for (
-            let index = batch.start;
-            index < batch.start + batch.rows.length;
-            index += 1
-          ) {
-            current.recipients[index].status = "failed";
-            current.recipients[index].error = message;
+          for (const index of indexes) {
+            current.recipients[index].status = "queued";
+            current.recipients[index].signature = undefined;
+            current.recipients[index].error = undefined;
           }
-          current.progress.attempted += batch.rows.length;
-          current.progress.failed += batch.rows.length;
-          current.progress.batchesComplete += 1;
           current.logs.push({
             atMs: Date.now(),
-            level: "error",
-            message: `Batch ${batchIndex + 1} failed: ${message}`,
+            level: "warn",
+            message: `Batch ${batchIndex + 1} failed before a confirmed transfer. Falling back to one recipient per transaction: ${errorText(error)}`,
           });
         });
-        throw error;
+
+        for (const index of indexes) {
+          if (await cancellationRequested(id)) {
+            await markCancelledRemainder(id);
+            return;
+          }
+          await updateAirdropJob(id, (current) => {
+            current.recipients[index].status = "sending";
+          });
+          try {
+            const current = (await getAirdropJob(id))!;
+            const signature = await sendRecipients({
+              id,
+              job: current,
+              signer,
+              connection,
+              bankAta,
+              recipientIndexes: [index],
+              label: `recipient ${index + 1}/${current.progress.total}`,
+            });
+            await confirmRecipients(id, [index], signature);
+          } catch (singleError) {
+            if (singleError instanceof ConfirmationUnknownError) {
+              await updateAirdropJob(id, (current) => {
+                current.status = "attention";
+                current.error = singleError.message;
+                current.finishedAtMs = Date.now();
+                current.logs.push({
+                  atMs: Date.now(),
+                  level: "error",
+                  message:
+                    "Execution stopped to avoid a duplicate retry. Verify the submitted signature on-chain.",
+                });
+              });
+              return;
+            }
+            await failRecipients(id, [index], singleError);
+          }
+        }
+      } finally {
+        await updateAirdropJob(id, (current) => {
+          current.progress.batchesComplete += 1;
+        });
       }
     }
 
-    await updateAirdropJob(id, (current) => {
-      current.status = "completed";
-      current.finishedAtMs = Date.now();
-      current.logs.push({
+    await updateAirdropJob(id, (job) => {
+      job.finishedAtMs = Date.now();
+      job.status =
+        job.progress.failed > 0
+          ? job.progress.sent > 0
+            ? "partial"
+            : "failed"
+          : "completed";
+      job.logs.push({
         atMs: Date.now(),
-        level: "info",
-        message: `Airdrop completed: ${current.progress.sent}/${current.progress.total} recipients sent.`,
+        level: job.status === "completed" ? "info" : "warn",
+        message: `Airdrop ${job.status}: ${job.progress.sent}/${job.progress.total} recipients confirmed.`,
       });
     });
   } catch (error) {
     const message = errorText(error);
-    await updateAirdropJob(id, (current) => {
-      current.status = current.progress.sent > 0 ? "partial" : "failed";
-      current.error = message;
-      current.finishedAtMs = Date.now();
-      current.logs.push({ atMs: Date.now(), level: "error", message });
+    await updateAirdropJob(id, (job) => {
+      if (job.status === "attention" || job.status === "cancelled") return;
+      job.status = job.progress.sent > 0 ? "partial" : "failed";
+      job.error = message;
+      job.finishedAtMs = Date.now();
+      job.logs.push({ atMs: Date.now(), level: "error", message });
     }).catch(() => undefined);
   } finally {
     runtime.close();
@@ -319,28 +522,9 @@ function queue(id: string): void {
 }
 
 export async function startAirdropJob(
-  plan: AirdropPlan,
-  serverRuntime?: unknown,
+  plan: AirdropJob["plan"],
 ): Promise<AirdropJob> {
   const job = await createAirdropJob(plan);
-  if (job.status === "queued") {
-    try {
-      const runtime = await openAirdropRuntime(plan.bankWallet, serverRuntime);
-      runtimes.set(job.id, runtime);
-      queue(job.id);
-    } catch (error) {
-      await updateAirdropJob(job.id, (current) => {
-        current.status = "failed";
-        current.error = errorText(error);
-        current.finishedAtMs = Date.now();
-        current.logs.push({
-          atMs: Date.now(),
-          level: "error",
-          message: errorText(error),
-        });
-      });
-      throw error;
-    }
-  }
-  return snapshotJob(job);
+  if (job.status === "queued") queue(job.id);
+  return job;
 }

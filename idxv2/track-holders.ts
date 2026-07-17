@@ -1,4 +1,3 @@
-
 // holder-tracker.ts — Case 3: track all holders of one token, per-holder
 // balance changes over time.
 //
@@ -167,7 +166,9 @@ export class HolderStore {
 
   balance(owner: string): bigint {
     const row = this.db
-      .query<{ balance: string }, [string]>("SELECT balance FROM holders WHERE owner = ?")
+      .query<{ balance: string }, [string]>(
+        "SELECT balance FROM holders WHERE owner = ?",
+      )
       .get(owner);
     return row ? BigInt(row.balance) : 0n;
   }
@@ -198,7 +199,16 @@ export class HolderStore {
       this.db.run(
         `INSERT INTO changes (ts, slot, signature, owner, delta, balance_after, kind, event)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [now, slot, signature, owner, (newBalance - prev).toString(), newBalance.toString(), kind, event],
+        [
+          now,
+          slot,
+          signature,
+          owner,
+          (newBalance - prev).toString(),
+          newBalance.toString(),
+          kind,
+          event,
+        ],
       );
     });
     tx();
@@ -208,7 +218,9 @@ export class HolderStore {
   allHolders(): Map<string, bigint> {
     const out = new Map<string, bigint>();
     for (const r of this.db
-      .query<{ owner: string; balance: string }, []>("SELECT owner, balance FROM holders")
+      .query<{ owner: string; balance: string }, []>(
+        "SELECT owner, balance FROM holders",
+      )
       .all()) {
       out.set(r.owner, BigInt(r.balance));
     }
@@ -218,10 +230,14 @@ export class HolderStore {
   top(n: number): { owner: string; balance: bigint }[] {
     // sort in JS: sqlite ORDER BY on TEXT/CAST breaks for supply-scale bigints
     return this.db
-      .query<{ owner: string; balance: string }, []>("SELECT owner, balance FROM holders")
+      .query<{ owner: string; balance: string }, []>(
+        "SELECT owner, balance FROM holders",
+      )
       .all()
       .map((r) => ({ owner: r.owner, balance: BigInt(r.balance) }))
-      .sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0))
+      .sort((a, b) =>
+        b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0,
+      )
       .slice(0, n);
   }
 
@@ -233,7 +249,9 @@ export class HolderStore {
   }
   getMeta(key: string): string | null {
     const r = this.db
-      .query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+      .query<{ value: string }, [string]>(
+        "SELECT value FROM meta WHERE key = ?",
+      )
       .get(key);
     return r?.value ?? null;
   }
@@ -269,27 +287,38 @@ async function fetchSnapshotDas(mint: string): Promise<SnapshotResult> {
     if (page > 500) break; // safety valve
   }
   // DAS doesn't return a slot; pin the snapshot to the current slot instead
-  const slot = await rpc<number>("getSlot", [{ commitment: CONFIG.commitment }]);
+  const slot = await rpc<number>("getSlot", [
+    { commitment: CONFIG.commitment },
+  ]);
   return { holders, slot };
 }
 
-async function fetchSnapshot(mint: string, tokenProgram: string): Promise<SnapshotResult> {
+async function fetchSnapshot(
+  mint: string,
+  tokenProgram: string,
+): Promise<SnapshotResult> {
   if (!dasUnavailable) {
     try {
       return await fetchSnapshotDas(mint);
     } catch (e) {
       dasUnavailable = true; // non-Helius RPC or method disabled — fall back for good
-      console.warn("[snapshot] DAS getTokenAccounts unavailable, using getProgramAccounts:", (e as Error).message);
+      console.warn(
+        "[snapshot] DAS getTokenAccounts unavailable, using getProgramAccounts:",
+        (e as Error).message,
+      );
     }
   }
   // fallback: memcmp offset 0 = mint field; dataSize 165 = classic layout.
   // Heavy for the RPC — fine at 10-min intervals, but DAS is preferred.
   const filters: unknown[] = [{ memcmp: { offset: 0, bytes: mint } }];
   if (tokenProgram === TOKEN_PROGRAM) filters.unshift({ dataSize: 165 });
-  const result = await rpc<{
-    context?: { slot: number };
-    value?: any[];
-  } | any[]>("getProgramAccounts", [
+  const result = await rpc<
+    | {
+        context?: { slot: number };
+        value?: any[];
+      }
+    | any[]
+  >("getProgramAccounts", [
     tokenProgram,
     {
       encoding: "jsonParsed",
@@ -299,7 +328,7 @@ async function fetchSnapshot(mint: string, tokenProgram: string): Promise<Snapsh
     },
   ]);
   const ctx = Array.isArray(result) ? null : result.context;
-  const accounts = Array.isArray(result) ? result : result.value ?? [];
+  const accounts = Array.isArray(result) ? result : (result.value ?? []);
   const holders = new Map<string, bigint>();
   for (const { account } of accounts) {
     const info = account?.data?.parsed?.info;
@@ -316,7 +345,13 @@ export function reconcile(
   store: HolderStore,
   snapshot: Map<string, bigint>,
   slot: number,
-  notify: (owner: string, event: HolderEventType, delta: bigint, balance: bigint, kind: ChangeKind) => void,
+  notify: (
+    owner: string,
+    event: HolderEventType,
+    delta: bigint,
+    balance: bigint,
+    kind: ChangeKind,
+  ) => void,
 ): number {
   let corrections = 0;
   const local = store.allHolders();
@@ -363,7 +398,10 @@ class LruSet {
 // ---------------------------------------------------------------------------
 
 type MetaHandler = (
-  meta: { preTokenBalances: TokenBalanceEntry[]; postTokenBalances: TokenBalanceEntry[] },
+  meta: {
+    preTokenBalances: TokenBalanceEntry[];
+    postTokenBalances: TokenBalanceEntry[];
+  },
   signature: string,
   slot: number,
 ) => void;
@@ -396,7 +434,9 @@ class Feed {
 
   #connect() {
     if (this.#stopped) return;
-    console.log(`[feed] connecting mode=${CONFIG.mode} (attempt ${this.#attempt + 1})`);
+    console.log(
+      `[feed] connecting mode=${CONFIG.mode} (attempt ${this.#attempt + 1})`,
+    );
     const ws = new WebSocket(this.#url);
     this.#ws = ws;
 
@@ -407,14 +447,20 @@ class Feed {
       console.log(`[feed] open — watching mint ${this.mint}`);
     };
     ws.onmessage = (m) => void this.#handle(String(m.data));
-    ws.onerror = (e) => console.error("[feed] error:", (e as any)?.message ?? e);
+    ws.onerror = (e) =>
+      console.error("[feed] error:", (e as any)?.message ?? e);
     ws.onclose = () => {
       if (this.#ping) clearInterval(this.#ping);
       if (this.#stopped) return;
-      const d = Math.min(CONFIG.backoffBaseMs * 2 ** this.#attempt, CONFIG.backoffMaxMs);
+      const d = Math.min(
+        CONFIG.backoffBaseMs * 2 ** this.#attempt,
+        CONFIG.backoffMaxMs,
+      );
       const j = d / 2 + Math.random() * (d / 2);
       this.#attempt++;
-      console.warn(`[feed] closed — reconnect in ${Math.round(j)}ms (snapshot will repair any gap)`);
+      console.warn(
+        `[feed] closed — reconnect in ${Math.round(j)}ms (snapshot will repair any gap)`,
+      );
       setTimeout(() => this.#connect(), j);
     };
   }
@@ -440,7 +486,10 @@ class Feed {
             jsonrpc: "2.0",
             id: this.#id++,
             method: "logsSubscribe",
-            params: [{ mentions: [this.mint] }, { commitment: CONFIG.commitment }],
+            params: [
+              { mentions: [this.mint] },
+              { commitment: CONFIG.commitment },
+            ],
           };
     this.#ws!.send(JSON.stringify(msg));
   }
@@ -448,7 +497,9 @@ class Feed {
   #startPing() {
     this.#ping = setInterval(() => {
       try {
-        this.#ws?.send(JSON.stringify({ jsonrpc: "2.0", id: this.#id++, method: "ping" }));
+        this.#ws?.send(
+          JSON.stringify({ jsonrpc: "2.0", id: this.#id++, method: "ping" }),
+        );
       } catch {}
     }, CONFIG.pingIntervalMs);
   }
@@ -485,9 +536,13 @@ class Feed {
             maxSupportedTransactionVersion: 0,
           },
         ]);
-        if (tx?.meta) this.onMeta(tx.meta, value.signature, tx.slot ?? context.slot);
+        if (tx?.meta)
+          this.onMeta(tx.meta, value.signature, tx.slot ?? context.slot);
       } catch (e) {
-        console.error(`[feed] getTransaction ${value.signature} failed (reconcile will cover):`, e);
+        console.error(
+          `[feed] getTransaction ${value.signature} failed (reconcile will cover):`,
+          e,
+        );
       }
     }
   }
@@ -512,14 +567,21 @@ if (import.meta.main) {
     process.exit(1);
   }
   if (!HTTP_URL || (CONFIG.mode === "enhanced" ? !ENHANCED_WS_URL : !WS_URL)) {
-    console.error("Set HELIUS_API_KEY, or RPC_HTTP_URL + RPC_WS_URL (with MODE=logs)");
+    console.error(
+      "Set HELIUS_API_KEY, or RPC_HTTP_URL + RPC_WS_URL (with MODE=logs)",
+    );
     process.exit(1);
   }
 
-  const store = new HolderStore(process.env.DB_PATH ?? `holders-${MINT.slice(0, 8)}.db`);
+  const store = new HolderStore(
+    process.env.DB_PATH ?? `holders-${MINT.slice(0, 8)}.db`,
+  );
 
   // resolve decimals + supply + owning token program once
-  const mintInfo = await rpc<any>("getAccountInfo", [MINT, { encoding: "jsonParsed" }]);
+  const mintInfo = await rpc<any>("getAccountInfo", [
+    MINT,
+    { encoding: "jsonParsed" },
+  ]);
   if (!mintInfo?.value) {
     console.error("mint not found");
     process.exit(1);
@@ -545,7 +607,13 @@ if (import.meta.main) {
     if (kind === "trade" && uiDelta < CONFIG.minNotifyUi) return;
     const pct = supply > 0n ? Number((balance * 10_000n) / supply) / 100 : 0;
     const icon =
-      event === "NEW_HOLDER" ? "🟢" : event === "EXIT" ? "🔴" : event === "INCREASE" ? "📈" : "📉";
+      event === "NEW_HOLDER"
+        ? "🟢"
+        : event === "EXIT"
+          ? "🔴"
+          : event === "INCREASE"
+            ? "📈"
+            : "📉";
     console.log(
       `${icon} ${event.padEnd(10)} ${owner}  Δ${ui(delta, decimals)}  → ${ui(balance, decimals)} (${pct.toFixed(2)}%)` +
         (kind === "reconcile" ? "  [reconcile]" : "") +
@@ -563,7 +631,9 @@ if (import.meta.main) {
     if (!isFirstRun) notify(o, e, d, b, k); // don't spam NEW_HOLDER x N on first run
   });
   console.log(
-    isFirstRun ? `[snapshot] baseline stored (${snap.holders.size} holders)` : `[reconcile] ${fixed} corrections`,
+    isFirstRun
+      ? `[snapshot] baseline stored (${snap.holders.size} holders)`
+      : `[reconcile] ${fixed} corrections`,
   );
 
   // 2) realtime deltas

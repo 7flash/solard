@@ -52,8 +52,7 @@ const m = createMeasure("sqd");
 // Pump ABI constants — @pump-fun/pump-sdk 1.36.0 / current public IDL
 // ---------------------------------------------------------------------------
 
-export const PUMP_PROGRAM =
-  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+export const PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
 // sha256("global:create")[0..8]
 export const CREATE_D8 = "0x181ec828051c0777";
@@ -99,43 +98,25 @@ const CREATE_LAYOUT = {
 // ---------------------------------------------------------------------------
 
 const PORTAL_URL =
-  process.env.PORTAL_URL ??
-  "https://portal.sqd.dev/datasets/solana-mainnet";
+  process.env.PORTAL_URL ?? "https://portal.sqd.dev/datasets/solana-mainnet";
 
-const HEARTBEAT_MS = positiveIntEnv(
-  "SQD_HEARTBEAT_MS",
-  10_000,
-);
+const HEARTBEAT_MS = positiveIntEnv("SQD_HEARTBEAT_MS", 10_000);
 
-const RETRY_MS = positiveIntEnv(
-  "SQD_RETRY_MS",
-  3_000,
-);
+const RETRY_MS = positiveIntEnv("SQD_RETRY_MS", 3_000);
 
-const LIVE_LOOKBACK = nonNegativeIntEnv(
-  "SQD_LIVE_LOOKBACK",
-  500,
-);
+const LIVE_LOOKBACK = nonNegativeIntEnv("SQD_LIVE_LOOKBACK", 500);
 
-const PROBE_SLOTS = positiveIntEnv(
-  "SQD_PROBE_SLOTS",
-  2_000,
-);
+const PROBE_SLOTS = positiveIntEnv("SQD_PROBE_SLOTS", 2_000);
 
-const USE_FINALIZED =
-  process.env.SQD_FINALIZED === "1";
+const USE_FINALIZED = process.env.SQD_FINALIZED === "1";
 
-const LOG_EVERY_BATCH =
-  process.env.SQD_LOG_EVERY_BATCH === "1";
+const LOG_EVERY_BATCH = process.env.SQD_LOG_EVERY_BATCH === "1";
 
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
 
-function positiveIntEnv(
-  name: string,
-  fallback: number,
-): number {
+function positiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
 
@@ -147,10 +128,7 @@ function positiveIntEnv(
   return value;
 }
 
-function nonNegativeIntEnv(
-  name: string,
-  fallback: number,
-): number {
+function nonNegativeIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
 
@@ -162,23 +140,15 @@ function nonNegativeIntEnv(
   return value;
 }
 
-function parseNumberFlag(
-  flag: string,
-): number | undefined {
+function parseNumberFlag(flag: string): number | undefined {
   const index = process.argv.indexOf(flag);
   if (index < 0) return undefined;
 
   const raw = process.argv[index + 1];
   const value = Number(raw);
 
-  if (
-    raw === undefined ||
-    !Number.isSafeInteger(value) ||
-    value < 0
-  ) {
-    throw new Error(
-      `${flag} requires a non-negative safe integer`,
-    );
+  if (raw === undefined || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${flag} requires a non-negative safe integer`);
   }
 
   return value;
@@ -193,15 +163,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error
-    ? error.message
-    : String(error);
+  return error instanceof Error ? error.message : String(error);
 }
 
-function equalBytes(
-  left: Uint8Array,
-  right: Uint8Array,
-): boolean {
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   if (left.length !== right.length) return false;
 
   for (let index = 0; index < left.length; index++) {
@@ -211,14 +176,8 @@ function equalBytes(
   return true;
 }
 
-function timestampMs(
-  value: number | undefined,
-): number | null {
-  if (
-    value === undefined ||
-    !Number.isFinite(value) ||
-    value <= 0
-  ) {
+function timestampMs(value: number | undefined): number | null {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) {
     return null;
   }
 
@@ -234,16 +193,12 @@ function short(value: string): string {
   return `${value.slice(0, 8)}…${value.slice(-6)}`;
 }
 
-const B58 =
-  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 function base58(bytes: Uint8Array): string {
   let leadingZeroes = 0;
 
-  while (
-    leadingZeroes < bytes.length &&
-    bytes[leadingZeroes] === 0
-  ) {
+  while (leadingZeroes < bytes.length && bytes[leadingZeroes] === 0) {
     leadingZeroes++;
   }
 
@@ -313,11 +268,7 @@ class BorshReader {
     offset = 0,
   ) {
     this.#offset = offset;
-    this.#view = new DataView(
-      data.buffer,
-      data.byteOffset,
-      data.byteLength,
-    );
+    this.#view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   }
 
   get remaining(): number {
@@ -331,10 +282,7 @@ class BorshReader {
       );
     }
 
-    const result = this.data.subarray(
-      this.#offset,
-      this.#offset + length,
-    );
+    const result = this.data.subarray(this.#offset, this.#offset + length);
 
     this.#offset += length;
     return result;
@@ -349,10 +297,7 @@ class BorshReader {
       throw new Error("borsh underrun reading u32");
     }
 
-    const value = this.#view.getUint32(
-      this.#offset,
-      true,
-    );
+    const value = this.#view.getUint32(this.#offset, true);
 
     this.#offset += 4;
     return value;
@@ -367,9 +312,7 @@ class BorshReader {
       throw new Error(`unreasonable string length ${length}`);
     }
 
-    return new TextDecoder().decode(
-      this.bytes(length),
-    );
+    return new TextDecoder().decode(this.bytes(length));
   }
 
   pubkey(): string {
@@ -398,9 +341,7 @@ class BorshReader {
   }
 }
 
-export function decodeCreateArgs(
-  data: Uint8Array,
-): CreateArgs | null {
+export function decodeCreateArgs(data: Uint8Array): CreateArgs | null {
   const kind = createInstructionKind(data);
   if (!kind) return null;
 
@@ -420,8 +361,7 @@ export function decodeCreateArgs(
       }
 
       if (reader.remaining >= 1) {
-        result.isCashbackEnabled =
-          reader.optionBool();
+        result.isCashbackEnabled = reader.optionBool();
       }
     }
 
@@ -504,9 +444,7 @@ interface SourceOptions {
   to?: number;
 }
 
-export function buildSource(
-  options: SourceOptions,
-) {
+export function buildSource(options: SourceOptions) {
   const where: Record<string, unknown> = {
     programId: [PUMP_PROGRAM],
     isCommitted: true,
@@ -514,10 +452,7 @@ export function buildSource(
 
   if (options.mode === "strict") {
     // Current Portal-client query shape. Some older SQD docs call this d8.
-    where.discriminator = [
-      CREATE_D8,
-      CREATE_V2_D8,
-    ];
+    where.discriminator = [CREATE_D8, CREATE_V2_D8];
   }
 
   const range =
@@ -580,9 +515,7 @@ function buildHeadSource() {
 // Extraction
 // ---------------------------------------------------------------------------
 
-export function extractCreates(
-  block: SqdBlockLike,
-): ExtractResult {
+export function extractCreates(block: SqdBlockLike): ExtractResult {
   const stats: ExtractStats = {
     instructions: block.instructions.length,
     creates: 0,
@@ -624,30 +557,20 @@ export function extractCreates(
       continue;
     }
 
-    const descriptor = getInstructionDescriptor(
-      instruction as any,
-    );
+    const descriptor = getInstructionDescriptor(instruction as any);
 
-    descriptors.set(
-      descriptor,
-      (descriptors.get(descriptor) ?? 0) + 1,
-    );
+    descriptors.set(descriptor, (descriptors.get(descriptor) ?? 0) + 1);
 
-    const instructionKind =
-      createInstructionKind(data);
+    const instructionKind = createInstructionKind(data);
 
     if (!instructionKind) {
       stats.unknownDiscriminators++;
       continue;
     }
 
-    const layout =
-      CREATE_LAYOUT[instructionKind];
+    const layout = CREATE_LAYOUT[instructionKind];
 
-    if (
-      instruction.accounts.length <
-      layout.minAccounts
-    ) {
+    if (instruction.accounts.length < layout.minAccounts) {
       stats.accountLayoutFailures++;
       continue;
     }
@@ -659,9 +582,7 @@ export function extractCreates(
       continue;
     }
 
-    const transaction = txByIndex.get(
-      instruction.transactionIndex,
-    );
+    const transaction = txByIndex.get(instruction.transactionIndex);
 
     if (!transaction) {
       stats.missingTransactions++;
@@ -673,29 +594,23 @@ export function extractCreates(
       continue;
     }
 
-    const signature =
-      transaction.signatures?.[0];
+    const signature = transaction.signatures?.[0];
 
     if (!signature) {
       stats.missingSignatures++;
       continue;
     }
 
-    const mint =
-      instruction.accounts[layout.mint];
-    const bondingCurve =
-      instruction.accounts[layout.bondingCurve];
-    const user =
-      instruction.accounts[layout.user];
+    const mint = instruction.accounts[layout.mint];
+    const bondingCurve = instruction.accounts[layout.bondingCurve];
+    const user = instruction.accounts[layout.user];
 
     if (!mint || !bondingCurve || !user) {
       stats.accountLayoutFailures++;
       continue;
     }
 
-    const instructionAddress = [
-      ...instruction.instructionAddress,
-    ];
+    const instructionAddress = [...instruction.instructionAddress];
 
     events.push({
       id: `${signature}:${instructionAddress.join(".")}`,
@@ -704,9 +619,7 @@ export function extractCreates(
       instructionKind,
       slot: block.header.number,
       blockHeight: block.header.height,
-      timestampMs: timestampMs(
-        block.header.timestamp,
-      ),
+      timestampMs: timestampMs(block.header.timestamp),
       detectedAt: Date.now(),
       name: args.name,
       symbol: args.symbol,
@@ -716,8 +629,7 @@ export function extractCreates(
       user,
       creator: args.creator,
       isMayhemMode: args.isMayhemMode,
-      isCashbackEnabled:
-        args.isCashbackEnabled,
+      isCashbackEnabled: args.isCashbackEnabled,
       viaCpi: instructionAddress.length > 1,
     });
 
@@ -738,9 +650,7 @@ export function extractCreates(
 class LruSet {
   readonly #values = new Set<string>();
 
-  constructor(
-    readonly capacity: number,
-  ) {}
+  constructor(readonly capacity: number) {}
 
   addIfNew(value: string): boolean {
     if (this.#values.has(value)) return false;
@@ -748,8 +658,7 @@ class LruSet {
     this.#values.add(value);
 
     if (this.#values.size > this.capacity) {
-      const oldest =
-        this.#values.values().next().value;
+      const oldest = this.#values.values().next().value;
 
       if (oldest !== undefined) {
         this.#values.delete(oldest);
@@ -788,10 +697,7 @@ interface RuntimeStatus {
   descriptorCounts: Map<string, number>;
 }
 
-function createStatus(
-  cursor: number,
-  sourceHead: number,
-): RuntimeStatus {
+function createStatus(cursor: number, sourceHead: number): RuntimeStatus {
   return {
     startedAtMs: Date.now(),
     connectedAtMs: 0,
@@ -822,10 +728,7 @@ function mergeDescriptors(
   source: Map<string, number>,
 ): void {
   for (const [descriptor, count] of source) {
-    target.set(
-      descriptor,
-      (target.get(descriptor) ?? 0) + count,
-    );
+    target.set(descriptor, (target.get(descriptor) ?? 0) + count);
   }
 }
 
@@ -841,9 +744,7 @@ function topDescriptors(
 }
 
 function ageMs(value: number): number | null {
-  return value === 0
-    ? null
-    : Date.now() - value;
+  return value === 0 ? null : Date.now() - value;
 }
 
 function startHeartbeat(
@@ -863,12 +764,8 @@ function startHeartbeat(
         finalized: USE_FINALIZED,
         cursor: status.cursor,
         sourceHead: status.sourceHead,
-        slotLag: Math.max(
-          0,
-          status.sourceHead - status.cursor,
-        ),
-        uptimeMs:
-          Date.now() - status.startedAtMs,
+        slotLag: Math.max(0, status.sourceHead - status.cursor),
+        uptimeMs: Date.now() - status.startedAtMs,
         batches: status.batches,
         blocks: status.blocks,
         instructions: status.instructions,
@@ -876,28 +773,16 @@ function startHeartbeat(
         duplicates: status.duplicates,
         reconnects: status.reconnects,
         forks: status.forks,
-        lastBatchAgeMs:
-          ageMs(status.lastBatchAtMs),
-        lastBlockAgeMs:
-          ageMs(status.lastBlockAtMs),
-        lastCreateAgeMs:
-          ageMs(status.lastCreateAtMs),
-        decodeFailures:
-          status.decodeFailures,
-        layoutFailures:
-          status.accountLayoutFailures,
-        unknownDiscriminators:
-          status.unknownDiscriminators,
-        missingTransactions:
-          status.missingTransactions,
-        failedTransactions:
-          status.failedTransactions,
-        missingSignatures:
-          status.missingSignatures,
-        topDiscriminators:
-          topDescriptors(
-            status.descriptorCounts,
-          ),
+        lastBatchAgeMs: ageMs(status.lastBatchAtMs),
+        lastBlockAgeMs: ageMs(status.lastBlockAtMs),
+        lastCreateAgeMs: ageMs(status.lastCreateAtMs),
+        decodeFailures: status.decodeFailures,
+        layoutFailures: status.accountLayoutFailures,
+        unknownDiscriminators: status.unknownDiscriminators,
+        missingTransactions: status.missingTransactions,
+        failedTransactions: status.failedTransactions,
+        missingSignatures: status.missingSignatures,
+        topDiscriminators: topDescriptors(status.descriptorCounts),
       }),
     );
   }, HEARTBEAT_MS);
@@ -910,13 +795,10 @@ function startHeartbeat(
 // Event output
 // ---------------------------------------------------------------------------
 
-async function onToken(
-  event: NewTokenEvent,
-): Promise<void> {
+async function onToken(event: NewTokenEvent): Promise<void> {
   await m(
     {
-      start: () =>
-        `create:${event.instructionKind} ${short(event.mint)}`,
+      start: () => `create:${event.instructionKind} ${short(event.mint)}`,
       end: () => ({
         id: event.id,
         mint: event.mint,
@@ -970,23 +852,15 @@ async function main(): Promise<void> {
       maxResultLength: 2_000,
     },
     async () => {
-      const requestedMode =
-        (
-          process.env.SQD_FILTER_MODE ??
-          "strict"
-        ).toLowerCase();
+      const requestedMode = (
+        process.env.SQD_FILTER_MODE ?? "strict"
+      ).toLowerCase();
 
-      if (
-        requestedMode !== "strict" &&
-        requestedMode !== "program"
-      ) {
-        throw new Error(
-          "SQD_FILTER_MODE must be strict or program",
-        );
+      if (requestedMode !== "strict" && requestedMode !== "program") {
+        throw new Error("SQD_FILTER_MODE must be strict or program");
       }
 
-      let mode =
-        requestedMode as FilterMode;
+      let mode = requestedMode as FilterMode;
 
       const probe = hasFlag("--probe");
 
@@ -994,15 +868,10 @@ async function main(): Promise<void> {
         mode = "program";
       }
 
-      const requestedFrom =
-        parseNumberFlag("--from");
-      const requestedTo =
-        parseNumberFlag("--to");
+      const requestedFrom = parseNumberFlag("--from");
+      const requestedTo = parseNumberFlag("--to");
 
-      if (
-        requestedTo !== undefined &&
-        requestedFrom === undefined
-      ) {
+      if (requestedTo !== undefined && requestedFrom === undefined) {
         throw new Error("--to requires --from");
       }
 
@@ -1011,9 +880,7 @@ async function main(): Promise<void> {
         requestedTo !== undefined &&
         requestedTo < requestedFrom
       ) {
-        throw new Error(
-          "--to must be greater than or equal to --from",
-        );
+        throw new Error("--to must be greater than or equal to --from");
       }
 
       const headSource = buildHeadSource();
@@ -1034,17 +901,11 @@ async function main(): Promise<void> {
 
       if (probe) {
         to = head.number;
-        from = Math.max(
-          0,
-          head.number - PROBE_SLOTS,
-        );
+        from = Math.max(0, head.number - PROBE_SLOTS);
       } else if (requestedFrom !== undefined) {
         from = requestedFrom;
       } else {
-        from = Math.max(
-          0,
-          head.number - LIVE_LOOKBACK,
-        );
+        from = Math.max(0, head.number - LIVE_LOOKBACK);
       }
 
       const finite = to !== undefined;
@@ -1061,16 +922,11 @@ async function main(): Promise<void> {
           program: PUMP_PROGRAM,
           mode,
           finalized: USE_FINALIZED,
-          createDiscriminators: [
-            CREATE_D8,
-            CREATE_V2_D8,
-          ],
+          createDiscriminators: [CREATE_D8, CREATE_V2_D8],
           from,
           to: to ?? null,
           liveLookback: LIVE_LOOKBACK,
-          probeSlots: probe
-            ? PROBE_SLOTS
-            : null,
+          probeSlots: probe ? PROBE_SLOTS : null,
           heartbeatMs: HEARTBEAT_MS,
           retryMs: RETRY_MS,
         }),
@@ -1082,11 +938,9 @@ async function main(): Promise<void> {
         to,
       });
 
-      const status =
-        createStatus(from, head.number);
+      const status = createStatus(from, head.number);
       const dedupe = new LruSet(100_000);
-      const heartbeat =
-        startHeartbeat(status, mode);
+      const heartbeat = startHeartbeat(status, mode);
 
       try {
         while (true) {
@@ -1116,25 +970,19 @@ async function main(): Promise<void> {
 
                 for await (const batch of iterable) {
                   const processBatch = async () => {
-                    status.lastBatchAtMs =
-                      Date.now();
+                    status.lastBatchAtMs = Date.now();
                     status.batches++;
 
                     for (const rawBlock of batch.blocks) {
-                      const block =
-                        rawBlock as SqdBlockLike;
+                      const block = rawBlock as SqdBlockLike;
 
                       status.blocks++;
-                      status.lastBlockAtMs =
-                        Date.now();
+                      status.lastBlockAtMs = Date.now();
 
-                      const result =
-                        extractCreates(block);
+                      const result = extractCreates(block);
 
-                      status.instructions +=
-                        result.stats.instructions;
-                      status.decodeFailures +=
-                        result.stats.decodeFailures;
+                      status.instructions += result.stats.instructions;
+                      status.decodeFailures += result.stats.decodeFailures;
                       status.accountLayoutFailures +=
                         result.stats.accountLayoutFailures;
                       status.unknownDiscriminators +=
@@ -1159,28 +1007,24 @@ async function main(): Promise<void> {
 
                         await onToken(event);
                         status.creates++;
-                        status.lastCreateAtMs =
-                          Date.now();
+                        status.lastCreateAtMs = Date.now();
                       }
 
                       // Advance only after all event side effects complete.
-                      status.cursor =
-                        block.header.number + 1;
+                      status.cursor = block.header.number + 1;
                     }
 
                     return {
                       blocks: batch.blocks.length,
                       cursor: status.cursor,
-                      totalCreates:
-                        status.creates,
+                      totalCreates: status.creates,
                     };
                   };
 
                   if (LOG_EVERY_BATCH) {
                     await m(
                       {
-                        start: () =>
-                          `batch blocks=${batch.blocks.length}`,
+                        start: () => `batch blocks=${batch.blocks.length}`,
                         end: (value) => value,
                       },
                       processBatch,
@@ -1204,14 +1048,12 @@ async function main(): Promise<void> {
                   to,
                   mode,
                   blocks: status.blocks,
-                  instructions:
-                    status.instructions,
+                  instructions: status.instructions,
                   creates: status.creates,
-                  topDiscriminators:
-                    topDescriptors(
-                      status.descriptorCounts,
-                      20,
-                    ),
+                  topDiscriminators: topDescriptors(
+                    status.descriptorCounts,
+                    20,
+                  ),
                 }),
               );
 
@@ -1220,52 +1062,37 @@ async function main(): Promise<void> {
 
             status.reconnects++;
 
-            m.sync(
-              "live_stream_ended",
-              () => ({
-                cursor: status.cursor,
-                retryMs: RETRY_MS,
-              }),
-            );
+            m.sync("live_stream_ended", () => ({
+              cursor: status.cursor,
+              retryMs: RETRY_MS,
+            }));
 
             await sleep(RETRY_MS);
           } catch (error) {
             if (isForkException(error)) {
               status.forks++;
 
-              const finalizedHead = await m(
-                "get_finalized_head",
-                () => source.getFinalizedHead(),
+              const finalizedHead = await m("get_finalized_head", () =>
+                source.getFinalizedHead(),
               );
 
-              status.cursor = Math.min(
-                status.cursor,
-                finalizedHead.number,
-              );
+              status.cursor = Math.min(status.cursor, finalizedHead.number);
 
-              m.sync(
-                "fork_rewind",
-                () => ({
-                  cursor: status.cursor,
-                  finalizedHead:
-                    finalizedHead.number,
-                }),
-              );
+              m.sync("fork_rewind", () => ({
+                cursor: status.cursor,
+                finalizedHead: finalizedHead.number,
+              }));
 
               continue;
             }
 
             status.reconnects++;
 
-            m.sync(
-              "stream_retry",
-              () => ({
-                cursor: status.cursor,
-                error:
-                  errorMessage(error),
-                retryMs: RETRY_MS,
-              }),
-            );
+            m.sync("stream_retry", () => ({
+              cursor: status.cursor,
+              error: errorMessage(error),
+              retryMs: RETRY_MS,
+            }));
 
             await sleep(RETRY_MS);
           }
@@ -1282,13 +1109,8 @@ async function main(): Promise<void> {
         instructions: status.instructions,
         creates: status.creates,
         duplicates: status.duplicates,
-        decodeFailures:
-          status.decodeFailures,
-        topDiscriminators:
-          topDescriptors(
-            status.descriptorCounts,
-            20,
-          ),
+        decodeFailures: status.decodeFailures,
+        topDiscriminators: topDescriptors(status.descriptorCounts, 20),
       };
     },
   );

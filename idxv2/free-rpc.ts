@@ -35,11 +35,18 @@ export class ThrottledRpc {
       const res = await fetch(this.url, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: this.#id++, method, params }),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: this.#id++,
+          method,
+          params,
+        }),
       });
-      if (res.status === 429) throw new Error(`${method}: 429 rate limited (lower RPC_RPS)`);
+      if (res.status === 429)
+        throw new Error(`${method}: 429 rate limited (lower RPC_RPS)`);
       const json = (await res.json()) as any;
-      if (json.error) throw new Error(`${method}: ${JSON.stringify(json.error)}`);
+      if (json.error)
+        throw new Error(`${method}: ${JSON.stringify(json.error)}`);
       return json.result as T;
     });
   }
@@ -80,7 +87,11 @@ export class MuxWs {
 
   constructor(
     private url: string,
-    private opts = { pingIntervalMs: 25_000, backoffBaseMs: 500, backoffMaxMs: 20_000 },
+    private opts = {
+      pingIntervalMs: 25_000,
+      backoffBaseMs: 500,
+      backoffMaxMs: 20_000,
+    },
   ) {}
 
   get subscriptionCount() {
@@ -98,8 +109,14 @@ export class MuxWs {
   }
 
   /** Register a subscription; survives reconnects until unsubscribed. */
-  subscribe(key: string, method: string, params: unknown[], handler: NotifyHandler) {
-    if (this.#subs.has(key)) throw new Error(`duplicate subscription key: ${key}`);
+  subscribe(
+    key: string,
+    method: string,
+    params: unknown[],
+    handler: NotifyHandler,
+  ) {
+    if (this.#subs.has(key))
+      throw new Error(`duplicate subscription key: ${key}`);
     const spec: SubSpec = { key, method, params, handler, subId: null };
     this.#subs.set(key, spec);
     if (this.#ws?.readyState === WebSocket.OPEN) this.#send(spec);
@@ -114,7 +131,12 @@ export class MuxWs {
       const unsub = spec.method.replace("Subscribe", "Unsubscribe");
       try {
         this.#ws?.send(
-          JSON.stringify({ jsonrpc: "2.0", id: this.#id++, method: unsub, params: [spec.subId] }),
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: this.#id++,
+            method: unsub,
+            params: [spec.subId],
+          }),
         );
       } catch {}
     }
@@ -124,7 +146,12 @@ export class MuxWs {
     const id = this.#id++;
     this.#pendingReq.set(id, spec.key);
     this.#ws!.send(
-      JSON.stringify({ jsonrpc: "2.0", id, method: spec.method, params: spec.params }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: spec.method,
+        params: spec.params,
+      }),
     );
   }
 
@@ -143,7 +170,9 @@ export class MuxWs {
       }
       this.#ping = setInterval(() => {
         try {
-          ws.send(JSON.stringify({ jsonrpc: "2.0", id: this.#id++, method: "ping" }));
+          ws.send(
+            JSON.stringify({ jsonrpc: "2.0", id: this.#id++, method: "ping" }),
+          );
         } catch {}
       }, this.opts.pingIntervalMs);
       console.log(`[mux] open — ${this.#subs.size} subscriptions active`);
@@ -172,7 +201,11 @@ export class MuxWs {
       if (subId === undefined) return;
       const spec = this.#bySubId.get(subId);
       if (!spec) return;
-      if (msg.method && NOTIFICATION_OF[spec.method] && msg.method !== NOTIFICATION_OF[spec.method])
+      if (
+        msg.method &&
+        NOTIFICATION_OF[spec.method] &&
+        msg.method !== NOTIFICATION_OF[spec.method]
+      )
         return; // wrong notification type for this sub — ignore defensively
       spec.handler(msg.params.result);
     };
@@ -183,10 +216,15 @@ export class MuxWs {
       if (this.#ping) clearInterval(this.#ping);
       this.#ping = null;
       if (this.#stopped) return;
-      const d = Math.min(this.opts.backoffBaseMs * 2 ** this.#attempt, this.opts.backoffMaxMs);
+      const d = Math.min(
+        this.opts.backoffBaseMs * 2 ** this.#attempt,
+        this.opts.backoffMaxMs,
+      );
       const j = d / 2 + Math.random() * (d / 2);
       this.#attempt++;
-      console.warn(`[mux] closed — reconnect in ${Math.round(j)}ms (will resubscribe ${this.#subs.size})`);
+      console.warn(
+        `[mux] closed — reconnect in ${Math.round(j)}ms (will resubscribe ${this.#subs.size})`,
+      );
       setTimeout(() => {
         this.#connect();
         // fire AFTER resubscribes are queued so gap-fill can run in parallel

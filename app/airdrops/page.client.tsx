@@ -6,10 +6,19 @@ import { storageFlag, storageJson, storageSet } from "../_client/storage";
 
 type AnyRow = Record<string, any>;
 type DistributionMode = "fixed" | "equal-total" | "pro-rata";
+type JobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "attention"
+  | "cancelled";
 
 type Holder = {
   owner?: string;
   tokenAccount?: string;
+  amountRaw?: string;
   amountUi?: number | string;
   uiAmount?: number | string;
   balanceUi?: number | string;
@@ -21,14 +30,11 @@ type Holder = {
 type HoldersPayload = {
   mint?: string;
   holders?: Holder[];
-  supply?: unknown;
   stale?: boolean;
   updatedAtMs?: number;
 };
 
-type OverviewPayload = {
-  wallets?: AnyRow[];
-};
+type OverviewPayload = { wallets?: AnyRow[] };
 
 type AirdropDraft = {
   name: string;
@@ -42,52 +48,61 @@ type AirdropDraft = {
   mode: DistributionMode;
   fixedAmountUi: string;
   totalAmountUi: string;
-  payoutDecimals: string;
   memo: string;
+  priorityMicroLamports: string;
   live: boolean;
   confirmation: string;
 };
 
 type Recipient = {
   owner: string;
-  sourceBalanceUi: number;
-  sourceSharePct: number;
+  rank: number;
+  sourceAmountRaw: string;
+  sourceBalanceUi: string;
+  sourceSharePct: string;
   amountUi: string;
+  amountRaw: string;
 };
 
 type AirdropPlan = {
+  planId: string;
   name: string;
   bankWallet: string;
   sourceMint: string;
+  sourceDecimals: number;
   payoutMint: string;
   payoutDecimals: number;
+  payoutTokenProgram: "spl-token" | "token-2022";
   mode: DistributionMode;
-  memo: string | null;
+  holderSnapshotAtMs: number;
   recipientCount: number;
   totalAmountUi: string;
+  totalAmountRaw: string;
   recipients: Recipient[];
 };
 
 type AirdropJob = {
   id: string;
   planId: string;
-  status: "queued" | "running" | "completed" | "partial" | "failed";
+  attempt: number;
+  status: JobStatus;
+  cancelRequested: boolean;
   createdAtMs: number;
   updatedAtMs: number;
-  startedAtMs?: number | null;
-  finishedAtMs?: number | null;
   progress: {
     total: number;
     attempted: number;
     sent: number;
     failed: number;
+    cancelled: number;
     batchesTotal: number;
     batchesComplete: number;
   };
   signatures: string[];
   recipients: Array<
     Recipient & {
-      status: "queued" | "sending" | "sent" | "failed";
+      status:
+        "queued" | "sending" | "submitted" | "sent" | "failed" | "cancelled";
       signature?: string;
       error?: string;
     }
@@ -100,7 +115,7 @@ type AirdropJob = {
   error?: string | null;
 };
 
-const DRAFT_KEY = "solard:airdrops:draft:v1";
+const DRAFT_KEY = "solard:airdrops:draft:v3";
 const AUTO_REFRESH_KEY = "solard:airdrops:auto-refresh";
 const BANK_SAVED_KEY = "solard:airdrops:bank-saved";
 
@@ -116,13 +131,13 @@ const defaultDraft: AirdropDraft = {
   mode: "fixed",
   fixedAmountUi: "1",
   totalAmountUi: "1000",
-  payoutDecimals: "6",
   memo: "Holder rewards",
+  priorityMicroLamports: "0",
   live: false,
   confirmation: "",
 };
 
-let draft = {
+let draft: AirdropDraft = {
   ...defaultDraft,
   ...storageJson<Partial<AirdropDraft>>(DRAFT_KEY, {}),
 };
@@ -131,8 +146,11 @@ const state = {
   wallets: [] as AnyRow[],
   holders: null as HoldersPayload | null,
   previousSnapshot: {} as Record<string, number>,
+  preview: null as AirdropPlan | null,
   loading: false,
+  previewing: false,
   executing: false,
+  cancelling: false,
   error: null as string | null,
   message: "Enter a source token mint to begin tracking holders.",
   loadedAtMs: null as number | null,
@@ -173,27 +191,28 @@ function holderShare(holder: Holder): number {
 function walletAddress(wallet: AnyRow): string {
   const nested = wallet?.wallet;
   const account = wallet?.account;
-  const value =
+  return String(
     wallet?.walletAddress ??
-    wallet?.address ??
-    wallet?.publicKey ??
-    wallet?.pubkey ??
-    nested?.address ??
-    nested?.walletAddress ??
-    nested?.publicKey ??
-    nested?.pubkey ??
-    account?.address ??
-    account?.publicKey ??
-    account?.pubkey ??
-    "";
-  return String(value).trim();
+      wallet?.address ??
+      wallet?.publicKey ??
+      wallet?.pubkey ??
+      nested?.address ??
+      nested?.walletAddress ??
+      nested?.publicKey ??
+      nested?.pubkey ??
+      account?.address ??
+      account?.publicKey ??
+      account?.pubkey ??
+      "",
+  ).trim();
 }
 
 function walletLabel(wallet: AnyRow): string {
   const address = walletAddress(wallet);
-  return String(
-    wallet?.name ?? wallet?.label ?? wallet?.alias ?? short(address, 6, 6),
-  );
+  const name = String(
+    wallet?.name ?? wallet?.label ?? wallet?.alias ?? "",
+  ).trim();
+  return name ? `${name} · ${short(address, 5, 5)}` : short(address, 6, 6);
 }
 
 function snapshotKey(mint: string): string {
@@ -214,6 +233,11 @@ function saveDraft(): void {
 
 function updateDraft(patch: Partial<AirdropDraft>): void {
   draft = { ...draft, ...patch };
+  if (
+    Object.keys(patch).some((key) => key !== "live" && key !== "confirmation")
+  ) {
+    state.preview = null;
+  }
   saveDraft();
   rerender();
 }
@@ -232,7 +256,6 @@ function eligibleHolders(): Holder[] {
   const minimumBalance = Math.max(0, finite(draft.minBalanceUi, 0));
   const minimumShare = Math.max(0, finite(draft.minSharePct, 0));
   const bank = draft.bankWallet.trim();
-
   return (state.holders?.holders ?? []).filter((holder) => {
     const owner = holderOwner(holder);
     if (!owner || owner === bank || excluded.has(owner)) return false;
@@ -243,83 +266,34 @@ function eligibleHolders(): Holder[] {
   });
 }
 
-function decimals(): number {
-  return Math.max(0, Math.min(18, Math.floor(finite(draft.payoutDecimals, 0))));
-}
-
-function amountText(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0";
-  return value.toFixed(decimals()).replace(/\.?0+$/, "");
-}
-
-function buildPlan(): AirdropPlan {
-  const holders = eligibleHolders();
+function rulesPayload(): Record<string, unknown> {
   if (!draft.sourceMint.trim())
     throw new Error("Source token mint is required.");
   if (!draft.payoutMint.trim())
     throw new Error("Payout token mint is required.");
-  if (!draft.bankWallet.trim()) throw new Error("Select a bank wallet.");
-  if (!holders.length) throw new Error("No holders match the current filters.");
-
-  const totalSourceBalance = holders.reduce(
-    (sum, holder) => sum + holderBalance(holder),
-    0,
-  );
-  const requestedTotal = Math.max(0, finite(draft.totalAmountUi, 0));
-  const fixedAmount = Math.max(0, finite(draft.fixedAmountUi, 0));
-
-  const recipients = holders.map((holder) => {
-    const sourceBalanceUi = holderBalance(holder);
-    let amount = fixedAmount;
-
-    if (draft.mode === "equal-total") {
-      amount = requestedTotal / holders.length;
-    } else if (draft.mode === "pro-rata") {
-      amount =
-        totalSourceBalance > 0
-          ? requestedTotal * (sourceBalanceUi / totalSourceBalance)
-          : 0;
-    }
-
-    return {
-      owner: holderOwner(holder),
-      sourceBalanceUi,
-      sourceSharePct: holderShare(holder),
-      amountUi: amountText(amount),
-    };
-  });
-
-  if (recipients.some((recipient) => finite(recipient.amountUi, 0) <= 0)) {
-    throw new Error("Every recipient amount must be greater than zero.");
-  }
-
-  const totalAmountUi = amountText(
-    recipients.reduce(
-      (sum, recipient) => sum + finite(recipient.amountUi, 0),
-      0,
-    ),
-  );
-
+  if (!draft.bankWallet.trim())
+    throw new Error("Select a managed bank wallet.");
   return {
     name: draft.name.trim() || "Holder rewards",
     bankWallet: draft.bankWallet.trim(),
     sourceMint: draft.sourceMint.trim(),
     payoutMint: draft.payoutMint.trim(),
-    payoutDecimals: decimals(),
+    holderLimit: Math.max(
+      1,
+      Math.min(50, Math.floor(finite(draft.holderLimit, 50))),
+    ),
+    minBalanceUi: draft.minBalanceUi.trim() || "0",
+    minSharePct: draft.minSharePct.trim() || "0",
+    excludedOwners: draft.excludedOwners,
     mode: draft.mode,
+    fixedAmountUi: draft.fixedAmountUi.trim() || "0",
+    totalAmountUi: draft.totalAmountUi.trim() || "0",
     memo: draft.memo.trim() || null,
-    recipientCount: recipients.length,
-    totalAmountUi,
-    recipients,
+    priorityMicroLamports: Math.max(
+      0,
+      Math.floor(finite(draft.priorityMicroLamports, 0)),
+    ),
   };
-}
-
-function planOrNull(): AirdropPlan | null {
-  try {
-    return buildPlan();
-  } catch {
-    return null;
-  }
 }
 
 function setShellStatus(status: string, healthy: boolean): void {
@@ -338,26 +312,29 @@ function setShellStatus(status: string, healthy: boolean): void {
 
 function rerender(): void {
   if (unmounted) return;
-  render(<AirdropsPage />, rootElement());
+  render(<AirdropsPage />, rootElement(), { reconciler: "sequential" });
   document
     .querySelectorAll<HTMLAnchorElement>("#main-nav a")
     .forEach((link) =>
       link.classList.toggle("active", link.dataset.page === "airdrops"),
     );
-  setShellStatus(state.error ? "error" : "ready", !state.error);
+  setShellStatus(
+    state.error ? "error" : state.executing ? "running" : "ready",
+    !state.error,
+  );
 }
 
 function scheduleRefresh(): void {
   if (timer) clearTimeout(timer);
   timer = null;
   if (!state.autoRefresh || unmounted) return;
-  timer = setTimeout(() => void loadHolders(false), 30_000);
+  timer = setTimeout(() => void loadHolders(true), 30_000);
 }
 
 async function loadWallets(): Promise<void> {
   try {
     const overview = await api<OverviewPayload>(
-      "/api/overview?fast=1&balances=none",
+      "/api/overview?fast=1&balances=none&tokenLimit=0&executionLimit=0",
     );
     state.wallets = Array.isArray(overview?.wallets) ? overview.wallets : [];
   } catch (error) {
@@ -375,6 +352,7 @@ async function loadHolders(refresh: boolean): Promise<void> {
 
   state.loading = true;
   state.error = null;
+  state.preview = null;
   state.message = refresh
     ? "Refreshing holder snapshot…"
     : "Loading holder snapshot…";
@@ -391,12 +369,13 @@ async function loadHolders(refresh: boolean): Promise<void> {
     );
     const value = await api<HoldersPayload>(
       `/api/token-holders?mint=${encodeURIComponent(mint)}&limit=${limit}&refresh=${refresh ? "1" : "0"}`,
+      { cache: "no-store" },
     );
     const holders = Array.isArray(value?.holders) ? value.holders : [];
     state.previousSnapshot = oldSnapshot;
     state.holders = { ...value, holders };
     state.loadedAtMs = Date.now();
-    state.message = `${holders.length} holder${holders.length === 1 ? "" : "s"} tracked.`;
+    state.message = `${holders.length} holder${holders.length === 1 ? "" : "s"} tracked. Preview to calculate the authoritative payout.`;
     storageSet(snapshotKey(mint), JSON.stringify(currentSnapshot(holders)));
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
@@ -409,87 +388,123 @@ async function loadHolders(refresh: boolean): Promise<void> {
 }
 
 function saveBank(): void {
-  if (!draft.bankWallet.trim()) {
-    state.error = "Select a managed wallet for the bank.";
-    rerender();
-    return;
+  try {
+    rulesPayload();
+    state.bankSaved = true;
+    state.error = null;
+    state.message =
+      "Bank profile saved locally. Signing remains on the Solard server.";
+    storageSet(BANK_SAVED_KEY, "1");
+    saveDraft();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
   }
-  if (!draft.payoutMint.trim()) {
-    state.error = "Payout token mint is required.";
-    rerender();
-    return;
-  }
-  state.bankSaved = true;
-  state.error = null;
-  state.message =
-    "Bank profile saved locally. Funding and signing stay server-side.";
-  storageSet(BANK_SAVED_KEY, "1");
-  saveDraft();
   rerender();
 }
 
-async function submitPlan(live: boolean): Promise<void> {
-  let plan: AirdropPlan;
+async function previewPlan(): Promise<void> {
+  let rules: Record<string, unknown>;
   try {
-    plan = buildPlan();
+    rules = rulesPayload();
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
     rerender();
     return;
   }
 
-  if (live && draft.confirmation !== "AIRDROP") {
+  state.previewing = true;
+  state.error = null;
+  state.preview = null;
+  state.message =
+    "Server is refreshing holders and calculating exact token units…";
+  rerender();
+
+  try {
+    const result = await api<{ status: string; plan: AirdropPlan }>(
+      "/api/airdrops/distribute",
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "preview", ...rules }),
+      },
+    );
+    state.preview = result.plan;
+    state.message = `Preview ready: ${result.plan.recipientCount} recipients, ${result.plan.totalAmountUi} tokens at ${result.plan.payoutDecimals} decimals.`;
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+    state.message = "Server preview failed.";
+  } finally {
+    state.previewing = false;
+    rerender();
+  }
+}
+
+function jobFinished(job: AirdropJob): boolean {
+  return ["completed", "partial", "failed", "attention", "cancelled"].includes(
+    job.status,
+  );
+}
+
+function jobStatusClass(job: AirdropJob): string {
+  if (job.status === "completed") return "ok";
+  if (job.status === "failed" || job.status === "attention") return "bad";
+  if (job.status === "partial" || job.status === "cancelled") return "warn";
+  return "";
+}
+
+async function executePreview(): Promise<void> {
+  if (!state.preview) {
+    state.error = "Preview the authoritative payout plan first.";
+    rerender();
+    return;
+  }
+  if (draft.confirmation !== "AIRDROP") {
     state.error = 'Type "AIRDROP" before executing a live distribution.';
+    rerender();
+    return;
+  }
+
+  let rules: Record<string, unknown>;
+  try {
+    rules = rulesPayload();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
     rerender();
     return;
   }
 
   state.executing = true;
   state.error = null;
-  state.message = live
-    ? "Starting the server airdrop job…"
-    : "Validating payout plan…";
+  state.message = "Starting the server airdrop job from the locked preview…";
   rerender();
 
   let polling = false;
   try {
-    const result = await api<AnyRow>("/api/airdrops/distribute", {
-      method: "POST",
-      body: JSON.stringify({ ...plan, live, confirmation: draft.confirmation }),
-    });
-
-    if (live) {
-      const job = result?.job as AirdropJob | undefined;
-      if (!job?.id)
-        throw new Error("The server did not return an airdrop job.");
-      state.currentJob = job;
-      polling = !jobFinished(job);
-      state.message = `Server job ${job.id} is ${job.status}.`;
-      if (polling) scheduleJobPoll(job.id);
-      void loadRecentJobs();
-    } else {
-      state.message = `Plan validated: ${plan.recipientCount} recipients, ${plan.totalAmountUi} tokens.`;
-    }
+    const result = await api<{ status: string; job: AirdropJob }>(
+      "/api/airdrops/distribute",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action: "execute",
+          ...rules,
+          previewPlanId: state.preview.planId,
+          confirmation: draft.confirmation,
+        }),
+      },
+    );
+    if (!result.job?.id)
+      throw new Error("The server did not return an airdrop job.");
+    state.currentJob = result.job;
+    polling = !jobFinished(result.job);
+    state.message = `Server job ${result.job.id} is ${result.job.status}.`;
+    if (polling) scheduleJobPoll(result.job.id);
+    void loadRecentJobs();
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
-    state.message = live
-      ? "Server airdrop job was not started."
-      : "Plan validation failed.";
+    state.message = "Server airdrop job was not started.";
   } finally {
     if (!polling) state.executing = false;
     rerender();
   }
-}
-
-function jobFinished(job: AirdropJob): boolean {
-  return ["completed", "partial", "failed"].includes(job.status);
-}
-
-function jobStatusClass(job: AirdropJob): string {
-  if (job.status === "completed") return "ok";
-  if (job.status === "failed") return "bad";
-  if (job.status === "partial") return "warn";
-  return "";
 }
 
 function scheduleJobPoll(id: string): void {
@@ -508,7 +523,7 @@ async function pollJob(id: string): Promise<void> {
     state.currentJob = job;
     state.executing = !jobFinished(job);
     state.message = jobFinished(job)
-      ? `Airdrop ${job.status}: ${job.progress.sent}/${job.progress.total} recipients sent.`
+      ? `Airdrop ${job.status}: ${job.progress.sent}/${job.progress.total} recipients confirmed.`
       : `Airdrop ${job.status}: batch ${job.progress.batchesComplete}/${job.progress.batchesTotal}.`;
     if (job.error) state.error = job.error;
     rerender();
@@ -517,6 +532,28 @@ async function pollJob(id: string): Promise<void> {
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
     state.executing = false;
+    rerender();
+  }
+}
+
+async function cancelCurrentJob(): Promise<void> {
+  const job = state.currentJob;
+  if (!job || jobFinished(job)) return;
+  state.cancelling = true;
+  state.error = null;
+  rerender();
+  try {
+    state.currentJob = await api<AirdropJob>("/api/airdrops/distribute", {
+      method: "POST",
+      body: JSON.stringify({ action: "cancel", id: job.id }),
+    });
+    state.message =
+      "Cancellation requested. The current transaction will finish before the executor stops.";
+    scheduleJobPoll(job.id);
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.cancelling = false;
     rerender();
   }
 }
@@ -537,7 +574,7 @@ async function loadRecentJobs(): Promise<void> {
       }
     }
   } catch {
-    // Airdrop history is secondary to the holder and planning UI.
+    // History is secondary to holder tracking and preview.
   } finally {
     state.jobsLoading = false;
     rerender();
@@ -545,32 +582,31 @@ async function loadRecentJobs(): Promise<void> {
 }
 
 function downloadCsv(): void {
-  try {
-    const plan = buildPlan();
-    const lines = [
-      "owner,amount_ui,source_balance_ui,source_share_pct",
-      ...plan.recipients.map((recipient) =>
-        [
-          recipient.owner,
-          recipient.amountUi,
-          recipient.sourceBalanceUi,
-          recipient.sourceSharePct,
-        ].join(","),
-      ),
-    ];
-    const blob = new Blob([lines.join("\n")], {
-      type: "text/csv;charset=utf-8",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${plan.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "airdrop"}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  } catch (error) {
-    state.error = error instanceof Error ? error.message : String(error);
+  const plan = state.preview;
+  if (!plan) {
+    state.error = "Preview the authoritative payout plan before exporting.";
     rerender();
+    return;
   }
+  const lines = [
+    "owner,amount_ui,amount_raw,source_balance_ui,source_share_pct",
+    ...plan.recipients.map((recipient) =>
+      [
+        recipient.owner,
+        recipient.amountUi,
+        recipient.amountRaw,
+        recipient.sourceBalanceUi,
+        recipient.sourceSharePct,
+      ].join(","),
+    ),
+  ];
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${plan.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "airdrop"}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function deltaFor(holder: Holder): number | null {
@@ -581,16 +617,22 @@ function deltaFor(holder: Holder): number | null {
 }
 
 function formatNumber(value: unknown, maximumFractionDigits = 6): string {
-  const number = finite(value, 0);
   return new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(
-    number,
+    finite(value, 0),
   );
+}
+
+function recipientStatusClass(status: string): string {
+  if (status === "sent") return "ok";
+  if (status === "failed") return "bad";
+  if (status === "cancelled") return "warn";
+  return "";
 }
 
 function AirdropsPage() {
   const holders = state.holders?.holders ?? [];
   const eligible = eligibleHolders();
-  const plan = planOrNull();
+  const preview = state.preview;
 
   return (
     <div className="airdrops-page">
@@ -599,9 +641,8 @@ function AirdropsPage() {
           <div className="section-kicker">Holder rewards</div>
           <h2>Airdrops</h2>
           <p className="muted">
-            Track holders of one token, configure a managed wallet as the bank,
-            and distribute another token using fixed, equal, or pro-rata
-            payouts.
+            Track holders, preview an exact server-calculated payout, and
+            execute SPL-token transfers from a managed Solard wallet.
           </p>
         </div>
         <div className="airdrops-hero-actions">
@@ -616,10 +657,10 @@ function AirdropsPage() {
           <button
             type="button"
             className="secondary"
-            disabled={!plan}
+            disabled={!preview}
             onClick={downloadCsv}
           >
-            Export CSV
+            Export preview CSV
           </button>
         </div>
       </header>
@@ -629,6 +670,7 @@ function AirdropsPage() {
           <span className="pill bad">{state.error}</span>
         </div>
       ) : null}
+
       <div className="airdrops-status-row">
         <span className={`pill ${state.holders?.stale ? "warn" : "ok"}`}>
           {state.holders?.stale ? "stale snapshot" : "tracker ready"}
@@ -762,8 +804,8 @@ function AirdropsPage() {
               {state.wallets.map((wallet) => {
                 const address = walletAddress(wallet);
                 return address ? (
-                  <option value={address}>
-                    {walletLabel(wallet)} · {short(address, 5, 5)}
+                  <option key={address} value={address}>
+                    {walletLabel(wallet)}
                   </option>
                 ) : null;
               })}
@@ -775,7 +817,7 @@ function AirdropsPage() {
             <input
               className="code"
               value={draft.payoutMint}
-              placeholder="Token held by the bank wallet"
+              placeholder="Token held by the bank and sent to recipients"
               onInput={(event: any) =>
                 updateDraft({ payoutMint: event.currentTarget.value })
               }
@@ -783,16 +825,6 @@ function AirdropsPage() {
           </label>
 
           <div className="airdrops-form-row two">
-            <label>
-              Token decimals
-              <input
-                inputMode="numeric"
-                value={draft.payoutDecimals}
-                onInput={(event: any) =>
-                  updateDraft({ payoutDecimals: event.currentTarget.value })
-                }
-              />
-            </label>
             <label>
               Memo
               <input
@@ -802,25 +834,37 @@ function AirdropsPage() {
                 }
               />
             </label>
+            <label>
+              Priority µ-lamports/CU
+              <input
+                inputMode="numeric"
+                value={draft.priorityMicroLamports}
+                onInput={(event: any) =>
+                  updateDraft({
+                    priorityMicroLamports: event.currentTarget.value,
+                  })
+                }
+              />
+            </label>
           </div>
 
           <div className="row gap">
             <button type="button" onClick={saveBank}>
-              Create bank profile
+              Save bank profile
             </button>
             <a className="button-link secondary" href="/wallets">
               Manage wallets
             </a>
           </div>
           <p className="muted small">
-            The bank is an existing server-managed wallet. This page never asks
-            for or stores a private key.
+            Mint decimals are read on-chain during preview. The browser never
+            receives the wallet secret.
           </p>
         </section>
 
         <section className="card airdrops-config-card">
           <div>
-            <div className="section-kicker">3 · Allocate</div>
+            <div className="section-kicker">3 · Preview</div>
             <h3>Payout rules</h3>
           </div>
 
@@ -870,22 +914,33 @@ function AirdropsPage() {
               <b>{holders.length}</b>
             </div>
             <div>
-              <span>Eligible</span>
+              <span>Local eligible</span>
               <b>{eligible.length}</b>
             </div>
             <div>
-              <span>Total payout</span>
-              <b>{plan?.totalAmountUi ?? "—"}</b>
+              <span>Server payout</span>
+              <b>{preview?.totalAmountUi ?? "—"}</b>
             </div>
           </div>
+
+          {preview ? (
+            <div className="callout">
+              <b>{preview.recipientCount} recipients</b> ·{" "}
+              {preview.payoutDecimals} decimals · {preview.payoutTokenProgram}
+              <br />
+              <span className="code">{short(preview.planId, 16, 10)}</span>
+            </div>
+          ) : null}
 
           <button
             type="button"
             className="secondary"
-            disabled={!plan || state.executing}
-            onClick={() => void submitPlan(false)}
+            disabled={state.previewing || state.executing}
+            onClick={() => void previewPlan()}
           >
-            {state.executing ? "Validating…" : "Validate payout plan"}
+            {state.previewing
+              ? "Calculating on server…"
+              : "Preview authoritative plan"}
           </button>
         </section>
       </div>
@@ -897,7 +952,7 @@ function AirdropsPage() {
             <h3>Recipients and balance changes</h3>
           </div>
           <span className="muted small">
-            Existing holder endpoint currently returns up to 50 wallets.
+            Preview refreshes the same holder source again on the server.
           </span>
         </div>
         <div className="airdrops-table-wrap">
@@ -909,7 +964,7 @@ function AirdropsPage() {
                 <th>Balance</th>
                 <th>Change</th>
                 <th>Supply %</th>
-                <th>Eligible</th>
+                <th>Preview</th>
                 <th>Payout</th>
               </tr>
             </thead>
@@ -917,7 +972,7 @@ function AirdropsPage() {
               {holders.map((holder, index) => {
                 const owner = holderOwner(holder);
                 const delta = deltaFor(holder);
-                const recipient = plan?.recipients.find(
+                const recipient = preview?.recipients.find(
                   (row) => row.owner === owner,
                 );
                 return (
@@ -963,11 +1018,11 @@ function AirdropsPage() {
       <section className="card airdrops-execute-card">
         <div>
           <div className="section-kicker">4 · Distribute</div>
-          <h3>Execute from the bank</h3>
+          <h3>Execute the locked preview</h3>
           <p className="muted">
-            This Solard server is the executor. It resolves the selected managed
-            wallet, creates recipient token accounts when needed, signs transfer
-            batches, and reports progress back here.
+            Solard rebuilds the plan before execution. If balances, filters,
+            decimals, or allocation results changed, execution is rejected until
+            you preview again.
           </p>
         </div>
 
@@ -1000,10 +1055,10 @@ function AirdropsPage() {
 
         <div className="airdrops-execute-summary">
           <span>
-            <b>{plan?.recipientCount ?? 0}</b> recipients
+            <b>{preview?.recipientCount ?? 0}</b> recipients
           </span>
           <span>
-            <b>{plan?.totalAmountUi ?? "0"}</b> payout tokens
+            <b>{preview?.totalAmountUi ?? "0"}</b> payout tokens
           </span>
           <span className="code">
             <b>{short(draft.bankWallet, 6, 6)}</b> bank
@@ -1016,12 +1071,12 @@ function AirdropsPage() {
           disabled={
             !draft.live ||
             draft.confirmation !== "AIRDROP" ||
-            !plan ||
+            !preview ||
             state.executing
           }
-          onClick={() => void submitPlan(true)}
+          onClick={() => void executePreview()}
         >
-          {state.executing ? "Server executing…" : "Execute airdrop"}
+          {state.executing ? "Server executing…" : "Execute preview"}
         </button>
       </section>
 
@@ -1031,13 +1086,29 @@ function AirdropsPage() {
             <div className="section-kicker">Server execution</div>
             <h3>Run progress</h3>
           </div>
-          {state.currentJob ? (
-            <span className={`pill ${jobStatusClass(state.currentJob)}`}>
-              {state.currentJob.status}
-            </span>
-          ) : (
-            <span className="pill">idle</span>
-          )}
+          <div className="row gap">
+            {state.currentJob && !jobFinished(state.currentJob) ? (
+              <button
+                type="button"
+                className="secondary compact"
+                disabled={state.cancelling || state.currentJob.cancelRequested}
+                onClick={() => void cancelCurrentJob()}
+              >
+                {state.currentJob.cancelRequested
+                  ? "Cancel requested"
+                  : state.cancelling
+                    ? "Requesting…"
+                    : "Cancel run"}
+              </button>
+            ) : null}
+            {state.currentJob ? (
+              <span className={`pill ${jobStatusClass(state.currentJob)}`}>
+                {state.currentJob.status}
+              </span>
+            ) : (
+              <span className="pill">idle</span>
+            )}
+          </div>
         </div>
 
         {state.currentJob ? (
@@ -1048,6 +1119,9 @@ function AirdropsPage() {
               </span>
               <span>
                 <b>{state.currentJob.progress.failed}</b> failed
+              </span>
+              <span>
+                <b>{state.currentJob.progress.cancelled}</b> cancelled
               </span>
               <span>
                 <b>
@@ -1063,15 +1137,32 @@ function AirdropsPage() {
             <div className="airdrops-progress" aria-label="Airdrop progress">
               <span
                 style={{
-                  width: `${state.currentJob.progress.total ? Math.round((state.currentJob.progress.attempted / state.currentJob.progress.total) * 100) : 0}%`,
+                  width: `${
+                    state.currentJob.progress.total
+                      ? Math.round(
+                          ((state.currentJob.progress.attempted +
+                            state.currentJob.progress.cancelled) /
+                            state.currentJob.progress.total) *
+                            100,
+                        )
+                      : 0
+                  }%`,
                 }}
               />
             </div>
+
+            {state.currentJob.status === "attention" ? (
+              <div className="callout">
+                A transaction was submitted but confirmation was uncertain.
+                Verify the displayed signature before starting another attempt.
+              </div>
+            ) : null}
 
             {state.currentJob.signatures.length ? (
               <div className="airdrops-signatures">
                 {state.currentJob.signatures.map((signature) => (
                   <a
+                    key={signature}
                     className="code"
                     href={`https://solscan.io/tx/${signature}`}
                     target="_blank"
@@ -1090,8 +1181,11 @@ function AirdropsPage() {
                   {state.currentJob.logs
                     .slice(-12)
                     .reverse()
-                    .map((entry) => (
-                      <div className={entry.level}>
+                    .map((entry, index) => (
+                      <div
+                        key={`${entry.atMs}:${index}`}
+                        className={entry.level}
+                      >
                         <time>{new Date(entry.atMs).toLocaleTimeString()}</time>
                         <span>{entry.message}</span>
                       </div>
@@ -1102,9 +1196,9 @@ function AirdropsPage() {
                 <h4>Recipient status</h4>
                 <div className="airdrops-recipient-runs">
                   {state.currentJob.recipients.slice(0, 50).map((recipient) => (
-                    <div>
+                    <div key={recipient.owner} title={recipient.error ?? ""}>
                       <span
-                        className={`pill ${recipient.status === "sent" ? "ok" : recipient.status === "failed" ? "bad" : ""}`}
+                        className={`pill ${recipientStatusClass(recipient.status)}`}
                       >
                         {recipient.status}
                       </span>
@@ -1128,6 +1222,7 @@ function AirdropsPage() {
             <div className="airdrops-recent-jobs">
               {state.recentJobs.map((job) => (
                 <button
+                  key={job.id}
                   type="button"
                   className="secondary"
                   onClick={() => {
@@ -1139,7 +1234,7 @@ function AirdropsPage() {
                   <span className={`pill ${jobStatusClass(job)}`}>
                     {job.status}
                   </span>
-                  <span>{job.planId}</span>
+                  <span>attempt {job.attempt}</span>
                   <b>
                     {job.progress.sent}/{job.progress.total}
                   </b>
