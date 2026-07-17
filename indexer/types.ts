@@ -123,6 +123,4 @@ export type TrackedPumpToken = {
   supplyUi: number;
   observedAtMs: number;
   activityAtMs: number;
-  interestAtMs: number;
-  interestScore: number;
 };

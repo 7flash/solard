@@ -114,12 +114,7 @@ function decodeCurve(
 }
 
 function priority(token: TrackedPumpToken): number[] {
-  return [
-    token.interestScore,
-    token.interestAtMs,
-    token.activityAtMs,
-    token.observedAtMs,
-  ];
+  return [token.activityAtMs, token.observedAtMs];
 }
 
 function comparePriority(

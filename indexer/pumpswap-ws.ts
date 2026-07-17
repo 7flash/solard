@@ -96,8 +96,6 @@ function isReadyPool(state: PumpSwapPoolState): boolean {
 
 function statePriority(state: PumpSwapPoolState): number[] {
   return [
-    Number(state.interestScore || 0),
-    Number(state.lastInterestAtMs || 0),
     Number(state.lastActivityAtMs || 0),
     Number(state.discoveredAtMs || 0),
     Number(state.migrationSlot || 0),

@@ -15,8 +15,19 @@ const queue: QueueItem[] = [];
 const queued = new Set<string>();
 
 const seenAt = new Map<string, number>();
+const METADATA_SEEN_TTL_MS = 30 * 60_000;
+let nextSeenPruneAtMs = 0;
 
 let workers = 0;
+
+function pruneSeenAt(now = Date.now()): void {
+  if (now < nextSeenPruneAtMs && seenAt.size < 5_000) return;
+  const cutoff = now - METADATA_SEEN_TTL_MS;
+  for (const [mint, atMs] of seenAt) {
+    if (atMs < cutoff && !queued.has(mint)) seenAt.delete(mint);
+  }
+  nextSeenPruneAtMs = now + 5 * 60_000;
+}
 
 function normalizeUri(value: string | null | undefined): string | null {
   const uri = value?.trim();
@@ -280,8 +291,9 @@ export function enqueueMetadata(
   }
 
   const now = Date.now();
+  pruneSeenAt(now);
 
-  if (now - (seenAt.get(input.mint) ?? 0) < 30 * 60_000) {
+  if (now - (seenAt.get(input.mint) ?? 0) < METADATA_SEEN_TTL_MS) {
     return;
   }
 

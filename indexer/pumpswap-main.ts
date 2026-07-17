@@ -68,7 +68,6 @@ function createCounters(): PumpSwapCounters {
 
     lifecycleEvictions: 0,
     inactiveEvictions: 0,
-    interestEvictions: 0,
     raydiumEvictions: 0,
     capacityEvictions: 0,
 
@@ -161,9 +160,11 @@ function firstText(row: any, keys: readonly string[]): string | null {
   return null;
 }
 
+type TrackingRejection = "inactive" | "raydium" | "lifecycle" | "capacity";
+
 type TrackingScan = {
   tracked: TrackedMigratedToken[];
-  rejected: Map<string, "inactive" | "interest" | "raydium" | "lifecycle">;
+  rejected: Map<string, TrackingRejection>;
 };
 
 function scanTrackedMigratedTokens(
@@ -173,21 +174,15 @@ function scanTrackedMigratedTokens(
   const now = Date.now();
   const rows = listTerminalFeed({
     limit: Math.max(config.maxTrackedTokens * 4, config.maxTrackedTokens),
-    activeWindowMs: Math.max(
-      config.activeWindowMs,
-      config.interestWindowMs,
-      7 * 24 * 60 * 60_000,
-    ),
+    activeWindowMs: config.activeWindowMs,
     includeUnpriced: true,
     source: "both",
     priceWindowTtlMs: 0,
+    includeMetrics: false,
   }) as any[];
 
   const accepted: TrackedMigratedToken[] = [];
-  const rejected = new Map<
-    string,
-    "inactive" | "interest" | "raydium" | "lifecycle"
-  >();
+  const rejected = new Map<string, TrackingRejection>();
 
   for (const row of rows) {
     const mint = String(rowValue(row, "mint") ?? "");
@@ -208,7 +203,6 @@ function scanTrackedMigratedTokens(
       rejected.set(mint, "lifecycle");
       continue;
     }
-
     if (venueLower.includes("raydium")) {
       rejected.set(mint, "raydium");
       continue;
@@ -231,48 +225,15 @@ function scanTrackedMigratedTokens(
         "lastActivityAtMs",
         "tradedAtMs",
         "migratedAtMs",
+        "updatedAtMs",
         "observedAtMs",
         "createdAtMs",
       ]),
       existing?.lastActivityAtMs ?? 0,
     );
-    const interestAtMs = Math.max(
-      firstFinite(row, [
-        "lastInterestAtMs",
-        "lastViewedAtMs",
-        "lastRequestedAtMs",
-        "lastOpenedAtMs",
-        "lastPinnedAtMs",
-      ]),
-      existing?.lastInterestAtMs ?? 0,
-    );
-    const interestScore = Math.max(
-      Number(
-        rowValue(row, "interestScore") ??
-          rowValue(row, "terminalScore") ??
-          rowValue(row, "watchCount") ??
-          rowValue(row, "watchers") ??
-          0,
-      ),
-      existing?.interestScore ?? 0,
-    );
 
     if (activityAtMs > 0 && now - activityAtMs > config.activeWindowMs) {
       rejected.set(mint, "inactive");
-      continue;
-    }
-
-    const hasInterestSignal = interestAtMs > 0 || interestScore > 0;
-    const staleInterest =
-      interestAtMs > 0 && now - interestAtMs > config.interestWindowMs;
-    const weakInterest = interestScore < config.minInterestScore;
-
-    if (
-      staleInterest ||
-      (config.requireInterestSignal && !hasInterestSignal) ||
-      (hasInterestSignal && weakInterest)
-    ) {
-      rejected.set(mint, "interest");
       continue;
     }
 
@@ -286,23 +247,20 @@ function scanTrackedMigratedTokens(
       observedAtMs,
       updatedAtMs,
       activityAtMs,
-      interestAtMs,
-      interestScore: Number.isFinite(interestScore) ? interestScore : 0,
       venue,
     });
   }
 
   accepted.sort(
     (left, right) =>
-      right.interestScore - left.interestScore ||
-      right.interestAtMs - left.interestAtMs ||
       right.activityAtMs - left.activityAtMs ||
+      right.updatedAtMs - left.updatedAtMs ||
       right.observedAtMs - left.observedAtMs,
   );
 
   if (accepted.length > config.maxTrackedTokens) {
     for (const token of accepted.slice(config.maxTrackedTokens)) {
-      rejected.set(token.mint, "interest");
+      rejected.set(token.mint, "capacity");
     }
   }
 
@@ -322,7 +280,6 @@ function reconcileTrackedTokens(
 
   for (const token of scan.tracked) {
     const existing = store.get(token.mint);
-
     if (existing) {
       store.set({
         ...existing,
@@ -334,8 +291,6 @@ function reconcileTrackedTokens(
         ),
         lastActivityAtMs:
           Math.max(existing.lastActivityAtMs ?? 0, token.activityAtMs) || null,
-        lastInterestAtMs: token.interestAtMs || existing.lastInterestAtMs,
-        interestScore: token.interestScore,
       });
       continue;
     }
@@ -344,21 +299,16 @@ function reconcileTrackedTokens(
       mint: token.mint,
       supplyUi: token.supplyUi,
       migrationSlot: token.migrationSlot,
-
       pool: null,
       quoteMint: null,
       poolBaseTokenAccount: null,
       poolQuoteTokenAccount: null,
-
       lastHistorySlot: token.migrationSlot,
       lastSignature: null,
       discoveredAtMs: null,
       lastPriceAtMs: null,
       lastHistoryAtMs: null,
       lastActivityAtMs: token.activityAtMs || null,
-      lastInterestAtMs: token.interestAtMs || null,
-      interestScore: token.interestScore,
-
       discoveryAttempts: 0,
       nextDiscoveryAtMs: 0,
       lastError: null,
@@ -367,13 +317,11 @@ function reconcileTrackedTokens(
 
   for (const state of store.values()) {
     if (active.has(state.mint)) continue;
-
     const reason = scan.rejected.get(state.mint) ?? "inactive";
     counters.lifecycleEvictions++;
     if (reason === "inactive") counters.inactiveEvictions++;
-    else if (reason === "interest") counters.interestEvictions++;
     else if (reason === "raydium") counters.raydiumEvictions++;
-
+    else if (reason === "capacity") counters.capacityEvictions++;
     store.delete(state.mint);
   }
 

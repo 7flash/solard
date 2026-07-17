@@ -22,9 +22,6 @@ export type PumpSwapConfig = {
   heartbeatMs: number;
   lifecycleRefreshMs: number;
   activeWindowMs: number;
-  interestWindowMs: number;
-  minInterestScore: number;
-  requireInterestSignal: boolean;
   maxTrackedTokens: number;
 
   maxConnections: number;
@@ -179,16 +176,6 @@ export function loadPumpSwapConfig(): PumpSwapConfig {
       "SOLARD_PUMPSWAP_ACTIVE_WINDOW_MS",
       24 * 60 * 60_000,
       60_000,
-    ),
-    interestWindowMs: integerEnv(
-      "SOLARD_PUMPSWAP_INTEREST_WINDOW_MS",
-      30 * 60_000,
-      60_000,
-    ),
-    minInterestScore: numberEnv("SOLARD_PUMPSWAP_MIN_INTEREST_SCORE", 0),
-    requireInterestSignal: boolEnv(
-      "SOLARD_PUMPSWAP_REQUIRE_INTEREST_SIGNAL",
-      false,
     ),
     maxTrackedTokens: Math.min(
       hardCapacity,

@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import type { PumpSwapPoolState } from "./pumpswap-types.js";
 
 type StateFile = {
-  version: 2;
+  version: 3;
   updatedAtMs: number;
   tokens: Record<string, PumpSwapPoolState>;
 };
@@ -36,8 +36,6 @@ function normalizeState(mint: string, value: any): PumpSwapPoolState | null {
     lastHistoryAtMs: Number(value.lastHistoryAtMs ?? 0) || null,
     lastActivityAtMs:
       Number(value.lastActivityAtMs ?? value.lastPriceAtMs ?? 0) || null,
-    lastInterestAtMs: Number(value.lastInterestAtMs ?? 0) || null,
-    interestScore: Number(value.interestScore ?? 0) || 0,
 
     discoveryAttempts: Number(value.discoveryAttempts ?? 0) || 0,
     nextDiscoveryAtMs: Number(value.nextDiscoveryAtMs ?? 0) || 0,
@@ -76,7 +74,7 @@ export class PumpSwapStateStore {
     mkdirSync(dirname(this.path), { recursive: true });
 
     const file: StateFile = {
-      version: 2,
+      version: 3,
       updatedAtMs: Date.now(),
       tokens: Object.fromEntries(
         [...this.tokens.entries()].sort(([left], [right]) =>
@@ -94,7 +92,8 @@ export class PumpSwapStateStore {
   private load(): void {
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf8")) as any;
-      if (![1, 2].includes(Number(parsed?.version)) || !parsed?.tokens) return;
+      if (![1, 2, 3].includes(Number(parsed?.version)) || !parsed?.tokens)
+        return;
 
       for (const [mint, value] of Object.entries(parsed.tokens)) {
         const normalized = normalizeState(mint, value);

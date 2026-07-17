@@ -113,6 +113,7 @@ function createIntent(
   const decision = evaluateCopyTrade(profile, swap, Date.now(), tokenContext);
   const key = intentKey(profile, swap);
   const approvedStatus = profile.mode === "paper" ? "paper" : "queued";
+  const rejectedReason = "reason" in decision ? decision.reason : null;
   const write = appendCopyTradeIntentOnce({
     intentKey: key,
     profileKey: profile.profileKey,
@@ -139,7 +140,7 @@ function createIntent(
       ? profile.mode === "live" && !config.allowLive
         ? "waiting-for-global-live-enable"
         : null
-      : decision.reason,
+      : rejectedReason,
     attempts: 0,
     nextAttemptAtMs: 0,
     requestJson: decision.approved ? json(decision.request) : "{}",

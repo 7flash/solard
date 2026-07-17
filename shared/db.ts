@@ -1,17 +1,26 @@
-import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { Database, defineView, z } from "sqlite-zod-orm";
-import {
-  dbMeasure,
-  measureRetry,
-  summarizeForMeasure,
-} from "../src/solard/measure.js";
 
-const DEFAULT_DB_PATH = join(
-  process.env.HOME || process.env.USERPROFILE || ".",
-  ".sowl",
-  "sowl.sqlite",
-);
+const HOME_DIR = process.env.HOME || process.env.USERPROFILE || ".";
+const RENAMED_DEFAULT_DB_PATH = join(HOME_DIR, ".solard", "solard.sqlite");
+export const SOLARD_LEGACY_DB_PATH = join(HOME_DIR, ".sowl", "sowl.sqlite");
+
+/**
+ * New installations use ~/.solard/solard.sqlite. Existing installations keep
+ * using the legacy file until SOLARD_DB_PATH is set or the file is migrated, so
+ * this change never silently starts an empty database.
+ */
+const DEFAULT_DB_PATH =
+  !existsSync(RENAMED_DEFAULT_DB_PATH) && existsSync(SOLARD_LEGACY_DB_PATH)
+    ? SOLARD_LEGACY_DB_PATH
+    : RENAMED_DEFAULT_DB_PATH;
 
 export const SOLARD_DB_PATH =
   process.env.SOLARD_DB_PATH || process.env.SOWL_DB_PATH || DEFAULT_DB_PATH;
@@ -824,6 +833,8 @@ export const db = await openDatabaseWithRetry(
             ["signature"],
             ["eventKey"],
             ["mint", "marketCapUsd"],
+            ["owner", "tradedAtMs"],
+            ["signature", "mint"],
           ],
 
           watchedWalletsV1: [["enabled", "updatedAtMs"], ["lastBackfillAtMs"]],
@@ -898,10 +909,38 @@ export const db = await openDatabaseWithRetry(
         },
 
         views: {
-          tokenPriceWindowsV8: defineView(
+          tokenPriceWindowsV9: defineView(
             TokenPriceWindowsSchema,
             `
-        WITH recent AS (
+        WITH ranked AS (
+          SELECT
+            trade.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY
+                signature,
+                mint,
+                side,
+                ROUND(ABS(tokenDeltaUi), 8),
+                ROUND(ABS(solDeltaUi), 9)
+              ORDER BY
+                CASE confidence
+                  WHEN 'finalized' THEN 0
+                  WHEN 'confirmed' THEN 1
+                  WHEN 'processed' THEN 2
+                  ELSE 3
+                END,
+                CASE WHEN marketCapUsd IS NULL THEN 1 ELSE 0 END,
+                CASE WHEN priceUsd IS NULL THEN 1 ELSE 0 END,
+                CASE WHEN priceSol IS NULL THEN 1 ELSE 0 END,
+                CASE WHEN owner IS NULL OR owner = '' THEN 1 ELSE 0 END,
+                updatedAtMs DESC,
+                id DESC
+            ) AS canonicalRank
+          FROM tokenTradesV2 AS trade
+          WHERE tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
+        ),
+
+        recent AS (
           SELECT
             id,
             mint,
@@ -911,15 +950,12 @@ export const db = await openDatabaseWithRetry(
             source,
             tokenDeltaUi,
             solDeltaUi,
-
             COALESCE(
               NULLIF(ABS(solDeltaUi), 0),
               ABS(priceSol * tokenDeltaUi),
               0
             ) AS effectiveVolumeSol,
-
             tradedAtMs,
-
             ROW_NUMBER() OVER (
               PARTITION BY mint
               ORDER BY
@@ -927,7 +963,6 @@ export const db = await openDatabaseWithRetry(
                 tradedAtMs DESC,
                 id DESC
             ) AS latestPriceSolRank,
-
             ROW_NUMBER() OVER (
               PARTITION BY mint
               ORDER BY
@@ -935,7 +970,6 @@ export const db = await openDatabaseWithRetry(
                 tradedAtMs DESC,
                 id DESC
             ) AS latestPriceUsdRank,
-
             ROW_NUMBER() OVER (
               PARTITION BY mint
               ORDER BY
@@ -943,385 +977,153 @@ export const db = await openDatabaseWithRetry(
                 tradedAtMs DESC,
                 id DESC
             ) AS latestMarketCapUsdRank,
-
             ROW_NUMBER() OVER (
               PARTITION BY mint
-              ORDER BY
-                tradedAtMs DESC,
-                id DESC
+              ORDER BY tradedAtMs DESC, id DESC
             ) AS latestTradeRank
-
-          FROM tokenTradesV2
-
-          WHERE
-            tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
-        ),
-
-        aggregated AS (
-        SELECT
-          mint,
-
-          AVG(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000
-            THEN priceUsd
-          END) AS avgPriceUsd1m,
-
-          AVG(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000
-            THEN priceUsd
-          END) AS avgPriceUsd5m,
-
-          AVG(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000
-            THEN priceUsd
-          END) AS avgPriceUsd15m,
-
-          AVG(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000
-            THEN marketCapUsd
-          END) AS avgMarketCapUsd1m,
-
-          AVG(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000
-            THEN marketCapUsd
-          END) AS avgMarketCapUsd5m,
-
-          AVG(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000
-            THEN marketCapUsd
-          END) AS avgMarketCapUsd15m,
-
-          AVG(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 60000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000
-            THEN marketCapUsd
-          END) AS previousAvgMarketCapUsd1m,
-
-          AVG(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 300000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000
-            THEN marketCapUsd
-          END) AS previousAvgMarketCapUsd5m,
-
-          AVG(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 900000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
-            THEN marketCapUsd
-          END) AS previousAvgMarketCapUsd15m,
-
-          COUNT(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000
-            THEN 1
-          END) AS trades1m,
-
-          COUNT(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000
-            THEN 1
-          END) AS trades5m,
-
-          COUNT(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000
-            THEN 1
-          END) AS trades15m,
-
-          COUNT(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 60000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000
-            THEN 1
-          END) AS previousTrades1m,
-
-          COUNT(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 300000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000
-            THEN 1
-          END) AS previousTrades5m,
-
-          COUNT(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 900000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
-            THEN 1
-          END) AS previousTrades15m,
-
-          SUM(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000
-            THEN effectiveVolumeSol
-            ELSE 0
-          END) AS volumeSol1m,
-
-          SUM(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000
-            THEN effectiveVolumeSol
-            ELSE 0
-          END) AS volumeSol5m,
-
-          SUM(CASE
-            WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000
-            THEN effectiveVolumeSol
-            ELSE 0
-          END) AS volumeSol15m,
-
-          SUM(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 60000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000
-            THEN effectiveVolumeSol
-            ELSE 0
-          END) AS previousVolumeSol1m,
-
-          SUM(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 300000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000
-            THEN effectiveVolumeSol
-            ELSE 0
-          END) AS previousVolumeSol5m,
-
-          SUM(CASE
-            WHEN
-              tradedAtMs < unixepoch('subsec') * 1000 - 900000
-              AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000
-            THEN effectiveVolumeSol
-            ELSE 0
-          END) AS previousVolumeSol15m,
-
-          MAX(CASE
-            WHEN latestPriceSolRank = 1
-            THEN priceSol
-          END) AS latestPriceSol,
-
-          MAX(CASE
-            WHEN latestPriceUsdRank = 1
-            THEN priceUsd
-          END) AS latestPriceUsd,
-
-          MAX(CASE
-            WHEN latestMarketCapUsdRank = 1
-            THEN marketCapUsd
-          END) AS latestMarketCapUsd,
-
-          MAX(tradedAtMs) AS latestTradeAtMs,
-
-          MAX(CASE
-            WHEN latestTradeRank = 1
-            THEN source
-          END) AS latestTradeSource
-
-        FROM recent
-
-        GROUP BY mint
-        ),
-
-        resolved AS (
-          SELECT
-            aggregated.*,
-
-            latestMarketCapUsd AS currentMarketCapUsd,
-
-            (
-              SELECT
-                MIN(
-                  coverage.tradedAtMs
-                )
-
-              FROM tokenTradesV2 AS coverage
-
-              WHERE
-                coverage.mint =
-                  aggregated.mint
-            ) AS firstRecordedTradeAtMs
-
-          FROM aggregated
+          FROM ranked
+          WHERE canonicalRank = 1
         )
 
-        SELECT *
-        FROM resolved
+        SELECT
+          mint,
+          AVG(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000 THEN priceUsd END) AS avgPriceUsd1m,
+          AVG(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000 THEN priceUsd END) AS avgPriceUsd5m,
+          AVG(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000 THEN priceUsd END) AS avgPriceUsd15m,
+          AVG(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000 THEN marketCapUsd END) AS avgMarketCapUsd1m,
+          AVG(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000 THEN marketCapUsd END) AS avgMarketCapUsd5m,
+          AVG(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000 THEN marketCapUsd END) AS avgMarketCapUsd15m,
+          AVG(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 60000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000 THEN marketCapUsd END) AS previousAvgMarketCapUsd1m,
+          AVG(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 300000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000 THEN marketCapUsd END) AS previousAvgMarketCapUsd5m,
+          AVG(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 900000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000 THEN marketCapUsd END) AS previousAvgMarketCapUsd15m,
+          COUNT(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000 THEN 1 END) AS trades1m,
+          COUNT(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000 THEN 1 END) AS trades5m,
+          COUNT(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000 THEN 1 END) AS trades15m,
+          COUNT(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 60000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000 THEN 1 END) AS previousTrades1m,
+          COUNT(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 300000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000 THEN 1 END) AS previousTrades5m,
+          COUNT(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 900000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000 THEN 1 END) AS previousTrades15m,
+          SUM(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 60000 THEN effectiveVolumeSol ELSE 0 END) AS volumeSol1m,
+          SUM(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 300000 THEN effectiveVolumeSol ELSE 0 END) AS volumeSol5m,
+          SUM(CASE WHEN tradedAtMs >= unixepoch('subsec') * 1000 - 900000 THEN effectiveVolumeSol ELSE 0 END) AS volumeSol15m,
+          SUM(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 60000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 120000 THEN effectiveVolumeSol ELSE 0 END) AS previousVolumeSol1m,
+          SUM(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 300000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 600000 THEN effectiveVolumeSol ELSE 0 END) AS previousVolumeSol5m,
+          SUM(CASE WHEN tradedAtMs < unixepoch('subsec') * 1000 - 900000 AND tradedAtMs >= unixepoch('subsec') * 1000 - 1800000 THEN effectiveVolumeSol ELSE 0 END) AS previousVolumeSol15m,
+          MAX(CASE WHEN latestPriceSolRank = 1 THEN priceSol END) AS latestPriceSol,
+          MAX(CASE WHEN latestPriceUsdRank = 1 THEN priceUsd END) AS latestPriceUsd,
+          MAX(CASE WHEN latestMarketCapUsdRank = 1 THEN marketCapUsd END) AS latestMarketCapUsd,
+          MAX(CASE WHEN latestMarketCapUsdRank = 1 THEN marketCapUsd END) AS currentMarketCapUsd,
+          MAX(tradedAtMs) AS latestTradeAtMs,
+          MAX(CASE WHEN latestTradeRank = 1 THEN source END) AS latestTradeSource,
+          MIN(tradedAtMs) AS firstRecordedTradeAtMs
+        FROM recent
+        GROUP BY mint
         `,
           ),
 
-          tokenMarketExtremaV4: defineView(
+          tokenMarketExtremaV5: defineView(
             TokenMarketExtremaSchema,
             `
-        WITH marketCaps AS (
+        WITH ranked AS (
+          SELECT
+            trade.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY
+                signature,
+                mint,
+                side,
+                ROUND(ABS(tokenDeltaUi), 8),
+                ROUND(ABS(solDeltaUi), 9)
+              ORDER BY
+                CASE confidence
+                  WHEN 'finalized' THEN 0
+                  WHEN 'confirmed' THEN 1
+                  WHEN 'processed' THEN 2
+                  ELSE 3
+                END,
+                CASE WHEN marketCapUsd IS NULL THEN 1 ELSE 0 END,
+                CASE WHEN priceUsd IS NULL THEN 1 ELSE 0 END,
+                CASE WHEN owner IS NULL OR owner = '' THEN 1 ELSE 0 END,
+                updatedAtMs DESC,
+                id DESC
+            ) AS canonicalRank
+          FROM tokenTradesV2 AS trade
+        ),
+        marketCaps AS (
           SELECT
             trade.mint AS mint,
-
             COALESCE(
               trade.marketCapUsd,
-
               CASE
-                WHEN
-                  trade.priceUsd IS NOT NULL
-                  AND token.supplyUi IS NOT NULL
-                  AND token.supplyUi > 0
-
-                THEN
-                  trade.priceUsd *
-                  token.supplyUi
+                WHEN trade.priceUsd IS NOT NULL AND token.supplyUi > 0
+                THEN trade.priceUsd * token.supplyUi
               END
             ) AS marketCapUsd
-
-          FROM tokenTradesV2 AS trade
-
-          LEFT JOIN terminalTokensLive AS token
-            ON token.mint = trade.mint
+          FROM ranked AS trade
+          LEFT JOIN terminalTokensLive AS token ON token.mint = trade.mint
+          WHERE trade.canonicalRank = 1
 
           UNION ALL
 
-          SELECT
-            mint,
-            marketCapUsd
-
+          SELECT mint, marketCapUsd
           FROM terminalTokensLive
-
-          WHERE
-            marketCapUsd IS NOT NULL
-            AND marketCapUsd > 0
+          WHERE marketCapUsd IS NOT NULL AND marketCapUsd > 0
         )
-
         SELECT
           mint,
           MAX(marketCapUsd) AS athMarketCapUsd,
           MIN(marketCapUsd) AS atlMarketCapUsd
-
         FROM marketCaps
-
-        WHERE
-          marketCapUsd IS NOT NULL
-          AND marketCapUsd > 0
-
+        WHERE marketCapUsd IS NOT NULL AND marketCapUsd > 0
         GROUP BY mint
         `,
           ),
 
-          tokenHolderWindowsV1: defineView(
+          tokenHolderWindowsV2: defineView(
             TokenHolderWindowsSchema,
             `
-        WITH ownerPositions AS (
+        WITH ranked AS (
+          SELECT
+            trade.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY
+                signature,
+                mint,
+                side,
+                ROUND(ABS(tokenDeltaUi), 8),
+                ROUND(ABS(solDeltaUi), 9)
+              ORDER BY
+                CASE confidence
+                  WHEN 'finalized' THEN 0
+                  WHEN 'confirmed' THEN 1
+                  WHEN 'processed' THEN 2
+                  ELSE 3
+                END,
+                CASE WHEN owner IS NULL OR owner = '' THEN 1 ELSE 0 END,
+                updatedAtMs DESC,
+                id DESC
+            ) AS canonicalRank
+          FROM tokenTradesV2 AS trade
+          WHERE owner IS NOT NULL AND owner <> '' AND tokenDeltaUi <> 0
+        ),
+        ownerPositions AS (
           SELECT
             mint,
             owner,
-
-            SUM(
-              CASE
-                WHEN side = 'buy'
-                THEN ABS(tokenDeltaUi)
-
-                WHEN side = 'sell'
-                THEN -ABS(tokenDeltaUi)
-
-                ELSE tokenDeltaUi
-              END
-            ) AS balanceNow,
-
-            SUM(
-              CASE
-                WHEN
-                  tradedAtMs <= unixepoch('subsec') * 1000 - 60000
-                THEN
-                  CASE
-                    WHEN side = 'buy'
-                    THEN ABS(tokenDeltaUi)
-
-                    WHEN side = 'sell'
-                    THEN -ABS(tokenDeltaUi)
-
-                    ELSE tokenDeltaUi
-                  END
-                ELSE 0
-              END
-            ) AS balance1mAgo,
-
-            SUM(
-              CASE
-                WHEN
-                  tradedAtMs <= unixepoch('subsec') * 1000 - 300000
-                THEN
-                  CASE
-                    WHEN side = 'buy'
-                    THEN ABS(tokenDeltaUi)
-
-                    WHEN side = 'sell'
-                    THEN -ABS(tokenDeltaUi)
-
-                    ELSE tokenDeltaUi
-                  END
-                ELSE 0
-              END
-            ) AS balance5mAgo,
-
-            SUM(
-              CASE
-                WHEN
-                  tradedAtMs <= unixepoch('subsec') * 1000 - 900000
-                THEN
-                  CASE
-                    WHEN side = 'buy'
-                    THEN ABS(tokenDeltaUi)
-
-                    WHEN side = 'sell'
-                    THEN -ABS(tokenDeltaUi)
-
-                    ELSE tokenDeltaUi
-                  END
-                ELSE 0
-              END
-            ) AS balance15mAgo
-
-          FROM tokenTradesV2
-
-          WHERE
-            owner IS NOT NULL
-            AND owner <> ''
-            AND tokenDeltaUi <> 0
-
-          GROUP BY
-            mint,
-            owner
+            SUM(CASE WHEN side = 'buy' THEN ABS(tokenDeltaUi) WHEN side = 'sell' THEN -ABS(tokenDeltaUi) ELSE tokenDeltaUi END) AS balanceNow,
+            SUM(CASE WHEN tradedAtMs <= unixepoch('subsec') * 1000 - 60000 THEN CASE WHEN side = 'buy' THEN ABS(tokenDeltaUi) WHEN side = 'sell' THEN -ABS(tokenDeltaUi) ELSE tokenDeltaUi END ELSE 0 END) AS balance1mAgo,
+            SUM(CASE WHEN tradedAtMs <= unixepoch('subsec') * 1000 - 300000 THEN CASE WHEN side = 'buy' THEN ABS(tokenDeltaUi) WHEN side = 'sell' THEN -ABS(tokenDeltaUi) ELSE tokenDeltaUi END ELSE 0 END) AS balance5mAgo,
+            SUM(CASE WHEN tradedAtMs <= unixepoch('subsec') * 1000 - 900000 THEN CASE WHEN side = 'buy' THEN ABS(tokenDeltaUi) WHEN side = 'sell' THEN -ABS(tokenDeltaUi) ELSE tokenDeltaUi END ELSE 0 END) AS balance15mAgo
+          FROM ranked
+          WHERE canonicalRank = 1
+          GROUP BY mint, owner
         )
-
         SELECT
           mint,
-
-          SUM(
-            CASE
-              WHEN balanceNow > 0.000000001
-              THEN 1
-              ELSE 0
-            END
-          ) AS holdersNow,
-
-          SUM(
-            CASE
-              WHEN balance1mAgo > 0.000000001
-              THEN 1
-              ELSE 0
-            END
-          ) AS holders1mAgo,
-
-          SUM(
-            CASE
-              WHEN balance5mAgo > 0.000000001
-              THEN 1
-              ELSE 0
-            END
-          ) AS holders5mAgo,
-
-          SUM(
-            CASE
-              WHEN balance15mAgo > 0.000000001
-              THEN 1
-              ELSE 0
-            END
-          ) AS holders15mAgo
-
+          SUM(CASE WHEN balanceNow > 0.000000001 THEN 1 ELSE 0 END) AS holdersNow,
+          SUM(CASE WHEN balance1mAgo > 0.000000001 THEN 1 ELSE 0 END) AS holders1mAgo,
+          SUM(CASE WHEN balance5mAgo > 0.000000001 THEN 1 ELSE 0 END) AS holders5mAgo,
+          SUM(CASE WHEN balance15mAgo > 0.000000001 THEN 1 ELSE 0 END) AS holders15mAgo
         FROM ownerPositions
-
         GROUP BY mint
         `,
           ),
@@ -2506,6 +2308,79 @@ export type AppendTokenTradeResult = {
   inserted: boolean;
 };
 
+function canonicalTradeAmount(value: unknown, digits: number): string {
+  const amount = Math.abs(finite(value) ?? 0);
+  return amount.toFixed(digits).replace(/\.?0+$/, "");
+}
+
+/**
+ * Cross-source identity for the same on-chain fill. Source-specific event
+ * ordinals remain in rawJson, but cannot create a second aggregate row.
+ */
+export function canonicalTokenTradeEventKey(input: {
+  eventKey: string;
+  mint: string;
+  signature: string;
+  owner?: string | null;
+  side?: string | null;
+  tokenDeltaUi?: number | null;
+  solDeltaUi?: number | null;
+}): string {
+  const signature = input.signature.trim();
+  const mint = input.mint.trim();
+  if (!signature || !mint) return input.eventKey;
+  const side =
+    input.side === "buy" || input.side === "sell" ? input.side : "unknown";
+  return [
+    "trade-v2",
+    signature,
+    mint,
+    side,
+    canonicalTradeAmount(input.tokenDeltaUi, 8),
+    canonicalTradeAmount(input.solDeltaUi, 9),
+  ].join(":");
+}
+
+function confidenceRank(value: TokenTrade["confidence"]): number {
+  return value === "finalized"
+    ? 3
+    : value === "confirmed"
+      ? 2
+      : value === "processed"
+        ? 1
+        : 0;
+}
+
+function mergeCanonicalTokenTrade(
+  existing: TokenTrade,
+  incoming: TokenTrade,
+): TokenTrade {
+  const incomingIsBetter =
+    confidenceRank(incoming.confidence) > confidenceRank(existing.confidence) ||
+    (incoming.marketCapUsd != null && existing.marketCapUsd == null) ||
+    (incoming.priceUsd != null && existing.priceUsd == null) ||
+    (incoming.priceSol != null && existing.priceSol == null);
+  if (!incomingIsBetter) return existing;
+  return db.tokenTradesV2.upsert(incoming, {
+    on: "eventKey",
+    merge: (table) => ({
+      slot: table.max("slot", 0),
+      owner: table.excludedIfNotNull("owner"),
+      side: table.excludedIfNotEmpty("side"),
+      tokenDeltaUi: table.excluded("tokenDeltaUi"),
+      solDeltaUi: table.excluded("solDeltaUi"),
+      priceSol: table.excludedIfNotNull("priceSol"),
+      priceUsd: table.excludedIfNotNull("priceUsd"),
+      marketCapUsd: table.excludedIfNotNull("marketCapUsd"),
+      confidence: table.excluded("confidence"),
+      source: table.excludedIfNotEmpty("source"),
+      rawJson: table.excludedIfNotEmpty("rawJson"),
+      tradedAtMs: table.max("tradedAtMs", 0),
+      updatedAtMs: table.max("updatedAtMs", 0),
+    }),
+  }) as TokenTrade;
+}
+
 export function appendTokenTradeOnce(
   input: Partial<TokenTrade> & {
     eventKey: string;
@@ -2515,9 +2390,10 @@ export function appendTokenTradeOnce(
   },
 ): AppendTokenTradeResult {
   const now = Date.now();
+  const eventKey = canonicalTokenTradeEventKey(input);
   const row = TokenTradeSchema.parse({
     ...input,
-    eventKey: input.eventKey,
+    eventKey,
     mint: input.mint,
     signature: input.signature,
     slot: integer(input.slot, 0),
@@ -2534,10 +2410,21 @@ export function appendTokenTradeOnce(
     rawJson:
       typeof input.rawJson === "string"
         ? input.rawJson
-        : stringify(input.rawJson ?? {}),
+        : stringify({
+            sourceEventKey: input.eventKey,
+            ...(input.rawJson ?? {}),
+          }),
     tradedAtMs: integer(input.tradedAtMs, now),
     updatedAtMs: integer(input.updatedAtMs, now),
   });
+
+  const existing = db.tokenTradesV2
+    .select()
+    .where({ eventKey })
+    .get() as TokenTrade | null;
+  if (existing) {
+    return { row: mergeCanonicalTokenTrade(existing, row), inserted: false };
+  }
 
   try {
     return {
@@ -2546,11 +2433,14 @@ export function appendTokenTradeOnce(
     };
   } catch (error) {
     if (!isDuplicateTradeError(error)) throw error;
-    const existing = db.tokenTradesV2
+    const raced = db.tokenTradesV2
       .select()
-      .where({ eventKey: row.eventKey })
+      .where({ eventKey })
       .get() as TokenTrade | null;
-    return { row: existing ?? row, inserted: false };
+    return {
+      row: raced ? mergeCanonicalTokenTrade(raced, row) : row,
+      inserted: false,
+    };
   }
 }
 
@@ -2572,7 +2462,7 @@ export function getTokenPriceWindows(
   const key = mint.trim();
   if (!key) return null;
   return (
-    (db.tokenPriceWindowsV8
+    (db.tokenPriceWindowsV9
       .select()
       .where({ mint: key })
       .cache({ ttlMs: Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS)) })
@@ -2583,18 +2473,45 @@ export function getTokenPriceWindows(
 export function listTokenPriceWindows(
   ttlMs = PRICE_WINDOW_TTL_MS,
 ): TokenPriceWindows[] {
-  return db.tokenPriceWindowsV8
+  return db.tokenPriceWindowsV9
     .select()
     .orderBy("latestTradeAtMs", "desc")
     .cache({ ttlMs: Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS)) })
     .all() as TokenPriceWindows[];
 }
 
-export function listTokenMarketExtrema(ttlMs = 2_000): TokenMarketExtrema[] {
-  return db.tokenMarketExtremaV4
-    .select()
-    .cache({ ttlMs: Math.max(0, integer(ttlMs, 2_000)) })
-    .all() as TokenMarketExtrema[];
+export function listTokenMarketExtrema(
+  mintsOrTtl?: Iterable<string> | number,
+  ttlMs = 2_000,
+): TokenMarketExtrema[] {
+  const loadAll = mintsOrTtl == null || typeof mintsOrTtl === "number";
+  const legacyTtl = typeof mintsOrTtl === "number" ? mintsOrTtl : ttlMs;
+  const keys = loadAll
+    ? []
+    : [
+        ...new Set(
+          [...mintsOrTtl].map((mint) => String(mint).trim()).filter(Boolean),
+        ),
+      ].slice(0, 5_000);
+  const cacheTtlMs = Math.max(0, integer(legacyTtl, 2_000));
+  if (!keys.length && !loadAll) return [];
+  if (loadAll) {
+    return db.tokenMarketExtremaV5
+      .select()
+      .cache({ ttlMs: cacheTtlMs })
+      .all() as TokenMarketExtrema[];
+  }
+  const rows: TokenMarketExtrema[] = [];
+  for (const chunk of chunked(keys, 200)) {
+    rows.push(
+      ...(db.tokenMarketExtremaV5
+        .select()
+        .whereIn("mint", chunk)
+        .cache({ ttlMs: cacheTtlMs })
+        .all() as TokenMarketExtrema[]),
+    );
+  }
+  return rows;
 }
 
 export function listTokenHolderWindows(
@@ -2603,13 +2520,20 @@ export function listTokenHolderWindows(
 ): TokenHolderWindows[] {
   const keys = [
     ...new Set([...mints].map((mint) => String(mint).trim()).filter(Boolean)),
-  ].slice(0, 2_000);
+  ].slice(0, 5_000);
   if (!keys.length) return [];
-  return db.tokenHolderWindowsV1
-    .select()
-    .whereIn("mint", keys)
-    .cache({ ttlMs: Math.max(0, integer(ttlMs, 5_000)) })
-    .all() as TokenHolderWindows[];
+  const rows: TokenHolderWindows[] = [];
+  const cacheTtlMs = Math.max(0, integer(ttlMs, 5_000));
+  for (const chunk of chunked(keys, 200)) {
+    rows.push(
+      ...(db.tokenHolderWindowsV2
+        .select()
+        .whereIn("mint", chunk)
+        .cache({ ttlMs: cacheTtlMs })
+        .all() as TokenHolderWindows[]),
+    );
+  }
+  return rows;
 }
 
 export type CopyTradeTokenContext = {
@@ -2634,8 +2558,16 @@ export function getCopyTradeTokenContext(
 ): CopyTradeTokenContext {
   const key = mint.trim();
   const token = key ? getTerminalToken(key) : null;
-  const window = key ? getTokenPriceWindows(key, 0) : null;
-  const holders = key ? (listTokenHolderWindows([key], 0)[0] ?? null) : null;
+  const metrics = key
+    ? computeScopedTerminalMetrics(
+        [key],
+        token ? [token] : [],
+        now,
+        PRICE_WINDOW_TTL_MS,
+      )
+    : null;
+  const window = key ? (metrics?.windows.get(key) ?? null) : null;
+  const holders = key ? (metrics?.holders.get(key) ?? null) : null;
 
   const observedAtMs = Math.max(
     positiveTime(token?.observedAtMs),
@@ -2796,11 +2728,9 @@ function tradeDedupeKey(row: UnifiedTrade): string {
   return [
     row.mint,
     row.signature,
-    row.owner ?? "",
     row.side,
-    Math.round(row.createdAtMs / 1_000),
-    row.tokenDeltaUi.toPrecision(10),
-    row.solDeltaUi.toPrecision(10),
+    canonicalTradeAmount(row.tokenDeltaUi, 8),
+    canonicalTradeAmount(row.solDeltaUi, 9),
   ].join("|");
 }
 
@@ -2860,6 +2790,234 @@ function loadUnifiedTrades(
       Math.max(right.createdAtMs, right.updatedAtMs) -
       Math.max(left.createdAtMs, left.updatedAtMs),
   );
+}
+
+type ScopedTerminalMetrics = {
+  windows: Map<string, TokenPriceWindows>;
+  holders: Map<string, TokenHolderWindows>;
+  extrema: Map<string, TokenMarketExtrema>;
+  latestTrades: Map<string, UnifiedTrade>;
+};
+
+const scopedMetricsCache = new Map<
+  string,
+  { expiresAtMs: number; value: ScopedTerminalMetrics }
+>();
+
+function averageFinite(values: Array<number | null>): number | null {
+  const finiteValues = values.filter(
+    (value): value is number => value != null && Number.isFinite(value),
+  );
+  return finiteValues.length
+    ? finiteValues.reduce((sum, value) => sum + value, 0) / finiteValues.length
+    : null;
+}
+
+function scopedMetricCacheKey(mints: string[]): string {
+  return [...mints].sort().join(",");
+}
+
+/**
+ * Computes metrics from indexed, mint-scoped reads. This avoids evaluating the
+ * compatibility SQL views across every retained trade on each feed refresh.
+ */
+function computeScopedTerminalMetrics(
+  mints: string[],
+  tokens: TerminalToken[],
+  now = Date.now(),
+  ttlMs = PRICE_WINDOW_TTL_MS,
+): ScopedTerminalMetrics {
+  const uniqueMints = [
+    ...new Set(mints.map((mint) => mint.trim()).filter(Boolean)),
+  ];
+  const empty: ScopedTerminalMetrics = {
+    windows: new Map(),
+    holders: new Map(),
+    extrema: new Map(),
+    latestTrades: new Map(),
+  };
+  if (!uniqueMints.length) return empty;
+
+  const cacheKey = scopedMetricCacheKey(uniqueMints);
+  const cached = scopedMetricsCache.get(cacheKey);
+  if (cached && cached.expiresAtMs >= now) return cached.value;
+
+  const tokenByMint = new Map(tokens.map((token) => [token.mint, token]));
+  const tradesByMint = new Map<string, UnifiedTrade[]>();
+  for (const trade of loadUnifiedTrades({ mints: uniqueMints })) {
+    const rows = tradesByMint.get(trade.mint) ?? [];
+    rows.push(trade);
+    tradesByMint.set(trade.mint, rows);
+  }
+
+  const result: ScopedTerminalMetrics = {
+    windows: new Map(),
+    holders: new Map(),
+    extrema: new Map(),
+    latestTrades: new Map(),
+  };
+  const oneMinute = 60_000;
+  const fiveMinutes = 300_000;
+  const fifteenMinutes = 900_000;
+  const thirtyMinutes = 1_800_000;
+
+  for (const mint of uniqueMints) {
+    const history = (tradesByMint.get(mint) ?? []).sort(
+      (left, right) => right.createdAtMs - left.createdAtMs,
+    );
+    const recent = history.filter(
+      (trade) => trade.createdAtMs >= now - thirtyMinutes,
+    );
+    const latest = history[0] ?? null;
+    if (latest) result.latestTrades.set(mint, latest);
+
+    const inRange = (minimumAgeMs: number, maximumAgeMs = 0) =>
+      recent.filter((trade) => {
+        const ageMs = now - trade.createdAtMs;
+        return ageMs >= maximumAgeMs && ageMs < minimumAgeMs;
+      });
+    const current1m = inRange(oneMinute);
+    const current5m = inRange(fiveMinutes);
+    const current15m = inRange(fifteenMinutes);
+    const previous1m = inRange(2 * oneMinute, oneMinute);
+    const previous5m = inRange(2 * fiveMinutes, fiveMinutes);
+    const previous15m = inRange(2 * fifteenMinutes, fifteenMinutes);
+    const effectiveVolume = (trade: UnifiedTrade) =>
+      Math.abs(trade.solDeltaUi) ||
+      Math.abs((trade.priceSol ?? 0) * trade.tokenDeltaUi) ||
+      0;
+    const sumVolume = (rows: UnifiedTrade[]) =>
+      rows.reduce((sum, trade) => sum + effectiveVolume(trade), 0);
+    const latestWith = (field: "priceSol" | "priceUsd" | "marketCapUsd") =>
+      recent.find((trade) => trade[field] != null)?.[field] ?? null;
+
+    result.windows.set(mint, {
+      mint,
+      avgPriceUsd1m: averageFinite(current1m.map((trade) => trade.priceUsd)),
+      avgPriceUsd5m: averageFinite(current5m.map((trade) => trade.priceUsd)),
+      avgPriceUsd15m: averageFinite(current15m.map((trade) => trade.priceUsd)),
+      avgMarketCapUsd1m: averageFinite(
+        current1m.map((trade) => trade.marketCapUsd),
+      ),
+      avgMarketCapUsd5m: averageFinite(
+        current5m.map((trade) => trade.marketCapUsd),
+      ),
+      avgMarketCapUsd15m: averageFinite(
+        current15m.map((trade) => trade.marketCapUsd),
+      ),
+      previousAvgMarketCapUsd1m: averageFinite(
+        previous1m.map((trade) => trade.marketCapUsd),
+      ),
+      previousAvgMarketCapUsd5m: averageFinite(
+        previous5m.map((trade) => trade.marketCapUsd),
+      ),
+      previousAvgMarketCapUsd15m: averageFinite(
+        previous15m.map((trade) => trade.marketCapUsd),
+      ),
+      trades1m: current1m.length,
+      trades5m: current5m.length,
+      trades15m: current15m.length,
+      previousTrades1m: previous1m.length,
+      previousTrades5m: previous5m.length,
+      previousTrades15m: previous15m.length,
+      volumeSol1m: sumVolume(current1m),
+      volumeSol5m: sumVolume(current5m),
+      volumeSol15m: sumVolume(current15m),
+      previousVolumeSol1m: sumVolume(previous1m),
+      previousVolumeSol5m: sumVolume(previous5m),
+      previousVolumeSol15m: sumVolume(previous15m),
+      latestPriceSol: latestWith("priceSol"),
+      latestPriceUsd: latestWith("priceUsd"),
+      latestMarketCapUsd: latestWith("marketCapUsd"),
+      currentMarketCapUsd: latestWith("marketCapUsd"),
+      latestTradeAtMs: latest?.createdAtMs ?? null,
+      latestTradeSource: latest?.source ?? null,
+      firstRecordedTradeAtMs: history.reduce<number | null>(
+        (earliest, trade) =>
+          earliest == null
+            ? trade.createdAtMs
+            : Math.min(earliest, trade.createdAtMs),
+        null,
+      ),
+    });
+
+    const token = tokenByMint.get(mint);
+    const supplyUi = finite(token?.supplyUi) ?? 0;
+    const marketCaps = history
+      .map(
+        (trade) =>
+          trade.marketCapUsd ??
+          (trade.priceUsd != null && supplyUi > 0
+            ? trade.priceUsd * supplyUi
+            : null),
+      )
+      .filter((value): value is number => value != null && value > 0);
+    if (token?.marketCapUsd != null && token.marketCapUsd > 0) {
+      marketCaps.push(token.marketCapUsd);
+    }
+    result.extrema.set(mint, {
+      mint,
+      athMarketCapUsd: marketCaps.reduce<number | null>(
+        (maximum, value) =>
+          maximum == null ? value : Math.max(maximum, value),
+        null,
+      ),
+      atlMarketCapUsd: marketCaps.reduce<number | null>(
+        (minimum, value) =>
+          minimum == null ? value : Math.min(minimum, value),
+        null,
+      ),
+    });
+
+    const ownerBalances = new Map<
+      string,
+      { now: number; one: number; five: number; fifteen: number }
+    >();
+    for (const trade of history) {
+      if (!trade.owner || trade.tokenDeltaUi === 0) continue;
+      const delta =
+        trade.side === "buy"
+          ? Math.abs(trade.tokenDeltaUi)
+          : trade.side === "sell"
+            ? -Math.abs(trade.tokenDeltaUi)
+            : trade.tokenDeltaUi;
+      const balances = ownerBalances.get(trade.owner) ?? {
+        now: 0,
+        one: 0,
+        five: 0,
+        fifteen: 0,
+      };
+      balances.now += delta;
+      if (trade.createdAtMs <= now - oneMinute) balances.one += delta;
+      if (trade.createdAtMs <= now - fiveMinutes) balances.five += delta;
+      if (trade.createdAtMs <= now - fifteenMinutes) balances.fifteen += delta;
+      ownerBalances.set(trade.owner, balances);
+    }
+    const balances = [...ownerBalances.values()];
+    const countPositive = (field: "now" | "one" | "five" | "fifteen") =>
+      balances.filter((row) => row[field] > 0.000000001).length;
+    result.holders.set(mint, {
+      mint,
+      holdersNow: countPositive("now"),
+      holders1mAgo: countPositive("one"),
+      holders5mAgo: countPositive("five"),
+      holders15mAgo: countPositive("fifteen"),
+    });
+  }
+
+  const cacheTtlMs = Math.max(0, integer(ttlMs, PRICE_WINDOW_TTL_MS));
+  scopedMetricsCache.set(cacheKey, {
+    expiresAtMs: now + cacheTtlMs,
+    value: result,
+  });
+  if (scopedMetricsCache.size > 32) {
+    for (const [key, entry] of scopedMetricsCache) {
+      if (entry.expiresAtMs < now || scopedMetricsCache.size > 32) {
+        scopedMetricsCache.delete(key);
+      }
+    }
+  }
+  return result;
 }
 
 export function insertTerminalTrade(
@@ -3056,6 +3214,65 @@ function isUsdc(token: TerminalToken): boolean {
   );
 }
 
+function loadTerminalFeedCandidates(input: {
+  minUpdatedAt: number;
+  pinnedMints: string[];
+  candidateLimit: number;
+}): TerminalToken[] {
+  const byMint = new Map<string, TerminalToken>();
+  const add = (rows: Record<string, unknown>[]) => {
+    for (const raw of rows) {
+      const token = normalizeTerminalToken(raw);
+      if (!token) continue;
+      const previous = byMint.get(token.mint);
+      if (!previous || newestTime(token) > newestTime(previous)) {
+        byMint.set(token.mint, token);
+      }
+    }
+  };
+  const threshold = Math.max(0, input.minUpdatedAt);
+  const limit = Math.max(1, input.candidateLimit);
+
+  add(
+    db.terminalTokensLive
+      .select()
+      .where({ updatedAtMs: { $gte: threshold } })
+      .orderBy("updatedAtMs", "desc")
+      .limit(limit)
+      .all() as Record<string, unknown>[],
+  );
+  add(
+    db.terminalTokensLive
+      .select()
+      .where({ priceUpdatedAtMs: { $gte: threshold } })
+      .orderBy("priceUpdatedAtMs", "desc")
+      .limit(limit)
+      .all() as Record<string, unknown>[],
+  );
+  add(
+    db.terminalTokensLive
+      .select()
+      .where({ observedAtMs: { $gte: threshold } })
+      .orderBy("observedAtMs", "desc")
+      .limit(limit)
+      .all() as Record<string, unknown>[],
+  );
+
+  for (const chunk of chunked(input.pinnedMints, 200)) {
+    if (!chunk.length) continue;
+    add(
+      db.terminalTokensLive.select().whereIn("mint", chunk).all() as Record<
+        string,
+        unknown
+      >[],
+    );
+  }
+
+  return [...byMint.values()]
+    .sort((left, right) => newestTime(right) - newestTime(left))
+    .slice(0, limit);
+}
+
 export function listTerminalFeed(
   input: {
     limit?: number;
@@ -3070,53 +3287,63 @@ export function listTerminalFeed(
     pinned?: string[];
     hideMayhem?: boolean;
     hideUsdc?: boolean;
+    includeMetrics?: boolean;
   } = {},
 ): TerminalFeedRow[] {
   const now = Date.now();
   const pinnedMints = cleanPinnedMints(input.pinnedMints ?? input.pinned);
   const pinnedSet = new Set(pinnedMints);
-  const tokens = (
-    db.terminalTokensLive
-      .select()
-      .orderBy("updatedAtMs", "desc")
-      .all() as Record<string, unknown>[]
-  )
-    .map(normalizeTerminalToken)
-    .filter((token): token is TerminalToken => token != null);
-  const mints = tokens.map((token) => token.mint);
-
-  const windows = new Map(
-    (mints.length
-      ? (db.tokenPriceWindowsV8
-          .select()
-          .whereIn("mint", mints)
-          .cache({
-            ttlMs: Math.max(
-              0,
-              integer(input.priceWindowTtlMs, PRICE_WINDOW_TTL_MS),
-            ),
-          })
-          .all() as TokenPriceWindows[])
-      : []
-    ).map((row) => [row.mint, row]),
+  const requestedLimit = Math.max(
+    1,
+    Math.min(integer(input.limit, 160), 5_000),
   );
-  const holders = new Map(
-    listTokenHolderWindows(mints).map((row) => [row.mint, row]),
-  );
-  const extrema = new Map(
-    listTokenMarketExtrema().map((row) => [row.mint, row]),
-  );
-  const latestTrades = new Map<string, UnifiedTrade>();
-  for (const trade of loadUnifiedTrades({ mints })) {
-    if (!latestTrades.has(trade.mint)) latestTrades.set(trade.mint, trade);
-  }
-
   const minUpdatedAt = Math.max(
     positiveTime(input.sinceMs),
     positiveTime(input.activeWindowMs) > 0
       ? now - positiveTime(input.activeWindowMs)
       : 0,
   );
+  const configuredCandidateLimit = Math.max(
+    500,
+    integer(process.env.SOLARD_TERMINAL_FEED_MAX_CANDIDATES, 5_000),
+  );
+  const candidateLimit = Math.min(
+    configuredCandidateLimit,
+    Math.max(requestedLimit * 8, 500, pinnedMints.length),
+  );
+  const includeMetrics = input.includeMetrics !== false;
+
+  const tokens = loadTerminalFeedCandidates({
+    minUpdatedAt,
+    pinnedMints,
+    candidateLimit,
+  }).filter((token) => {
+    if (pinnedSet.has(token.mint)) return true;
+    if (minUpdatedAt > 0 && newestTime(token) < minUpdatedAt) return false;
+    if (!sourceMatches(input.source, token.source)) return false;
+    if (input.hideMayhem && token.isMayhemMode > 0) return false;
+    if (input.hideUsdc && isUsdc(token)) return false;
+    return true;
+  });
+  const mints = tokens.map((token) => token.mint);
+
+  const metricTtlMs = Math.max(
+    0,
+    integer(input.priceWindowTtlMs, PRICE_WINDOW_TTL_MS),
+  );
+  const metrics = includeMetrics
+    ? computeScopedTerminalMetrics(mints, tokens, now, metricTtlMs)
+    : {
+        windows: new Map<string, TokenPriceWindows>(),
+        holders: new Map<string, TokenHolderWindows>(),
+        extrema: new Map<string, TokenMarketExtrema>(),
+        latestTrades: new Map<string, UnifiedTrade>(),
+      };
+  const windows = metrics.windows;
+  const holders = metrics.holders;
+  const extrema = metrics.extrema;
+  const latestTrades = metrics.latestTrades;
+
   const minMcap = Math.max(0, finite(input.minMarketCapUsd) ?? 0);
   const maxMcap = Math.max(0, finite(input.maxMarketCapUsd) ?? 0);
 
@@ -3157,7 +3384,6 @@ export function listTerminalFeed(
       return {
         ...token,
         priceSol,
-        priceSolPerToken: priceSol,
         priceUsd,
         marketCapSol,
         marketCapUsd,
@@ -3207,14 +3433,11 @@ export function listTerminalFeed(
           latest?.updatedAtMs ?? 0,
         ),
         raw: token,
-      } as TerminalFeedRow;
+      } satisfies TerminalFeedRow;
     })
     .filter((row) => {
       if (pinnedSet.has(row.mint)) return true;
-      // if (minUpdatedAt > 0 && newestTime(row) < minUpdatedAt) return false;
-      if (!sourceMatches(input.source, row.source)) return false;
-      if (input.hideMayhem && row.isMayhemMode > 0) return false;
-      if (input.hideUsdc && isUsdc(row)) return false;
+      if (minUpdatedAt > 0 && newestTime(row) < minUpdatedAt) return false;
       const mcap = finite(row.marketCapUsd);
       if (
         input.includeUnpriced === false &&
@@ -3235,8 +3458,7 @@ export function listTerminalFeed(
       return newestTime(right) - newestTime(left);
     });
 
-  const limit = Math.max(0, integer(input.limit, 0));
-  return limit > 0 ? rows.slice(0, limit) : rows;
+  return rows.slice(0, requestedLimit);
 }
 
 export function listObservedHolderPositions(input: {
@@ -3468,6 +3690,135 @@ export async function dbWriteBatch<T>(label: string, fn: () => T): Promise<T> {
 
 export function initTerminalStore(): void {
   // Database construction owns table/view creation and migrations.
+}
+
+export type TerminalHistoryPruneResult = {
+  cutoffMs: number;
+  tokenCutoffMs: number;
+  deletedIndexedTrades: number;
+  deletedTerminalTrades: number;
+  deletedIndicators: number;
+  deletedTokens: number;
+  deletedWorkerErrors: number;
+  deletedSignals: number;
+  staleTokenBatchFull: boolean;
+};
+
+/** Keeps terminal/indexer tables bounded without touching wallet/copy audit data. */
+export function pruneTerminalHistory(
+  input: {
+    now?: number;
+    tradeRetentionMs?: number;
+    tokenRetentionMs?: number;
+    workerErrorRetentionMs?: number;
+    signalRetentionMs?: number;
+    tokenBatchSize?: number;
+  } = {},
+): TerminalHistoryPruneResult {
+  const now = positiveTime(input.now) || Date.now();
+  const tradeRetentionMs = Math.max(
+    60 * 60_000,
+    integer(
+      input.tradeRetentionMs ?? process.env.SOLARD_TRADE_RETENTION_MS,
+      7 * 24 * 60 * 60_000,
+    ),
+  );
+  const tokenRetentionMs = Math.max(
+    tradeRetentionMs,
+    integer(
+      input.tokenRetentionMs ?? process.env.SOLARD_TOKEN_RETENTION_MS,
+      14 * 24 * 60 * 60_000,
+    ),
+  );
+  const workerErrorRetentionMs = Math.max(
+    24 * 60 * 60_000,
+    integer(
+      input.workerErrorRetentionMs ??
+        process.env.SOLARD_WORKER_ERROR_RETENTION_MS,
+      14 * 24 * 60 * 60_000,
+    ),
+  );
+  const signalRetentionMs = Math.max(
+    24 * 60 * 60_000,
+    integer(
+      input.signalRetentionMs ?? process.env.SOLARD_SIGNAL_RETENTION_MS,
+      30 * 24 * 60 * 60_000,
+    ),
+  );
+  const cutoffMs = now - tradeRetentionMs;
+  const tokenCutoffMs = now - tokenRetentionMs;
+  const tokenBatchSize = Math.max(
+    100,
+    Math.min(integer(input.tokenBatchSize, 2_000), 10_000),
+  );
+  const staleTokens = db.terminalTokensLive
+    .select("mint")
+    .where({ updatedAtMs: { $lt: tokenCutoffMs } })
+    .orderBy("updatedAtMs", "asc")
+    .limit(tokenBatchSize)
+    .all() as Array<{ mint: string }>;
+  const staleMints = staleTokens.map((row) => row.mint).filter(Boolean);
+
+  let deletedIndexedTrades = 0;
+  let deletedTerminalTrades = 0;
+  let deletedIndicators = 0;
+  let deletedTokens = 0;
+  let deletedWorkerErrors = 0;
+  let deletedSignals = 0;
+
+  db.transaction(() => {
+    deletedIndexedTrades = db.tokenTradesV2
+      .delete()
+      .where({ tradedAtMs: { $lt: cutoffMs } })
+      .exec();
+    deletedTerminalTrades = db.terminalTradesLive
+      .delete()
+      .where({ createdAtMs: { $lt: cutoffMs } })
+      .exec();
+    deletedIndicators = db.terminalIndicatorsLive
+      .delete()
+      .where({ updatedAtMs: { $lt: cutoffMs } })
+      .exec();
+    deletedWorkerErrors = db.workerErrors
+      .delete()
+      .where({ createdAtMs: { $lt: now - workerErrorRetentionMs } })
+      .exec();
+    deletedSignals = db.telegramSignals
+      .delete()
+      .where({ receivedAtMs: { $lt: now - signalRetentionMs } })
+      .exec();
+
+    for (const chunk of chunked(staleMints, 200)) {
+      deletedIndexedTrades += db.tokenTradesV2
+        .delete()
+        .where({ mint: { $in: chunk } })
+        .exec();
+      deletedTerminalTrades += db.terminalTradesLive
+        .delete()
+        .where({ mint: { $in: chunk } })
+        .exec();
+      deletedIndicators += db.terminalIndicatorsLive
+        .delete()
+        .where({ mint: { $in: chunk } })
+        .exec();
+      deletedTokens += db.terminalTokensLive
+        .delete()
+        .where({ mint: { $in: chunk } })
+        .exec();
+    }
+  });
+
+  return {
+    cutoffMs,
+    tokenCutoffMs,
+    deletedIndexedTrades,
+    deletedTerminalTrades,
+    deletedIndicators,
+    deletedTokens,
+    deletedWorkerErrors,
+    deletedSignals,
+    staleTokenBatchFull: staleMints.length >= tokenBatchSize,
+  };
 }
 
 export function clearTerminalLiveData(

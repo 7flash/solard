@@ -27,7 +27,6 @@ export type PumpSwapCounters = {
 
   lifecycleEvictions: number;
   inactiveEvictions: number;
-  interestEvictions: number;
   raydiumEvictions: number;
   capacityEvictions: number;
 
@@ -84,8 +83,6 @@ export type TrackedMigratedToken = {
   observedAtMs: number;
   updatedAtMs: number;
   activityAtMs: number;
-  interestAtMs: number;
-  interestScore: number;
   venue: string | null;
 };
 
@@ -105,8 +102,6 @@ export type PumpSwapPoolState = {
   lastPriceAtMs: number | null;
   lastHistoryAtMs: number | null;
   lastActivityAtMs: number | null;
-  lastInterestAtMs: number | null;
-  interestScore: number;
 
   discoveryAttempts: number;
   nextDiscoveryAtMs: number;

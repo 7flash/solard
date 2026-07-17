@@ -4,6 +4,7 @@ import {
   getTerminalToken,
   isSqliteBusyError,
   listTerminalFeed,
+  pruneTerminalHistory,
   recordWorkerError,
   upsertProcessStatus,
 } from "../shared/db.js";
@@ -134,14 +135,11 @@ function scanTrackedTokens(
   const now = Date.now();
   const result = listTerminalFeed({
     limit: Math.max(config.maxTrackedTokens * 4, config.maxTrackedTokens),
-    activeWindowMs: Math.max(
-      config.activeWindowMs,
-      config.interestWindowMs,
-      24 * 60 * 60_000,
-    ),
+    activeWindowMs: config.activeWindowMs,
     includeUnpriced: true,
     source: "both",
     priceWindowTtlMs: 0,
+    includeMetrics: false,
   }) as any;
   const rows: any[] = Array.isArray(result)
     ? result
@@ -171,28 +169,8 @@ function scanTrackedTokens(
       "observedAtMs",
       "createdAtMs",
     ]);
-    const interestAtMs = firstFinite(row, [
-      "lastInterestAtMs",
-      "lastViewedAtMs",
-      "lastRequestedAtMs",
-      "lastOpenedAtMs",
-      "lastPinnedAtMs",
-    ]);
-    const interestScore = Number(
-      rowValue(row, "interestScore") ??
-        rowValue(row, "terminalScore") ??
-        rowValue(row, "watchCount") ??
-        rowValue(row, "watchers") ??
-        0,
-    );
-
     if (activityAtMs > 0 && now - activityAtMs > config.activeWindowMs)
       continue;
-    const hasInterest = interestAtMs > 0 || interestScore > 0;
-    if (interestAtMs > 0 && now - interestAtMs > config.interestWindowMs)
-      continue;
-    if (config.requireInterestSignal && !hasInterest) continue;
-    if (hasInterest && interestScore < config.minInterestScore) continue;
 
     const supplyUi = Number(rowValue(row, "supplyUi") ?? config.pumpSupplyUi);
     accepted.push({
@@ -204,15 +182,11 @@ function scanTrackedTokens(
           : config.pumpSupplyUi,
       observedAtMs,
       activityAtMs,
-      interestAtMs,
-      interestScore: Number.isFinite(interestScore) ? interestScore : 0,
     });
   }
 
   accepted.sort(
     (left, right) =>
-      right.interestScore - left.interestScore ||
-      right.interestAtMs - left.interestAtMs ||
       right.activityAtMs - left.activityAtMs ||
       right.observedAtMs - left.observedAtMs,
   );
@@ -235,8 +209,6 @@ function trackedFromCreate(
     supplyUi: config.pumpSupplyUi,
     observedAtMs: atMs,
     activityAtMs: atMs,
-    interestAtMs: 0,
-    interestScore: 0,
   };
 }
 
@@ -284,6 +256,10 @@ export async function runIndexer(): Promise<void> {
 
   const discovery = new PumpDiscoveryState(
     `${config.dbPath}.pumpportal-discovered.json`,
+    {
+      flushMs: config.discoveryFlushMs,
+      maxAgeMs: config.activeWindowMs,
+    },
   );
   let stopping = false;
 
@@ -295,6 +271,7 @@ export async function runIndexer(): Promise<void> {
 
   const reconcile = () => {
     try {
+      discovery.prune(config.activeWindowMs);
       const merged = new Map<string, TrackedPumpToken>();
 
       // Preserve directly admitted creations even when listTerminalFeed has a
@@ -348,6 +325,32 @@ export async function runIndexer(): Promise<void> {
   );
   (solTimer as any).unref?.();
 
+  const runMaintenance = () => {
+    try {
+      const result = pruneTerminalHistory({
+        tradeRetentionMs: config.tradeRetentionMs,
+        tokenRetentionMs: config.tokenRetentionMs,
+      });
+      if (
+        result.deletedIndexedTrades ||
+        result.deletedTerminalTrades ||
+        result.deletedTokens
+      ) {
+        console.info("[solard:indexer] terminal history pruned", result);
+      }
+    } catch (error) {
+      counters.errors++;
+      recordWorkerError(config.name, error, { phase: "maintenance-prune" });
+    }
+  };
+  const maintenanceTimer = setInterval(
+    runMaintenance,
+    config.maintenanceIntervalMs,
+  );
+  (maintenanceTimer as any).unref?.();
+  const initialMaintenanceTimer = setTimeout(runMaintenance, 5_000);
+  (initialMaintenanceTimer as any).unref?.();
+
   const heartbeat = setInterval(() => {
     void writeStatus({
       name: config.name,
@@ -376,9 +379,11 @@ export async function runIndexer(): Promise<void> {
     controller.abort();
     clearInterval(reconcileTimer);
     clearInterval(solTimer);
+    clearInterval(maintenanceTimer);
+    clearTimeout(initialMaintenanceTimer);
     clearInterval(heartbeat);
     curve.stop();
-    discovery.save();
+    discovery.close();
     void writeStatus({
       name: config.name,
       kind: "indexer",
@@ -410,9 +415,10 @@ export async function runIndexer(): Promise<void> {
     updatedAtMs: Date.now(),
   });
 
-  let attempt = 0;
+  let reconnectAttempt = 0;
   while (!controller.signal.aborted) {
-    attempt++;
+    const sessionStartedAtMs = Date.now();
+    let sessionError: unknown = null;
     try {
       await runPumpPortalSession({
         config,
@@ -422,8 +428,6 @@ export async function runIndexer(): Promise<void> {
           discovery.add(event.mint, event.createdAtMs);
           const token = trackedFromCreate(config, event);
           if (token) {
-            // Direct admission is the critical path: do not wait for a feed
-            // rescan before polling/subscribing this new bonding curve.
             curve.admit(token);
           }
           reconcile();
@@ -433,30 +437,48 @@ export async function runIndexer(): Promise<void> {
           curve.removeMint(mint);
         },
       });
-      attempt = 0;
     } catch (error) {
-      if (controller.signal.aborted) break;
+      sessionError = error;
+    }
+
+    if (controller.signal.aborted) break;
+    const sessionDurationMs = Date.now() - sessionStartedAtMs;
+    reconnectAttempt =
+      sessionDurationMs >= config.reconnectStableMs
+        ? 1
+        : Math.min(reconnectAttempt + 1, 32);
+
+    if (sessionError != null) {
       counters.errors++;
-      recordWorkerError(config.name, error, {
+      recordWorkerError(config.name, sessionError, {
         phase: "pumpportal-session",
-        attempt,
+        reconnectAttempt,
+        sessionDurationMs,
       });
       await writeStatus({
         name: config.name,
         kind: "indexer",
         status: "error",
         buildId: config.buildId,
-        error: error instanceof Error ? error.message : String(error),
-        dataJson: JSON.stringify({ attempt, ...counters }),
+        error:
+          sessionError instanceof Error
+            ? sessionError.message
+            : String(sessionError),
+        dataJson: JSON.stringify({
+          reconnectAttempt,
+          sessionDurationMs,
+          ...counters,
+        }),
         updatedAtMs: Date.now(),
       });
     }
 
-    if (controller.signal.aborted) break;
-    const delay = Math.min(
-      config.reconnectMaxMs,
-      config.reconnectMinMs * 2 ** Math.min(attempt, 6),
-    );
+    const exponential =
+      config.reconnectMinMs *
+      2 ** Math.min(Math.max(0, reconnectAttempt - 1), 6);
+    const delay =
+      Math.min(config.reconnectMaxMs, exponential) +
+      Math.floor(Math.random() * Math.max(1, config.reconnectMinMs / 4));
     await sleep(delay, controller.signal);
   }
 

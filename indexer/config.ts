@@ -17,6 +17,7 @@ export type IndexerConfig = {
 
   reconnectMinMs: number;
   reconnectMaxMs: number;
+  reconnectStableMs: number;
   heartbeatMs: number;
 
   metadataFetch: boolean;
@@ -35,9 +36,10 @@ export type IndexerConfig = {
   maxTrackedTokens: number;
   lifecycleRefreshMs: number;
   activeWindowMs: number;
-  interestWindowMs: number;
-  minInterestScore: number;
-  requireInterestSignal: boolean;
+  discoveryFlushMs: number;
+  maintenanceIntervalMs: number;
+  tradeRetentionMs: number;
+  tokenRetentionMs: number;
   curveRepairPollMs: number;
   curvePollMs: number;
   curveRpcTimeoutMs: number;
@@ -154,6 +156,10 @@ export function loadConfig(): IndexerConfig {
       1000,
       numberEnv("SOLARD_INDEXER_RECONNECT_MAX_MS", 30_000),
     ),
+    reconnectStableMs: Math.max(
+      5_000,
+      numberEnv("SOLARD_INDEXER_RECONNECT_STABLE_MS", 30_000),
+    ),
     heartbeatMs: Math.max(1000, numberEnv("SOLARD_INDEXER_HEARTBEAT_MS", 5000)),
     metadataFetch: boolEnv("SOLARD_INDEXER_METADATA", true),
     metadataTimeoutMs: numberEnv("SOLARD_INDEXER_METADATA_TIMEOUT_MS", 3500),
@@ -184,14 +190,21 @@ export function loadConfig(): IndexerConfig {
       60_000,
       numberEnv("SOLARD_PUMP_ACTIVE_WINDOW_MS", 60 * 60_000),
     ),
-    interestWindowMs: Math.max(
-      60_000,
-      numberEnv("SOLARD_PUMP_INTEREST_WINDOW_MS", 30 * 60_000),
+    discoveryFlushMs: Math.max(
+      250,
+      numberEnv("SOLARD_PUMP_DISCOVERY_FLUSH_MS", 2_000),
     ),
-    minInterestScore: numberEnv("SOLARD_PUMP_MIN_INTEREST_SCORE", 0),
-    requireInterestSignal: boolEnv(
-      "SOLARD_PUMP_REQUIRE_INTEREST_SIGNAL",
-      false,
+    maintenanceIntervalMs: Math.max(
+      60_000,
+      numberEnv("SOLARD_MAINTENANCE_INTERVAL_MS", 60 * 60_000),
+    ),
+    tradeRetentionMs: Math.max(
+      60 * 60_000,
+      numberEnv("SOLARD_TRADE_RETENTION_MS", 7 * 24 * 60 * 60_000),
+    ),
+    tokenRetentionMs: Math.max(
+      24 * 60 * 60_000,
+      numberEnv("SOLARD_TOKEN_RETENTION_MS", 14 * 24 * 60 * 60_000),
     ),
     curveRepairPollMs: Math.max(
       10_000,

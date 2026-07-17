@@ -4,6 +4,7 @@ import {
   listProcessStatus,
   listTerminalFeed,
   listWorkerErrors,
+  pruneTerminalHistory,
   terminalStoreStats,
 } from "../shared/db.js";
 import { loadConfig } from "./config.js";
@@ -57,6 +58,8 @@ if (command === "status") {
       2,
     ),
   );
+} else if (command === "prune") {
+  console.log(JSON.stringify(pruneTerminalHistory(), null, 2));
 } else if (command === "sol-usd") {
   console.log(
     JSON.stringify(
@@ -71,7 +74,7 @@ if (command === "status") {
   );
 } else {
   console.log(
-    "Usage: bun indexer/cli.ts status|latest [limit]|errors [limit]|sol-usd",
+    "Usage: bun indexer/cli.ts status|latest [limit]|errors [limit]|prune|sol-usd",
   );
 
   process.exitCode = 1;
