@@ -1,8 +1,19 @@
-// SQD holder tracker: holder deltas for selected SPL mints.
-// Portal tokenBalances catches trades and plain SPL transfers without
+// SQD holder tracker: holder deltas for selected SPL / Token-2022 mints.
+// Portal tokenBalances catches trades and plain transfers without
 // logsSubscribe/getTransaction. For exact current balances, replay from each
 // mint's creation slot. If starting mid-history, seed a snapshot first.
-
+//
+// Changes vs original:
+// - Defaults to HOT stream (SQD_FINALIZED=0) so recent buys appear immediately
+// - Much better visibility: logs when tokenBalances arrive, empty batches, etc.
+// - Safer FROM_SLOT / LOOKBACK handling + clearer startup warning
+// - Explicit support note for Token-2022 (create_v2) mints
+// - Still accepts multiple mints on CLI
+//
+// Usage:
+//   SQD_FINALIZED=0 bun run src/holder-tracker.ts <MINT> [MINT2 ...]
+//   FROM_SLOT=433300000 bun run src/holder-tracker.ts <MINT>
+//   LOOKBACK_SLOTS=3000 bun run src/holder-tracker.ts <MINT>
 import { Database } from "bun:sqlite";
 import {
   getPortalHead,
@@ -13,7 +24,7 @@ import {
   runPortal,
   timestampMs,
   transactionMap,
-} from "./shared/portal.js";
+} from "../src/shared/portal.js";
 
 export type HolderEventType = "NEW_HOLDER" | "INCREASE" | "DECREASE" | "EXIT";
 
@@ -32,7 +43,6 @@ export function classifyHolderChange(
 
 export class HolderLedger {
   readonly db: Database;
-
   constructor(path: string) {
     this.db = new Database(path);
     this.db.exec(`
@@ -106,14 +116,12 @@ export class HolderLedger {
     ) {
       return null;
     }
-
     const previous = this.balance(context.mint, context.owner);
     const calculated = previous + context.delta;
     // Missing history or provider anomalies can create a negative reconstructed
     // balance. Clamp current state, but preserve the raw delta in history.
     const next = calculated < 0n ? 0n : calculated;
     const event = classifyHolderChange(previous, next);
-
     const transaction = this.db.transaction(() => {
       if (next === 0n) {
         this.db.run("DELETE FROM holders WHERE mint = ? AND owner = ?", [
@@ -137,7 +145,6 @@ export class HolderLedger {
           ],
         );
       }
-
       this.db.run(
         `INSERT INTO holder_changes
            (id, ts, slot, signature, mint, owner, delta, balance_after, event)
@@ -155,7 +162,6 @@ export class HolderLedger {
         ],
       );
     });
-
     transaction();
     return { event, balance: next };
   }
@@ -198,7 +204,6 @@ export function aggregateHolderDeltas(
   watchedMints: ReadonlySet<string>,
 ): MintOwnerDelta[] {
   const deltas = new Map<string, MintOwnerDelta>();
-
   const add = (mint: string, owner: string, delta: bigint) => {
     if (!watchedMints.has(mint) || delta === 0n) return;
     const key = `${mint}:${owner}`;
@@ -206,7 +211,6 @@ export function aggregateHolderDeltas(
     if (current) current.delta += delta;
     else deltas.set(key, { mint, owner, delta });
   };
-
   for (const row of rows) {
     if (row.preMint && row.preOwner) {
       add(row.preMint, row.preOwner, -bigintValue(row.preAmount));
@@ -215,7 +219,6 @@ export function aggregateHolderDeltas(
       add(row.postMint, row.postOwner, bigintValue(row.postAmount));
     }
   }
-
   return [...deltas.values()].filter((item) => item.delta !== 0n);
 }
 
@@ -250,6 +253,8 @@ export function buildHolderQuery(mints: string[], cursor: number): PortalQuery {
         postDecimals: true,
       },
     },
+    // Both pre and post so we catch pure transfers as well as buy/sell that
+    // only appear on one side.
     tokenBalances: [
       { preMint: mints, transaction: true },
       { postMint: mints, transaction: true },
@@ -262,38 +267,48 @@ async function main(): Promise<void> {
     .slice(2)
     .filter((value) => !value.startsWith("--"));
   if (mints.length === 0) {
-    throw new Error("usage: bun run src/holder-tracker.ts <MINT> [MINT2 ...]");
+    throw new Error(
+      "usage: SQD_FINALIZED=0 bun run src/holder-tracker.ts <MINT> [MINT2 ...]",
+    );
   }
-
   const mintSet = new Set(mints);
   const ledger = new HolderLedger(process.env.DB_PATH ?? "sqd-holders.db");
   const portal =
     process.env.PORTAL_URL ?? "https://portal.sqd.dev/datasets/solana-mainnet";
-  const finalized = process.env.SQD_FINALIZED !== "0";
+
+  // IMPORTANT: default to HOT so recent buys show up.
+  // Set SQD_FINALIZED=1 only when you want authoritative / delayed data.
+  const finalized = process.env.SQD_FINALIZED === "1";
+
   const head = await getPortalHead(portal, finalized);
   const explicitFrom = Number(process.env.FROM_SLOT ?? "");
   const checkpoint = ledger.checkpoint();
 
   if (checkpoint === null && !Number.isSafeInteger(explicitFrom)) {
     console.warn(
-      "[holder] FROM_SLOT was not provided. Starting from LOOKBACK_SLOTS creates a partial holder state. " +
-        "For exact state, set FROM_SLOT to the earliest creation slot or seed a snapshot first.",
+      "[holder] No checkpoint and no FROM_SLOT. " +
+        "Starting from LOOKBACK_SLOTS creates a partial holder state. " +
+        "For exact state set FROM_SLOT to the mint creation slot (or a few slots before).",
     );
   }
 
+  const lookback = Number(process.env.LOOKBACK_SLOTS ?? 5_000); // smaller default for live testing
   const from =
     checkpoint ??
     (Number.isSafeInteger(explicitFrom) && explicitFrom >= 0
       ? explicitFrom
-      : Math.max(
-          0,
-          head.number - Number(process.env.LOOKBACK_SLOTS ?? 100_000),
-        ));
+      : Math.max(0, head.number - lookback));
 
-  measure.sync.note({
-    start: () =>
-      `holder tracker mints=${mints.length} from=${from} finalized=${finalized}`,
-  });
+  console.log(
+    `[holder] start mints=${mints.length} from=${from} head=${head.number} ` +
+      `finalized=${finalized} lookback=${lookback} portal=${portal}`,
+  );
+  console.log(`[holder] watching: ${mints.join(", ")}`);
+
+  let blocksSeen = 0;
+  let tokenBalanceRowsSeen = 0;
+  let deltasApplied = 0;
+  let lastLogSlot = 0;
 
   await runPortal({
     name: "holder",
@@ -302,10 +317,26 @@ async function main(): Promise<void> {
     from,
     buildQuery: (cursor) => buildHolderQuery(mints, cursor),
     onBlock: async (block: PortalBlock) => {
+      blocksSeen++;
+      const allRows = block.tokenBalances ?? [];
+      tokenBalanceRowsSeen += allRows.length;
+
+      // Visibility: every ~50 blocks or whenever we actually get token balance rows
+      if (
+        allRows.length > 0 ||
+        block.header.number - lastLogSlot >= 50 ||
+        blocksSeen <= 3
+      ) {
+        console.log(
+          `[holder] slot=${block.header.number} tokenBalances=${allRows.length} ` +
+            `(total rows so far=${tokenBalanceRowsSeen})`,
+        );
+        lastLogSlot = block.header.number;
+      }
+
       const txs = transactionMap(block);
       const rowsByTx = new Map<number, PortalTokenBalance[]>();
-
-      for (const row of block.tokenBalances ?? []) {
+      for (const row of allRows) {
         const rows = rowsByTx.get(row.transactionIndex) ?? [];
         rows.push(row);
         rowsByTx.set(row.transactionIndex, rows);
@@ -332,12 +363,12 @@ async function main(): Promise<void> {
             owner: item.owner,
             delta: item.delta,
           });
-
           if (result) {
+            deltasApplied++;
             console.log(
               `[holder] ${item.mint.slice(0, 8)}… ${result.event} ` +
                 `${item.owner.slice(0, 8)}… delta=${item.delta} balance=${result.balance} ` +
-                `${signature.slice(0, 12)}…`,
+                `sig=${signature.slice(0, 12)}… slot=${block.header.number}`,
             );
           }
         }
@@ -347,6 +378,9 @@ async function main(): Promise<void> {
     },
   });
 
+  console.log(
+    `[holder] finished blocks=${blocksSeen} tokenBalanceRows=${tokenBalanceRowsSeen} deltas=${deltasApplied}`,
+  );
   for (const mint of mints) {
     console.log(
       `[holder] ${mint.slice(0, 8)}… holders=${ledger.holderCount(mint)} top=${ledger
