@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { publishAirdropJob } from "./events.js";
 import type { AirdropJob, AirdropPlan } from "./types.js";
 
 const JOB_DIR = resolve(
@@ -179,6 +180,7 @@ export async function createAirdropJob(plan: AirdropPlan): Promise<AirdropJob> {
   jobs.set(job.id, job);
   planJobs.set(plan.planId, job.id);
   await persist(job);
+  publishAirdropJob(job);
   return clone(job);
 }
 
@@ -211,6 +213,7 @@ export async function updateAirdropJob(
     job.updatedAtMs = Date.now();
     if (job.logs.length > 600) job.logs.splice(0, job.logs.length - 600);
     await persist(job);
+    publishAirdropJob(job);
     return clone(job);
   });
 }

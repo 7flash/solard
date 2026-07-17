@@ -164,6 +164,8 @@ const state = {
 let unmounted = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let jobTimer: ReturnType<typeof setTimeout> | null = null;
+let jobStreamAbort: AbortController | null = null;
+let streamedJobId: string | null = null;
 
 function rootElement(): HTMLElement {
   const value = document.getElementById("app-root");
@@ -451,6 +453,103 @@ function jobStatusClass(job: AirdropJob): string {
   return "";
 }
 
+function stopJobStream(): void {
+  jobStreamAbort?.abort();
+  jobStreamAbort = null;
+  streamedJobId = null;
+}
+
+function applyJob(job: AirdropJob): void {
+  state.currentJob = job;
+  state.executing = !jobFinished(job);
+  state.message = jobFinished(job)
+    ? `Airdrop ${job.status}: ${job.progress.sent}/${job.progress.total} recipients confirmed.`
+    : `Airdrop ${job.status}: batch ${job.progress.batchesComplete}/${job.progress.batchesTotal}.`;
+  if (job.error) state.error = job.error;
+  rerender();
+  if (jobFinished(job)) {
+    stopJobStream();
+    if (jobTimer) clearTimeout(jobTimer);
+    jobTimer = null;
+    void loadRecentJobs();
+  }
+}
+
+function streamAuthHeaders(): HeadersInit {
+  const token = localStorage.getItem("solwal:web-token") ?? "";
+  return token ? { "x-solwal-web-token": token } : {};
+}
+
+async function streamJob(
+  id: string,
+  controller: AbortController,
+): Promise<void> {
+  const response = await fetch(
+    `/api/airdrops/events?id=${encodeURIComponent(id)}`,
+    {
+      cache: "no-store",
+      headers: streamAuthHeaders(),
+      signal: controller.signal,
+    },
+  );
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => "");
+    throw new Error(
+      text || `Airdrop event stream failed with HTTP ${response.status}.`,
+    );
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (!unmounted && !controller.signal.aborted) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    while (true) {
+      const boundary = buffer.indexOf("\n\n");
+      if (boundary < 0) break;
+      const block = buffer.slice(0, boundary).replace(/\r/g, "");
+      buffer = buffer.slice(boundary + 2);
+      const data = block
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!data) continue;
+      const job = JSON.parse(data) as AirdropJob;
+      if (job.id !== id) continue;
+      applyJob(job);
+      if (jobFinished(job)) return;
+    }
+  }
+}
+
+function watchJob(id: string): void {
+  if (unmounted || !id) return;
+  if (
+    streamedJobId === id &&
+    jobStreamAbort &&
+    !jobStreamAbort.signal.aborted
+  ) {
+    return;
+  }
+  stopJobStream();
+  if (jobTimer) clearTimeout(jobTimer);
+  jobTimer = null;
+  const controller = new AbortController();
+  jobStreamAbort = controller;
+  streamedJobId = id;
+  void streamJob(id, controller).catch((error) => {
+    if (controller.signal.aborted || unmounted) return;
+    jobStreamAbort = null;
+    streamedJobId = null;
+    state.error = error instanceof Error ? error.message : String(error);
+    rerender();
+    scheduleJobPoll(id);
+  });
+}
+
 async function executePreview(): Promise<void> {
   if (!state.preview) {
     state.error = "Preview the authoritative payout plan first.";
@@ -496,7 +595,7 @@ async function executePreview(): Promise<void> {
     state.currentJob = result.job;
     polling = !jobFinished(result.job);
     state.message = `Server job ${result.job.id} is ${result.job.status}.`;
-    if (polling) scheduleJobPoll(result.job.id);
+    if (polling) watchJob(result.job.id);
     void loadRecentJobs();
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
@@ -520,15 +619,8 @@ async function pollJob(id: string): Promise<void> {
       `/api/airdrops/distribute?id=${encodeURIComponent(id)}`,
       { cache: "no-store" },
     );
-    state.currentJob = job;
-    state.executing = !jobFinished(job);
-    state.message = jobFinished(job)
-      ? `Airdrop ${job.status}: ${job.progress.sent}/${job.progress.total} recipients confirmed.`
-      : `Airdrop ${job.status}: batch ${job.progress.batchesComplete}/${job.progress.batchesTotal}.`;
-    if (job.error) state.error = job.error;
-    rerender();
-    if (!jobFinished(job)) scheduleJobPoll(job.id);
-    else void loadRecentJobs();
+    applyJob(job);
+    if (!jobFinished(job)) watchJob(job.id);
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
     state.executing = false;
@@ -549,7 +641,7 @@ async function cancelCurrentJob(): Promise<void> {
     });
     state.message =
       "Cancellation requested. The current transaction will finish before the executor stops.";
-    scheduleJobPoll(job.id);
+    watchJob(job.id);
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
   } finally {
@@ -570,7 +662,7 @@ async function loadRecentJobs(): Promise<void> {
       state.currentJob = state.recentJobs[0];
       if (!jobFinished(state.currentJob)) {
         state.executing = true;
-        scheduleJobPoll(state.currentJob.id);
+        watchJob(state.currentJob.id);
       }
     }
   } catch {
@@ -1228,7 +1320,7 @@ function AirdropsPage() {
                   onClick={() => {
                     state.currentJob = job;
                     rerender();
-                    if (!jobFinished(job)) scheduleJobPoll(job.id);
+                    if (!jobFinished(job)) watchJob(job.id);
                   }}
                 >
                   <span className={`pill ${jobStatusClass(job)}`}>
@@ -1263,5 +1355,6 @@ export default function mount() {
     timer = null;
     if (jobTimer) clearTimeout(jobTimer);
     jobTimer = null;
+    stopJobStream();
   };
 }
