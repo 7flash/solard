@@ -1,7 +1,7 @@
 import { recordWorkerError, upsertTerminalToken } from "../shared/db.js";
-import type { IndexerConfig } from "./config.js";
-import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
-import type { Counters, TokenMetadataPatch } from "./types.js";
+import type { IndexerConfig } from "./config.ts";
+import { indexerMeasure, summarizeError, summarizeValue } from "./measure.ts";
+import type { Counters, TokenMetadataPatch } from "./types.ts";
 
 type QueueItem = {
   mint: string;

@@ -1,5 +1,5 @@
-import type { IndexerConfig } from "./config.js";
-import type { Counters } from "./types.js";
+import type { IndexerConfig } from "./config.ts";
+import type { Counters } from "./types.ts";
 
 /**
  * Intentionally disabled. The primary indexer must never subscribe to the

@@ -60,7 +60,7 @@ const CONFIG = {
 // rpc — throttled for free-tier RPS limits (RPC_RPS env, default 8)
 // ---------------------------------------------------------------------------
 
-import { ThrottledRpc, MuxWs } from "./free-rpc";
+import { ThrottledRpc, MuxWs } from "./free-rpc.ts";
 
 let _rpc: ThrottledRpc | null = null;
 function rpc<T = any>(method: string, params: unknown[]): Promise<T> {

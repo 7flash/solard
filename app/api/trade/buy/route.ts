@@ -4,7 +4,7 @@ import {
   optionalString,
   readJson,
   requireString,
-  withSowl,
+  withSolard,
 } from "../../../../src/web/http.js";
 import {
   buyTokenAction,
@@ -14,8 +14,8 @@ import {
 
 export async function POST(request: Request): Promise<Response> {
   const body = await readJson(request);
-  return withSowl(request, async (sowl) => {
-    const ctx = createSolardActionContext({ sowl });
+  return withSolard(request, async (slrd) => {
+    const ctx = createSolardActionContext({ slrd });
     const tokenMeta =
       body.tokenMeta && typeof body.tokenMeta === "object"
         ? (body.tokenMeta as TradeTokenMeta)

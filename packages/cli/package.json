@@ -1,0 +1,20 @@
+{
+  "name": "@solard/cli",
+  "version": "0.1.8",
+  "description": "Multi-wallet Solana trading CLI UI and commands.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "bin": {
+    "solard": "./bin/solard.ts",
+    "slrd": "./bin/solard.ts"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "dependencies": {
+    "@solard/core": "workspace:*"
+  },
+  "license": "MIT"
+}

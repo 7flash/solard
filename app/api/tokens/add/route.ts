@@ -2,7 +2,7 @@ import {
   readJson,
   requireString,
   optionalString,
-  withSowl,
+  withSolard,
 } from "../../../../src/web/http.js";
 import {
   addTokenAction,
@@ -11,8 +11,8 @@ import {
 
 export async function POST(request: Request): Promise<Response> {
   const body = await readJson(request);
-  return withSowl(request, async (sowl) => {
-    const ctx = createSolardActionContext({ sowl });
+  return withSolard(request, async (slrd) => {
+    const ctx = createSolardActionContext({ slrd });
     return await addTokenAction(ctx, {
       mint: requireString(body, "mint"),
       name: optionalString(body, "name"),

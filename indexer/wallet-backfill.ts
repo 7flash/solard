@@ -1,6 +1,6 @@
 import { updateWatchedWalletCursor, type WatchedWallet } from "../shared/db.js";
-import type { WalletIndexerConfig } from "./wallet-config.js";
-import type { WalletIndexerCounters } from "./wallet-types.js";
+import type { WalletIndexerConfig } from "./wallet-config.ts";
+import type { WalletIndexerCounters } from "./wallet-types.ts";
 
 type AnyRow = Record<string, any>;
 

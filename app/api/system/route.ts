@@ -1,6 +1,6 @@
 import { listWorkerErrors, terminalStoreStats } from "../../../shared/db.js";
 import { assertWebAuth } from "../../../src/web/http.js";
-import { getSolardRuntimeHealth } from "../../_server/process-health.js";
+import { getSolardRuntimeHealth } from "../../_server/process-health.ts";
 
 function errorLimit(url: URL): number {
   const parsed = Number(url.searchParams.get("errors") ?? 40);

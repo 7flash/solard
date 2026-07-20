@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@solard/core/shared/*": ["./src/shared/*"],
+      "@solard/core/*": ["./src/*"]
+    }
+  }
+}

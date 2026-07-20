@@ -1,15 +1,15 @@
-import { withSowl } from "../../../src/web/http.js";
+import { withSolard } from "../../../src/web/http.js";
 import { loadSolardOverview } from "../../../src/solard/overview-service.js";
 
 export function GET(request: Request): Promise<Response> {
-  return withSowl(request, async (sowl) => {
+  return withSolard(request, async (slrd) => {
     const url = new URL(request.url);
     const fast =
       url.searchParams.get("fast") === "1" ||
       url.searchParams.get("fast") === "true";
     const balances =
       url.searchParams.get("balances") ?? (fast ? "none" : "sol");
-    return await loadSolardOverview(sowl, {
+    return await loadSolardOverview(slrd, {
       fast,
       includeBalances: balances !== "none",
       balanceKind: balances === "none" ? "none" : "sol",

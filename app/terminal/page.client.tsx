@@ -1,19 +1,19 @@
 import "./page.css";
 import { render } from "tradjs/client";
-import { api } from "../_client/api";
-import { age, formatMcap, numberValue, short } from "../_client/format";
+import { api } from "../_client/api.ts";
+import { age, formatMcap, numberValue, short } from "../_client/format.ts";
 import {
   storageFlag,
   storageGet,
   storageJson,
   storageSet,
-} from "../_client/storage";
+} from "../_client/storage.ts";
 import {
   clearClientMeasureEntries,
   getClientMeasureEntries,
   subscribeClientMeasure,
   type ClientMeasureEntry,
-} from "../_client/measure";
+} from "../_client/measure.ts";
 import {
   compactId,
   summarizeError,
@@ -21,7 +21,7 @@ import {
   terminalHoldersMeasure,
   terminalTradeMeasure,
   terminalUiMeasure,
-} from "./measure";
+} from "./measure.ts";
 import type {
   AnyRow,
   OverviewPayload,
@@ -29,7 +29,7 @@ import type {
   TerminalFeedPayload,
   TerminalHealthPayload,
   WalletRow,
-} from "../_client/types";
+} from "../_client/types.ts";
 
 type SortBase =
   | "created"

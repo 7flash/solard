@@ -21,10 +21,10 @@ import {
   type EvmPortalBlock,
   type EvmPortalQuery,
   type EvmLog,
-} from "./robinhood/evm-portal.js";
-import { BalanceStore } from "./monitor/balance-store.js";
-import { MintRegistry } from "./monitor/mint-registry.js";
-import { classify } from "./monitor/aggregate.js";
+} from "./robinhood/evm-portal.ts";
+import { BalanceStore } from "./monitor/balance-store.ts";
+import { MintRegistry } from "./monitor/mint-registry.ts";
+import { classify } from "./monitor/aggregate.ts";
 
 // ---------------------------------------------------------------------------
 // Constants

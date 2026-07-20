@@ -1,5 +1,5 @@
-import { encodeBase58 } from "./pumpswap-base58.js";
-import type { PumpSwapConfig } from "./pumpswap-config.js";
+import { encodeBase58 } from "./pumpswap-base58.ts";
+import type { PumpSwapConfig } from "./pumpswap-config.ts";
 
 type AnyRow = Record<string, any>;
 

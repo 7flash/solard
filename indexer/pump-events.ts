@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { base58 } from "./base58.js";
+import { base58 } from "./base58.ts";
 import type {
   IndexedComplete,
   IndexedCreate,
   IndexedEvent,
   IndexedTrade,
   LogJob,
-} from "./types.js";
+} from "./types.ts";
 
 const EVENT_NAMES = ["CreateEvent", "TradeEvent", "CompleteEvent"] as const;
 

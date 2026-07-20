@@ -2,7 +2,7 @@ import {
   readJson,
   requireString,
   numberValue,
-  withSowl,
+  withSolard,
 } from "../../../../src/web/http.js";
 import {
   addWalletToGroupAction,
@@ -11,8 +11,8 @@ import {
 
 export async function POST(request: Request): Promise<Response> {
   const body = await readJson(request);
-  return withSowl(request, (sowl) => {
-    const ctx = createSolardActionContext({ sowl, installSenders: false });
+  return withSolard(request, (slrd) => {
+    const ctx = createSolardActionContext({ slrd, installSenders: false });
     return addWalletToGroupAction(ctx, {
       group: requireString(body, "groupName"),
       wallet: requireString(body, "wallet"),

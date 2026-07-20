@@ -10,20 +10,20 @@ import {
   type WatchedWallet,
 } from "../shared/db.js";
 import { compactId, dbMeasure, summarizeError } from "../shared/measure.js";
-import { refreshSolUsd } from "./sol-usd.js";
-import { applyWalletTransaction } from "./wallet-apply.js";
-import { WalletBackfill } from "./wallet-backfill.js";
+import { refreshSolUsd } from "./sol-usd.ts";
+import { applyWalletTransaction } from "./wallet-apply.ts";
+import { WalletBackfill } from "./wallet-backfill.ts";
 import {
   loadWalletIndexerConfig,
   redactedWalletUrl,
   type WalletIndexerConfig,
-} from "./wallet-config.js";
-import { parseWatchedWalletTransaction } from "./wallet-parser.js";
+} from "./wallet-config.ts";
+import { parseWatchedWalletTransaction } from "./wallet-parser.ts";
 import type {
   WalletIndexerCounters,
   WalletConfidence,
-} from "./wallet-types.js";
-import { WalletTransactionSubscription } from "./wallet-ws.js";
+} from "./wallet-types.ts";
+import { WalletTransactionSubscription } from "./wallet-ws.ts";
 
 function createCounters(): WalletIndexerCounters {
   return {

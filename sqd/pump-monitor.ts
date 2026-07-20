@@ -25,7 +25,7 @@ import {
   type PortalQuery,
   runPortal,
   transactionMap,
-} from "./shared/portal.js";
+} from "./shared/portal.ts";
 import {
   PUMP_PROGRAM,
   CREATE_D8,
@@ -33,10 +33,10 @@ import {
   CREATE_LAYOUT,
   base58Decode,
   decodeCreateArgs,
-} from "./monitor/pump-decode.js";
-import { BalanceStore } from "./monitor/balance-store.js";
-import { MintRegistry } from "./monitor/mint-registry.js";
-import { collectChanges, classify } from "./monitor/aggregate.js";
+} from "./monitor/pump-decode.ts";
+import { BalanceStore } from "./monitor/balance-store.ts";
+import { MintRegistry } from "./monitor/mint-registry.ts";
+import { collectChanges, classify } from "./monitor/aggregate.ts";
 
 // ---------------------------------------------------------------------------
 // Config

@@ -2,13 +2,13 @@ import {
   USDC_MINT,
   WSOL_MINT,
   type PumpSwapConfig,
-} from "./pumpswap-config.js";
-import { getTokenAccountAmounts, SolUsdOracle } from "./pumpswap-rpc.js";
+} from "./pumpswap-config.ts";
+import { getTokenAccountAmounts, SolUsdOracle } from "./pumpswap-rpc.ts";
 import type {
   PumpSwapCounters,
   PumpSwapPoolState,
   PumpSwapReserveSample,
-} from "./pumpswap-types.js";
+} from "./pumpswap-types.ts";
 
 type Assignment = {
   mint: string;

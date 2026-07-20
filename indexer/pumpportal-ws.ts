@@ -1,12 +1,12 @@
 import { PublicKey } from "@solana/web3.js";
-import { applyIndexedEvents } from "./apply.js";
-import type { IndexerConfig } from "./config.js";
+import { applyIndexedEvents } from "./apply.ts";
+import type { IndexerConfig } from "./config.ts";
 import type {
   Counters,
   IndexedComplete,
   IndexedCreate,
   IndexedTrade,
-} from "./types.js";
+} from "./types.ts";
 
 type AnyRow = Record<string, any>;
 

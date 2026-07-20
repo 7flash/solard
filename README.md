@@ -1,8 +1,8 @@
-# SOWL
+# SLRD
 
 **Multi-wallet Solana CLI + SDK for traders and AI agents**
 
-SOWL is a production-oriented toolkit for operating many Solana wallets as a coordinated agent. It is built around a small, plugin-based kernel that can quote, buy, sell, claim value, launch tokens (primarily on the pump.fun family of venues), and compose higher-level workflows, while keeping a full local history of every execution, position, and price sample.
+SLRD is a production-oriented toolkit for operating many Solana wallets as a coordinated agent. It is built around a small, plugin-based kernel that can quote, buy, sell, claim value, launch tokens (primarily on the pump.fun family of venues), and compose higher-level workflows, while keeping a full local history of every execution, position, and price sample.
 
 A web terminal (“Solard”) is included for live monitoring, watchlists, portfolio views, launch jobs, and signal ingestion.
 
@@ -10,7 +10,7 @@ A web terminal (“Solard”) is included for live monitoring, watchlists, portf
 
 - **Wallet & group management**
   - Import private keys (base58 or JSON byte arrays)
-  - Encrypted at rest with `SOWL_MASTER_KEY`
+  - Encrypted at rest with `SLRD_MASTER_KEY`
   - Named wallets + weighted groups for coordinated multi-wallet actions
   - Balance inspection (SOL + registered tokens)
 
@@ -44,7 +44,7 @@ A web terminal (“Solard”) is included for live monitoring, watchlists, portf
 
 - **Extensibility**
   - Venue, ClaimSource, LaunchSource, Launchpad, and Sender registries
-  - External scripts via `sowl run <name-or-path>`
+  - External scripts via `slrd run <name-or-path>`
   - Agent configuration surface for longer-running actors
 
 ## Quick Start
@@ -54,7 +54,7 @@ A web terminal (“Solard”) is included for live monitoring, watchlists, portf
 bun install
 
 # Required environment
-export SOWL_MASTER_KEY="your-long-random-secret"
+export SLRD_MASTER_KEY="your-long-random-secret"
 export RPC_ENDPOINT="https://..."          # or HELIUS_RPC_URL / HELIUS_API_KEY
 # Optional but recommended for production lanes
 export HELIUS_SENDER_URL="..."
@@ -62,38 +62,38 @@ export HELIUS_TIP_ACCOUNT="..."
 export JITO_BLOCK_ENGINE_URL="https://mainnet.block-engine.jito.wtf"
 
 # Import a wallet
-sowl import <private-key-base58-or-json> bgmu
+slrd import <private-key-base58-or-json> bgmu
 
 # Register a token
-sowl token <mint> MyToken
+slrd token <mint> MyToken
 
 # Dry-run a buy
-sowl buy <mint> --wallet bgmu --sol 1 --simulate-only
+slrd buy <mint> --wallet bgmu --sol 1 --simulate-only
 
 # Live buy (only after you have set SOLARD_ENABLE_LIVE_TRADES=1 or the equivalent live flag)
-sowl buy <mint> --wallet bgmu --sol 0.05 --sender helius-fast --slippage-bps 1500
+slrd buy <mint> --wallet bgmu --sol 0.05 --sender helius-fast --slippage-bps 1500
 ```
 
 ### Useful one-liners
 
 ```bash
 # List wallets + balances
-sowl wallets
+slrd wallets
 
 # Group operations
-sowl group create snipers
-sowl group add-many snipers wallet1,wallet2,wallet3
-sowl buy <mint> --group snipers --sol 0.1 --sender jito
+slrd group create snipers
+slrd group add-many snipers wallet1,wallet2,wallet3
+slrd buy <mint> --group snipers --sol 0.1 --sender jito
 
 # Price sampling
-sowl price <mint>
-sowl price watch <mint1> <mint2> --interval 2s --period 5m
+slrd price <mint>
+slrd price watch <mint1> <mint2> --interval 2s --period 5m
 
 # Launch (pump)
-sowl launch pump --creator <wallet> --image ./img.png --description "..." --live
+slrd launch pump --creator <wallet> --image ./img.png --description "..." --live
 
 # History
-sowl history
+slrd history
 ```
 
 ## Architecture (first principles)
@@ -101,14 +101,14 @@ sowl history
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Interfaces                                                 │
-│  • CLI (sowl …)                                             │
+│  • CLI (slrd …)                                             │
 │  • Web terminal (Solard)                                    │
-│  • Scripts (sowl run …)                                     │
+│  • Scripts (slrd run …)                                     │
 │  • Agents                                                   │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
-│  Kernel (Sowl class)                                        │
+│  Kernel (Solard class)                                        │
 │  • resolve wallet / token / group                           │
 │  • route to Venue / ClaimSource / Launchpad                 │
 │  • TransactionComposer / BatchComposer                      │
@@ -137,29 +137,29 @@ Treat the live flag as a physical switch. Keep it off until you have verified th
 
 | Variable                    | Purpose                                      |
 |-----------------------------|----------------------------------------------|
-| `SOWL_MASTER_KEY`           | Required for import / signing of stored wallets |
+| `SLRD_MASTER_KEY`           | Required for import / signing of stored wallets |
 | `RPC_ENDPOINT` / `HELIUS_RPC_URL` / `HELIUS_API_KEY` | Chain access                 |
 | `HELIUS_SENDER_URL`         | Fast Helius sender endpoint                  |
 | `HELIUS_TIP_ACCOUNT`        | Tip account for helius-fast                  |
 | `JITO_BLOCK_ENGINE_URL`     | Jito block engine                            |
-| `SOWL_DB_PATH`              | SQLite location (default `./sowl.db`)        |
+| `SLRD_DB_PATH`              | SQLite location (default `./slrd.db`)        |
 | `SOLARD_ENABLE_LIVE_TRADES` | Master switch for real sends                 |
-| `SOWL_CACHE_TTL_MS`         | Account cache TTL                            |
-| `SOWL_TRACE`                | Enable human-readable progress tracing       |
+| `SLRD_CACHE_TTL_MS`         | Account cache TTL                            |
+| `SLRD_TRACE`                | Enable human-readable progress tracing       |
 
 ## Development & Scripts
 
 ```bash
 # List registered scripts
-sowl scripts
+slrd scripts
 
-# Run a script (looks in sowl.config.ts or ./scripts/)
-sowl run snipe --name ExactTokenName --group snipers --sol 0.05 --sender jito
+# Run a script (looks in slrd.config.ts or ./scripts/)
+slrd run snipe --name ExactTokenName --group snipers --sol 0.05 --sender jito
 
 # Example external script pattern
 # scripts/repeat-buy.ts
-import { createTraderSowl } from "../src/presets/trader.js";
-// … use sowl.buy in a loop with sleep
+import { createTraderSolard } from "../src/presets/trader.js";
+// … use slrd.buy in a loop with sleep
 ```
 
 The recommended way to add new strategies is to keep them as thin scripts that import the SDK. The kernel itself stays free of hard-coded trading logic.
@@ -176,7 +176,7 @@ src/
   claims/        # ClaimSourcePlugin registry
   launches/      # LaunchSource + Launchpad plugins (pump, …)
   workflows/     # claim-trade-send, wait-launch-trade-group, …
-  sdk/           # the Sowl class (kernel)
+  sdk/           # the Solard class (kernel)
   cli.ts         # CLI entrypoint
   web/           # Solard web terminal + API
   runtime/       # agents, positions, watcher
@@ -198,4 +198,4 @@ Internal / private use. Treat the live-trading path with the same care you would
 
 **Philosophy**
 
-SOWL is deliberately built from the same first principles that good electronics and good agent design share: clear entities, explicit state transitions, measurable effects, and the ability to compose larger behaviours from small, reliable primitives. Keep the kernel simple; put the cleverness in the plugins and the scripts.
+SLRD is deliberately built from the same first principles that good electronics and good agent design share: clear entities, explicit state transitions, measurable effects, and the ability to compose larger behaviours from small, reliable primitives. Keep the kernel simple; put the cleverness in the plugins and the scripts.

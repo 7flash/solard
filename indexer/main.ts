@@ -9,15 +9,15 @@ import {
   upsertProcessStatus,
 } from "../shared/db.js";
 import { compactId, dbMeasure, summarizeError } from "../shared/measure.js";
-import { loadConfig, redactedUrl, type IndexerConfig } from "./config.js";
-import { PumpCurveSubscriptionManager } from "./pump-curve-ws.js";
-import { PumpDiscoveryState } from "./pump-discovery-state.js";
-import { runPumpPortalSession } from "./pumpportal-ws.js";
-import { startMetadataHydrator } from "./metadata.js";
-import { refreshSolUsd } from "./sol-usd.js";
-import { runWalletIndexer } from "./wallet-main.js";
-import { runCopyTradeWorker } from "./copy-main.js";
-import type { Counters, IndexedCreate, TrackedPumpToken } from "./types.js";
+import { loadConfig, redactedUrl, type IndexerConfig } from "./config.ts";
+import { PumpCurveSubscriptionManager } from "./pump-curve-ws.ts";
+import { PumpDiscoveryState } from "./pump-discovery-state.ts";
+import { runPumpPortalSession } from "./pumpportal-ws.ts";
+import { startMetadataHydrator } from "./metadata.ts";
+import { refreshSolUsd } from "./sol-usd.ts";
+import { runWalletIndexer } from "./wallet-main.ts";
+import { runCopyTradeWorker } from "./copy-main.ts";
+import type { Counters, IndexedCreate, TrackedPumpToken } from "./types.ts";
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted || ms <= 0) return Promise.resolve();

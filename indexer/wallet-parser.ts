@@ -1,19 +1,19 @@
-import { parsePumpLogs } from "./pump-events.js";
+import { parsePumpLogs } from "./pump-events.ts";
 import {
   extractPumpSwapCandidates,
   normalizeTransactionNotification,
-} from "./pumpswap-transaction.js";
+} from "./pumpswap-transaction.ts";
 import {
   USDC_MINT,
   WSOL_MINT,
   type WalletIndexerConfig,
-} from "./wallet-config.js";
+} from "./wallet-config.ts";
 import type {
   ParsedWalletTransaction,
   WalletConfidence,
   WalletSwapCandidate,
   WalletSwapSide,
-} from "./wallet-types.js";
+} from "./wallet-types.ts";
 
 type AnyRow = Record<string, any>;
 

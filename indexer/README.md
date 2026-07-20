@@ -11,7 +11,7 @@ compatibility facades that re-export the canonical instance and create no
 tables, views, or connections.
 
 New installations default to `~/.solard/solard.sqlite`. If the legacy
-`~/.sowl/sowl.sqlite` already exists and the renamed path does not, it is used
+`~/.slrd/slrd.sqlite` already exists and the renamed path does not, it is used
 automatically to avoid silently starting with an empty database. Set
 `SOLARD_DB_PATH` to make the location explicit.
 

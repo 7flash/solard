@@ -1,10 +1,10 @@
 import { SOLARD_DB_PATH } from "../shared/db.js";
-import { OFFICIAL_PUMP_PROGRAM_ID } from "./config.js";
+import { OFFICIAL_PUMP_PROGRAM_ID } from "./config.ts";
 import {
   OFFICIAL_PUMPSWAP_PROGRAM_ID,
   USDC_MINT,
   WSOL_MINT,
-} from "./pumpswap-config.js";
+} from "./pumpswap-config.ts";
 
 export { USDC_MINT, WSOL_MINT };
 

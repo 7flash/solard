@@ -1,7 +1,7 @@
 import { render } from "tradjs/client";
-import { api } from "./_client/api";
-import { short, solFromLamports, statusClass } from "./_client/format";
-import type { AnyRow, JobRow, OverviewPayload } from "./_client/types";
+import { api } from "./_client/api.ts";
+import { short, solFromLamports, statusClass } from "./_client/format.ts";
+import type { AnyRow, JobRow, OverviewPayload } from "./_client/types.ts";
 
 type PageState = {
   overview: OverviewPayload;

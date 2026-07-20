@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { PumpSwapPoolState } from "./pumpswap-types.js";
+import type { PumpSwapPoolState } from "./pumpswap-types.ts";
 
 type StateFile = {
   version: 3;

@@ -13,7 +13,7 @@ import {
   runPortal,
   timestampMs,
   transactionMap,
-} from "./shared/portal.js";
+} from "./shared/portal.ts";
 
 export const WSOL = "So11111111111111111111111111111111111111112";
 const RENT_EPSILON = BigInt(process.env.RENT_EPSILON_LAMPORTS ?? "3000000");

@@ -1,6 +1,6 @@
 import { render } from "tradjs/client";
-import { api } from "../_client/api";
-import { age } from "../_client/format";
+import { api } from "../_client/api.ts";
+import { age } from "../_client/format.ts";
 
 type AnyRow = Record<string, any>;
 

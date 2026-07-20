@@ -1,61 +1,26 @@
 {
-  "name": "sowl",
-  "version": "0.0.1",
-  "description": "Multi-wallet Solana CLI and SDK for traders and AI agents. Direct venue transactions, encrypted local persistence, and no Jupiter dependency.",
-  "type": "module",
-  "module": "./src/index.ts",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
-  "bin": {
-    "slrd": "./src/cli.ts"
-  },
-  "exports": {
-    ".": "./src/index.ts",
-    "./venues": "./src/venues/venue-plugin.ts",
-    "./claims": "./src/claims/claim-source.ts",
-    "./venues/pump": "./src/venues/pump/index.ts",
-    "./presets/trader": "./src/presets/trader.ts",
-    "./launches": "./src/launches/launch-source.ts",
-    "./launchpads": "./src/launches/launchpad.ts",
-    "./runner": "./src/runner/config.ts"
-  },
-  "files": [
-    "src",
-    "README.md",
-    "LICENSE"
+  "name": "solard-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
   ],
   "scripts": {
-    "slrd": "bun run ./src/cli.ts",
-    "typecheck": "tsc -p ./tsconfig.typecheck.json --noEmit",
-    "build": "bun build ./src/index.ts ./src/cli.ts --outdir ./dist --target bun",
-    "compile": "bun build ./src/cli.ts --compile --outfile ./bin/slrd",
-    "verify": "bun run typecheck && bun run verify:measure-logging && bun run verify:pump-create-encoding",
-    "verify:measure-logging": "bun run ./scripts/verify-measure-logging.ts",
-    "verify:pump-create-encoding": "bun run ./scripts/verify-pump-create-encoding.ts"
-  },
-  "keywords": [
-    "solana",
-    "cli",
-    "sdk",
-    "trading",
-    "pump",
-    "pumpfun",
-    "memecoin",
-    "wallet",
-    "automation",
-    "ai-agent"
-  ],
-  "license": "MIT",
-  "dependencies": {
-    "@solana/spl-token": "^0.4.14",
-    "@solana/web3.js": "^1.98.4",
-    "bgrun": "3.13.1",
-    "bs58": "^6.0.0",
-    "measure-fn": "5",
-    "pinata": "^2.5.6",
-    "sqlite-zod-orm": "^3.33.0",
-    "tradjs": "4.2.0",
-    "tweetnacl": "^1.0.3"
+    "build": "bun run --filter '*' build",
+    "typecheck": "bun run --filter '*' typecheck",
+    "cli": "bun run packages/cli/bin/solard.ts",
+
+    "pub:bump": "bun run version:core && bun run version:cli && bun run version:solard-cli",
+    "version:core": "cd packages/core && bun pm version patch --no-git-tag-version",
+    "version:cli": "cd packages/cli && bun pm version patch --no-git-tag-version",
+    "version:solard-cli": "cd packages/solard-cli && bun pm version patch --no-git-tag-version",
+
+    "pub:lock": "bun install --lockfile-only",
+
+    "pub:core": "cd packages/core && bun publish --access public --no-git-checks",
+    "pub:cli": "cd packages/cli && bun publish --access public --no-git-checks",
+    "pub:solard-cli": "cd packages/solard-cli && bun publish --access public --no-git-checks",
+
+    "pub": "bun run pub:bump && bun run pub:lock && bun run pub:core && bun run pub:cli && bun run pub:solard-cli"
   },
   "devDependencies": {
     "@types/bun": "latest",

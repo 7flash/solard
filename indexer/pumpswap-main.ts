@@ -18,25 +18,25 @@ import {
   USDC_MINT,
   WSOL_MINT,
   type PumpSwapConfig,
-} from "./pumpswap-config.js";
+} from "./pumpswap-config.ts";
 import {
   CanonicalPoolValidator,
   getTransactionsForAddress,
   SolUsdOracle,
-} from "./pumpswap-rpc.js";
-import { PumpSwapStateStore } from "./pumpswap-state.js";
-import { PumpSwapSubscriptionManager } from "./pumpswap-ws.js";
+} from "./pumpswap-rpc.ts";
+import { PumpSwapStateStore } from "./pumpswap-state.ts";
+import { PumpSwapSubscriptionManager } from "./pumpswap-ws.ts";
 import {
   extractPumpSwapCandidates,
   normalizeTransactionNotification,
-} from "./pumpswap-transaction.js";
+} from "./pumpswap-transaction.ts";
 import type {
   PumpSwapCandidate,
   PumpSwapCounters,
   PumpSwapPoolState,
   PumpSwapReserveSample,
   TrackedMigratedToken,
-} from "./pumpswap-types.js";
+} from "./pumpswap-types.ts";
 
 function createCounters(): PumpSwapCounters {
   return {

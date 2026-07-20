@@ -17,7 +17,7 @@ import {
   runPortal,
   timestampMs,
   transactionMap,
-} from "./shared/portal.js";
+} from "./shared/portal.ts";
 
 type EventType = "NEW" | "INCREASE" | "DECREASE" | "EXIT";
 

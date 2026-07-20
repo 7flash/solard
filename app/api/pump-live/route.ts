@@ -14,7 +14,7 @@ import {
   resolveTerminalSource,
   summarizeError,
   type TerminalSource,
-} from "../../_server/measure.js";
+} from "../../_server/measure.ts";
 
 function safeWatchGroups() {
   try {

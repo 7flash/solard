@@ -1,10 +1,10 @@
-import { withSowl } from "../../../src/web/http.js";
+import { withSolard } from "../../../src/web/http.js";
 import { loadSolardPortfolio } from "../../../src/solard/portfolio-service.js";
 
 export function GET(request: Request): Promise<Response> {
-  return withSowl(request, async (sowl) => {
+  return withSolard(request, async (slrd) => {
     const url = new URL(request.url);
-    return await loadSolardPortfolio(sowl, {
+    return await loadSolardPortfolio(slrd, {
       includeZero:
         url.searchParams.get("includeZero") === "1" ||
         url.searchParams.get("includeZero") === "true",

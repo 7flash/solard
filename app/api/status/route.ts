@@ -3,14 +3,14 @@ import {
   resolvedHeliusRpcUrl,
   rpcHasApiKey,
 } from "../../../src/chain/helius-history.js";
-import { jsonResponse, withSowl } from "../../../src/web/http.js";
+import { jsonResponse, withSolard } from "../../../src/web/http.js";
 import { terminalHealthAction } from "../../../src/solard/actions/terminal-health.js";
 
 export async function GET(request: Request): Promise<Response> {
   const startedAt = Date.now();
   try {
-    return await withSowl(request, async (sowl) => {
-      const connection = sowl.connection();
+    return await withSolard(request, async (slrd) => {
+      const connection = slrd.connection();
       let ok = false;
       let error: string | null = null;
       let slot: number | null = null;
@@ -67,7 +67,7 @@ export async function GET(request: Request): Promise<Response> {
           heliusTipAccount:
             process.env.HELIUS_TIP_ACCOUNT?.trim() ||
             process.env.SOLWAL_HELIUS_TIP_ACCOUNT?.trim() ||
-            process.env.SOWL_HELIUS_TIP_ACCOUNT?.trim() ||
+            process.env.SLRD_HELIUS_TIP_ACCOUNT?.trim() ||
             null,
         },
       };

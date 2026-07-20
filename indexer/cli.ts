@@ -7,8 +7,8 @@ import {
   pruneTerminalHistory,
   terminalStoreStats,
 } from "../shared/db.js";
-import { loadConfig } from "./config.js";
-import { refreshSolUsd } from "./sol-usd.js";
+import { loadConfig } from "./config.ts";
+import { refreshSolUsd } from "./sol-usd.ts";
 
 const command = process.argv[2] ?? "status";
 

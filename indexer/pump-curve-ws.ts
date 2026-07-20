@@ -5,10 +5,10 @@ import {
   upsertTerminalToken,
 } from "../shared/db.js";
 import { compactId, dbMeasure, summarizeError } from "../shared/measure.js";
-import { applyIndexedEvents } from "./apply.js";
-import type { IndexerConfig } from "./config.js";
-import { parsePumpLogs } from "./pump-events.js";
-import type { Counters, TrackedPumpToken } from "./types.js";
+import { applyIndexedEvents } from "./apply.ts";
+import type { IndexerConfig } from "./config.ts";
+import { parsePumpLogs } from "./pump-events.ts";
+import type { Counters, TrackedPumpToken } from "./types.ts";
 
 type Assignment = {
   mint: string;

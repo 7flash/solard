@@ -1,4 +1,4 @@
-import { PageHost, type ConsolePage } from "./page-host";
+import { PageHost, type ConsolePage } from "./page-host.tsx";
 
 /**
  * Deprecated compatibility shim.

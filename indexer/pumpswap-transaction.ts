@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { decodeBase58 } from "./pumpswap-base58.js";
-import type { PumpSwapCandidate } from "./pumpswap-types.js";
+import { decodeBase58 } from "./pumpswap-base58.ts";
+import type { PumpSwapCandidate } from "./pumpswap-types.ts";
 
 type AnyRow = Record<string, any>;
 

@@ -3,7 +3,7 @@ import {
   errorResponse,
   jsonResponse,
   readJson,
-  withSowl,
+  withSolard,
 } from "../../../../src/web/http.js";
 import {
   getAirdropJob,
@@ -70,9 +70,9 @@ export async function POST(request: Request): Promise<Response> {
       });
     }
 
-    return await withSowl(request, async (sowl) => {
+    return await withSolard(request, async (slrd) => {
       const rules = normalizeAirdropRules(body);
-      const plan = await buildAirdropPlan(sowl.connection(), rules);
+      const plan = await buildAirdropPlan(slrd.connection(), rules);
 
       if (action === "preview" || action === "validate") {
         return {

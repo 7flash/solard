@@ -20,7 +20,7 @@ import {
   type PortalTokenBalance,
   runPortal,
   transactionMap,
-} from "./shared/portal.js";
+} from "./shared/portal.ts";
 
 type HolderEventType = "NEW_HOLDER" | "INCREASE" | "DECREASE" | "EXIT";
 

@@ -1,0 +1,21 @@
+{
+  "name": "solard-cli",
+  "version": "0.1.8",
+  "description": "Multi-wallet Solana CLI",
+  "type": "module",
+  "bin": {
+    "solard": "./bin/solard.ts",
+    "slrd": "./bin/solard.ts"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "dependencies": {
+    "@solard/cli": "workspace:*"
+  },
+  "license": "MIT"
+}

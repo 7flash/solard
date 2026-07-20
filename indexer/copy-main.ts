@@ -22,7 +22,7 @@ import {
   type CopyTradeConfig,
 } from "./copy-config.js";
 import { CopyTradeGateway } from "./copy-gateway.js";
-import { evaluateCopyTrade } from "./copy-policy.js";
+import { evaluateCopyTrade } from "./copy-policy.ts";
 import type {
   CopyTradeCounters,
   CopyTradeGatewayRequest,

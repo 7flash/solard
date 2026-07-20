@@ -18,7 +18,7 @@ import {
   runPortal,
   timestampMs,
   transactionMap,
-} from "./shared/portal.js";
+} from "./shared/portal.ts";
 
 // ---------------------------------------------------------------------------
 // Pump constants

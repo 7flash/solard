@@ -1,4 +1,4 @@
-import { readJson, requireString, withSowl } from "../../../../src/web/http.js";
+import { readJson, requireString, withSolard } from "../../../../src/web/http.js";
 import {
   createSolardActionContext,
   refreshTokenAction,
@@ -6,8 +6,8 @@ import {
 
 export async function POST(request: Request): Promise<Response> {
   const body = await readJson(request);
-  return withSowl(request, async (sowl) => {
-    const ctx = createSolardActionContext({ sowl });
+  return withSolard(request, async (slrd) => {
+    const ctx = createSolardActionContext({ slrd });
     return await refreshTokenAction(ctx, {
       token: requireString(body, "token"),
     });

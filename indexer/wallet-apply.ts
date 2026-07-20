@@ -5,8 +5,8 @@ import {
   upsertWatchedWallet,
 } from "../shared/db.js";
 import { compactId, dbMeasure, summarizeError } from "../shared/measure.js";
-import type { ParsedWalletTransaction } from "./wallet-types.js";
-import type { WalletIndexerCounters } from "./wallet-types.js";
+import type { ParsedWalletTransaction } from "./wallet-types.ts";
+import type { WalletIndexerCounters } from "./wallet-types.ts";
 
 function json(value: unknown): string {
   return JSON.stringify(value, (_key, item) =>

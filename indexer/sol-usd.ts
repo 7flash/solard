@@ -1,4 +1,4 @@
-import { indexerMeasure, summarizeError, summarizeValue } from "./measure.js";
+import { indexerMeasure, summarizeError, summarizeValue } from "./measure.ts";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 

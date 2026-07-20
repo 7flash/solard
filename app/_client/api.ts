@@ -1,4 +1,4 @@
-import { storageGet } from "./storage";
+import { storageGet } from "./storage.ts";
 
 function authHeaders(): HeadersInit {
   const token = storageGet("solwal:web-token", "");

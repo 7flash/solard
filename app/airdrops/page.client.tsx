@@ -1,8 +1,8 @@
 import "./page.css";
 import { render } from "tradjs/client";
-import { api } from "../_client/api";
-import { short } from "../_client/format";
-import { storageFlag, storageJson, storageSet } from "../_client/storage";
+import { api } from "../_client/api.ts";
+import { short } from "../_client/format.ts";
+import { storageFlag, storageJson, storageSet } from "../_client/storage.ts";
 
 type AnyRow = Record<string, any>;
 type DistributionMode = "fixed" | "equal-total" | "pro-rata";

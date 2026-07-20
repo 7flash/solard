@@ -9,9 +9,9 @@ import {
   indexerMeasure,
   summarizeError,
 } from "../shared/measure.js";
-import type { IndexerConfig } from "./config.js";
-import { enqueueMetadata } from "./metadata.js";
-import type { Counters, IndexedEvent, IndexedTrade } from "./types.js";
+import type { IndexerConfig } from "./config.ts";
+import { enqueueMetadata } from "./metadata.ts";
+import type { Counters, IndexedEvent, IndexedTrade } from "./types.ts";
 
 function json(value: unknown): string {
   return JSON.stringify(value, (_key, item) =>

@@ -2,7 +2,7 @@ import {
   readJson,
   requireString,
   optionalString,
-  withSowl,
+  withSolard,
 } from "../../../../src/web/http.js";
 import {
   createGroupAction,
@@ -11,8 +11,8 @@ import {
 
 export async function POST(request: Request): Promise<Response> {
   const body = await readJson(request);
-  return withSowl(request, (sowl) => {
-    const ctx = createSolardActionContext({ sowl, installSenders: false });
+  return withSolard(request, (slrd) => {
+    const ctx = createSolardActionContext({ slrd, installSenders: false });
     return createGroupAction(ctx, {
       name: requireString(body, "name"),
       description: optionalString(body, "description"),

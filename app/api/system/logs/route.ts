@@ -104,7 +104,7 @@ function redact(value: string): string {
     .replace(/([?&](?:api[-_]?key|token|secret|auth|jwt)=)[^&\s]+/gi, "$1***")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer ***")
     .replace(
-      /^(\s*(?:SOWL_MASTER_KEY|HELIUS_API_KEY|PINATA_JWT|SOLWAL_WEB_TOKEN)\s*=\s*).+$/gim,
+      /^(\s*(?:SLRD_MASTER_KEY|HELIUS_API_KEY|PINATA_JWT|SOLWAL_WEB_TOKEN)\s*=\s*).+$/gim,
       "$1***",
     );
 }
