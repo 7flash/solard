@@ -202,6 +202,36 @@ async function main() {
     emit(help());
     return;
   }
+  if (command === "vanity") {
+    const { generateMintKeypairWithSuffix, saveMintKeypairFile, cleanVanitySuffix } =
+      await import("./launches/pump/vanity-mint.js");
+    const suffix = cleanVanitySuffix(need(flags, "suffix"));
+    const out = need(flags, "out");
+    const count = int(flags, "count", 1)!;
+    const results = [];
+    for (let i = 0; i < count; i++) {
+      const found = await generateMintKeypairWithSuffix({
+        suffix,
+        workers: int(flags, "workers"),
+        maxAttempts: int(flags, "max-attempts", 25_000_000)!,
+        timeoutMs: int(flags, "timeout-ms", 0)!,
+        reportEvery: int(flags, "report-every", 1_000_000)!,
+        onProgress: (p) =>
+          emit(`${OWL} grinding ${p.suffix}: ${p.attempts} attempts, ${p.ratePerSecond}/s\n`),
+      });
+      const path = count === 1 ? out : out.replace(/(\.json)?$/, `-${i + 1}$1`);
+      const saved = saveMintKeypairFile(path, found.mint, { force: flags.has("force") });
+      results.push({
+        address: found.mint.publicKey.toBase58(),
+        keypairPath: saved,
+        attempts: found.attempts,
+        elapsedMs: found.elapsedMs,
+        launchArguments: ["--mint-keypair", saved, "--mint-suffix", suffix],
+      });
+    }
+    emit(json(count === 1 ? results[0] : results) + "\n");
+    return;
+  }
   if (command === "spam-buy" || command === "buy-spam") {
     const { runPumpSpamBuyFromArgs } =
       await import("./launches/pump/spam-buy-cli.js");
