@@ -40,11 +40,64 @@ export type UploadPumpMetadataOptions = {
   provider?: MetadataUploaderId;
   endpoint?: string;
   fallback?: MetadataUploaderId | null;
+  /** Per-request timeout in ms. Defaults to PUMP_METADATA_TIMEOUT_MS or 30s. */
+  timeoutMs?: number;
 };
+
+const DEFAULT_UPLOAD_TIMEOUT_MS = 30_000;
 
 function clean(value: string | undefined | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function uploadTimeoutMs(options: UploadPumpMetadataOptions): number {
+  const fromOptions = options.timeoutMs;
+  if (typeof fromOptions === "number" && Number.isFinite(fromOptions) && fromOptions > 0) {
+    return Math.trunc(fromOptions);
+  }
+  const fromEnv = Number(
+    process.env.PUMP_METADATA_TIMEOUT_MS ??
+      process.env.SOLARD_PUMP_METADATA_TIMEOUT_MS ??
+      "",
+  );
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.trunc(fromEnv);
+  return DEFAULT_UPLOAD_TIMEOUT_MS;
+}
+
+function fetchSignal(timeoutMs: number): AbortSignal {
+  return AbortSignal.timeout(timeoutMs);
+}
+
+/** Pump frontend IPFS endpoint (documented as PUMP_IPFS_ENDPOINT). */
+function pumpFrontendEndpoint(options: UploadPumpMetadataOptions): string {
+  return (
+    clean(options.endpoint) ||
+    clean(process.env.PUMP_IPFS_ENDPOINT) ||
+    clean(process.env.PUMP_METADATA_ENDPOINT) ||
+    "https://pump.fun/api/ipfs"
+  );
+}
+
+/** Pinata pin endpoint; does not reuse a Pump-frontend options.endpoint. */
+function pinataEndpoint(options: UploadPumpMetadataOptions): string {
+  return (
+    clean(options.endpoint) ||
+    clean(process.env.PINATA_API_URL) ||
+    "https://api.pinata.cloud/pinning/pinFileToIPFS"
+  );
+}
+
+function resolveProvider(
+  options: UploadPumpMetadataOptions,
+): MetadataUploaderId {
+  const raw =
+    options.provider ||
+    clean(process.env.PUMP_METADATA_PROVIDER) ||
+    clean(process.env.SLRD_METADATA_UPLOADER) ||
+    clean(process.env.SOWL_METADATA_UPLOADER) ||
+    "pump-frontend";
+  return raw === "pinata" ? "pinata" : "pump-frontend";
 }
 
 function metadataJson(
@@ -92,10 +145,8 @@ export async function uploadPumpMetadataWithPumpFrontend(
   input: PumpCoinMetadataInput,
   options: UploadPumpMetadataOptions = {},
 ): Promise<UploadedPumpCoinMetadata> {
-  const endpoint =
-    clean(options.endpoint) ||
-    clean(process.env.PUMP_METADATA_ENDPOINT) ||
-    "https://pump.fun/api/ipfs";
+  const endpoint = pumpFrontendEndpoint(options);
+  const timeoutMs = uploadTimeoutMs(options);
 
   const form = new FormData();
   form.set("file", fileFromPath(input.imagePath));
@@ -111,7 +162,11 @@ export async function uploadPumpMetadataWithPumpFrontend(
   if (clean(input.video)) form.set("video", clean(input.video)!);
   form.set("showName", input.showName === false ? "false" : "true");
 
-  const response = await fetch(endpoint, { method: "POST", body: form });
+  const response = await fetch(endpoint, {
+    method: "POST",
+    body: form,
+    signal: fetchSignal(timeoutMs),
+  });
   const raw = await response.json().catch(async () => ({
     text: await response.text().catch(() => ""),
   }));
@@ -144,10 +199,8 @@ export async function uploadPumpMetadataWithPinata(
   if (!jwt)
     throw new Error("PINATA_JWT is required for pinata metadata uploads.");
 
-  const endpoint =
-    clean(options.endpoint) ||
-    clean(process.env.PINATA_API_URL) ||
-    "https://api.pinata.cloud/pinning/pinFileToIPFS";
+  const endpoint = pinataEndpoint(options);
+  const timeoutMs = uploadTimeoutMs(options);
 
   const imageForm = new FormData();
   imageForm.set("file", fileFromPath(input.imagePath));
@@ -155,6 +208,7 @@ export async function uploadPumpMetadataWithPinata(
     method: "POST",
     headers: { authorization: `Bearer ${jwt}` },
     body: imageForm,
+    signal: fetchSignal(timeoutMs),
   });
   const imageRaw = await imageResponse.json().catch(async () => ({
     text: await imageResponse.text().catch(() => ""),
@@ -182,6 +236,7 @@ export async function uploadPumpMetadataWithPinata(
     method: "POST",
     headers: { authorization: `Bearer ${jwt}` },
     body: jsonForm,
+    signal: fetchSignal(timeoutMs),
   });
   const jsonRaw = await jsonResponse.json().catch(async () => ({
     text: await jsonResponse.text().catch(() => ""),
@@ -205,11 +260,7 @@ export async function uploadPumpMetadata(
   input: PumpCoinMetadataInput,
   options: UploadPumpMetadataOptions = {},
 ): Promise<UploadedPumpCoinMetadata> {
-  const provider =
-    options.provider ||
-    (process.env.PUMP_METADATA_PROVIDER as MetadataUploaderId | undefined) ||
-    (process.env.SOWL_METADATA_UPLOADER as MetadataUploaderId | undefined) ||
-    "pump-frontend";
+  const provider = resolveProvider(options);
 
   try {
     if (provider === "pinata")
@@ -217,9 +268,16 @@ export async function uploadPumpMetadata(
     return await uploadPumpMetadataWithPumpFrontend(input, options);
   } catch (error) {
     if (options.fallback && options.fallback !== provider) {
+      // Drop provider-specific endpoint so fallback uses its own defaults.
+      const fallbackOptions: UploadPumpMetadataOptions = {
+        ...options,
+        provider: options.fallback,
+        endpoint: undefined,
+        fallback: null,
+      };
       return options.fallback === "pinata"
-        ? uploadPumpMetadataWithPinata(input, options)
-        : uploadPumpMetadataWithPumpFrontend(input, options);
+        ? uploadPumpMetadataWithPinata(input, fallbackOptions)
+        : uploadPumpMetadataWithPumpFrontend(input, fallbackOptions);
     }
     throw error;
   }
