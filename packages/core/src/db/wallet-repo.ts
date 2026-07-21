@@ -25,8 +25,8 @@ function maybeAddress(value: string): string | null {
 
 export type WalletImportOptions = {
   /**
-   * When true, allow replacing a different wallet that already uses the
-   * requested name. Same-address re-imports always update without this flag.
+   * When this is true, it should or will allow replacing a different wallet that already uses the
+   * requested name. Same address re-imports always update without this flag.
    */
   overwrite?: boolean;
 };
@@ -66,8 +66,6 @@ export class WalletRepo {
           }
         }
 
-        // Prefer updating the address row when re-importing the same key.
-        // On forced name takeover, update the name row (may change its address).
         const existing =
           byAddress ??
           (byName && (byName.address === address || options.overwrite)

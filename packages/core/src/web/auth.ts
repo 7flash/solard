@@ -4,13 +4,7 @@ import {
   configuredWebToken,
 } from "../solard/safety.ts";
 
-/**
- * Fail-closed web API authentication.
- *
- * - Requires SOLARD_WEB_TOKEN (or legacy SOLWAL_/SLRD_ aliases) by default.
- * - Set SOLARD_ALLOW_OPEN_WEB=1 only for intentional local open access.
- * - Accepts x-solard-web-token, x-solwal-web-token, or Authorization: Bearer.
- */
+
 export function assertWebAuth(request: Request): void {
   const expected = configuredWebToken();
   if (!expected) {
