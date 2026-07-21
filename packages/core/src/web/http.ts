@@ -4,6 +4,8 @@ import {
   summarizeError,
   summarizeForMeasure,
 } from "../solard/measure.ts";
+export { assertWebAuth } from "./auth.ts";
+import { assertWebAuth } from "./auth.ts";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -89,15 +91,6 @@ export function boolValue(
   const value = body[key];
   if (value == null || value === "") return fallback;
   return value === true || value === "true" || value === "1" || value === 1;
-}
-
-export function assertWebAuth(request: Request): void {
-  const expected = process.env.SOLWAL_WEB_TOKEN?.trim();
-  if (!expected) return;
-  const supplied = request.headers.get("x-solwal-web-token") ?? "";
-  if (supplied !== expected) {
-    throw Object.assign(new Error("Unauthorized"), { status: 401 });
-  }
 }
 
 function requestId(): string {

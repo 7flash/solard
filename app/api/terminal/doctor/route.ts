@@ -1,3 +1,4 @@
+import { assertWebAuth } from "../../../../src/web/http.js";
 import { runLiveDoctor } from "../../../../src/solard/diagnostics/live-doctor.js";
 import {
   createMeasure,
@@ -22,14 +23,25 @@ function json(value: unknown, status = 200): Response {
   );
 }
 
+function errorStatus(error: unknown): number {
+  return typeof (error as { status?: unknown })?.status === "number"
+    ? (error as { status: number }).status
+    : 500;
+}
+
 export async function GET(request: Request): Promise<Response> {
   return await api.measure(
     {
       start: () => "terminal doctor GET",
       end: (result) => summarizeForMeasure(result),
-      catch: (error) => ({ error: summarizeError(error) }),
+      catch: (error) =>
+        json(
+          { ok: false, error: summarizeError(error) },
+          errorStatus(error),
+        ),
     },
     async () => {
+      assertWebAuth(request);
       const url = new URL(request.url);
       const result = await runLiveDoctor({
         source: url.searchParams.get("source") ?? "helius",
