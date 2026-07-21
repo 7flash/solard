@@ -240,8 +240,12 @@ export class Solard implements ComposerHost {
     return this;
   }
 
-  importWallet(privateKey: string, name?: string): WalletRow {
-    return this.wallets.import(privateKey, name);
+  importWallet(
+    privateKey: string,
+    name?: string,
+    options?: import("../db/wallet-repo.ts").WalletImportOptions,
+  ): WalletRow {
+    return this.wallets.import(privateKey, name, options);
   }
   resolveWallet(ref: WalletRef) {
     return this.wallets.resolve(ref);

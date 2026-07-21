@@ -23,10 +23,22 @@ function maybeAddress(value: string): string | null {
   }
 }
 
+export type WalletImportOptions = {
+  /**
+   * When true, allow replacing a different wallet that already uses the
+   * requested name. Same-address re-imports always update without this flag.
+   */
+  overwrite?: boolean;
+};
+
 export class WalletRepo {
   constructor(private readonly db: SolardDatabase) {}
 
-  import(privateKey: string, name?: string): WalletRow {
+  import(
+    privateKey: string,
+    name?: string,
+    options: WalletImportOptions = {},
+  ): WalletRow {
     return measuredSync(
       m,
       "import",
@@ -43,7 +55,25 @@ export class WalletRepo {
           .select()
           .where({ name: resolvedName })
           .first() as WalletRow | undefined;
-        const existing = byAddress ?? byName;
+
+        // Name is held by a different address: refuse unless overwrite.
+        if (byName && byName.address !== address) {
+          if (!options.overwrite) {
+            throw new Error(
+              `Wallet name '${resolvedName}' is already used by ${byName.address}. ` +
+                `Choose a different name, or pass overwrite/force to replace it.`,
+            );
+          }
+        }
+
+        // Prefer updating the address row when re-importing the same key.
+        // On forced name takeover, update the name row (may change its address).
+        const existing =
+          byAddress ??
+          (byName && (byName.address === address || options.overwrite)
+            ? byName
+            : undefined);
+
         if (existing) {
           existing.name = resolvedName;
           existing.address = address;

@@ -32,12 +32,18 @@ export function compactWallet(row: {
 
 export function importWalletAction(
   ctx: SolardActionContext,
-  input: { privateKey: string; name?: string | null },
+  input: {
+    privateKey: string;
+    name?: string | null;
+    overwrite?: boolean | null;
+  },
 ): WalletSummary {
   const privateKey = input.privateKey?.trim();
   if (!privateKey) throw new Error("privateKey is required");
   return compactWallet(
-    ctx.slrd.importWallet(privateKey, input.name?.trim() || undefined),
+    ctx.slrd.importWallet(privateKey, input.name?.trim() || undefined, {
+      overwrite: Boolean(input.overwrite),
+    }),
   );
 }
 
