@@ -905,7 +905,6 @@ export class Solard implements ComposerHost {
     );
   }
 
-  /** Confirm a previously broadcast signature, including after a processor restart. */
   async confirmSignature(
     signature: string,
     sender: SenderId | string = "rpc",
@@ -984,7 +983,7 @@ export class Solard implements ComposerHost {
             quoteMint: token.quoteMint ?? undefined,
           });
         } catch {
-          /* recording must never turn a landed trade into a client failure */
+          
         }
       }
       for (const action of submission.plan.draft.actions.filter(
@@ -1200,7 +1199,6 @@ export class Solard implements ComposerHost {
     const draft = this.transaction(signer)
       .add(ix, { kind: "alt-create", meta: { address: address.toBase58() } })
       .snapshot();
-    // ALT management must never compile against newly-created or partially-extended tables.
     const plan = await this.compile(signer, draft, { useAlts: false });
     const receipt = await this.sendPlan(plan, "rpc", "alt-create");
     if (receipt.status !== "failed") this.alts.register(address.toBase58());
@@ -1221,7 +1219,6 @@ export class Solard implements ComposerHost {
     const draft = this.transaction(signer)
       .add(ix, { kind: "alt-extend", meta: { address, accounts } })
       .snapshot();
-    // Never reference addresses from the lookup table inside the transaction extending it.
     const plan = await this.compile(signer, draft, { useAlts: false });
     return await this.sendPlan(plan, "rpc", "alt-extend");
   }
