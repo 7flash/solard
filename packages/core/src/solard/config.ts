@@ -1,4 +1,8 @@
 import { resolveDbPath } from "../db/database.ts";
+import {
+  liveTradesEnabled,
+  webAuthConfigured,
+} from "./safety.ts";
 
 export type SolardConfigIssue = {
   level: "warn" | "error";
@@ -99,10 +103,7 @@ export function loadSolardRuntimeConfig(): SolardRuntimeConfig {
     });
   }
 
-  const liveTradingEnabled =
-    clean(process.env.SOLARD_ENABLE_LIVE_TRADES) === "1" ||
-    clean(process.env.SOLWAL_ENABLE_LIVE_TRADES) === "1" ||
-    clean(process.env.SLRD_ENABLE_LIVE_TRADES) === "1";
+  const liveTradingEnabled = liveTradesEnabled();
 
   if (liveTradingEnabled && !rpc.url) {
     issues.push({
@@ -121,7 +122,7 @@ export function loadSolardRuntimeConfig(): SolardRuntimeConfig {
     websocketUrl,
     heliusSenderUrl,
     heliusTipAccount,
-    webAuthConfigured: Boolean(clean(process.env.SOLWAL_WEB_TOKEN)),
+    webAuthConfigured: webAuthConfigured(),
     liveTradingEnabled,
     pump: {
       metadataProvider:

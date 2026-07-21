@@ -255,7 +255,8 @@ export function pumpLaunchInputFromRecord(
     ),
     slippageBps: numberValue("slippageBps"),
     live: boolValue("live", false),
-    skipSimulation: boolValue("skipSimulation", true),
+    // Match kernel safety: simulation is the default unless the caller opts out.
+    skipSimulation: boolValue("skipSimulation", false),
     out: stringValue("out"),
   };
 }

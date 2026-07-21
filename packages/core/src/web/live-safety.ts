@@ -1,22 +1,25 @@
 import { PublicKey } from "@solana/web3.js";
 import { HeliusSender, HttpRpcSender, sol } from "../index.ts";
-import { loadSolardRuntimeConfig, resolveRpcUrl } from "../solard/config.ts";
+import { resolveRpcUrl } from "../solard/config.ts";
+import {
+  liveTradeEnvHint,
+  liveTradesEnabled,
+} from "../solard/safety.ts";
 
 export function liveTradingEnabled(): boolean {
-  return loadSolardRuntimeConfig().liveTradingEnabled;
+  return liveTradesEnabled();
 }
 
 export function assertLiveTradeAllowed(context: string): void {
-  const config = loadSolardRuntimeConfig();
-  if (!config.liveTradingEnabled) {
+  if (!liveTradesEnabled()) {
     throw Object.assign(
       new Error(
-        `${context} requested live execution, but live trading is disabled. Set SOLARD_ENABLE_LIVE_TRADES=1 only after reviewing dry-run output.`,
+        `${context} requested live execution, but live trading is disabled. ${liveTradeEnvHint()}`,
       ),
       { status: 403 },
     );
   }
-  if (!config.rpcUrl) {
+  if (!resolveRpcUrl().url) {
     throw Object.assign(
       new Error(
         `${context} requested live execution, but no RPC URL is configured.`,
