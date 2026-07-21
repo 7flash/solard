@@ -4,6 +4,10 @@ import {
   HttpRpcSender,
   type Solard,
 } from "../../index.ts";
+import {
+  liveTradeEnvHint,
+  liveTradesEnabled as liveTradesEnabledFromEnv,
+} from "../safety.ts";
 
 export type SolardActionContext = {
   slrd: Solard;
@@ -27,8 +31,9 @@ export function configuredRpcUrl(): string | undefined {
   );
 }
 
+/** Re-export of the shared live-trading gate (all env aliases). */
 export function liveTradesEnabled(): boolean {
-  return process.env.SOLARD_ENABLE_LIVE_TRADES?.trim() === "1";
+  return liveTradesEnabledFromEnv();
 }
 
 export function assertLiveAllowed(
@@ -37,7 +42,7 @@ export function assertLiveAllowed(
 ): void {
   if (!ctx.liveTradesEnabled) {
     throw new Error(
-      `${action} requested live execution, but SOLARD_ENABLE_LIVE_TRADES=1 is not set. Run a dry-run/simulation first, then opt in explicitly.`,
+      `${action} requested live execution, but live trading is disabled. ${liveTradeEnvHint()}`,
     );
   }
 }

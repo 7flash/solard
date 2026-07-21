@@ -20,7 +20,8 @@ examples
 
 package-lock.json
 bun.lock
-metadata
+# Local upload / generated metadata artifacts (not packages/core/src/metadata)
+/metadata
 .config.toml
 
 *.db
