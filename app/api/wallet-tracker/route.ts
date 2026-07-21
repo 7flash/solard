@@ -16,6 +16,7 @@ import {
   type WalletTransaction,
   type WatchedWallet,
 } from "../../../shared/db.js";
+import { assertWebAuth } from "../../../src/web/http.js";
 
 type Side = "buy" | "sell" | "swap" | "unknown";
 
@@ -71,6 +72,12 @@ function response(value: unknown, status = 200): Response {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function errorStatus(error: unknown, fallback = 400): number {
+  return typeof (error as { status?: unknown })?.status === "number"
+    ? (error as { status: number }).status
+    : fallback;
 }
 
 function integer(value: unknown, fallback: number): number {
@@ -329,6 +336,7 @@ function workerStatus(): Record<string, unknown> | null {
 
 export async function GET(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
     const url = new URL(request.url);
     const wallet = text(url.searchParams.get("wallet")) || null;
     const mint = text(url.searchParams.get("mint")) || null;
@@ -469,12 +477,13 @@ export async function GET(request: Request): Promise<Response> {
       generatedAtMs: Date.now(),
     });
   } catch (error) {
-    return response(errorMessage(error), 400);
+    return response(errorMessage(error), errorStatus(error));
   }
 }
 
 export async function POST(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
     const body = await requestBody(request);
     const address = cleanAddress(body.address);
     const wallet = upsertWatchedWallet({
@@ -486,12 +495,13 @@ export async function POST(request: Request): Promise<Response> {
     });
     return response(wallet, 201);
   } catch (error) {
-    return response(errorMessage(error), 400);
+    return response(errorMessage(error), errorStatus(error));
   }
 }
 
 export async function PATCH(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
     const body = await requestBody(request);
     const action = text(body.action);
     const address = cleanAddress(body.address);
@@ -558,12 +568,13 @@ export async function PATCH(request: Request): Promise<Response> {
     });
     return response(wallet);
   } catch (error) {
-    return response(errorMessage(error), 400);
+    return response(errorMessage(error), errorStatus(error));
   }
 }
 
 export async function DELETE(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
     const url = new URL(request.url);
     let address = text(url.searchParams.get("address"));
     if (!address) {
@@ -581,6 +592,6 @@ export async function DELETE(request: Request): Promise<Response> {
       }),
     );
   } catch (error) {
-    return response(errorMessage(error), 400);
+    return response(errorMessage(error), errorStatus(error));
   }
 }

@@ -10,6 +10,7 @@ import {
   type CopyTradeIntent,
   type CopyTradeProfile,
 } from "../../../shared/db.js";
+import { assertWebAuth } from "../../../src/web/http.js";
 
 type IntentStatus = CopyTradeIntent["status"];
 
@@ -45,6 +46,12 @@ function response(value: unknown, status = 200): Response {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function errorStatus(error: unknown, fallback = 400): number {
+  return typeof (error as { status?: unknown })?.status === "number"
+    ? (error as { status: number }).status
+    : fallback;
 }
 
 function text(value: unknown): string {
@@ -365,6 +372,7 @@ function profileInput(
 
 export async function GET(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
     const url = new URL(request.url);
     const profileKey = text(url.searchParams.get("profileKey")) || null;
     const leaderWallet = text(url.searchParams.get("leaderWallet")) || null;
@@ -420,24 +428,26 @@ export async function GET(request: Request): Promise<Response> {
       generatedAtMs: Date.now(),
     });
   } catch (error) {
-    return response(errorMessage(error), 400);
+    return response(errorMessage(error), errorStatus(error));
   }
 }
 
 export async function POST(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
     const body = await requestBody(request);
     const profileKey = text(body.profileKey);
     const existing = profileKey ? getCopyTradeProfile(profileKey) : null;
     const profile = upsertCopyTradeProfile(profileInput(body, existing));
     return response(profile, existing ? 200 : 201);
   } catch (error) {
-    return response(errorMessage(error), 400);
+    return response(errorMessage(error), errorStatus(error));
   }
 }
 
 export async function PATCH(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
     const body = await requestBody(request);
     const action = text(body.action) || "profile";
 
@@ -479,13 +489,14 @@ export async function PATCH(request: Request): Promise<Response> {
 
     return response(upsertCopyTradeProfile(profileInput(body, existing)));
   } catch (error) {
-    return response(errorMessage(error), 400);
+    return response(errorMessage(error), errorStatus(error));
   }
 }
 
 /** Profiles are retained for audit history; DELETE disables rather than erases. */
 export async function DELETE(request: Request): Promise<Response> {
   try {
+    assertWebAuth(request);
     const url = new URL(request.url);
     let profileKey = text(url.searchParams.get("profileKey"));
     if (!profileKey) {
@@ -502,6 +513,6 @@ export async function DELETE(request: Request): Promise<Response> {
       }),
     );
   } catch (error) {
-    return response(errorMessage(error), 400);
+    return response(errorMessage(error), errorStatus(error));
   }
 }

@@ -47,7 +47,12 @@ export function healthAction(): Record<string, unknown> {
     },
     env: {
       SOLARD_ENABLE_LIVE_TRADES: liveTradesEnabled(),
+      SOLARD_WEB_TOKEN:
+        present("SOLARD_WEB_TOKEN") ||
+        present("SOLWAL_WEB_TOKEN") ||
+        present("SLRD_WEB_TOKEN"),
       SOLWAL_WEB_TOKEN: present("SOLWAL_WEB_TOKEN"),
+      SOLARD_ALLOW_OPEN_WEB: present("SOLARD_ALLOW_OPEN_WEB"),
       HELIUS_API_KEY: present("HELIUS_API_KEY"),
       HELIUS_SENDER_URL: present("HELIUS_SENDER_URL"),
       HELIUS_TIP_ACCOUNT:
