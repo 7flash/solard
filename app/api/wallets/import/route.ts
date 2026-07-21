@@ -1,4 +1,5 @@
 import {
+  boolValue,
   readJson,
   requireString,
   optionalString,
@@ -16,6 +17,8 @@ export async function POST(request: Request): Promise<Response> {
     return importWalletAction(ctx, {
       privateKey: requireString(body, "privateKey"),
       name: optionalString(body, "name"),
+      overwrite:
+        boolValue(body, "overwrite", false) || boolValue(body, "force", false),
     });
   });
 }

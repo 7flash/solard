@@ -382,10 +382,12 @@ async function main() {
         : values[0];
       if (!input)
         throw new Error(
-          "Usage: slrd import <private_key> [name] or cat key.json | slrd import --stdin [name]",
+          "Usage: slrd import <private_key> [name] [--force] or cat key.json | slrd import --stdin [name] [--force]",
         );
       const name = flags.has("stdin") ? values[0] : values[1];
-      const wallet = slrd.importWallet(input, name);
+      const wallet = slrd.importWallet(input, name, {
+        overwrite: flags.has("force") || flags.has("overwrite"),
+      });
       emit(`${OWL} imported @${wallet.name} ${wallet.address}\n`);
       return;
     }
