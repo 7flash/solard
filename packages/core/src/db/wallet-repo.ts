@@ -66,6 +66,24 @@ export class WalletRepo {
           }
         }
 
+        // When re-importing an existing address under a name that belongs to a
+        // different row, free that name first so uniqueness (and name resolution)
+        // stay correct. Prefer keeping the address row; retire the name holder.
+        if (
+          options.overwrite &&
+          byAddress &&
+          byName &&
+          byAddress.id !== byName.id &&
+          byName.address !== address
+        ) {
+          byName.name = `${resolvedName}-replaced-${byName.address.slice(0, 8)}`;
+          byName.isActive = 0;
+          byName.updatedAtMs = Date.now();
+        }
+
+        // Prefer updating the address row when re-importing the same key.
+        // On forced name takeover without a matching address row, update the
+        // name row (may change its address).
         const existing =
           byAddress ??
           (byName && (byName.address === address || options.overwrite)

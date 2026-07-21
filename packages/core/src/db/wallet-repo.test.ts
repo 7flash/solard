@@ -85,4 +85,32 @@ describe("WalletRepo.import name collision", () => {
     expect(replaced.address).toBe(b.publicKey.toBase58());
     expect(repo.list()).toHaveLength(1);
   });
+
+  test("overwrite renames a conflicting name row when re-importing an existing address", () => {
+    const db = openDatabase(dbPath);
+    const repo = new WalletRepo(db);
+    const a = Keypair.generate();
+    const b = Keypair.generate();
+    
+    repo.import(secretB58(a), "bob");
+    repo.import(secretB58(b), "alice");
+
+    const updated = repo.import(secretB58(a), "alice", { overwrite: true });
+    expect(updated.address).toBe(a.publicKey.toBase58());
+    expect(updated.name).toBe("alice");
+
+    const active = repo.list();
+    expect(active).toHaveLength(1);
+    expect(active[0]!.address).toBe(a.publicKey.toBase58());
+    expect(active[0]!.name).toBe("alice");
+
+    const retired = db.wallets
+      .select()
+      .where({ address: b.publicKey.toBase58() })
+      .first() as { name: string; isActive: number } | undefined;
+    expect(retired).toBeTruthy();
+    expect(retired!.isActive).toBe(0);
+    expect(retired!.name).not.toBe("alice");
+    expect(retired!.name.startsWith("alice-replaced-")).toBe(true);
+  });
 });
