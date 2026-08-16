@@ -1,5 +1,5 @@
-export { Solard, SolardGroup } from "./sdk/slrd.ts";
-export type { SolardOptions } from "./sdk/slrd.ts";
+export { Solard, SolardGroup } from "./core/solard.ts";
+export type { SolardOptions } from "./core/solard.ts";
 export { createTraderSolard } from "./presets/trader.ts";
 
 export {
@@ -25,7 +25,7 @@ export type {
 } from "./tx/sender.ts";
 export { HeliusSender } from "./tx/senders/helius-sender.ts";
 export { HttpRpcSender } from "./tx/senders/http-rpc-sender.ts";
-export { JitoSender } from "./tx/senders/jito-sender.ts";
+export { JitoSender, getJitoTipAccounts } from "./tx/senders/jito-sender.ts";
 
 export type {
   TradeVenuePlugin,
@@ -61,9 +61,22 @@ export type {
   PositionRow,
   ExecutionRow,
   PriceSampleRow,
+  BalanceRow,
+  ClaimRow,
+  GroupRow,
+  GroupWalletRow,
+  AgentRow,
+  AltRow,
+  WatchRow,
+  SettingRow,
 } from "./db/schema.ts";
+export { WalletRepo } from "./db/wallet-repo.ts";
+export type { WalletImportOptions, WalletInfo } from "./db/wallet-repo.ts";
+export { TokenRepo } from "./db/token-repo.ts";
 export { PriceRepo } from "./db/price-repo.ts";
+export { openDatabase, closeDatabase, resolveDbPath } from "./db/database.ts";
 export type { PriceWindow } from "./db/price-repo.ts";
+export { shortKey } from "./core/log.ts";
 export {
   sol,
   tokenAmount,
@@ -116,6 +129,7 @@ export {
 export {
   executePumpTokenLaunch,
   installPumpLaunchSenders,
+  loadExplicitBuyerAllocations,
   loadGroupBuyerAllocations,
   normalizeTraderSubmitMode,
   preparePumpTokenLaunch,
@@ -124,12 +138,15 @@ export {
   simulatePumpTokenLaunch,
   usesHeliusSenderForLaunch,
   validateHeliusTip,
+  validateJitoTip,
   waitForAccountExists,
   waitForSignatureAtLeastProcessed,
 } from "./launches/pump/token-launch.ts";
 export type {
   BuyerAllocation,
   BuyerLane,
+  ExplicitBuyerAmount,
+  ExplicitBuyerPlanRow,
   LaunchReporter,
   LaunchSenderPolicy,
   PumpLaunchEnvironment,
@@ -143,26 +160,6 @@ export type {
   TraderSubmitMode,
 } from "./launches/pump/token-launch.ts";
 
-export {
-  bigintFlag,
-  enabled,
-  first,
-  formatCliError,
-  json,
-  numberFlag,
-  parseArgs,
-  preparePumpTokenLaunchFromFlags,
-  pumpLaunchEnvironmentFromFlags,
-  pumpTokenMetadataInput,
-  required,
-  runPumpTokenLaunchFromArgs,
-} from "./launches/pump/token-launch-cli.ts";
-export type {
-  Flags,
-  PumpTokenLaunchCliOptions,
-  PumpTokenLaunchCliResult,
-  PumpTokenMetadataInput,
-} from "./launches/pump/token-launch-cli.ts";
 export { runPumpSpamBuyers } from "./launches/pump/spam-buy.ts";
 export type {
   PumpSpamBuyerInput,
@@ -170,5 +167,20 @@ export type {
   PumpSpamBuyRunResult,
   PumpSpamBuySettings,
 } from "./launches/pump/spam-buy.ts";
-export { runPumpSpamBuyFromArgs } from "./launches/pump/spam-buy-cli.ts";
-export type { PumpSpamBuyCliOptions } from "./launches/pump/spam-buy-cli.ts";
+export {
+  abortArmedBuyerEndpoints,
+  assertArmedBuyerEndpointsReady,
+  parseArmedBuyerEndpoint,
+  releaseArmedBuyerEndpoints,
+} from "./launches/pump/armed-buyers.ts";
+export type { ArmedBuyerEndpoint } from "./launches/pump/armed-buyers.ts";
+export { PUMP_PROGRAM_ID, TOKEN_2022_ID } from "./venues/pump/constants.ts";
+export { bondingCurvePda } from "./venues/pump/pda.ts";
+
+export {
+  cleanVanitySuffix,
+  generateMintKeypairWithSuffix,
+  loadMintKeypairFile,
+  saveMintKeypairFile,
+  withPregeneratedMintKeypair,
+} from "./launches/pump/vanity-mint.ts";

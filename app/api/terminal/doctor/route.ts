@@ -35,10 +35,7 @@ export async function GET(request: Request): Promise<Response> {
       start: () => "terminal doctor GET",
       end: (result) => summarizeForMeasure(result),
       catch: (error) =>
-        json(
-          { ok: false, error: summarizeError(error) },
-          errorStatus(error),
-        ),
+        json({ ok: false, error: summarizeError(error) }, errorStatus(error)),
     },
     async () => {
       assertWebAuth(request);

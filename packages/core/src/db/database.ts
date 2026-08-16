@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { Database } from "sqlite-zod-orm";
 import { measure } from "../core/log.ts";
 import { ensureSolardDatabaseRuntimeObjects } from "./maintenance.ts";
@@ -17,28 +18,36 @@ import {
   SettingSchema,
   TokenSchema,
   WalletSchema,
-  TokenWatchGroupSchema,
-  TokenWatchGroupTokenSchema,
   WatchSchema,
-  PumpTokenEventSchema,
-  PumpSwapSchema,
-  PumpHolderCurrentSchema,
-  PumpBalanceDeltaSchema,
-  PumpPriceAggregateSchema,
   type SolardDatabase,
 } from "./schema.ts";
 
 const m = measure("db");
-const open = new Map<string, SolardDatabase>();
+type OpenDatabaseEntry = { db: SolardDatabase; refs: number };
+const open = new Map<string, OpenDatabaseEntry>();
 
+/**
+ * Resolve the one database path shared by @solard/core, @solard/sdk and @solard/cli.
+ *
+ * An explicit path always wins, followed by the environment overrides. Without
+ * either, use a stable per-user location instead of process.cwd(), so invoking
+ * the globally linked CLI from different directories still opens the same DB.
+ */
 export function resolveDbPath(input?: string): string {
-  return resolve(input ?? process.env.SLRD_DB_PATH ?? "./slrd.db");
+  const configured =
+    input ?? process.env.SLRD_DB_PATH ?? process.env.SOLARD_DB_PATH;
+  if (configured?.trim()) return resolve(configured);
+  return join(homedir(), ".solard", "solard.sqlite");
 }
 
 export function openDatabase(input?: string): SolardDatabase {
   const path = resolveDbPath(input);
   const existing = open.get(path);
-  if (existing) return existing;
+  if (existing) {
+    existing.refs += 1;
+    return existing.db;
+  }
+
   mkdirSync(dirname(path), { recursive: true });
   const db = new Database(
     path,
@@ -57,13 +66,6 @@ export function openDatabase(input?: string): SolardDatabase {
       alts: AltSchema,
       watches: WatchSchema,
       settings: SettingSchema,
-      tokenWatchGroups: TokenWatchGroupSchema,
-      tokenWatchGroupTokens: TokenWatchGroupTokenSchema,
-      pumpTokenEvents: PumpTokenEventSchema,
-      pumpSwaps: PumpSwapSchema,
-      pumpHoldersCurrent: PumpHolderCurrentSchema,
-      pumpBalanceDeltas: PumpBalanceDeltaSchema,
-      pumpPriceAggregates: PumpPriceAggregateSchema,
     },
     {
       timestamps: false,
@@ -81,13 +83,6 @@ export function openDatabase(input?: string): SolardDatabase {
         alts: [["address"]],
         watches: [["kind", "address"]],
         settings: [["key"]],
-        tokenWatchGroups: [["groupId"], ["name"]],
-        tokenWatchGroupTokens: [["groupId", "mint"]],
-        pumpTokenEvents: [["mint"]],
-        pumpSwaps: [["signature"]],
-        pumpHoldersCurrent: [["mint", "owner"]],
-        pumpBalanceDeltas: [["signature", "owner", "mint"]],
-        pumpPriceAggregates: [["mint", "intervalSeconds", "bucketStartMs"]],
       },
       indexes: {
         wallets: ["name", "address", "isActive"],
@@ -98,26 +93,22 @@ export function openDatabase(input?: string): SolardDatabase {
         claims: ["walletAddress", "mint", "status"],
         groupWallets: ["groupName", "walletAddress"],
         watches: ["kind", "address", "isActive"],
-        tokenWatchGroups: ["groupId", "name"],
-        tokenWatchGroupTokens: ["groupId", "mint", "updatedAtMs"],
-        pumpTokenEvents: ["mint", "updatedAtMs", "marketCapSol", "symbol"],
-        pumpSwaps: ["mint", "createdAtMs", "trader"],
-        pumpHoldersCurrent: ["mint", "pctSupply", "balanceUi", "lastUpdatedMs"],
-        pumpBalanceDeltas: ["mint", "owner", "createdAtMs"],
-        pumpPriceAggregates: ["mint", "intervalSeconds", "bucketStartMs"],
       },
     },
   ) as SolardDatabase;
+
   ensureSolardDatabaseRuntimeObjects(db);
-  open.set(path, db);
-  m.measureSync(`open ${path}`, () => `ready`);
+  open.set(path, { db, refs: 1 });
+  m.measureSync(`open ${path}`, () => "ready");
   return db;
 }
 
 export function closeDatabase(input?: string): void {
   const path = resolveDbPath(input);
-  const db = open.get(path);
-  if (!db) return;
-  db.close();
+  const entry = open.get(path);
+  if (!entry) return;
+  entry.refs -= 1;
+  if (entry.refs > 0) return;
+  entry.db.close();
   open.delete(path);
 }

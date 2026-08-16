@@ -10,5 +10,5 @@ export const workerCommands: Record<string, (args: string[]) => void> = {
   },
   help: () => {
     console.log("Available commands: stats, signals, help");
-  }
+  },
 };

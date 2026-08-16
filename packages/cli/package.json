@@ -1,7 +1,7 @@
 {
   "name": "@solard/cli",
-  "version": "0.1.8",
-  "description": "Multi-wallet Solana trading CLI UI and commands.",
+  "version": "0.2.6",
+  "description": "Command-line interface for the Solard SDK.",
   "type": "module",
   "main": "./src/index.ts",
   "bin": {
@@ -13,8 +13,16 @@
     "src",
     "README.md"
   ],
-  "dependencies": {
-    "@solard/core": "workspace:*"
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.1.0"
   },
-  "license": "MIT"
+  "dependencies": {
+    "@solard/sdk": "0.2.6",
+    "bs58": "^6.0.0",
+    "@solana/web3.js": "^1.98.4"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ../../tsconfig.json"
+  }
 }

@@ -7,22 +7,22 @@
   "scripts": {
     "build": "bun run --filter '*' build",
     "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun run --filter '*' test",
     "cli": "bun run packages/cli/bin/solard.ts",
-
-    "pub:bump": "bun run version:core && bun run version:cli && bun run version:solard-cli",
-    "version:core": "cd packages/core && bun pm version patch --no-git-tag-version",
-    "version:cli": "cd packages/cli && bun pm version patch --no-git-tag-version",
-    "version:solard-cli": "cd packages/solard-cli && bun pm version patch --no-git-tag-version",
-
+    "pub:bump": "bun run scripts/release-version.mjs patch",
+    "pub:verify": "bun run scripts/verify-release.mjs",
     "pub:lock": "bun install --lockfile-only",
-
     "pub:core": "cd packages/core && bun publish --access public --no-git-checks",
+    "pub:sdk": "cd packages/sdk && bun publish --access public --no-git-checks",
     "pub:cli": "cd packages/cli && bun publish --access public --no-git-checks",
     "pub:solard-cli": "cd packages/solard-cli && bun publish --access public --no-git-checks",
-
-    "pub": "bun run pub:bump && bun run pub:lock && bun run pub:core && bun run pub:cli && bun run pub:solard-cli"
+    "pub:publish": "bun run pub:core && bun run pub:sdk && bun run pub:cli && bun run pub:solard-cli",
+    "pub:current": "bun run pub:lock && bun run pub:verify && bun run pub:publish",
+    "pub": "bun run pub:bump && bun run pub:lock && bun run pub:verify && bun run pub:publish",
+    "pub:checked": "bun run typecheck && bun run test && bun run pub:bump && bun run pub:lock && bun run pub:verify && bun run pub:publish"
   },
   "devDependencies": {
+    "@openai/codex-sdk": "^0.147.0",
     "@types/bun": "latest",
     "@types/node": "^22.15.0",
     "typescript": "^5.8.3"

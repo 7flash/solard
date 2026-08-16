@@ -39,15 +39,15 @@ import {
   tokenLog,
 } from "../core/log-result.ts";
 import { measured } from "../core/measured.ts";
-import { openDatabase, closeDatabase } from "../db/database.ts";
+import { openDatabase, closeDatabase, resolveDbPath } from "../db/database.ts";
 import { AgentRepo } from "../db/agent-repo.ts";
 import { AltRepo } from "../db/alt-repo.ts";
 import { ExecutionRepo } from "../db/execution-repo.ts";
 import { PriceRepo, type PriceWindow } from "../db/price-repo.ts";
 import { GroupRepo } from "../db/group-repo.ts";
-import type { SolardDatabase, TokenRow, WalletRow } from "../db/schema.ts";
+import type { SolardDatabase, TokenRow } from "../db/schema.ts";
 import { TokenRepo } from "../db/token-repo.ts";
-import { WalletRepo } from "../db/wallet-repo.ts";
+import { WalletRepo, type WalletInfo } from "../db/wallet-repo.ts";
 import { PositionStore } from "../runtime/positions.ts";
 import { SolardAgent } from "../runtime/agent.ts";
 import { SolardWatcher } from "../runtime/watcher.ts";
@@ -158,12 +158,13 @@ export class Solard implements ComposerHost {
   readonly blockhash = new BlockhashCache();
   private readonly chain: SolardConnection;
   private readonly agentRepo: AgentRepo;
-  private readonly dbPath?: string;
+  private readonly dbPath: string;
+  private closed = false;
 
   constructor(options: SolardOptions = {}) {
     trace("construct: opening database");
-    this.dbPath = options.dbPath;
-    this.db = openDatabase(options.dbPath);
+    this.dbPath = resolveDbPath(options.dbPath);
+    this.db = openDatabase(this.dbPath);
     trace("construct: database ready");
     this.wallets = new WalletRepo(this.db);
     this.tokens = new TokenRepo(this.db);
@@ -240,12 +241,18 @@ export class Solard implements ComposerHost {
     return this;
   }
 
+  createWallet(name?: string): WalletInfo {
+    return this.wallets.create(name);
+  }
   importWallet(
     privateKey: string,
     name?: string,
     options?: import("../db/wallet-repo.ts").WalletImportOptions,
-  ): WalletRow {
+  ): WalletInfo {
     return this.wallets.import(privateKey, name, options);
+  }
+  listWallets(): WalletInfo[] {
+    return this.wallets.list();
   }
   resolveWallet(ref: WalletRef) {
     return this.wallets.resolve(ref);
@@ -1221,6 +1228,8 @@ export class Solard implements ComposerHost {
     return await this.sendPlan(plan, "rpc", "alt-extend");
   }
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     closeDatabase(this.dbPath);
   }
 }

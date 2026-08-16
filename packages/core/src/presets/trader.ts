@@ -1,4 +1,4 @@
-import { Solard, type SolardOptions } from "../sdk/slrd.ts";
+import { Solard, type SolardOptions } from "../core/solard.ts";
 import { installPump } from "../venues/pump/index.ts";
 import { trace } from "../core/trace.ts";
 

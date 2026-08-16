@@ -1,7 +1,7 @@
 {
   "name": "@solard/core",
-  "version": "0.1.10",
-  "description": "Multi-wallet Solana SDK for traders and AI agents.",
+  "version": "0.2.6",
+  "description": "Core Solana wallet, transaction and trading engine for Solard.",
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
@@ -16,6 +16,9 @@
     "LICENSE"
   ],
   "license": "MIT",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
   "scripts": {
     "test": "bun test src",
     "typecheck": "tsc --noEmit -p tsconfig.json"
@@ -23,12 +26,8 @@
   "dependencies": {
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
-    "bgrun": "3.13.1",
     "bs58": "^6.0.0",
     "measure-fn": "5",
-    "pinata": "^2.5.6",
-    "sqlite-zod-orm": "^3.33.0",
-    "tradjs": "4.2.0",
-    "tweetnacl": "^1.0.3"
+    "sqlite-zod-orm": "^3.33.0"
   }
 }

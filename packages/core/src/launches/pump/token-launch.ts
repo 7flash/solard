@@ -8,7 +8,7 @@ import {
 
 import { rawAmount, SOL_ASSET } from "../../core/amounts.ts";
 import type { WalletRef } from "../../core/refs.ts";
-import type { Solard } from "../../sdk/slrd.ts";
+import type { Solard } from "../../core/solard.ts";
 import { HeliusSender } from "../../tx/senders/helius-sender.ts";
 import { HttpRpcSender } from "../../tx/senders/http-rpc-sender.ts";
 import {

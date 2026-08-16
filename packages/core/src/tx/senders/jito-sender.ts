@@ -170,10 +170,6 @@ function bundleMethodUrl(endpoint: string, method: string): string {
   return `${base.replace(/\/$/, "")}/api/v1/${method}`;
 }
 
-function globalBundleMethodUrl(method: string): string {
-  return `https://mainnet.block-engine.jito.wtf/api/v1/${method}`;
-}
-
 function sameOrigin(left: string, right: string): boolean {
   try {
     return new URL(left).origin === new URL(right).origin;
@@ -244,6 +240,27 @@ async function postJsonRpc<T>(
   }
 
   return data?.result ?? null;
+}
+
+export async function getJitoTipAccounts(
+  endpoint = process.env.JITO_BLOCK_ENGINE_URL ??
+    "https://mainnet.block-engine.jito.wtf",
+): Promise<string[]> {
+  const result = await postJsonRpc<string[]>(
+    bundleMethodUrl(endpoint, "getTipAccounts"),
+    "getTipAccounts",
+    [],
+  );
+  const accounts = (result ?? []).filter(
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0,
+  );
+  if (accounts.length !== 8) {
+    throw new Error(
+      `Jito getTipAccounts returned ${accounts.length} accounts; expected 8.`,
+    );
+  }
+  return accounts;
 }
 
 function expiredBlockhashFailure(detail: string): boolean {
@@ -374,20 +391,7 @@ export class JitoSender implements SolardBundleSender {
       return this.tipAccountsCache.accounts;
     }
 
-    const result = await postJsonRpc<string[]>(
-      globalBundleMethodUrl("getTipAccounts"),
-      "getTipAccounts",
-      [],
-    );
-    const accounts = (result ?? []).filter(
-      (value): value is string =>
-        typeof value === "string" && value.trim().length > 0,
-    );
-    if (accounts.length !== 8) {
-      throw new Error(
-        `Jito getTipAccounts returned ${accounts.length} accounts; expected 8.`,
-      );
-    }
+    const accounts = await getJitoTipAccounts(this.endpoint);
 
     this.tipAccountsCache = {
       expiresAt: now + 5 * 60_000,

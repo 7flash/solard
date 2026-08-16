@@ -1,18 +1,24 @@
 {
-    "compilerOptions": {
-        "jsx": "react-jsx",
-        "jsxImportSource": "tradjs/client",
-        "baseUrl": ".",
-        "paths": {
-            "tradjs": ["./node_modules/tradjs/src/web.ts"],
-            "tradjs/*": ["./node_modules/tradjs/src/*"]
-        },
-        "target": "ESNext",
-        "module": "ESNext",
-        "moduleResolution": "bundler",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "strict": true,
-        "noEmit": true,
-        "skipLibCheck": true
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "@solard/core": ["packages/core/src/index.ts"],
+      "@solard/sdk": ["packages/sdk/src/index.ts"]
     },
-    "include": ["app/**/*"]
+    "types": ["bun", "node"]
+  },
+  "include": [
+    "packages/core/src/**/*.ts",
+    "packages/core/src/**/*.d.ts",
+    "packages/sdk/src/**/*.ts",
+    "packages/cli/src/**/*.ts",
+    "packages/cli/bin/**/*.ts"
+  ]
 }

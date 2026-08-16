@@ -23,6 +23,22 @@ function maybeAddress(value: string): string | null {
   }
 }
 
+export type WalletInfo = Pick<
+  WalletRow,
+  "id" | "name" | "address" | "isActive" | "createdAtMs" | "updatedAtMs"
+>;
+
+function publicWallet(row: WalletRow): WalletInfo {
+  return {
+    id: row.id,
+    name: row.name,
+    address: row.address,
+    isActive: row.isActive,
+    createdAtMs: row.createdAtMs,
+    updatedAtMs: row.updatedAtMs,
+  };
+}
+
 export type WalletImportOptions = {
   /**
    * When this is true, it should or will allow replacing a different wallet that already uses the
@@ -34,74 +50,103 @@ export type WalletImportOptions = {
 export class WalletRepo {
   constructor(private readonly db: SolardDatabase) {}
 
+  /** Generate a new Solana keypair and persist it encrypted in the canonical Solard DB. */
+  create(name?: string): WalletInfo {
+    return publicWallet(
+      measuredSync(
+        m,
+        "create",
+        () => this.persistKeypair(Keypair.generate(), name),
+        walletLog,
+      ),
+    );
+  }
+
   import(
     privateKey: string,
     name?: string,
     options: WalletImportOptions = {},
-  ): WalletRow {
-    return measuredSync(
-      m,
-      "import",
-      () => {
-        const keypair = parseKeypair(privateKey);
-        const address = keypair.publicKey.toBase58();
-        const encrypted = encryptKeypair(keypair);
-        const resolvedName = clean(name ?? address.slice(0, 8));
-        const byAddress = this.db.wallets
-          .select()
-          .where({ address })
-          .first() as WalletRow | undefined;
-        const byName = this.db.wallets
-          .select()
-          .where({ name: resolvedName })
-          .first() as WalletRow | undefined;
-
-        // Name is held by a different address: refuse unless overwrite.
-        if (byName && byName.address !== address) {
-          if (!options.overwrite) {
-            throw new Error(
-              `Wallet name '${resolvedName}' is already used by ${byName.address}. ` +
-                `Choose a different name, or pass overwrite/force to replace it.`,
-            );
-          }
-        }
-
-        const existing =
-          byAddress ??
-          (byName && (byName.address === address || options.overwrite)
-            ? byName
-            : undefined);
-
-        if (existing) {
-          existing.name = resolvedName;
-          existing.address = address;
-          existing.encryptedSecretKey = encrypted.encryptedSecretKey;
-          existing.nonce = encrypted.nonce;
-          existing.authTag = encrypted.authTag;
-          existing.isActive = 1;
-          existing.updatedAtMs = Date.now();
-          return existing;
-        }
-        const now = Date.now();
-        return this.db.wallets.insert({
-          name: resolvedName,
-          address,
-          ...encrypted,
-          isActive: 1,
-          createdAtMs: now,
-          updatedAtMs: now,
-        }) as WalletRow;
-      },
-      walletLog,
+  ): WalletInfo {
+    return publicWallet(
+      measuredSync(
+        m,
+        "import",
+        () => this.persistKeypair(parseKeypair(privateKey), name, options),
+        walletLog,
+      ),
     );
   }
 
-  list(): WalletRow[] {
-    return this.db.wallets
+  private persistKeypair(
+    keypair: Keypair,
+    name?: string,
+    options: WalletImportOptions = {},
+  ): WalletRow {
+    const address = keypair.publicKey.toBase58();
+    const encrypted = encryptKeypair(keypair);
+    const resolvedName = clean(name ?? address.slice(0, 8));
+    const byAddress = this.db.wallets.select().where({ address }).first() as
+      WalletRow | undefined;
+    const byName = this.db.wallets
       .select()
-      .where({ isActive: 1 })
-      .orderBy("id", "asc")
-      .all() as WalletRow[];
+      .where({ name: resolvedName })
+      .first() as WalletRow | undefined;
+
+    // Name is held by a different address: refuse unless overwrite.
+    if (byName && byName.address !== address) {
+      if (!options.overwrite) {
+        throw new Error(
+          `Wallet name '${resolvedName}' is already used by ${byName.address}. ` +
+            `Choose a different name, or pass overwrite/force to replace it.`,
+        );
+      }
+    }
+
+    const existing =
+      byAddress ??
+      (byName && (byName.address === address || options.overwrite)
+        ? byName
+        : undefined);
+
+    if (existing) {
+      this.db.wallets
+        .update({
+          name: resolvedName,
+          address,
+          encryptedSecretKey: encrypted.encryptedSecretKey,
+          nonce: encrypted.nonce,
+          authTag: encrypted.authTag,
+          isActive: 1,
+          updatedAtMs: Date.now(),
+        })
+        .where({ id: existing.id })
+        .exec();
+      const updated = this.db.wallets
+        .select()
+        .where({ id: existing.id })
+        .first() as WalletRow | undefined;
+      if (!updated) throw new Error(`Wallet update failed for ${resolvedName}`);
+      return updated;
+    }
+    const now = Date.now();
+    return this.db.wallets.insert({
+      name: resolvedName,
+      address,
+      ...encrypted,
+      isActive: 1,
+      createdAtMs: now,
+      updatedAtMs: now,
+    }) as WalletRow;
+  }
+
+  list(): WalletInfo[] {
+    return (
+      this.db.wallets
+        .select()
+        .where({ isActive: 1 })
+        .orderBy("id", "asc")
+        .all() as WalletRow[]
+    ).map(publicWallet);
   }
 
   resolve(ref: WalletRef): {

@@ -17,7 +17,9 @@ export interface SolardBundleSender extends SolardSender {
     transactions: VersionedTransaction[];
   }): Promise<BundleSubmission>;
 }
-export function isBundleSender(sender: SolardSender): sender is SolardBundleSender {
+export function isBundleSender(
+  sender: SolardSender,
+): sender is SolardBundleSender {
   return (
     "sendBundle" in sender &&
     typeof (sender as SolardBundleSender).sendBundle === "function"

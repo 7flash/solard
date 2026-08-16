@@ -1,9 +1,4 @@
 {
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@solard/core/shared/*": ["./src/shared/*"],
-      "@solard/core/*": ["./src/*"]
-    }
-  }
+  "extends": "../../tsconfig.json",
+  "include": ["src/**/*.ts", "src/**/*.d.ts"]
 }

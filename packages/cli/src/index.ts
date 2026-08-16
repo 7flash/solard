@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
-import type { TokenRow } from "@solard/core/db/schema.ts";
-import { emit } from "@solard/core/core/ui.ts";
-import { listScripts, runScript } from "@solard/core/runner/run-script.ts";
+import { listScripts, runScript, type TokenRow } from "@solard/sdk";
+
+function emit(value: string): void {
+  process.stdout.write(value);
+}
 
 const OWL = "🦉";
 type Flags = Map<string, string>;
@@ -116,22 +118,25 @@ function help(): string {
   return `${OWL} slrd — multi-wallet Solana CLI + SDK for traders and AI agents
 
 Wallets and tokens
+  slrd wallets create [name]                Generate and persist an encrypted Solana wallet
+  slrd wallet create [name]                 Alias for wallets create
   slrd import <private_key> [name]
   cat key.json | slrd import --stdin [name]
-  slrd wallets [--token <token>] [--addresses-only]    Show SOL and registered-token balances
+  slrd wallets [--tokens | --token <token>] [--addresses-only]    Show wallet SOL balances; token balances are opt-in
   slrd token <token_ca> [name] [--metadata-json <json>]
   slrd token set <token|ca> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>]
   slrd token refresh <token|ca>
   slrd tokens
 
 Metadata and launching
-  solwal launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--alias <name>] [--live] [--skip-simulation]
+  slrd launch pump --creator <wallet> --alias <name> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--live] [--skip-simulation]
                     [--deployment-sender helius-rpc|helius-fast] [--helius-tip-sol 0.01]
+  slrd launch pump --creator <wallet> --alias <name> --buyer-group <group> --submit-mode jito-bundle --jito-block-engine-url <url>
+                    (--uri <metadata_uri> | --image <path> --description <text>) [--creator-buy-sol <amount>] [--live --skip-simulation]
   slrd metadata upload --image <local_path> --name <name> --symbol <symbol> --description <text> [--provider pump-frontend|pinata]
                        [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
   slrd deploy pump --wallet <wallet> --name <name> --symbol <symbol> (--uri <metadata_uri> | --image <local_path> --description <text>) [--alias <name>] [--live]
                    [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
-  slrd run launch-pump-token --creator <wallet> --metadata <token.json> [--deploy-only] [--live]
 
 Prices
   slrd quote buy <token|ca> --sol <amount>           Inspect buy quote without submitting
@@ -143,7 +148,6 @@ Trading
   slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
-  bun run scripts/spam-pump-buyers.ts --mint <future-mint> (--wallet <wallet> | --group <name>) --amount-mode range-bps --min-bps <n> --max-bps <n> [--live]
   slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--simulate-only]
   slrd claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
@@ -152,7 +156,6 @@ Scripts (strategies stay outside the kernel)
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
-  slrd run claim-trade-send --claim <token> --buy <token> --wallet <wallet> --recipient <address>
 
 Groups and agents
   slrd group create <name> [description]
@@ -172,6 +175,7 @@ Watching
   slrd watch list
 
 Transactions and ALTs
+  slrd transfer <recipient> --wallet <wallet> --sol <amount> [--sender rpc|helius|jito] [--simulate-only]
   slrd history
   slrd jito tip-accounts [--endpoint <block-engine-url>]
   slrd alt add <address> [label]
@@ -180,8 +184,8 @@ Transactions and ALTs
   slrd alt extend <address> --wallet <wallet> <account...>
 
 Environment
-  SLRD_DB_PATH      local shared database; default ./slrd.db
-  SLRD_MASTER_KEY   required to import/decrypt stored wallets
+  SLRD_DB_PATH      shared SDK/CLI database; default ~/.solard/solard.sqlite (SOLARD_DB_PATH alias supported)
+  SLRD_MASTER_KEY   required to create/import/decrypt stored wallets
   RPC_ENDPOINT      required only for chain operations
   HELIUS_SENDER_URL regional/global Helius Sender endpoint used by launch scripts
   HELIUS_RPC_URL    RPC endpoint used for ordinary Helius-RPC buyer lane
@@ -212,8 +216,11 @@ async function main() {
     return;
   }
   if (command === "vanity") {
-    const { generateMintKeypairWithSuffix, saveMintKeypairFile, cleanVanitySuffix } =
-      await import("@solard/core/launches/pump/vanity-mint.ts");
+    const {
+      generateMintKeypairWithSuffix,
+      saveMintKeypairFile,
+      cleanVanitySuffix,
+    } = await import("@solard/sdk");
     const suffix = cleanVanitySuffix(need(flags, "suffix"));
     const out = need(flags, "out");
     const count = int(flags, "count", 1)!;
@@ -226,10 +233,14 @@ async function main() {
         timeoutMs: int(flags, "timeout-ms", 0)!,
         reportEvery: int(flags, "report-every", 1_000_000)!,
         onProgress: (p) =>
-          emit(`${OWL} grinding ${p.suffix}: ${p.attempts} attempts, ${p.ratePerSecond}/s\n`),
+          emit(
+            `${OWL} grinding ${p.suffix}: ${p.attempts} attempts, ${p.ratePerSecond}/s\n`,
+          ),
       });
       const path = count === 1 ? out : out.replace(/(\.json)?$/, `-${i + 1}$1`);
-      const saved = saveMintKeypairFile(path, found.mint, { force: flags.has("force") });
+      const saved = saveMintKeypairFile(path, found.mint, {
+        force: flags.has("force"),
+      });
       results.push({
         address: found.mint.publicKey.toBase58(),
         keypairPath: saved,
@@ -242,21 +253,15 @@ async function main() {
     return;
   }
   if (command === "spam-buy" || command === "buy-spam") {
-    const { runPumpSpamBuyFromArgs } =
-      await import("@solard/core/launches/pump/spam-buy-cli.ts");
+    const { runPumpSpamBuyFromArgs } = await import("./pump/spam-buy-cli.ts");
     await runPumpSpamBuyFromArgs(rest);
     return;
   }
   if (command === "buy" && flags.has("spam")) {
-    const { runPumpSpamBuyFromArgs } =
-      await import("@solard/core/launches/pump/spam-buy-cli.ts");
+    const { runPumpSpamBuyFromArgs } = await import("./pump/spam-buy-cli.ts");
     await runPumpSpamBuyFromArgs(rest);
     return;
   }
-  // const { maybeRunWorkerCliCommand } =
-  //   await import("./worker-commands.js");
-  // if (await maybeRunWorkerCliCommand({ values: [command, ...values], flags }))
-  //   return;
   if (command === "scripts") {
     emit(json(await listScripts()) + "\n");
     return;
@@ -273,7 +278,7 @@ async function main() {
     (values[0] === "pump" || values[0] === "pump-token")
   ) {
     const { runPumpTokenLaunchFromArgs } =
-      await import("@solard/core/launches/pump/token-launch-cli.ts");
+      await import("./pump/token-launch-cli.ts");
     await runPumpTokenLaunchFromArgs(rest.slice(1), {
       defaultSubmitMode: "after-deploy-processed",
       defaultDeploymentPriorityMicroLamports: 500_000,
@@ -290,29 +295,13 @@ async function main() {
       process.env.JITO_BLOCK_ENGINE_URL ??
       "https://mainnet.block-engine.jito.wtf"
     ).replace(/\/$/, "");
-    const response = await fetch(`${endpoint}/api/v1/bundles`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: Date.now(),
-        method: "getTipAccounts",
-        params: [],
-      }),
-    });
-    const payload = (await response.json()) as {
-      result?: string[];
-      error?: unknown;
-    };
-    if (!response.ok || payload.error || !Array.isArray(payload.result))
-      throw new Error(
-        `Jito getTipAccounts failed: ${JSON.stringify(payload.error ?? response.status)}`,
-      );
-    emit(json({ endpoint, tipAccounts: payload.result }) + "\n");
+    const { getJitoTipAccounts } = await import("@solard/sdk");
+    const tipAccounts = await getJitoTipAccounts(endpoint);
+    emit(json({ endpoint, tipAccounts }) + "\n");
     return;
   }
   if (command === "metadata" && values[0] === "upload") {
-    const { uploadPumpMetadata } = await import("@solard/core/metadata/pump-metadata.ts");
+    const { uploadPumpMetadata } = await import("@solard/sdk");
     const uploaded = await uploadPumpMetadata(
       {
         imagePath: need(flags, "image"),
@@ -338,12 +327,20 @@ async function main() {
   }
   const [{ sol, formatRaw }, { shortKey }, { createTraderSolard }] =
     await Promise.all([
-      import("@solard/core/core/amounts.ts"),
-      import("@solard/core/core/log.ts"),
-      import("@solard/core/presets/trader.ts"),
+      import("@solard/sdk"),
+      import("@solard/sdk"),
+      import("@solard/sdk"),
     ]);
   const slrd = createTraderSolard();
   try {
+    if (
+      (command === "wallet" || command === "wallets") &&
+      values[0] === "create"
+    ) {
+      const wallet = slrd.createWallet(values[1]);
+      emit(`${OWL} created @${wallet.name} ${wallet.address}\n`);
+      return;
+    }
     if (command === "export") {
       const ref = values[0];
       if (!ref)
@@ -398,9 +395,15 @@ async function main() {
           emit(`@${wallet.name}\t${wallet.address}\n`);
         return;
       }
+
+      // Wallet overview is intentionally SOL-only by default. Token scans can
+      // be expensive when many tokens are registered, so they are opt-in.
       const selectedTokens = flags.get("token")
         ? [slrd.resolveToken(flags.get("token")!)]
-        : slrd.tokens.list();
+        : flags.has("tokens")
+          ? slrd.tokens.list()
+          : [];
+
       for (const wallet of wallets) {
         const balances = await slrd.walletBalances(wallet, selectedTokens);
         const holdings = balances.tokenBalances
@@ -421,6 +424,45 @@ async function main() {
       }
       return;
     }
+
+    if (command === "transfer" || command === "send-sol") {
+      const recipient = values[0] === "sol" ? values[1] : values[0];
+      if (!recipient) {
+        throw new Error(
+          "Usage: slrd transfer <recipient> --wallet <wallet> --sol <amount> [--sender rpc|helius|jito] [--simulate-only]",
+        );
+      }
+
+      const wallet = need(flags, "wallet");
+      const amount = need(flags, "sol");
+      const via = flags.get("sender") ?? "rpc";
+      const composer = slrd.tx(wallet).transferSol(recipient, sol(amount));
+
+      if (flags.has("simulate-only")) {
+        const plan = await composer.build();
+        const result = await slrd.simulatePlan(plan);
+        emit(
+          json({
+            mode: "simulation",
+            wallet,
+            recipient,
+            sol: amount,
+            result,
+          }) + "\n",
+        );
+        return;
+      }
+
+      const receipt = await composer.send({
+        via,
+        kind: "transfer-sol",
+        skipSimulation: flags.has("skip-simulation"),
+        skipPreflight:
+          flags.has("skip-preflight") || flags.has("skip-simulation"),
+      });
+      emit(json(receipt) + "\n");
+      return;
+    }
     if (command === "deploy") {
       const launchpad = values[0] ?? "pump";
       const wallet = need(flags, "wallet");
@@ -433,8 +475,7 @@ async function main() {
           throw new Error(
             "Provide --uri <metadata_uri> or --image <local_path> --description <text>",
           );
-        const { uploadPumpMetadata } =
-          await import("@solard/core/metadata/pump-metadata.ts");
+        const { uploadPumpMetadata } = await import("@solard/sdk");
         uploadedMetadata = await uploadPumpMetadata(
           {
             imagePath: need(flags, "image"),
@@ -930,4 +971,4 @@ main().catch((error) => {
   process.exitCode = 1;
 });
 
-export { formatCliError } from "@solard/core";
+export { formatCliError } from "./pump/token-launch-cli.ts";

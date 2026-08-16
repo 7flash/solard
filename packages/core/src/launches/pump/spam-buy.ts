@@ -3,7 +3,7 @@ import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { rawAmount, SOL_ASSET } from "../../core/amounts.ts";
 import type { WalletRef } from "../../core/refs.ts";
 import type { TokenRow } from "../../db/schema.ts";
-import type { Solard } from "../../sdk/slrd.ts";
+import type { Solard } from "../../core/solard.ts";
 import type {
   PlannedTransaction,
   SenderId,
