@@ -122,7 +122,7 @@ Wallets and tokens
   slrd wallet create [name]                 Alias for wallets create
   slrd import <private_key> [name]
   cat key.json | slrd import --stdin [name]
-  slrd wallets [--tokens | --token <token>] [--addresses-only]    Show wallet SOL balances; token balances are opt-in
+  slrd wallets [--group <name>] [--tokens | --token <token>] [--addresses-only]    Show wallet SOL balances; token balances are opt-in
   slrd token <token_ca> [name] [--metadata-json <json>]
   slrd token set <token|ca> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>]
   slrd token refresh <token|ca>
@@ -161,6 +161,7 @@ Groups and agents
   slrd group create <name> [description]
   slrd group add <group> <wallet> [weight_bps]
   slrd group add-many <group> <wallet1,wallet2,...>
+  slrd group add-prefix <group> <wallet-name-prefix>
   slrd group show <group>
   slrd group list
   slrd buy <token|ca> --group <name> --sol <amount> --sender jito      Submit group buys as Jito bundles, five tx per bundle
@@ -389,7 +390,21 @@ async function main() {
       return;
     }
     if (command === "wallets") {
-      const wallets = slrd.wallets.list();
+      let wallets = slrd.wallets.list();
+
+      // Filter the local wallet set before making any RPC balance requests.
+      // This keeps large project-specific groups from rate-limiting a normal
+      // wallet overview.
+      const group = flags.get("group");
+      if (group && group !== "true") {
+        const exists = slrd.groups.list().some((row) => row.name === group);
+        if (!exists) throw new Error(`Unknown group: ${group}`);
+        const addresses = new Set(
+          slrd.groups.wallets(group).map((row) => row.walletAddress),
+        );
+        wallets = wallets.filter((wallet) => addresses.has(wallet.address));
+      }
+
       if (flags.has("addresses-only")) {
         for (const wallet of wallets)
           emit(`@${wallet.name}\t${wallet.address}\n`);
@@ -873,6 +888,40 @@ async function main() {
       emit(json({ group, added: members.length, members }) + "\n");
       return;
     }
+    if (command === "group" && values[0] === "add-prefix") {
+      const group = values[1];
+      const prefix = values[2];
+      if (!group || !prefix)
+        throw new Error(
+          "Usage: slrd group add-prefix <group> <wallet-name-prefix>",
+        );
+
+      slrd.groups.create(group);
+      const normalizedPrefix = prefix.toLowerCase();
+      const matches = slrd.wallets
+        .list()
+        .filter((wallet) =>
+          wallet.name.toLowerCase().startsWith(normalizedPrefix),
+        );
+
+      const members = matches.map((wallet) =>
+        slrd.groups.addWallet(group, wallet.address, 10000),
+      );
+
+      emit(
+        json({
+          group,
+          prefix,
+          added: members.length,
+          wallets: matches.map((wallet) => ({
+            name: wallet.name,
+            address: wallet.address,
+          })),
+        }) + "\n",
+      );
+      return;
+    }
+
     if (command === "group" && values[0] === "show") {
       const group = values[1];
       if (!group) throw new Error("Usage: slrd group show <group>");
