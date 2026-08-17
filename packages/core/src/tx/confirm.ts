@@ -25,11 +25,35 @@ export async function confirmSignature(
       status?.confirmationStatus === "confirmed" ||
       status?.confirmationStatus === "finalized"
     ) {
+      // Signature status does not contain the charged fee. Fetch the confirmed
+      // transaction metadata so receipts can report the authoritative on-chain
+      // fee rather than an estimate.
+      let meta:
+        | { fee: number; computeUnitsConsumed?: number | bigint | null }
+        | null
+        | undefined;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const transaction = await connection.getTransaction(signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        });
+        meta = transaction?.meta;
+        if (meta) break;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+
+      const computeUnitsConsumed =
+        meta?.computeUnitsConsumed == null
+          ? undefined
+          : Number(meta.computeUnitsConsumed);
+
       return {
         signature,
         slot: status.slot ?? null,
         sender,
         status: "confirmed",
+        feeLamports: meta?.fee,
+        computeUnitsConsumed,
       };
     }
     await new Promise((resolve) => setTimeout(resolve, 300));

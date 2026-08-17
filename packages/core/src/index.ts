@@ -75,7 +75,17 @@ export type { WalletImportOptions, WalletInfo } from "./db/wallet-repo.ts";
 export { TokenRepo } from "./db/token-repo.ts";
 export { PriceRepo } from "./db/price-repo.ts";
 export { openDatabase, closeDatabase, resolveDbPath } from "./db/database.ts";
+export { analyzeRegistryTransfers } from "./chain/registry-transfers.ts";
+export type {
+  RegistryWalletRef,
+  RegistryTransferEvent,
+  RegistryTransferPair,
+  RegistryTransferAnalysis,
+  RegistryTransferAnalysisOptions,
+} from "./chain/registry-transfers.ts";
 export type { PriceWindow } from "./db/price-repo.ts";
+export { listOwnedTokenAccounts } from "./chain/state.ts";
+export type { OwnedTokenAccount } from "./chain/state.ts";
 export { shortKey } from "./core/log.ts";
 export {
   sol,
@@ -95,6 +105,21 @@ export {
   PumpLaunchSource,
   PumpTokenLaunchpad,
 } from "./venues/pump/index.ts";
+export {
+  planPumpCleanup,
+  simulatePumpCleanup,
+  executePumpCleanup,
+} from "./venues/pump/cleanup.ts";
+export type {
+  PumpCleanupAction,
+  PumpCleanupCandidate,
+  PumpCleanupSkipped,
+  PumpCleanupPlan,
+  PumpCleanupPlanOptions,
+  PumpCleanupExecutionOptions,
+  PumpCleanupResult,
+  PumpCleanupSimulation,
+} from "./venues/pump/cleanup.ts";
 export * as pump from "./venues/pump/pump-instructions.ts";
 export * as pumpswap from "./venues/pump/pumpswap-instructions.ts";
 
@@ -119,6 +144,7 @@ export { defineSolardConfig } from "./runner/config.ts";
 export type { SolardConfig, SolardScriptEntry } from "./runner/config.ts";
 export { resolveScript, listScripts, runScript } from "./runner/run-script.ts";
 export {
+  closeTokenAccountIx,
   transferSolIx,
   transferTokenIxs,
   wrappedSolAta,

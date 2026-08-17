@@ -1,5 +1,10 @@
 #!/usr/bin/env bun
-import { listScripts, runScript, type TokenRow } from "@solard/sdk";
+import {
+  analyzeRegistryTransfers,
+  listScripts,
+  runScript,
+  type TokenRow,
+} from "@solard/sdk";
 
 function emit(value: string): void {
   process.stdout.write(value);
@@ -122,7 +127,10 @@ Wallets and tokens
   slrd wallet create [name]                 Alias for wallets create
   slrd import <private_key> [name]
   cat key.json | slrd import --stdin [name]
+  slrd import --file <keys.txt> [--name-prefix <prefix>] [--group <group>] [--force]
+                    Import one private key per non-empty line; '#' comment lines are ignored
   slrd wallets [--group <name>] [--tokens | --token <token>] [--addresses-only]    Show wallet SOL balances; token balances are opt-in
+  slrd analyze transfers [--limit 50] [--group <name>] [--exclude-group <name>] [--events]    Find direct transfers between stored wallets
   slrd token <token_ca> [name] [--metadata-json <json>]
   slrd token set <token|ca> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>]
   slrd token refresh <token|ca>
@@ -149,6 +157,7 @@ Trading
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
   slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
+  slrd cleanup pump --exclude-group <group> --keep <mint[,mint...]> [--exclude-prefix <prefix>] [--simulate | --live] [--slippage-bps 1500] [--sender rpc]
   slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--simulate-only]
   slrd claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
 
@@ -176,7 +185,7 @@ Watching
   slrd watch list
 
 Transactions and ALTs
-  slrd transfer <recipient> --wallet <wallet> --sol <amount> [--sender rpc|helius|jito] [--simulate-only]
+  slrd transfer <recipient> --wallet <wallet> --sol <amount> [--priority-micro-lamports <n>] [--cu-limit <n>] [--sender rpc|helius|jito] [--simulate-only]
   slrd history
   slrd jito tip-accounts [--endpoint <block-engine-url>]
   slrd alt add <address> [label]
@@ -375,12 +384,93 @@ async function main() {
       return;
     }
     if (command === "import") {
+      const file = flags.get("file");
+      if (file && file !== "true") {
+        const { readFileSync } = await import("node:fs");
+        const { resolve } = await import("node:path");
+        const path = resolve(file);
+        const prefix = flags.get("name-prefix");
+        const group = flags.get("group");
+        const overwrite = flags.has("force") || flags.has("overwrite");
+
+        const lines = readFileSync(path, "utf8").split(/\r?\n/);
+        const entries = lines
+          .map((raw, index) => ({ raw: raw.trim(), line: index + 1 }))
+          .filter(({ raw }) => raw.length > 0 && !raw.startsWith("#"));
+
+        if (entries.length === 0)
+          throw new Error(`No private keys found in ${path}`);
+
+        if (group && group !== "true") {
+          slrd.groups.create(group);
+        }
+
+        const imported: Array<{
+          line: number;
+          name: string;
+          address: string;
+        }> = [];
+        const failed: Array<{
+          line: number;
+          error: string;
+        }> = [];
+
+        for (let index = 0; index < entries.length; index++) {
+          const entry = entries[index]!;
+          const name =
+            prefix && prefix !== "true"
+              ? `${prefix}-${String(index + 1).padStart(3, "0")}`
+              : undefined;
+          try {
+            const wallet = slrd.importWallet(entry.raw, name, { overwrite });
+            if (group && group !== "true") {
+              slrd.groups.addWallet(group, wallet.address, 10000);
+            }
+            imported.push({
+              line: entry.line,
+              name: wallet.name,
+              address: wallet.address,
+            });
+            emit(
+              `${OWL} imported line ${entry.line} @${wallet.name} ${wallet.address}${group && group !== "true" ? ` group=${group}` : ""}\n`,
+            );
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            failed.push({ line: entry.line, error: message });
+            process.stderr.write(
+              `${OWL} import failed line ${entry.line}: ${message}\n`,
+            );
+          }
+        }
+
+        emit(
+          json({
+            file: path,
+            attempted: entries.length,
+            imported: imported.length,
+            failed: failed.length,
+            group: group && group !== "true" ? group : null,
+            wallets: imported,
+            errors: failed,
+          }) + "\n",
+        );
+
+        if (failed.length > 0) process.exitCode = 2;
+        return;
+      }
+
+      if (flags.has("file"))
+        throw new Error(
+          "Usage: slrd import --file <keys.txt> [--name-prefix <prefix>] [--group <group>] [--force]",
+        );
+
       const input = flags.has("stdin")
         ? (await new Response(Bun.stdin.stream()).text()).trim()
         : values[0];
       if (!input)
         throw new Error(
-          "Usage: slrd import <private_key> [name] [--force] or cat key.json | slrd import --stdin [name] [--force]",
+          "Usage: slrd import <private_key> [name] [--force], cat key.json | slrd import --stdin [name] [--force], or slrd import --file <keys.txt>",
         );
       const name = flags.has("stdin") ? values[0] : values[1];
       const wallet = slrd.importWallet(input, name, {
@@ -392,9 +482,7 @@ async function main() {
     if (command === "wallets") {
       let wallets = slrd.wallets.list();
 
-      // Filter the local wallet set before making any RPC balance requests.
-      // This keeps large project-specific groups from rate-limiting a normal
-      // wallet overview.
+      // Filter locally before any RPC calls.
       const group = flags.get("group");
       if (group && group !== "true") {
         const exists = slrd.groups.list().some((row) => row.name === group);
@@ -411,13 +499,52 @@ async function main() {
         return;
       }
 
-      // Wallet overview is intentionally SOL-only by default. Token scans can
-      // be expensive when many tokens are registered, so they are opt-in.
+      // Batch native SOL account lookups (100 per RPC request) and sort by
+      // balance descending. This avoids one getBalance RPC call per wallet and
+      // dramatically reduces 429s for large wallet sets.
+      const connection = slrd.connection();
+      const solByAddress = new Map<string, bigint>();
+      for (let offset = 0; offset < wallets.length; offset += 100) {
+        const batch = wallets.slice(offset, offset + 100);
+        const keys = batch.map(
+          (wallet) => slrd.resolveWallet(wallet.address).address,
+        );
+        const infos = await connection.getMultipleAccountsInfo(
+          keys,
+          "confirmed",
+        );
+        for (let index = 0; index < batch.length; index++) {
+          solByAddress.set(
+            batch[index]!.address,
+            BigInt(infos[index]?.lamports ?? 0),
+          );
+        }
+      }
+
+      wallets.sort((a, b) => {
+        const aBalance = solByAddress.get(a.address) ?? 0n;
+        const bBalance = solByAddress.get(b.address) ?? 0n;
+        if (aBalance === bBalance) return a.name.localeCompare(b.name);
+        return aBalance > bBalance ? -1 : 1;
+      });
+
+      // Wallet overview is SOL-only by default. Token scans remain opt-in.
       const selectedTokens = flags.get("token")
         ? [slrd.resolveToken(flags.get("token")!)]
         : flags.has("tokens")
           ? slrd.tokens.list()
           : [];
+
+      // Fast path: native SOL only. We already have every balance from the
+      // batched RPC request, so do not call walletBalances() again.
+      if (selectedTokens.length === 0) {
+        for (const wallet of wallets) {
+          emit(
+            `@${wallet.name}\t${wallet.address}\tSOL=${formatRaw(solByAddress.get(wallet.address) ?? 0n, 9)}\n`,
+          );
+        }
+        return;
+      }
 
       for (const wallet of wallets) {
         const balances = await slrd.walletBalances(wallet, selectedTokens);
@@ -434,9 +561,80 @@ async function main() {
           )
           .join("  ");
         emit(
-          `@${wallet.name}\t${wallet.address}\tSOL=${formatRaw(balances.solLamports, 9)}${holdings ? `  ${holdings}` : ""}\n`,
+          `@${wallet.name}\t${wallet.address}\tSOL=${formatRaw(solByAddress.get(wallet.address) ?? balances.solLamports, 9)}${holdings ? `  ${holdings}` : ""}\n`,
         );
       }
+      return;
+    }
+
+    if (command === "analyze" && values[0] === "transfers") {
+      const allWallets = slrd.wallets.list();
+      let scanWallets = [...allWallets];
+
+      const group = flags.get("group");
+      if (group && group !== "true") {
+        const exists = slrd.groups.list().some((row) => row.name === group);
+        if (!exists) throw new Error(`Unknown group: ${group}`);
+        const members = new Set(
+          slrd.groups.wallets(group).map((row) => row.walletAddress),
+        );
+        scanWallets = scanWallets.filter((wallet) =>
+          members.has(wallet.address),
+        );
+      }
+
+      const excludeGroup = flags.get("exclude-group");
+      if (excludeGroup && excludeGroup !== "true") {
+        const exists = slrd.groups
+          .list()
+          .some((row) => row.name === excludeGroup);
+        if (!exists) throw new Error(`Unknown group: ${excludeGroup}`);
+        const excluded = new Set(
+          slrd.groups.wallets(excludeGroup).map((row) => row.walletAddress),
+        );
+        scanWallets = scanWallets.filter(
+          (wallet) => !excluded.has(wallet.address),
+        );
+      }
+
+      const limit = int(flags, "limit", 50) ?? 50;
+      const delayMs = int(flags, "delay-ms", 100) ?? 100;
+      const result = await analyzeRegistryTransfers(
+        slrd.connection(),
+        allWallets.map((wallet) => ({
+          name: wallet.name,
+          address: wallet.address,
+        })),
+        {
+          scanAddresses: scanWallets.map((wallet) => wallet.address),
+          signaturesPerWallet: limit,
+          delayMs,
+        },
+      );
+
+      if (flags.has("events")) {
+        emit(json(result) + "\n");
+        return;
+      }
+
+      if (result.pairs.length === 0) {
+        emit(
+          `${OWL} no direct registry-to-registry transfers found in the scanned history\n`,
+        );
+      } else {
+        for (const pair of result.pairs) {
+          const sol = formatRaw(BigInt(pair.solLamports), 9);
+          const tokenNote = pair.tokenTransferCount
+            ? ` tokens=${pair.tokenTransferCount} mints=${pair.tokenMints.length}`
+            : "";
+          emit(
+            `@${pair.sourceName} -> @${pair.destinationName}\ttx=${pair.transactionCount}\tSOL=${sol}${tokenNote}\n`,
+          );
+        }
+      }
+      emit(
+        `${OWL} scanned=${result.scannedWallets} signatures=${result.uniqueSignatures} parsed=${result.parsedTransactions} direct-events=${result.eventCount}\n`,
+      );
       return;
     }
 
@@ -451,7 +649,28 @@ async function main() {
       const wallet = need(flags, "wallet");
       const amount = need(flags, "sol");
       const via = flags.get("sender") ?? "rpc";
-      const composer = slrd.tx(wallet).transferSol(recipient, sol(amount));
+
+      // Plain SOL transfers should be cheap by default. The global transaction
+      // assembler has a trading-oriented priority default, so override it here.
+      // Users can opt into a priority fee explicitly when the network is busy.
+      const cuLimit = Number(flags.get("cu-limit") ?? "10000");
+      const priorityMicroLamports = Number(
+        flags.get("priority-micro-lamports") ?? "0",
+      );
+      if (!Number.isInteger(cuLimit) || cuLimit <= 0)
+        throw new Error("--cu-limit must be a positive integer");
+      if (!Number.isInteger(priorityMicroLamports) || priorityMicroLamports < 0)
+        throw new Error(
+          "--priority-micro-lamports must be a non-negative integer",
+        );
+
+      const composer = slrd
+        .tx(wallet)
+        .transferSol(recipient, sol(amount))
+        .priorityFee({
+          cuLimit,
+          microLamports: priorityMicroLamports,
+        });
 
       if (flags.has("simulate-only")) {
         const plan = await composer.build();
@@ -475,7 +694,15 @@ async function main() {
         skipPreflight:
           flags.has("skip-preflight") || flags.has("skip-simulation"),
       });
-      emit(json(receipt) + "\n");
+      emit(
+        json({
+          ...receipt,
+          feeSol:
+            receipt.feeLamports == null
+              ? null
+              : formatRaw(BigInt(receipt.feeLamports), 9),
+        }) + "\n",
+      );
       return;
     }
     if (command === "deploy") {
@@ -685,6 +912,89 @@ async function main() {
       );
       return;
     }
+    if (command === "cleanup" && values[0] === "pump") {
+      const excludeGroup = need(flags, "exclude-group");
+      const protectedMints = csv(flags.get("keep") ?? flags.get("keep-mint"));
+      if (!protectedMints.length)
+        throw new Error(
+          "Cleanup requires --keep <mint[,mint...]> so protected tokens are explicit.",
+        );
+      if (flags.has("live") && flags.has("simulate"))
+        throw new Error("Use either --simulate or --live, not both.");
+
+      const { planPumpCleanup, simulatePumpCleanup, executePumpCleanup } =
+        await import("@solard/sdk");
+      const delayMs = int(flags, "delay-ms", 150) ?? 150;
+      const plan = await planPumpCleanup(slrd, {
+        excludeGroup,
+        excludePrefixes: csv(flags.get("exclude-prefix")),
+        protectedMints,
+        delayMs,
+      });
+
+      const summary = {
+        mode: flags.has("live")
+          ? "live"
+          : flags.has("simulate")
+            ? "simulation"
+            : "plan",
+        excludeGroup: plan.excludeGroup,
+        excludePrefixes: plan.excludePrefixes,
+        protectedMints: plan.protectedMints,
+        excludedWallets: plan.excludedWallets,
+        scannedWallets: plan.scannedWallets,
+        candidateCount: plan.candidates.length,
+        sellCloseCount: plan.candidates.filter(
+          (item) => item.action === "sell-close",
+        ).length,
+        closeOnlyCount: plan.candidates.filter(
+          (item) => item.action === "close-only",
+        ).length,
+        refundableRentLamports: plan.refundableRentLamports,
+        refundableRentSol: formatRaw(plan.refundableRentLamports, 9),
+        candidates: plan.candidates,
+        skipped: plan.skipped,
+      };
+
+      const executionOptions = {
+        via: flags.get("sender") ?? "rpc",
+        slippageBps: int(flags, "slippage-bps", 1500) ?? 1500,
+        cuLimit: int(flags, "cu-limit", 600000) ?? 600000,
+        priorityMicroLamports: int(flags, "priority-micro-lamports", 0) ?? 0,
+        fundingWallet: flags.get("funding-wallet"),
+        skipSimulation: flags.has("skip-simulation"),
+        skipPreflight:
+          flags.has("skip-preflight") || flags.has("skip-simulation"),
+        delayMs,
+      };
+
+      if (flags.has("simulate")) {
+        const simulation = await simulatePumpCleanup(
+          slrd,
+          plan,
+          executionOptions,
+        );
+        emit(json({ ...summary, results: simulation.results }) + "\n");
+        return;
+      }
+
+      if (flags.has("live")) {
+        const result = await executePumpCleanup(slrd, plan, executionOptions);
+        emit(
+          json({
+            ...summary,
+            receipts: result.receipts,
+            feeLamports: result.feeLamports,
+            feeSol: formatRaw(BigInt(result.feeLamports), 9),
+          }) + "\n",
+        );
+        return;
+      }
+
+      emit(json(summary) + "\n");
+      return;
+    }
+
     if (command === "buy") {
       const token = values[0];
       if (!token)

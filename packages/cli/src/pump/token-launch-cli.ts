@@ -1140,7 +1140,7 @@ export async function preparePumpTokenLaunchFromFlags(args: {
           10_000n;
     if (
       spendLamports <= 0n ||
-      finalTrader.balanceLamports <= spendLamports + reserveLamports
+      finalTrader.balanceLamports < spendLamports + reserveLamports
     ) {
       throw new Error(
         `Final Jito buyer ${finalTrader.address} cannot cover buy, reserve, and tip: balance=${finalTrader.balanceLamports} spend=${spendLamports} reserve=${finalTrader.reserveLamports} jitoTip=${jitoTipLamports}`,

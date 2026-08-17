@@ -8,7 +8,12 @@ import type { TokenRef, WalletRef } from "../core/refs.ts";
 import type { TokenRow } from "../db/schema.ts";
 import type { ClaimPlan } from "../claims/claim-source.ts";
 import type { TradeVenuePlugin, VenueMarket } from "../venues/venue-plugin.ts";
-import { transferSolIx, transferTokenIxs, unwrapWsolIxs } from "./spl.ts";
+import {
+  closeTokenAccountIx,
+  transferSolIx,
+  transferTokenIxs,
+  unwrapWsolIxs,
+} from "./spl.ts";
 import {
   TransactionBuilder,
   type TransactionHost,
@@ -195,6 +200,43 @@ export class TransactionComposer extends TransactionBuilder {
           minOutputRaw: quote.minimumOutputRaw.toString(),
         },
       });
+    });
+  }
+
+  closeTokenAccountAddress(
+    account: string | PublicKey,
+    tokenProgram: string | PublicKey,
+    options: { destination?: string | PublicKey } = {},
+  ): this {
+    return this.addOperation(async (_ctx, tx) => {
+      const accountKey =
+        typeof account === "string" ? new PublicKey(account) : account;
+      const programKey =
+        typeof tokenProgram === "string"
+          ? new PublicKey(tokenProgram)
+          : tokenProgram;
+      const destination =
+        typeof options.destination === "string"
+          ? new PublicKey(options.destination)
+          : (options.destination ?? tx.payer());
+      tx.add(
+        closeTokenAccountIx({
+          account: accountKey,
+          owner: tx.payer(),
+          destination,
+          tokenProgram: programKey,
+        }),
+        {
+          kind: "close-token-account",
+          recipient: destination,
+          meta: {
+            tokenAccount: accountKey.toBase58(),
+            tokenProgram: programKey.toBase58(),
+          },
+        },
+      );
+      tx.track({ address: tx.payer(), kind: "sol" });
+      tx.track({ address: accountKey, kind: "token" });
     });
   }
 

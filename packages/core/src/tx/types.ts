@@ -74,6 +74,10 @@ export type SendReceipt = {
   slot: number | null;
   sender: string;
   status: "broadcast" | "confirmed" | "failed";
+  /** Actual fee charged by the cluster, populated after transaction metadata is available. */
+  feeLamports?: number;
+  /** Actual compute units consumed, populated when returned by transaction metadata. */
+  computeUnitsConsumed?: number;
   error?: string;
 };
 export type SubmittedPlan = {

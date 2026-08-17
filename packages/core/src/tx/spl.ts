@@ -80,6 +80,21 @@ export function transferTokenIxs(args: {
   };
 }
 
+export function closeTokenAccountIx(args: {
+  account: PublicKey;
+  owner: PublicKey;
+  destination?: PublicKey;
+  tokenProgram?: PublicKey;
+}): TransactionInstruction {
+  return createCloseAccountInstruction(
+    args.account,
+    args.destination ?? args.owner,
+    args.owner,
+    [],
+    args.tokenProgram ?? TOKEN_PROGRAM_ID,
+  );
+}
+
 export function wrappedSolAta(owner: PublicKey): PublicKey {
   return getAssociatedTokenAddressSync(
     NATIVE_MINT,

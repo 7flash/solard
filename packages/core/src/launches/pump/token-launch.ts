@@ -584,7 +584,7 @@ export async function loadExplicitBuyerAllocations(args: {
       throw new Error(
         `Buy plan row ${index + 1} wallet ${address} produced zero buy amount`,
       );
-    if (balanceLamports <= spendLamports + reserveLamports) {
+    if (balanceLamports < spendLamports + reserveLamports) {
       throw new Error(
         `Buy plan row ${index + 1} wallet ${address} has insufficient SOL: balance=${balanceLamports} spend=${spendLamports} reserve=${reserveLamports}`,
       );
@@ -2610,34 +2610,48 @@ export async function executePumpTokenLaunch(args: {
 
     while (true) {
       const generation = completedGenerations + 1;
-      const baselineSimulation = await validateJitoBundleGeneration({
-        slrd: args.slrd,
-        prepared: args.prepared,
-        plans,
-        reporter: args.reporter,
-        generation,
-        pass: "baseline",
-      });
-
-      const optimized = await optimizeJitoBundleForAuction({
-        slrd: args.slrd,
-        prepared: args.prepared,
-        plans,
-        simulation: baselineSimulation,
-        reporter: args.reporter,
-        generation,
-      });
-      plans = optimized.plans;
-
-      if (optimized.changed) {
-        await validateJitoBundleGeneration({
+      if (args.skipSimulation) {
+        assertJitoPumpBundleLayout({
+          prepared: args.prepared,
+          plans,
+        });
+        args.reporter?.("pump jito atomic bundle simulation skipped", {
+          generation,
+          transactions: plans.length,
+          reason: "--skip-simulation",
+          staticLayoutValidated: true,
+          cuOptimizationSkipped: true,
+        });
+      } else {
+        const baselineSimulation = await validateJitoBundleGeneration({
           slrd: args.slrd,
           prepared: args.prepared,
           plans,
           reporter: args.reporter,
           generation,
-          pass: "optimized",
+          pass: "baseline",
         });
+
+        const optimized = await optimizeJitoBundleForAuction({
+          slrd: args.slrd,
+          prepared: args.prepared,
+          plans,
+          simulation: baselineSimulation,
+          reporter: args.reporter,
+          generation,
+        });
+        plans = optimized.plans;
+
+        if (optimized.changed) {
+          await validateJitoBundleGeneration({
+            slrd: args.slrd,
+            prepared: args.prepared,
+            plans,
+            reporter: args.reporter,
+            generation,
+            pass: "optimized",
+          });
+        }
       }
 
       try {

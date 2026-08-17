@@ -1,4 +1,4 @@
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, type AccountMeta } from "@solana/web3.js";
 import { sameAsset, type RawAmount } from "../../core/amounts.ts";
 import type {
   BuiltInstructions,
@@ -8,7 +8,12 @@ import type {
   VenueContext,
   VenueMarket,
 } from "../venue-plugin.ts";
-import { ammGlobalConfigPda, pumpSwapPoolPda } from "./pda.ts";
+import {
+  ammGlobalConfigPda,
+  ammUserVolumeAccumulatorPda,
+  ata,
+  pumpSwapPoolPda,
+} from "./pda.ts";
 import {
   buildPumpSwapBuyExactQuoteIn,
   buildPumpSwapSell,
@@ -22,11 +27,42 @@ import { resolvePumpSwapProtocolFeeRecipient, tokenMeta } from "./routing.ts";
 import { defaultTokenProgram, fetchCurve, fetchPool } from "./state.ts";
 import {
   configuredTotalFeeBps,
-  extraAccounts,
   poolQuoteAsset,
   tokenAccountAmount,
   type PumpSwapMarketMeta,
 } from "./common.ts";
+
+function cashbackAccounts(args: {
+  enabled: boolean;
+  user: PublicKey;
+  quoteMint: PublicKey;
+  quoteTokenProgram: PublicKey;
+}): { buy?: AccountMeta[]; sell?: AccountMeta[] } {
+  if (!args.enabled) return {};
+  const accumulator = ammUserVolumeAccumulatorPda(args.user);
+  const accumulatorQuoteAta = ata(
+    args.quoteMint,
+    accumulator,
+    args.quoteTokenProgram,
+    true,
+  );
+  const accumulatorAtaMeta: AccountMeta = {
+    pubkey: accumulatorQuoteAta,
+    isWritable: true,
+    isSigner: false,
+  };
+  const accumulatorMeta: AccountMeta = {
+    pubkey: accumulator,
+    isWritable: true,
+    isSigner: false,
+  };
+  return {
+    // PumpSwap buy expects only the accumulator quote ATA as remaining[0].
+    buy: [accumulatorAtaMeta],
+    // PumpSwap sell expects accumulator quote ATA then accumulator PDA.
+    sell: [accumulatorAtaMeta, accumulatorMeta],
+  };
+}
 
 /** Canonical PumpSwap AMM only. It is a separate swappable venue plugin from the launch curve. */
 export class PumpSwapVenue implements TradeVenuePlugin {
@@ -63,6 +99,12 @@ export class PumpSwapVenue implements TradeVenuePlugin {
       ),
     ]);
     const meta = tokenMeta(ctx.token);
+    const cashback = cashbackAccounts({
+      enabled: state.isCashbackCoin,
+      user: ctx.user,
+      quoteMint: quoteAsset.mint,
+      quoteTokenProgram: quoteAsset.tokenProgram,
+    });
     const protocolFeeRecipient = await resolvePumpSwapProtocolFeeRecipient(
       ctx.connection,
       mint,
@@ -84,8 +126,8 @@ export class PumpSwapVenue implements TradeVenuePlugin {
         protocolFeeRecipient,
         coinCreator: state.coinCreator,
         reserves: { virtualBase: baseReserve, virtualQuote: quoteReserve },
-        extraBuyAccounts: extraAccounts(meta.ammCashbackBuyAccounts),
-        extraSellAccounts: extraAccounts(meta.ammCashbackSellAccounts),
+        extraBuyAccounts: cashback.buy,
+        extraSellAccounts: cashback.sell,
       } satisfies PumpSwapMarketMeta,
     };
   }

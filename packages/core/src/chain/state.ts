@@ -55,6 +55,75 @@ export async function readTokenAmount(
   }
 }
 
+export type OwnedTokenAccount = {
+  address: string;
+  mint: string;
+  owner: string;
+  amountRaw: bigint;
+  decimals: number;
+  tokenProgram: string;
+  lamports: bigint;
+  isAssociated: boolean;
+  state: string | null;
+  closeAuthority: string | null;
+};
+
+/** Lists actual token accounts owned by a wallet across Token and Token-2022. */
+export async function listOwnedTokenAccounts(
+  connection: Connection,
+  owner: PublicKey,
+): Promise<OwnedTokenAccount[]> {
+  const rows: OwnedTokenAccount[] = [];
+  for (const tokenProgram of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    const response = await connection.getParsedTokenAccountsByOwner(
+      owner,
+      { programId: tokenProgram },
+      "confirmed",
+    );
+    for (const item of response.value) {
+      const data = item.account.data;
+      if (!(typeof data === "object" && data !== null && "parsed" in data))
+        continue;
+      const parsed = (data as { parsed?: { info?: Record<string, unknown> } })
+        .parsed;
+      const info = parsed?.info;
+      if (!info) continue;
+      const mintValue = info.mint;
+      const ownerValue = info.owner;
+      const tokenAmount = info.tokenAmount as
+        { amount?: unknown; decimals?: unknown } | undefined;
+      if (
+        typeof mintValue !== "string" ||
+        typeof ownerValue !== "string" ||
+        typeof tokenAmount?.amount !== "string" ||
+        typeof tokenAmount?.decimals !== "number"
+      )
+        continue;
+      const mint = new PublicKey(mintValue);
+      const associated = getAssociatedTokenAddressSync(
+        mint,
+        owner,
+        false,
+        tokenProgram,
+      );
+      rows.push({
+        address: item.pubkey.toBase58(),
+        mint: mint.toBase58(),
+        owner: ownerValue,
+        amountRaw: BigInt(tokenAmount.amount),
+        decimals: tokenAmount.decimals,
+        tokenProgram: tokenProgram.toBase58(),
+        lamports: BigInt(item.account.lamports),
+        isAssociated: item.pubkey.equals(associated),
+        state: typeof info.state === "string" ? info.state : null,
+        closeAuthority:
+          typeof info.closeAuthority === "string" ? info.closeAuthority : null,
+      });
+    }
+  }
+  return rows;
+}
+
 export async function getAccountInfoRequired(
   connection: Connection,
   address: PublicKey,

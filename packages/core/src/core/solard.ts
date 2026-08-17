@@ -12,7 +12,12 @@ import {
 import { AccountCache } from "../chain/account-cache.ts";
 import { BlockhashCache } from "../chain/blockhash.ts";
 import { SolardConnection } from "../chain/connection.ts";
-import { readMint, readTokenAmount } from "../chain/state.ts";
+import {
+  listOwnedTokenAccounts,
+  readMint,
+  readTokenAmount,
+  type OwnedTokenAccount,
+} from "../chain/state.ts";
 import { simulatePlanned } from "../chain/simulate.ts";
 import { sameAsset, toRawAmount, type HumanAmount } from "../core/amounts.ts";
 import { QuoteAssetMismatchError } from "../core/errors.ts";
@@ -438,6 +443,11 @@ export class Solard implements ComposerHost {
     if (!memberships.length) throw new Error(`Group has no wallets: ${name}`);
     return memberships.map((row) => row.walletAddress);
   }
+  async tokenAccounts(ref: WalletRef): Promise<OwnedTokenAccount[]> {
+    const wallet = this.resolveWallet(ref);
+    return await listOwnedTokenAccounts(this.connection(), wallet.address);
+  }
+
   async tokenBalance(
     owner: PublicKey,
     token: TokenRow,
