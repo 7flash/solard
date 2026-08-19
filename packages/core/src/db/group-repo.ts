@@ -7,6 +7,11 @@ const m = measure("groups");
 export class GroupRepo {
   constructor(private readonly db: SolardDatabase) {}
   create(name: string, description?: string): GroupRow {
+    if (name.trim().toLowerCase() === "ungrouped") {
+      throw new Error(
+        "ungrouped is a reserved virtual group containing wallets with zero persisted group memberships",
+      );
+    }
     return measuredSync(
       m,
       `create ${name}`,

@@ -439,8 +439,33 @@ export class Solard implements ComposerHost {
     return { deployment, token, receipt };
   }
   groupWallets(name: GroupRef): WalletRef[] {
-    const memberships = this.groups.wallets(name);
-    if (!memberships.length) throw new Error(`Group has no wallets: ${name}`);
+    const groupName = String(name).trim();
+
+    if (groupName.toLowerCase() === "ungrouped") {
+      // "ungrouped" is a virtual group: active registry wallets that belong
+      // to zero persisted groups. Ignore any legacy/accidental persisted
+      // membership whose groupName itself is "ungrouped".
+      const groupedAddresses = new Set(
+        (this.db.groupWallets.select().all() as Array<{
+          groupName: string;
+          walletAddress: string;
+        }>)
+          .filter((row) => row.groupName.trim().toLowerCase() !== "ungrouped")
+          .map((row) => row.walletAddress),
+      );
+
+      const refs = this.wallets
+        .list()
+        .filter((wallet) => !groupedAddresses.has(wallet.address))
+        .map((wallet) => wallet.address);
+
+      if (!refs.length) throw new Error("Group has no wallets: ungrouped");
+      return refs;
+    }
+
+    const memberships = this.groups.wallets(groupName);
+    if (!memberships.length)
+      throw new Error(`Group has no wallets: ${groupName}`);
     return memberships.map((row) => row.walletAddress);
   }
   async tokenAccounts(ref: WalletRef): Promise<OwnedTokenAccount[]> {

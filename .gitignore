@@ -33,3 +33,7 @@ bun.lock
 run
 
 .npmrc
+
+*.json
+*.png
+*.ps1
