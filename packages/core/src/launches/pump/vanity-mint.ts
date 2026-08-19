@@ -86,6 +86,17 @@ export function cleanVanitySuffix(value: string): string {
   return suffix;
 }
 
+export function defaultVanityMaxAttempts(value: string): number {
+  const suffix = cleanVanitySuffix(value);
+  const expectedAttempts = 58 ** suffix.length;
+  const highConfidenceAttempts = Math.ceil(expectedAttempts * 8);
+
+  return Math.min(
+    Number.MAX_SAFE_INTEGER,
+    Math.max(25_000_000, highConfidenceAttempts),
+  );
+}
+
 function secretKeyBytes(value: unknown): Uint8Array {
   const source = Array.isArray(value)
     ? value
@@ -219,7 +230,7 @@ export async function generateMintKeypairWithSuffix(
 
   const maxAttempts = Math.max(
     1,
-    Math.trunc(Number(options.maxAttempts ?? 25_000_000)),
+    Math.trunc(Number(options.maxAttempts ?? defaultVanityMaxAttempts(suffix))),
   );
 
   const timeoutMs = Math.max(0, Math.trunc(Number(options.timeoutMs ?? 0)));

@@ -7,6 +7,8 @@ import {
   assertArmedBuyerEndpointsReady,
   bondingCurvePda,
   createTraderSolard,
+  cleanVanitySuffix,
+  defaultVanityMaxAttempts,
   executePumpTokenLaunch,
   generateMintKeypairWithSuffix,
   installPumpLaunchSenders,
@@ -18,6 +20,9 @@ import {
   preparePumpTokenLaunch,
   pumpLaunchEnvironment,
   releaseArmedBuyerEndpoints,
+  releaseVanityMintReservation,
+  reserveVanityMintFromPool,
+  markVanityMintUsed,
   sol,
   TOKEN_2022_ID,
   uploadPumpMetadata,
@@ -35,6 +40,7 @@ import {
   type Solard,
   type TokenMetadata,
   type TraderSubmitMode,
+  type VanityMintPoolReservation,
 } from "@solard/sdk";
 
 export type Flags = Map<string, string[]>;
@@ -1027,30 +1033,61 @@ function parseBuyPlanRows(flags: Flags): ExplicitBuyerPlanRow[] | null {
       stringValue(row, "address");
     if (!wallet) throw new Error(`Buy plan row ${index + 1} is missing wallet`);
 
+    const exactSol =
+      stringValue(row, "exactSol") ??
+      stringValue(row, "sol") ??
+      stringValue(row, "amountSol");
+    const exactLamports =
+      bigintValue(row, "exactLamports") ??
+      bigintValue(row, "lamports") ??
+      bigintValue(row, "amountLamports");
+
+    if (exactSol != null && exactLamports != null) {
+      throw new Error(
+        `Buy plan row ${index + 1} supplies both SOL and lamport exact amounts`,
+      );
+    }
+
+    const configuredMode =
+      stringValue(row, "amountMode") ?? stringValue(row, "mode");
     const amountMode =
-      stringValue(row, "amountMode") ?? stringValue(row, "mode") ?? "range-bps";
+      configuredMode ??
+      (exactSol != null
+        ? "exact-sol"
+        : exactLamports != null
+          ? "exact-lamports"
+          : "range-bps");
+
+    const exactReserveLamports =
+      solValue(row, "reserveSol", "reserveLamports") ?? 0n;
+
     let amount: ExplicitBuyerPlanRow["amount"];
     if (amountMode === "exact-sol" || amountMode === "exact") {
-      const exactSol =
-        stringValue(row, "exactSol") ??
-        stringValue(row, "sol") ??
-        stringValue(row, "amountSol");
       if (!exactSol)
         throw new Error(
-          `Buy plan row ${index + 1} exact-sol mode requires exactSol`,
+          `Buy plan row ${index + 1} exact-sol mode requires exactSol/amountSol`,
         );
-      amount = { kind: "exact-sol", sol: exactSol };
+      amount = {
+        kind: "exact-sol",
+        sol: exactSol,
+        reserveLamports: exactReserveLamports,
+      };
     } else if (amountMode === "exact-lamports" || amountMode === "lamports") {
-      const lamports =
-        bigintValue(row, "exactLamports") ??
-        bigintValue(row, "lamports") ??
-        bigintValue(row, "amountLamports");
-      if (lamports == null)
+      if (exactLamports == null)
         throw new Error(
-          `Buy plan row ${index + 1} exact-lamports mode requires exactLamports`,
+          `Buy plan row ${index + 1} exact-lamports mode requires exactLamports/amountLamports`,
         );
-      amount = { kind: "exact-lamports", lamports };
+      amount = {
+        kind: "exact-lamports",
+        lamports: exactLamports,
+        reserveLamports: exactReserveLamports,
+      };
     } else {
+      if (exactSol != null || exactLamports != null) {
+        throw new Error(
+          `Buy plan row ${index + 1} exact amount conflicts with amountMode ${amountMode}`,
+        );
+      }
       amount = {
         kind: "balance-bps",
         minBps:
@@ -1287,8 +1324,32 @@ export async function runPumpTokenLaunchFromArgs(
   const { uri, uploaded } = await resolveMetadataUri(flags, input);
   const cashback = enabled(flags, "cashback", "SOLARD_LAUNCH_CASHBACK");
   const mayhemMode = enabled(flags, "mayhem", "SOLARD_LAUNCH_MAYHEM");
-  const vanityMintSuffix = vanitySuffixFromFlags(flags);
+  const vanityPoolSuffixRaw = nonEmpty(first(flags, "mint-pool"));
+  const vanityPoolAddress = nonEmpty(first(flags, "mint-pool-address"));
+  if (vanityPoolAddress && !vanityPoolSuffixRaw) {
+    throw new Error("--mint-pool-address requires --mint-pool <suffix>.");
+  }
+  if (vanityPoolSuffixRaw && first(flags, "mint-keypair")) {
+    throw new Error("Use either --mint-pool or --mint-keypair, not both.");
+  }
+
+  const vanityPoolSuffix = vanityPoolSuffixRaw
+    ? cleanVanitySuffix(vanityPoolSuffixRaw)
+    : null;
+  const configuredVanitySuffix = vanitySuffixFromFlags(flags);
+  if (
+    vanityPoolSuffix &&
+    configuredVanitySuffix &&
+    vanityPoolSuffix !== configuredVanitySuffix
+  ) {
+    throw new Error(
+      `--mint-pool suffix ${vanityPoolSuffix} conflicts with configured mint suffix ${configuredVanitySuffix}.`,
+    );
+  }
+
+  const vanityMintSuffix = vanityPoolSuffix ?? configuredVanitySuffix;
   const pregeneratedMint = loadMintKeypairFromFlags(flags, vanityMintSuffix);
+  let poolReservation: VanityMintPoolReservation | null = null;
   let vanityMint: Keypair | undefined = pregeneratedMint?.mint;
   let vanityMintAttempts: number | null = pregeneratedMint ? 0 : null;
   let vanityMintElapsedMs: number | null = pregeneratedMint ? 0 : null;
@@ -1301,11 +1362,14 @@ export async function runPumpTokenLaunchFromArgs(
       attempts: 0,
       elapsedMs: 0,
     });
-  } else if (vanityMintSuffix) {
+  } else if (vanityMintSuffix && !vanityPoolSuffix) {
     const maxAttempts = numberFlag(
       flags,
       "vanity-max-attempts",
-      envNumber("SOLARD_VANITY_MINT_MAX_ATTEMPTS", 25_000_000),
+      envNumber(
+        "SOLARD_VANITY_MINT_MAX_ATTEMPTS",
+        defaultVanityMaxAttempts(vanityMintSuffix),
+      ),
     );
     const timeoutMs = numberFlag(
       flags,
@@ -1393,6 +1457,22 @@ export async function runPumpTokenLaunchFromArgs(
     report("jito tip selected", {
       ...jitoTipSelection,
       lamports: jitoTipSelection.lamports.toString(),
+    });
+  }
+
+  if (!vanityMint && vanityPoolSuffix) {
+    poolReservation = reserveVanityMintFromPool(vanityPoolSuffix, {
+      address: vanityPoolAddress,
+      reason: live ? "pump-launch-live" : "pump-launch-dry-run",
+    });
+    vanityMint = poolReservation.mint;
+    vanityMintAttempts = 0;
+    vanityMintElapsedMs = 0;
+    report("vanity mint pool reserved", {
+      mint: poolReservation.address,
+      suffix: poolReservation.suffix,
+      status: poolReservation.status,
+      live,
     });
   }
 
@@ -1572,6 +1652,15 @@ export async function runPumpTokenLaunchFromArgs(
           : undefined,
     });
 
+    if (poolReservation && live) {
+      const used = markVanityMintUsed(poolReservation.address);
+      report("vanity mint pool used", {
+        mint: used.address,
+        suffix: used.suffix,
+        status: used.status,
+      });
+    }
+
     if (live && persistOnLive && prepared) {
       try {
         slrd.persistPreparedDeployment(prepared.deployment, input.alias);
@@ -1639,6 +1728,17 @@ export async function runPumpTokenLaunchFromArgs(
 
     return output;
   } finally {
+    // Dry runs never consume a pooled mint. Live failures intentionally leave
+    // it RESERVED because a bundle can be ambiguous even when local tracking
+    // fails. Release it manually only after on-chain preflight confirms unused.
+    if (poolReservation && !live) {
+      try {
+        releaseVanityMintReservation(poolReservation.address);
+      } catch {
+        // Preserve the primary launch/simulation result.
+      }
+    }
+
     // Never persist from finally: preflight, simulation, and bundle submission
     // failures must leave the token registry untouched.
     slrd.close();

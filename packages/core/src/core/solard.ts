@@ -446,10 +446,12 @@ export class Solard implements ComposerHost {
       // to zero persisted groups. Ignore any legacy/accidental persisted
       // membership whose groupName itself is "ungrouped".
       const groupedAddresses = new Set(
-        (this.db.groupWallets.select().all() as Array<{
-          groupName: string;
-          walletAddress: string;
-        }>)
+        (
+          this.db.groupWallets.select().all() as Array<{
+            groupName: string;
+            walletAddress: string;
+          }>
+        )
           .filter((row) => row.groupName.trim().toLowerCase() !== "ungrouped")
           .map((row) => row.walletAddress),
       );

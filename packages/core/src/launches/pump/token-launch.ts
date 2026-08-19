@@ -510,8 +510,8 @@ function addTip(
 }
 
 export type ExplicitBuyerAmount =
-  | { kind: "exact-lamports"; lamports: bigint }
-  | { kind: "exact-sol"; sol: string }
+  | { kind: "exact-lamports"; lamports: bigint; reserveLamports?: bigint }
+  | { kind: "exact-sol"; sol: string; reserveLamports?: bigint }
   | {
       kind: "balance-bps";
       minBps: number;
@@ -565,8 +565,10 @@ export async function loadExplicitBuyerAllocations(args: {
 
     if (row.amount.kind === "exact-lamports") {
       spendLamports = row.amount.lamports;
+      reserveLamports = row.amount.reserveLamports ?? 0n;
     } else if (row.amount.kind === "exact-sol") {
       spendLamports = solStringToLamports(row.amount.sol);
+      reserveLamports = row.amount.reserveLamports ?? 0n;
     } else {
       reserveLamports = row.amount.reserveLamports;
       validateBps(row.amount.minBps, row.amount.maxBps);
@@ -2273,6 +2275,78 @@ function optimizedJitoCuLimit(
   return Math.min(currentLimit, Math.max(minimum, rounded));
 }
 
+async function compileJitoBundleDraftsWithSharedBlockhash(args: {
+  slrd: Solard;
+  prepared: PumpTokenLaunchPlan;
+  drafts: TransactionDraft[];
+  reporter?: LaunchReporter;
+  reason: "initial" | "optimized" | "retry";
+}): Promise<PlannedTransaction[]> {
+  if (args.drafts.length !== args.prepared.traders.length + 1) {
+    throw new Error(
+      `Pump Jito shared-blockhash compile expected deployment plus ${args.prepared.traders.length} buyers; got ${args.drafts.length} drafts.`,
+    );
+  }
+
+  // Resolve/decrypt every signer BEFORE capturing the blockhash. This prevents
+  // slow signer materialization from consuming the BlockhashCache TTL between
+  // the deployment and buyer compiles.
+  const signers: Keypair[] = [
+    args.slrd.signer(args.prepared.creatorWallet),
+    ...args.prepared.traders.map((trader) =>
+      args.slrd.signer(trader.walletRef),
+    ),
+  ];
+
+  const maximumAttempts = 3;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    args.slrd.blockhash.invalidate();
+
+    // Prime exactly one fresh blockhash into Solard's cache, then start every
+    // bundle compile in the same event-loop turn. assembleTransaction() reads
+    // this cached value, so every signed transaction belongs to one generation.
+    const pinned = await args.slrd.blockhash.get(args.slrd.connection());
+
+    const plans = await Promise.all(
+      args.drafts.map((draft, index) =>
+        args.slrd.compile(signers[index]!, draft, { useAlts: false }),
+      ),
+    );
+
+    const blockhashes = new Set(plans.map((plan) => plan.recentBlockhash));
+    const pinnedEverywhere =
+      blockhashes.size === 1 &&
+      plans.every((plan) => plan.recentBlockhash === pinned.blockhash);
+
+    if (pinnedEverywhere) {
+      args.prepared.launchDraft = args.drafts[0]!;
+      args.prepared.launchPlan = plans[0]!;
+      args.prepared.traderPlans = plans.slice(1);
+
+      args.reporter?.("pump jito shared blockhash", {
+        reason: args.reason,
+        attempt,
+        recentBlockhash: pinned.blockhash,
+        lastValidBlockHeight: pinned.lastValidBlockHeight,
+        transactions: plans.length,
+      });
+
+      return plans;
+    }
+
+    args.reporter?.("pump jito shared blockhash retry", {
+      reason: args.reason,
+      attempt,
+      expectedBlockhash: pinned.blockhash,
+      observedBlockhashes: [...blockhashes],
+    });
+  }
+
+  throw new Error(
+    `Could not compile Pump Jito bundle against one shared recent blockhash after ${maximumAttempts} attempts.`,
+  );
+}
+
 async function optimizeJitoBundleForAuction(args: {
   slrd: Solard;
   prepared: PumpTokenLaunchPlan;
@@ -2312,28 +2386,13 @@ async function optimizeJitoBundleForAuction(args: {
     cuPriceMicroLamports: 0,
   }));
 
-  const launchPlan = await args.slrd.compile(
-    args.slrd.signer(args.prepared.creatorWallet),
-    optimizedDrafts[0]!,
-    { useAlts: false },
-  );
-  const traderPlans = await Promise.all(
-    optimizedDrafts.slice(1).map((draft, index) => {
-      const trader = args.prepared.traders[index];
-      if (!trader) {
-        throw new Error(
-          `Missing trader allocation for Jito transaction ${index + 2}`,
-        );
-      }
-      return args.slrd.compile(args.slrd.signer(trader.walletRef), draft, {
-        useAlts: false,
-      });
-    }),
-  );
-
-  args.prepared.launchDraft = optimizedDrafts[0]!;
-  args.prepared.launchPlan = launchPlan;
-  args.prepared.traderPlans = traderPlans;
+  const optimizedPlans = await compileJitoBundleDraftsWithSharedBlockhash({
+    slrd: args.slrd,
+    prepared: args.prepared,
+    drafts: optimizedDrafts,
+    reporter: args.reporter,
+    reason: "optimized",
+  });
 
   const beforeTotal = args.plans.reduce(
     (sum, plan) => sum + (plan.draft.cuLimit ?? 600_000),
@@ -2355,7 +2414,7 @@ async function optimizeJitoBundleForAuction(args: {
 
   return {
     changed: true,
-    plans: [launchPlan, ...traderPlans],
+    plans: optimizedPlans,
   };
 }
 
@@ -2512,31 +2571,16 @@ async function rebuildJitoBundlePlans(args: {
     );
   }
 
-  args.slrd.blockhash.invalidate();
-
-  const launchPlan = await args.slrd.compile(
-    args.slrd.signer(args.prepared.creatorWallet),
-    args.prepared.launchDraft,
-    { useAlts: false },
-  );
-
-  const traderPlans = await Promise.all(
-    args.prepared.traderPlans.map((plan, index) => {
-      const trader = args.prepared.traders[index];
-      if (!trader) {
-        throw new Error(
-          `Missing trader allocation for Jito bundle transaction ${index + 2}`,
-        );
-      }
-      return args.slrd.compile(args.slrd.signer(trader.walletRef), plan.draft, {
-        useAlts: false,
-      });
-    }),
-  );
-
-  args.prepared.launchPlan = launchPlan;
-  args.prepared.traderPlans = traderPlans;
-  return [launchPlan, ...traderPlans];
+  return await compileJitoBundleDraftsWithSharedBlockhash({
+    slrd: args.slrd,
+    prepared: args.prepared,
+    drafts: [
+      args.prepared.launchDraft,
+      ...args.prepared.traderPlans.map((plan) => plan.draft),
+    ],
+    reporter: args.reporter,
+    reason: "retry",
+  });
 }
 
 export async function executePumpTokenLaunch(args: {
@@ -2569,12 +2613,25 @@ export async function executePumpTokenLaunch(args: {
   }
 
   if (submitMode === "jito-bundle") {
-    let plans = [args.prepared.launchPlan, ...args.prepared.traderPlans];
     if (args.prepared.traders.length > 4) {
       throw new Error(
         `jito-bundle supports deployment plus at most 4 buyers; got ${args.prepared.traders.length} buyers.`,
       );
     }
+
+    // The ordinary preparation path may compile deployment and buyers at
+    // different times. Recompile the complete first Jito generation here so
+    // deployment + all buyers are signed against one fresh blockhash.
+    let plans = await compileJitoBundleDraftsWithSharedBlockhash({
+      slrd: args.slrd,
+      prepared: args.prepared,
+      drafts: [
+        args.prepared.launchDraft,
+        ...args.prepared.traderPlans.map((plan) => plan.draft),
+      ],
+      reporter: args.reporter,
+      reason: "initial",
+    });
     const launchHasJitoTip = args.prepared.launchPlan.draft.actions.some(
       (action) => action.kind === "jito-tip",
     );
@@ -2611,10 +2668,7 @@ export async function executePumpTokenLaunch(args: {
     while (true) {
       const generation = completedGenerations + 1;
       if (args.skipSimulation) {
-        assertJitoPumpBundleLayout({
-          prepared: args.prepared,
-          plans,
-        });
+        assertJitoPumpBundleLayout({ prepared: args.prepared, plans });
         args.reporter?.("pump jito atomic bundle simulation skipped", {
           generation,
           transactions: plans.length,

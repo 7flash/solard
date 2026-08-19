@@ -1,6 +1,29 @@
+export {
+  configureSolardMeasure,
+  createSolardMeasureCollector,
+  measure,
+  shortKey,
+} from "./core/log.ts";
+export type {
+  SolardMeasureCollector,
+  SolardMeasureEvent,
+  SolardMeasureLabelSummary,
+  SolardMeasureOptions,
+  SolardMeasureSummary,
+} from "./core/log.ts";
+export { getSolardRpcStats, resetSolardRpcStats } from "./chain/connection.ts";
+export type { SolardRpcStats } from "./chain/connection.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
 export type { SolardOptions } from "./core/solard.ts";
 export { createTraderSolard } from "./presets/trader.ts";
+
+export {
+  addExternalContact,
+  findExternalContact,
+  listExternalContacts,
+  removeExternalContact,
+} from "./address-book.ts";
+export type { ExternalContact } from "./address-book.ts";
 
 export {
   SolardTransaction,
@@ -75,6 +98,36 @@ export type { WalletImportOptions, WalletInfo } from "./db/wallet-repo.ts";
 export { TokenRepo } from "./db/token-repo.ts";
 export { PriceRepo } from "./db/price-repo.ts";
 export { openDatabase, closeDatabase, resolveDbPath } from "./db/database.ts";
+export {
+  executeJupiterTokenToSol,
+  quoteJupiterTokenToSol,
+} from "./chain/jupiter-swap.ts";
+export type {
+  JupiterSwapExecuteResult,
+  JupiterSwapOrder,
+  JupiterSwapQuote,
+} from "./chain/jupiter-swap.ts";
+export {
+  executeRegistryTokenLiquidation,
+  planRegistryTokenLiquidation,
+  resolveTokenMintForPolicy,
+  simulateRegistryTokenLiquidation,
+} from "./chain/liquidation.ts";
+export type {
+  RegistryTokenLiquidationAction,
+  RegistryTokenLiquidationActionKind,
+  RegistryTokenLiquidationOptions,
+  RegistryTokenLiquidationPlan,
+  RegistryTokenLiquidationProgress,
+  RegistryTokenLiquidationResult,
+} from "./chain/liquidation.ts";
+export { loadWalletAssetPortfolio } from "./chain/portfolio.ts";
+export type {
+  WalletAssetPortfolio,
+  WalletAssetPortfolioOptions,
+  WalletAssetPortfolioRow,
+  WalletTokenHolding,
+} from "./chain/portfolio.ts";
 export { analyzeRegistryTransfers } from "./chain/registry-transfers.ts";
 export type {
   RegistryWalletRef,
@@ -82,11 +135,24 @@ export type {
   RegistryTransferPair,
   RegistryTransferAnalysis,
   RegistryTransferAnalysisOptions,
+  RegistryTransferProgress,
 } from "./chain/registry-transfers.ts";
+export {
+  executeRegistrySolSweep,
+  planRegistrySolSweep,
+  simulateRegistrySolSweep,
+} from "./chain/registry-sweep.ts";
+export type {
+  RegistrySolSweepOptions,
+  RegistrySolSweepPlan,
+  RegistrySolSweepProgress,
+  RegistrySolSweepReceipt,
+  RegistrySolSweepRow,
+  RegistrySolSweepSimulation,
+} from "./chain/registry-sweep.ts";
 export type { PriceWindow } from "./db/price-repo.ts";
 export { listOwnedTokenAccounts } from "./chain/state.ts";
 export type { OwnedTokenAccount } from "./chain/state.ts";
-export { shortKey } from "./core/log.ts";
 export {
   sol,
   tokenAmount,
@@ -205,8 +271,28 @@ export { bondingCurvePda } from "./venues/pump/pda.ts";
 
 export {
   cleanVanitySuffix,
+  defaultVanityMaxAttempts,
   generateMintKeypairWithSuffix,
   loadMintKeypairFile,
   saveMintKeypairFile,
   withPregeneratedMintKeypair,
 } from "./launches/pump/vanity-mint.ts";
+
+export {
+  addVanityMintToPool,
+  listVanityMintPool,
+  markVanityMintUsed,
+  releaseVanityMintReservation,
+  reserveVanityMintFromPool,
+} from "./launches/pump/vanity-pool.ts";
+export type {
+  VanityMintPoolEntry,
+  VanityMintPoolReservation,
+  VanityMintPoolStatus,
+} from "./launches/pump/vanity-pool.ts";
+
+export {
+  fetchPumpVampSourceMetadata,
+  publicPumpMetadataUrl,
+} from "./launches/pump/vamp.ts";
+export type { PumpVampSourceMetadata } from "./launches/pump/vamp.ts";

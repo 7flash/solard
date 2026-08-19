@@ -1,8 +1,24 @@
 #!/usr/bin/env bun
 import {
-  analyzeRegistryTransfers,
-  listScripts,
+  addExternalContact,
+  configureSolardMeasure,
+  createSolardMeasureCollector,
+  executeRegistrySolSweep,
+  executeRegistryTokenLiquidation,
+  findExternalContact,
+  getSolardRpcStats,
+  listExternalContacts,
+  loadWalletAssetPortfolio,
+  planRegistrySolSweep,
+  planRegistryTokenLiquidation,
+  removeExternalContact,
+  resetSolardRpcStats,
+  resolveTokenMintForPolicy,
   runScript,
+  listScripts,
+  simulateRegistrySolSweep,
+  simulateRegistryTokenLiquidation,
+  wrappedSolAta,
   type TokenRow,
 } from "@solard/sdk";
 
@@ -83,6 +99,13 @@ function duration(value: string | undefined, fallbackMs: number): number {
   ];
   return Math.floor(n * scale);
 }
+function formatDurationMs(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "0ms";
+  if (value < 1_000) return `${value.toFixed(value < 10 ? 1 : 0)}ms`;
+  if (value < 60_000) return `${(value / 1_000).toFixed(2)}s`;
+  return `${(value / 60_000).toFixed(2)}m`;
+}
+
 function formatPrice(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "n/a";
   return value >= 0.001
@@ -119,30 +142,86 @@ function targetWallets(
     group,
   };
 }
+function resolveDestinationRef(
+  slrd: { resolveWallet(ref: string): { address: { toBase58(): string } } },
+  value: string,
+): {
+  input: string;
+  address: string;
+  contactName?: string;
+  walletName?: string;
+} {
+  const input = value.trim();
+  const contact = findExternalContact(input);
+
+  let walletAddress: string | null = null;
+  try {
+    walletAddress = slrd.resolveWallet(input).address.toBase58();
+  } catch {
+    walletAddress = null;
+  }
+
+  if (contact && walletAddress && contact.address !== walletAddress) {
+    throw new Error(
+      `Ambiguous destination ${input}: external contact @${contact.name} points to ${contact.address}, ` +
+        `but a stored signing wallet resolves to ${walletAddress}. Rename one of them.`,
+    );
+  }
+
+  if (contact) {
+    return {
+      input,
+      address: contact.address,
+      contactName: contact.name,
+    };
+  }
+
+  if (walletAddress) {
+    return {
+      input,
+      address: walletAddress,
+      walletName: input.replace(/^@/, ""),
+    };
+  }
+
+  return { input, address: input };
+}
+
 function help(): string {
   return `${OWL} slrd — multi-wallet Solana CLI + SDK for traders and AI agents
 
 Wallets and tokens
-  slrd wallets create [name]                Generate and persist an encrypted Solana wallet
-  slrd wallet create [name]                 Alias for wallets create
+  slrd wallet create [name]                  Generate and persist an encrypted Solana wallet
   slrd import <private_key> [name]
   cat key.json | slrd import --stdin [name]
-  slrd import --file <keys.txt> [--name-prefix <prefix>] [--group <group>] [--force]
-                    Import one private key per non-empty line; '#' comment lines are ignored
-  slrd wallets [--group <name>] [--tokens | --token <token>] [--addresses-only]    Show wallet SOL balances; token balances are opt-in
-  slrd analyze transfers [--limit 50] [--group <name>] [--exclude-group <name>] [--events]    Find direct transfers between stored wallets
+
+External contacts (public addresses only; never signing wallets or group members)
+  slrd contact add <name> <address> [--force]
+  slrd contact list
+  slrd contact show <name|address>
+  slrd contact remove <name|address>
+  slrd wallets [--group <name>] [--token <token> | --tokens] [--token-totals] [--only-with-tokens] [--rpc-concurrency <n>] [--rpc-delay-ms <n>] [--addresses-only]
+                                                        Show SOL by default; token scans are opt-in
   slrd token <token_ca> [name] [--metadata-json <json>]
   slrd token set <token|ca> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>]
   slrd token refresh <token|ca>
   slrd tokens
 
+Vanity mints
+  slrd vanity --suffix pump --out .\\mint.json [--count <n>]
+  slrd vanity pool generate --suffix pump --count <n> [--max-attempts <n>]   Generate encrypted mint keypairs into the canonical DB
+  slrd vanity pool list [--suffix pump] [--status available|reserved|used]
+  slrd vanity pool release <mint-address>               Release an ambiguous/failed launch reservation
+  launch/vamp: add --mint-pool pump [--mint-pool-address <address>] to consume a pooled mint
+
 Metadata and launching
-  slrd launch pump --creator <wallet> --alias <name> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--live] [--skip-simulation]
+  slrd launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--alias <name>] [--live] [--skip-simulation]
                     [--deployment-sender helius-rpc|helius-fast] [--helius-tip-sol 0.01]
-  slrd launch pump --creator <wallet> --alias <name> --buyer-group <group> --submit-mode jito-bundle --jito-block-engine-url <url>
-                    (--uri <metadata_uri> | --image <path> --description <text>) [--creator-buy-sol <amount>] [--live --skip-simulation]
   slrd metadata upload --image <local_path> --name <name> --symbol <symbol> --description <text> [--provider pump-frontend|pinata]
                        [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
+  slrd vamp <source-mint> --creator <wallet> [--name <name>] [--symbol <symbol>] [--image <path-or-url>] [--description <text>]
+                     [--website <url>] [--twitter <url>] [--telegram <url>] [--video <url>] [--uri <metadata-uri>]
+                     [--buy-plan <file>] [--mint-pool pump] [--submit-mode jito-bundle] [--live] [--skip-simulation]
   slrd deploy pump --wallet <wallet> --name <name> --symbol <symbol> (--uri <metadata_uri> | --image <local_path> --description <text>) [--alias <name>] [--live]
                    [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
 
@@ -152,13 +231,31 @@ Prices
   slrd price average <token|ca> --period 15m         Average stored samples in a period
   slrd price watch <token|ca...> [--interval 1s] [--period 1m]
 
+Transfers and consolidation
+  slrd transfer <contact|wallet|address> --wallet <source-wallet> --sol <amount> [--simulate-only]
+  slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]
+                                                        Without --wallets, sweep considers all stored signing wallets
+
+Token liquidation
+  slrd liquidate tokens --except <token|mint> [--wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--simulate | --live]
+                                                        Plan/sell all supported tokens except protected mint(s); WSOL is unwrapped
+
+RPC
+  All Solard JSON-RPC traffic is globally rate-limited to 5 req/s by default.
+  Override only when your provider allows it: SLRD_RPC_MAX_RPS=<n>
+  Jupiter fallback: keyless 0.5 req/s, API-key default 1 req/s; override SLRD_JUPITER_MAX_RPS=<n>
+
+Diagnostics
+  Commands collect measure-fn telemetry without streaming it to the terminal.
+  --measure         Print top aggregate timings after the normal command result
+  --measure-stream  Restore raw live measure-fn output for low-level debugging
+
 Trading
   slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
   slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
-  slrd cleanup pump --exclude-group <group> --keep <mint[,mint...]> [--exclude-prefix <prefix>] [--simulate | --live] [--slippage-bps 1500] [--sender rpc]
-  slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--simulate-only]
+  slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--continue-on-error] [--simulate-only]
   slrd claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
 
 Scripts (strategies stay outside the kernel)
@@ -170,7 +267,6 @@ Groups and agents
   slrd group create <name> [description]
   slrd group add <group> <wallet> [weight_bps]
   slrd group add-many <group> <wallet1,wallet2,...>
-  slrd group add-prefix <group> <wallet-name-prefix>
   slrd group show <group>
   slrd group list
   slrd buy <token|ca> --group <name> --sol <amount> --sender jito      Submit group buys as Jito bundles, five tx per bundle
@@ -185,7 +281,6 @@ Watching
   slrd watch list
 
 Transactions and ALTs
-  slrd transfer <recipient> --wallet <wallet> --sol <amount> [--priority-micro-lamports <n>] [--cu-limit <n>] [--sender rpc|helius|jito] [--simulate-only]
   slrd history
   slrd jito tip-accounts [--endpoint <block-engine-url>]
   slrd alt add <address> [label]
@@ -194,7 +289,7 @@ Transactions and ALTs
   slrd alt extend <address> --wallet <wallet> <account...>
 
 Environment
-  SLRD_DB_PATH      shared SDK/CLI database; default ~/.solard/solard.sqlite (SOLARD_DB_PATH alias supported)
+  SLRD_DB_PATH      shared SDK/CLI database; default ./slrd.db (SOLARD_DB_PATH alias supported)
   SLRD_MASTER_KEY   required to create/import/decrypt stored wallets
   RPC_ENDPOINT      required only for chain operations
   HELIUS_SENDER_URL regional/global Helius Sender endpoint used by launch scripts
@@ -212,6 +307,62 @@ Environment
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const { values, flags } = args(rest);
+
+  const commandStartedAt = performance.now();
+  const measureCollector = createSolardMeasureCollector();
+  resetSolardRpcStats();
+
+  // Keep measurement active, but route events away from terminal output.
+  // --measure adds a detailed aggregate at the end; --measure-stream restores
+  // measure-fn's raw live logger for low-level debugging.
+  const streamMeasures =
+    flags.has("measure-stream") ||
+    process.env.SLRD_MEASURE_STREAM === "1" ||
+    process.env.SLRD_MEASURE_STREAM === "true";
+  configureSolardMeasure(
+    streamMeasures
+      ? { silent: false, logger: null }
+      : { silent: false, logger: measureCollector.logger },
+  );
+
+  let perfPrinted = false;
+  const printPerfSummary = () => {
+    if (perfPrinted) return;
+    perfPrinted = true;
+
+    const measures = measureCollector.snapshot();
+    const rpc = getSolardRpcStats();
+    const wallMs = Math.max(0, performance.now() - commandStartedAt);
+
+    if (
+      measures.completed === 0 &&
+      measures.annotations === 0 &&
+      rpc.requestStarts === 0
+    ) {
+      return;
+    }
+
+    emit(
+      `PERF     wall=${formatDurationMs(wallMs)}  ` +
+        `measure=${measures.completed} (${measures.errors} err)  ` +
+        `rpc=${rpc.requestStarts}  429=${rpc.rateLimited429}  ` +
+        `retries=${rpc.retries429}  limit=${rpc.maxRps}/s\n`,
+    );
+
+    if (flags.has("measure") && !streamMeasures) {
+      for (const row of measures.labels.slice(0, 10)) {
+        emit(
+          `  ${row.label}  calls=${row.calls}  ` +
+            `total=${formatDurationMs(row.totalMs)}  ` +
+            `max=${formatDurationMs(row.maxMs)}` +
+            `${row.errors ? `  errors=${row.errors}` : ""}\n`,
+        );
+      }
+    }
+  };
+
+  process.once("beforeExit", printPerfSummary);
+
   if (!command || command === "help" || command === "--help") {
     emit(help());
     return;
@@ -227,10 +378,84 @@ async function main() {
   }
   if (command === "vanity") {
     const {
-      generateMintKeypairWithSuffix,
-      saveMintKeypairFile,
+      addVanityMintToPool,
       cleanVanitySuffix,
+      defaultVanityMaxAttempts,
+      generateMintKeypairWithSuffix,
+      listVanityMintPool,
+      releaseVanityMintReservation,
+      saveMintKeypairFile,
     } = await import("@solard/sdk");
+
+    if (values[0] === "pool") {
+      const action = values[1] ?? "list";
+
+      if (action === "generate") {
+        const suffix = cleanVanitySuffix(need(flags, "suffix"));
+        const count = int(flags, "count", 1)!;
+        if (count <= 0) throw new Error("--count must be greater than zero");
+        const results = [];
+        for (let i = 0; i < count; i++) {
+          const found = await generateMintKeypairWithSuffix({
+            suffix,
+            workers: int(flags, "workers"),
+            maxAttempts: int(
+              flags,
+              "max-attempts",
+              defaultVanityMaxAttempts(suffix),
+            )!,
+            timeoutMs: int(flags, "timeout-ms", 0)!,
+            reportEvery: int(flags, "report-every", 1_000_000)!,
+            onProgress: (p) =>
+              emit(
+                `${OWL} pool grinding ${p.suffix} [${i + 1}/${count}]: ${p.attempts} attempts, ${p.ratePerSecond}/s\n`,
+              ),
+          });
+          results.push({
+            ...addVanityMintToPool(found.mint, suffix),
+            attempts: found.attempts,
+            elapsedMs: found.elapsedMs,
+          });
+        }
+        emit(json(results) + "\n");
+        return;
+      }
+
+      if (action === "list") {
+        const status = flags.get("status") as
+          "available" | "reserved" | "used" | undefined;
+        if (
+          status &&
+          status !== "available" &&
+          status !== "reserved" &&
+          status !== "used"
+        ) {
+          throw new Error("--status must be available, reserved, or used");
+        }
+        emit(
+          json(
+            listVanityMintPool({
+              suffix: flags.get("suffix"),
+              status,
+            }),
+          ) + "\n",
+        );
+        return;
+      }
+
+      if (action === "release") {
+        const address = values[2] ?? flags.get("address");
+        if (!address)
+          throw new Error("Usage: slrd vanity pool release <mint-address>");
+        emit(json(releaseVanityMintReservation(address)) + "\n");
+        return;
+      }
+
+      throw new Error(
+        "Usage: slrd vanity pool <generate|list|release> [options]",
+      );
+    }
+
     const suffix = cleanVanitySuffix(need(flags, "suffix"));
     const out = need(flags, "out");
     const count = int(flags, "count", 1)!;
@@ -239,7 +464,11 @@ async function main() {
       const found = await generateMintKeypairWithSuffix({
         suffix,
         workers: int(flags, "workers"),
-        maxAttempts: int(flags, "max-attempts", 25_000_000)!,
+        maxAttempts: int(
+          flags,
+          "max-attempts",
+          defaultVanityMaxAttempts(suffix),
+        )!,
         timeoutMs: int(flags, "timeout-ms", 0)!,
         reportEvery: int(flags, "report-every", 1_000_000)!,
         onProgress: (p) =>
@@ -299,6 +528,18 @@ async function main() {
     });
     return;
   }
+  if (command === "vamp") {
+    const { runPumpVampFromArgs } = await import("./pump/vamp-cli.ts");
+    await runPumpVampFromArgs(rest, {
+      defaultSubmitMode: "after-deploy-processed",
+      defaultDeploymentPriorityMicroLamports: 500_000,
+      defaultBuyerPriorityMicroLamports: 1_500_000,
+      defaultSlippageBps: 1_500,
+      persistOnLive: true,
+      report: (label, value) => emit(`${label}: ${json(value)}\n`),
+    });
+    return;
+  }
   if (command === "jito" && values[0] === "tip-accounts") {
     const endpoint = (
       flags.get("endpoint") ??
@@ -343,10 +584,68 @@ async function main() {
     ]);
   const slrd = createTraderSolard();
   try {
-    if (
-      (command === "wallet" || command === "wallets") &&
-      values[0] === "create"
-    ) {
+    if (command === "contact" || command === "contacts") {
+      const action = values[0] ?? "list";
+
+      if (action === "add") {
+        const name = values[1];
+        const address = values[2];
+        if (!name || !address) {
+          throw new Error("Usage: slrd contact add <name> <address> [--force]");
+        }
+
+        let walletCollision: string | null = null;
+        try {
+          walletCollision = slrd.resolveWallet(name).address.toBase58();
+        } catch {
+          walletCollision = null;
+        }
+        if (walletCollision && walletCollision !== address) {
+          throw new Error(
+            `Cannot create external contact @${name}: a stored signing wallet already uses that name (${walletCollision}).`,
+          );
+        }
+
+        const contact = addExternalContact(name, address, {
+          overwrite: flags.has("force") || flags.has("overwrite"),
+        });
+        emit(`${OWL} contact @${contact.name}\t${contact.address}\n`);
+        return;
+      }
+
+      if (action === "list") {
+        const contacts = listExternalContacts();
+        if (flags.has("json")) {
+          emit(json(contacts) + "\n");
+          return;
+        }
+        for (const contact of contacts) {
+          emit(`@${contact.name}\t${contact.address}\n`);
+        }
+        return;
+      }
+
+      if (action === "show") {
+        const ref = values[1];
+        if (!ref) throw new Error("Usage: slrd contact show <name|address>");
+        const contact = findExternalContact(ref);
+        if (!contact) throw new Error(`Unknown external contact: ${ref}`);
+        emit(json(contact) + "\n");
+        return;
+      }
+
+      if (action === "remove" || action === "delete" || action === "rm") {
+        const ref = values[1];
+        if (!ref) throw new Error("Usage: slrd contact remove <name|address>");
+        const removed = removeExternalContact(ref);
+        emit(`${OWL} removed contact @${removed.name}\t${removed.address}\n`);
+        return;
+      }
+
+      throw new Error("Usage: slrd contact <add|list|show|remove> [arguments]");
+    }
+
+    if (command === "wallet" && values[0] === "create") {
       const wallet = slrd.createWallet(values[1]);
       emit(`${OWL} created @${wallet.name} ${wallet.address}\n`);
       return;
@@ -384,93 +683,12 @@ async function main() {
       return;
     }
     if (command === "import") {
-      const file = flags.get("file");
-      if (file && file !== "true") {
-        const { readFileSync } = await import("node:fs");
-        const { resolve } = await import("node:path");
-        const path = resolve(file);
-        const prefix = flags.get("name-prefix");
-        const group = flags.get("group");
-        const overwrite = flags.has("force") || flags.has("overwrite");
-
-        const lines = readFileSync(path, "utf8").split(/\r?\n/);
-        const entries = lines
-          .map((raw, index) => ({ raw: raw.trim(), line: index + 1 }))
-          .filter(({ raw }) => raw.length > 0 && !raw.startsWith("#"));
-
-        if (entries.length === 0)
-          throw new Error(`No private keys found in ${path}`);
-
-        if (group && group !== "true") {
-          slrd.groups.create(group);
-        }
-
-        const imported: Array<{
-          line: number;
-          name: string;
-          address: string;
-        }> = [];
-        const failed: Array<{
-          line: number;
-          error: string;
-        }> = [];
-
-        for (let index = 0; index < entries.length; index++) {
-          const entry = entries[index]!;
-          const name =
-            prefix && prefix !== "true"
-              ? `${prefix}-${String(index + 1).padStart(3, "0")}`
-              : undefined;
-          try {
-            const wallet = slrd.importWallet(entry.raw, name, { overwrite });
-            if (group && group !== "true") {
-              slrd.groups.addWallet(group, wallet.address, 10000);
-            }
-            imported.push({
-              line: entry.line,
-              name: wallet.name,
-              address: wallet.address,
-            });
-            emit(
-              `${OWL} imported line ${entry.line} @${wallet.name} ${wallet.address}${group && group !== "true" ? ` group=${group}` : ""}\n`,
-            );
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : String(error);
-            failed.push({ line: entry.line, error: message });
-            process.stderr.write(
-              `${OWL} import failed line ${entry.line}: ${message}\n`,
-            );
-          }
-        }
-
-        emit(
-          json({
-            file: path,
-            attempted: entries.length,
-            imported: imported.length,
-            failed: failed.length,
-            group: group && group !== "true" ? group : null,
-            wallets: imported,
-            errors: failed,
-          }) + "\n",
-        );
-
-        if (failed.length > 0) process.exitCode = 2;
-        return;
-      }
-
-      if (flags.has("file"))
-        throw new Error(
-          "Usage: slrd import --file <keys.txt> [--name-prefix <prefix>] [--group <group>] [--force]",
-        );
-
       const input = flags.has("stdin")
         ? (await new Response(Bun.stdin.stream()).text()).trim()
         : values[0];
       if (!input)
         throw new Error(
-          "Usage: slrd import <private_key> [name] [--force], cat key.json | slrd import --stdin [name] [--force], or slrd import --file <keys.txt>",
+          "Usage: slrd import <private_key> [name] [--force] or cat key.json | slrd import --stdin [name] [--force]",
         );
       const name = flags.has("stdin") ? values[0] : values[1];
       const wallet = slrd.importWallet(input, name, {
@@ -480,15 +698,20 @@ async function main() {
       return;
     }
     if (command === "wallets") {
-      let wallets = slrd.wallets.list();
+      if (
+        flags.get("token") &&
+        (flags.has("tokens") || flags.has("all-tokens"))
+      ) {
+        throw new Error("Use either --token <token> or --tokens, not both.");
+      }
 
-      // Filter locally before any RPC calls.
+      let wallets = slrd.wallets.list();
       const group = flags.get("group");
-      if (group && group !== "true") {
-        const exists = slrd.groups.list().some((row) => row.name === group);
-        if (!exists) throw new Error(`Unknown group: ${group}`);
+      if (group) {
         const addresses = new Set(
-          slrd.groups.wallets(group).map((row) => row.walletAddress),
+          slrd
+            .groupWallets(group)
+            .map((ref) => slrd.resolveWallet(ref).address.toBase58()),
         );
         wallets = wallets.filter((wallet) => addresses.has(wallet.address));
       }
@@ -499,210 +722,179 @@ async function main() {
         return;
       }
 
-      // Batch native SOL account lookups (100 per RPC request) and sort by
-      // balance descending. This avoids one getBalance RPC call per wallet and
-      // dramatically reduces 429s for large wallet sets.
-      const connection = slrd.connection();
-      const solByAddress = new Map<string, bigint>();
-      for (let offset = 0; offset < wallets.length; offset += 100) {
-        const batch = wallets.slice(offset, offset + 100);
-        const keys = batch.map(
-          (wallet) => slrd.resolveWallet(wallet.address).address,
-        );
-        const infos = await connection.getMultipleAccountsInfo(
-          keys,
-          "confirmed",
-        );
-        for (let index = 0; index < batch.length; index++) {
-          solByAddress.set(
-            batch[index]!.address,
-            BigInt(infos[index]?.lamports ?? 0),
+      const allTokens = flags.has("tokens") || flags.has("all-tokens");
+      const tokenRef = flags.get("token");
+      if (!allTokens && !tokenRef) {
+        // Cheap native-SOL-only default: <=100 wallets per RPC call.
+        const rows: Array<{
+          wallet: (typeof wallets)[number];
+          solLamports: bigint;
+        }> = [];
+        const connection = slrd.connection();
+        const batchSize = 100;
+
+        for (let offset = 0; offset < wallets.length; offset += batchSize) {
+          const batch = wallets.slice(offset, offset + batchSize);
+          const addresses = batch.map(
+            (wallet) => slrd.resolveWallet(wallet).address,
           );
+          const accounts = await connection.getMultipleAccountsInfo(
+            addresses,
+            "confirmed",
+          );
+
+          for (let index = 0; index < batch.length; index += 1) {
+            rows.push({
+              wallet: batch[index]!,
+              solLamports: BigInt(accounts[index]?.lamports ?? 0),
+            });
+          }
         }
-      }
 
-      wallets.sort((a, b) => {
-        const aBalance = solByAddress.get(a.address) ?? 0n;
-        const bBalance = solByAddress.get(b.address) ?? 0n;
-        if (aBalance === bBalance) return a.name.localeCompare(b.name);
-        return aBalance > bBalance ? -1 : 1;
-      });
+        rows.sort((left, right) =>
+          left.solLamports === right.solLamports
+            ? left.wallet.name.localeCompare(right.wallet.name)
+            : left.solLamports > right.solLamports
+              ? -1
+              : 1,
+        );
 
-      // Wallet overview is SOL-only by default. Token scans remain opt-in.
-      const selectedTokens = flags.get("token")
-        ? [slrd.resolveToken(flags.get("token")!)]
-        : flags.has("tokens")
-          ? slrd.tokens.list()
-          : [];
-
-      // Fast path: native SOL only. We already have every balance from the
-      // batched RPC request, so do not call walletBalances() again.
-      if (selectedTokens.length === 0) {
-        for (const wallet of wallets) {
+        const totalSol = rows.reduce((sum, row) => sum + row.solLamports, 0n);
+        emit(`TOTAL\tSOL=${formatRaw(totalSol, 9)}\tWALLETS=${rows.length}\n`);
+        for (const { wallet, solLamports } of rows) {
           emit(
-            `@${wallet.name}\t${wallet.address}\tSOL=${formatRaw(solByAddress.get(wallet.address) ?? 0n, 9)}\n`,
+            `@${wallet.name}\t${wallet.address}\tSOL=${formatRaw(solLamports, 9)}\n`,
           );
         }
         return;
       }
 
-      for (const wallet of wallets) {
-        const balances = await slrd.walletBalances(wallet, selectedTokens);
-        const holdings = balances.tokenBalances
-          .filter(
-            (balance) =>
-              balance.amountRaw > 0n ||
-              flags.has("show-zero") ||
-              Boolean(flags.get("token")),
-          )
-          .map(
-            (balance) =>
-              `${balance.token.symbol ? "$" + balance.token.symbol : (balance.token.name ?? shortKey(balance.token.mint))}=${formatRaw(balance.amountRaw, balance.decimals)}`,
-          )
-          .join("  ");
-        emit(
-          `@${wallet.name}\t${wallet.address}\tSOL=${formatRaw(solByAddress.get(wallet.address) ?? balances.solLamports, 9)}${holdings ? `  ${holdings}` : ""}\n`,
-        );
-      }
-      return;
-    }
+      // Owner-centric token discovery. This never refreshes/upserts the token
+      // registry, so `wallets --tokens` stays read-only and its stdout remains
+      // actual portfolio output instead of measurement noise.
+      const portfolio = await loadWalletAssetPortfolio(slrd, {
+        walletRefs: wallets.map((wallet) => wallet.address),
+        includeZero: flags.has("show-zero"),
+        concurrency: Math.max(
+          1,
+          Math.min(8, Math.trunc(int(flags, "rpc-concurrency", 1) ?? 1)),
+        ),
+        requestDelayMs: Math.max(
+          0,
+          Math.trunc(int(flags, "rpc-delay-ms", 75) ?? 75),
+        ),
+      });
 
-    if (command === "analyze" && values[0] === "transfers") {
-      const allWallets = slrd.wallets.list();
-      let scanWallets = [...allWallets];
+      const selectedMint = tokenRef ? slrd.resolveToken(tokenRef).mint : null;
 
-      const group = flags.get("group");
-      if (group && group !== "true") {
-        const exists = slrd.groups.list().some((row) => row.name === group);
-        if (!exists) throw new Error(`Unknown group: ${group}`);
-        const members = new Set(
-          slrd.groups.wallets(group).map((row) => row.walletAddress),
-        );
-        scanWallets = scanWallets.filter((wallet) =>
-          members.has(wallet.address),
-        );
-      }
+      const visibleRows = portfolio.rows.map((row) => ({
+        ...row,
+        tokenHoldings: selectedMint
+          ? row.tokenHoldings.filter((holding) => holding.mint === selectedMint)
+          : row.tokenHoldings,
+      }));
 
-      const excludeGroup = flags.get("exclude-group");
-      if (excludeGroup && excludeGroup !== "true") {
-        const exists = slrd.groups
-          .list()
-          .some((row) => row.name === excludeGroup);
-        if (!exists) throw new Error(`Unknown group: ${excludeGroup}`);
-        const excluded = new Set(
-          slrd.groups.wallets(excludeGroup).map((row) => row.walletAddress),
-        );
-        scanWallets = scanWallets.filter(
-          (wallet) => !excluded.has(wallet.address),
-        );
-      }
-
-      const limit = int(flags, "limit", 50) ?? 50;
-      const delayMs = int(flags, "delay-ms", 100) ?? 100;
-      const result = await analyzeRegistryTransfers(
-        slrd.connection(),
-        allWallets.map((wallet) => ({
-          name: wallet.name,
-          address: wallet.address,
-        })),
+      const visibleTotals = new Map<
+        string,
         {
-          scanAddresses: scanWallets.map((wallet) => wallet.address),
-          signaturesPerWallet: limit,
-          delayMs,
-        },
-      );
-
-      if (flags.has("events")) {
-        emit(json(result) + "\n");
-        return;
+          mint: string;
+          name: string | null;
+          symbol: string | null;
+          decimals: number;
+          amountRaw: bigint;
+        }
+      >();
+      for (const row of visibleRows) {
+        for (const holding of row.tokenHoldings) {
+          if (holding.amountRaw <= 0n && !flags.has("show-zero")) continue;
+          const existing = visibleTotals.get(holding.mint);
+          if (existing) existing.amountRaw += holding.amountRaw;
+          else
+            visibleTotals.set(holding.mint, {
+              mint: holding.mint,
+              name: holding.name,
+              symbol: holding.symbol,
+              decimals: holding.decimals,
+              amountRaw: holding.amountRaw,
+            });
+        }
       }
 
-      if (result.pairs.length === 0) {
-        emit(
-          `${OWL} no direct registry-to-registry transfers found in the scanned history\n`,
+      const holdingCount = visibleRows.reduce(
+        (sum, row) =>
+          sum +
+          row.tokenHoldings.filter(
+            (holding) => holding.amountRaw > 0n || flags.has("show-zero"),
+          ).length,
+        0,
+      );
+
+      emit(
+        `PORTFOLIO  ${visibleRows.length} wallets | ` +
+          `${formatRaw(portfolio.totalSolLamports, 9)} SOL | ` +
+          `${holdingCount} token holdings | ${visibleTotals.size} mints` +
+          `${portfolio.tokenScanErrorCount ? ` | ${portfolio.tokenScanErrorCount} scan errors` : ""}\n`,
+      );
+
+      if (flags.has("token-totals")) {
+        const aggregateRows = [...visibleTotals.values()].sort((left, right) =>
+          (left.symbol ?? left.name ?? left.mint).localeCompare(
+            right.symbol ?? right.name ?? right.mint,
+          ),
         );
-      } else {
-        for (const pair of result.pairs) {
-          const sol = formatRaw(BigInt(pair.solLamports), 9);
-          const tokenNote = pair.tokenTransferCount
-            ? ` tokens=${pair.tokenTransferCount} mints=${pair.tokenMints.length}`
-            : "";
+        emit("\nTOKEN TOTALS\n");
+        for (const total of aggregateRows) {
+          const label = total.symbol
+            ? total.symbol
+            : (total.name ?? shortKey(total.mint));
           emit(
-            `@${pair.sourceName} -> @${pair.destinationName}\ttx=${pair.transactionCount}\tSOL=${sol}${tokenNote}\n`,
+            `  ${label.padEnd(14)} ${formatRaw(total.amountRaw, total.decimals).padStart(18)}  ${total.mint}\n`,
           );
         }
       }
-      emit(
-        `${OWL} scanned=${result.scannedWallets} signatures=${result.uniqueSignatures} parsed=${result.parsedTransactions} direct-events=${result.eventCount}\n`,
-      );
-      return;
-    }
 
-    if (command === "transfer" || command === "send-sol") {
-      const recipient = values[0] === "sol" ? values[1] : values[0];
-      if (!recipient) {
-        throw new Error(
-          "Usage: slrd transfer <recipient> --wallet <wallet> --sol <amount> [--sender rpc|helius|jito] [--simulate-only]",
+      for (const row of visibleRows) {
+        const holdings = row.tokenHoldings.filter(
+          (holding) =>
+            holding.amountRaw > 0n ||
+            flags.has("show-zero") ||
+            Boolean(tokenRef),
         );
-      }
+        if (
+          flags.has("only-with-tokens") &&
+          holdings.every((holding) => holding.amountRaw <= 0n)
+        ) {
+          continue;
+        }
 
-      const wallet = need(flags, "wallet");
-      const amount = need(flags, "sol");
-      const via = flags.get("sender") ?? "rpc";
-
-      // Plain SOL transfers should be cheap by default. The global transaction
-      // assembler has a trading-oriented priority default, so override it here.
-      // Users can opt into a priority fee explicitly when the network is busy.
-      const cuLimit = Number(flags.get("cu-limit") ?? "10000");
-      const priorityMicroLamports = Number(
-        flags.get("priority-micro-lamports") ?? "0",
-      );
-      if (!Number.isInteger(cuLimit) || cuLimit <= 0)
-        throw new Error("--cu-limit must be a positive integer");
-      if (!Number.isInteger(priorityMicroLamports) || priorityMicroLamports < 0)
-        throw new Error(
-          "--priority-micro-lamports must be a non-negative integer",
-        );
-
-      const composer = slrd
-        .tx(wallet)
-        .transferSol(recipient, sol(amount))
-        .priorityFee({
-          cuLimit,
-          microLamports: priorityMicroLamports,
-        });
-
-      if (flags.has("simulate-only")) {
-        const plan = await composer.build();
-        const result = await slrd.simulatePlan(plan);
         emit(
-          json({
-            mode: "simulation",
-            wallet,
-            recipient,
-            sol: amount,
-            result,
-          }) + "\n",
+          `\n@${row.walletName}  SOL ${formatRaw(row.solLamports, 9)}  ` +
+            `${holdings.filter((holding) => holding.amountRaw > 0n).length} token(s)\n`,
         );
-        return;
-      }
+        emit(`  ${row.walletAddress}\n`);
 
-      const receipt = await composer.send({
-        via,
-        kind: "transfer-sol",
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-      });
-      emit(
-        json({
-          ...receipt,
-          feeSol:
-            receipt.feeLamports == null
-              ? null
-              : formatRaw(BigInt(receipt.feeLamports), 9),
-        }) + "\n",
-      );
+        for (const holding of holdings) {
+          const label = holding.symbol
+            ? holding.symbol
+            : (holding.name ?? shortKey(holding.mint));
+          emit(
+            `  ${label.padEnd(14)} ${holding.amountUi.padStart(18)}  ${holding.mint}\n`,
+          );
+        }
+
+        if (!row.tokenScanComplete) {
+          emit(
+            `  ! token scan partial (${row.tokenScanErrors.length} error(s))\n`,
+          );
+          if (flags.has("verbose")) {
+            for (const error of row.tokenScanErrors) {
+              process.stderr.write(
+                `${OWL} token scan @${row.walletName}: ${error}\n`,
+              );
+            }
+          }
+        }
+      }
       return;
     }
     if (command === "deploy") {
@@ -912,86 +1104,447 @@ async function main() {
       );
       return;
     }
-    if (command === "cleanup" && values[0] === "pump") {
-      const excludeGroup = need(flags, "exclude-group");
-      const protectedMints = csv(flags.get("keep") ?? flags.get("keep-mint"));
-      if (!protectedMints.length)
+    if (command === "liquidate" && (values[0] ?? "tokens") === "tokens") {
+      const except = csv(flags.get("except"));
+      if (except.length === 0) {
         throw new Error(
-          "Cleanup requires --keep <mint[,mint...]> so protected tokens are explicit.",
+          "Usage: slrd liquidate tokens --except <token|mint>[,<token|mint>...] [--wallets <a,b,...>] [--simulate | --live]",
         );
-      if (flags.has("live") && flags.has("simulate"))
-        throw new Error("Use either --simulate or --live, not both.");
+      }
+      if (flags.has("simulate") && flags.has("live")) {
+        throw new Error("Use either --simulate or --live, not both");
+      }
 
-      const { planPumpCleanup, simulatePumpCleanup, executePumpCleanup } =
-        await import("@solard/sdk");
-      const delayMs = int(flags, "delay-ms", 150) ?? 150;
-      const plan = await planPumpCleanup(slrd, {
-        excludeGroup,
-        excludePrefixes: csv(flags.get("exclude-prefix")),
-        protectedMints,
-        delayMs,
-      });
+      const mode = flags.has("live")
+        ? "LIVE"
+        : flags.has("simulate")
+          ? "SIMULATE"
+          : "PLAN";
 
-      const summary = {
-        mode: flags.has("live")
-          ? "live"
-          : flags.has("simulate")
-            ? "simulation"
-            : "plan",
-        excludeGroup: plan.excludeGroup,
-        excludePrefixes: plan.excludePrefixes,
-        protectedMints: plan.protectedMints,
-        excludedWallets: plan.excludedWallets,
-        scannedWallets: plan.scannedWallets,
-        candidateCount: plan.candidates.length,
-        sellCloseCount: plan.candidates.filter(
-          (item) => item.action === "sell-close",
-        ).length,
-        closeOnlyCount: plan.candidates.filter(
-          (item) => item.action === "close-only",
-        ).length,
-        refundableRentLamports: plan.refundableRentLamports,
-        refundableRentSol: formatRaw(plan.refundableRentLamports, 9),
-        candidates: plan.candidates,
-        skipped: plan.skipped,
+      emit(`LIQUIDATE ${mode}\n`);
+      for (const ref of except) {
+        const mint = resolveTokenMintForPolicy(slrd, ref);
+        emit(`PROTECT  ${ref} -> ${mint}\n`);
+      }
+      emit(
+        `RPC      hard limit ${process.env.SLRD_RPC_MAX_RPS ?? "5"} req/s\n`,
+      );
+
+      const showAction = (
+        prefix: string,
+        index: number,
+        total: number,
+        action: {
+          walletName: string;
+          mint: string;
+          symbol: string | null;
+          name: string | null;
+          amountUi: string;
+          kind: string;
+        },
+      ) => {
+        const label = action.symbol ?? action.name ?? shortKey(action.mint);
+        emit(
+          `${prefix} ${index}/${total}  @${action.walletName}  ` +
+            `${action.kind === "unwrap-wsol" ? "WSOL" : label}  ${action.amountUi}\n`,
+        );
       };
 
-      const executionOptions = {
-        via: flags.get("sender") ?? "rpc",
+      const options = {
+        except,
+        walletRefs: csv(flags.get("wallets")),
         slippageBps: int(flags, "slippage-bps", 1500) ?? 1500,
-        cuLimit: int(flags, "cu-limit", 600000) ?? 600000,
-        priorityMicroLamports: int(flags, "priority-micro-lamports", 0) ?? 0,
-        fundingWallet: flags.get("funding-wallet"),
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-        delayMs,
+        via: flags.get("sender") ?? "rpc",
+        delayMs: int(flags, "delay-ms", 0) ?? 0,
+        routeDelayMs: int(flags, "route-delay-ms", 0) ?? 0,
+        portfolioConcurrency: 1,
+        portfolioDelayMs: 0,
+        jupiterFallback: !flags.has("no-jupiter"),
+        onProgress: (event: any) => {
+          if (event.stage === "portfolio-start") {
+            emit("SCAN     wallet token accounts...\n");
+          } else if (event.stage === "portfolio-done") {
+            emit(
+              `SCAN     ${event.wallets} wallets, ${event.holdings} holdings, ` +
+                `${event.distinctMints} mints\n`,
+            );
+          } else if (event.stage === "route") {
+            emit(
+              `ROUTE    ${event.index}/${event.total}  ${shortKey(event.mint)}\n`,
+            );
+          } else if (event.stage === "action-start") {
+            showAction(
+              flags.has("simulate") ? "SIM " : "DO  ",
+              event.index,
+              event.total,
+              event.action,
+            );
+          } else if (event.stage === "action-done") {
+            showAction("OK  ", event.index, event.total, event.action);
+          } else if (event.stage === "action-error") {
+            showAction("FAIL", event.index, event.total, event.action);
+            emit(`         ${event.error}\n`);
+          }
+        },
       };
 
-      if (flags.has("simulate")) {
-        const simulation = await simulatePumpCleanup(
-          slrd,
-          plan,
-          executionOptions,
+      const plan = await planRegistryTokenLiquidation(slrd, options);
+      emit(
+        `PLAN     native=${plan.totals.sell}  jupiter=${plan.totals.jupiterSell}  ` +
+          `unwrap=${plan.totals.unwrapWsol}  keep=${plan.totals.keepProtected}  ` +
+          `unsupported=${plan.totals.skipUnsupported}\n`,
+      );
+
+      if (!flags.has("simulate") && !flags.has("live")) {
+        const actionable = plan.actions.filter(
+          (action) =>
+            action.kind === "sell" ||
+            action.kind === "jupiter-sell" ||
+            action.kind === "unwrap-wsol",
         );
-        emit(json({ ...summary, results: simulation.results }) + "\n");
+        for (const action of actionable) {
+          const label = action.symbol ?? action.name ?? shortKey(action.mint);
+          const verb =
+            action.kind === "unwrap-wsol"
+              ? "UNWRAP"
+              : action.kind === "jupiter-sell"
+                ? "JUPITER"
+                : "SELL";
+          emit(
+            `${verb.padEnd(7)} @${action.walletName.padEnd(16)} ` +
+              `${label.padEnd(14)} ${action.amountUi}` +
+              `${action.venue ? `  ${action.venue}` : ""}\n`,
+          );
+        }
+
+        emit(
+          `KEEP     ${plan.totals.keepProtected} protected SLRD holding(s)\n` +
+            `SKIP     ${plan.totals.skipUnsupported} unsupported/no-liquidity holding(s)`,
+        );
+        if (plan.totals.skipUnsupported > 0) {
+          emit(flags.has("verbose") ? "\n" : "  (use --verbose to list)\n");
+          if (flags.has("verbose")) {
+            for (const action of plan.actions.filter(
+              (item) => item.kind === "skip-unsupported",
+            )) {
+              const label =
+                action.symbol ?? action.name ?? shortKey(action.mint);
+              emit(
+                `SKIP     @${action.walletName.padEnd(16)} ` +
+                  `${label.padEnd(14)} ${action.amountUi}  ${action.reason ?? "unsupported"}\n`,
+              );
+            }
+          }
+        } else {
+          emit("\n");
+        }
+        emit(`\n${OWL} plan only. Use --simulate, then --live.\n`);
         return;
       }
 
-      if (flags.has("live")) {
-        const result = await executePumpCleanup(slrd, plan, executionOptions);
+      const results = flags.has("simulate")
+        ? await simulateRegistryTokenLiquidation(slrd, plan, options)
+        : await executeRegistryTokenLiquidation(slrd, plan, options);
+
+      const failed = results.filter((result) => Boolean(result.error)).length;
+      const succeeded = results.filter((result) => !result.error);
+      const soldNative = succeeded.filter(
+        (result) => result.action.kind === "sell",
+      ).length;
+      const soldJupiter = succeeded.filter(
+        (result) => result.action.kind === "jupiter-sell",
+      ).length;
+      const unwrapped = succeeded.filter(
+        (result) => result.action.kind === "unwrap-wsol",
+      ).length;
+      emit(
+        `DONE     ok=${succeeded.length}  failed=${failed}  ` +
+          `native-sold=${soldNative}  jupiter-sold=${soldJupiter}  ` +
+          `unwrapped=${unwrapped}\n`,
+      );
+      return;
+    }
+
+    if (command === "sweep" && values[0] === "sol") {
+      const destinationInput = flags.get("to") ?? values[1];
+      if (!destinationInput || destinationInput === "true") {
+        throw new Error(
+          "Usage: slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]",
+        );
+      }
+
+      const destination = resolveDestinationRef(slrd, destinationInput);
+
+      const keepSolByWallet: Record<string, string> = {};
+      const keep = flags.get("keep");
+      if (keep && keep !== "true") {
+        for (const entry of keep.split(",")) {
+          const [wallet, amount, ...extra] = entry.split("=");
+          if (!wallet?.trim() || !amount?.trim() || extra.length) {
+            throw new Error(
+              `Invalid --keep entry ${entry}; expected wallet=SOL`,
+            );
+          }
+          keepSolByWallet[wallet.trim()] = amount.trim();
+        }
+      }
+
+      const excludeGroups = csv(flags.get("exclude-group"));
+      const excludePrefixes = csv(flags.get("exclude-prefix"));
+      const includeWallets = csv(flags.get("wallets"));
+
+      const keepIfTokenRaw = flags.get("keep-if-token");
+      let keepSolIfToken: { token: string; sol: string } | undefined;
+      if (keepIfTokenRaw && keepIfTokenRaw !== "true") {
+        const separator = keepIfTokenRaw.lastIndexOf("=");
+        if (separator <= 0 || separator >= keepIfTokenRaw.length - 1) {
+          throw new Error(
+            "--keep-if-token expects <token|mint>=<SOL>, for example slrd=0.1",
+          );
+        }
+        keepSolIfToken = {
+          token: keepIfTokenRaw.slice(0, separator).trim(),
+          sol: keepIfTokenRaw.slice(separator + 1).trim(),
+        };
+      }
+      if (flags.get("keep-if-tokens") && keepSolIfToken) {
+        throw new Error(
+          "Use either --keep-if-tokens or --keep-if-token, not both",
+        );
+      }
+
+      const sweepMode = flags.has("live")
+        ? "LIVE"
+        : flags.has("simulate")
+          ? "SIMULATE"
+          : "PLAN";
+      if (!flags.has("json")) {
+        emit(`SWEEP ${sweepMode}  to=${destination.address}\n`);
+        emit(
+          `RPC      hard limit ${process.env.SLRD_RPC_MAX_RPS ?? "5"} req/s\n`,
+        );
+      }
+
+      const options = {
+        destination: destination.address,
+        excludeGroups,
+        excludePrefixes,
+        includeWallets: includeWallets.length ? includeWallets : undefined,
+        keepSolByWallet,
+        defaultKeepSol: flags.get("default-keep-sol") ?? "0",
+        keepSolIfTokens: flags.get("keep-if-tokens"),
+        keepSolIfToken,
+        tokenScanConcurrency: Math.max(
+          1,
+          Math.min(8, Math.trunc(int(flags, "rpc-concurrency", 1) ?? 1)),
+        ),
+        tokenScanDelayMs: Math.max(
+          0,
+          Math.trunc(int(flags, "rpc-delay-ms", 75) ?? 75),
+        ),
+        delayMs: int(flags, "delay-ms", 0) ?? 0,
+        onProgress: flags.has("json")
+          ? undefined
+          : (event: any) => {
+              if (event.stage === "plan-start") {
+                emit(`PLAN     ${event.wallets} candidate wallets\n`);
+              } else if (event.stage === "plan-ready") {
+                emit(
+                  `PLAN     ${event.sendWallets}/${event.wallets} will send, ` +
+                    `${formatRaw(event.totalSendLamports, 9)} SOL total\n`,
+                );
+              } else if (event.stage === "wallet-start") {
+                emit(
+                  `SEND     ${event.index}/${event.total}  @${event.row.walletName}  ` +
+                    `${formatRaw(event.row.sendLamports, 9)} SOL\n`,
+                );
+              } else if (event.stage === "wallet-done") {
+                emit(
+                  `OK       ${event.index}/${event.total}  @${event.row.walletName}\n`,
+                );
+              } else if (event.stage === "wallet-error") {
+                emit(
+                  `FAIL     ${event.index}/${event.total}  @${event.row.walletName}  ` +
+                    `${event.error}\n`,
+                );
+              }
+            },
+      };
+      const plan = await planRegistrySolSweep(slrd, options);
+
+      const printablePlan = {
+        mode: flags.has("live")
+          ? "live"
+          : flags.has("simulate")
+            ? "simulate"
+            : "plan",
+        destination: {
+          input: destination.input,
+          address: plan.destination,
+          contact: destination.contactName ?? null,
+          wallet: destination.walletName ?? null,
+        },
+        totalSendSol: formatRaw(plan.totalSendLamports, 9),
+        rows: plan.rows.map((row) => ({
+          wallet: row.walletName,
+          address: row.walletAddress,
+          balanceSol: formatRaw(row.balanceLamports, 9),
+          keepSol: formatRaw(row.keepLamports, 9),
+          feeSol: formatRaw(row.feeLamports, 9),
+          sendSol: formatRaw(row.sendLamports, 9),
+          tokenHoldings: row.tokenHoldingCount,
+          tokenScanComplete: row.tokenScanComplete,
+          reserveReason: row.reserveReason ?? null,
+          reserveTokenMint: row.reserveTokenMint ?? null,
+          reserveTokenAmountRaw: row.reserveTokenAmountRaw?.toString() ?? null,
+          skippedReason: row.skippedReason ?? null,
+        })),
+      };
+
+      if (!flags.has("simulate") && !flags.has("live")) {
+        if (flags.has("json")) {
+          emit(json(printablePlan) + "\n");
+          return;
+        }
+
+        emit(
+          `SWEEP PLAN  to=${plan.destination}  ` +
+            `send=${formatRaw(plan.totalSendLamports, 9)} SOL  ` +
+            `wallets=${plan.rows.filter((row) => row.sendLamports > 0n).length}/${plan.rows.length}\n`,
+        );
+
+        for (const row of plan.rows) {
+          if (row.sendLamports <= 0n && !flags.has("show-skipped")) continue;
+          emit(
+            `${row.sendLamports > 0n ? "SEND" : "SKIP"}  ` +
+              `@${row.walletName.padEnd(18)} ` +
+              `balance=${formatRaw(row.balanceLamports, 9).padStart(12)}  ` +
+              `keep=${formatRaw(row.keepLamports, 9).padStart(5)}  ` +
+              `send=${formatRaw(row.sendLamports, 9).padStart(12)}` +
+              `${row.reserveReason === "specific-token" ? "  keep-token=yes" : ""}` +
+              `${row.skippedReason ? `  ${row.skippedReason}` : ""}\n`,
+          );
+        }
+
+        emit(
+          `\n${OWL} plan only; no signer was decrypted and nothing was submitted. ` +
+            `Use --json for full details, then --simulate or --live.\n`,
+        );
+        return;
+      }
+
+      if (flags.has("simulate") && flags.has("live")) {
+        throw new Error("Use either --simulate or --live, not both");
+      }
+
+      if (flags.has("simulate")) {
+        const results = await simulateRegistrySolSweep(slrd, plan, options);
+        if (flags.has("json")) {
+          emit(json({ ...printablePlan, results }) + "\n");
+        } else {
+          const failed = results.filter(
+            (result) => result.error || result.simulation?.success === false,
+          ).length;
+          emit(
+            `SWEEP SIMULATION  attempted=${results.length}  ` +
+              `ok=${results.length - failed}  failed=${failed}  ` +
+              `to=${plan.destination}\n`,
+          );
+          for (const result of results) {
+            if (!result.error && result.simulation?.success !== false) continue;
+            emit(
+              `FAIL  @${result.row.walletName}  ` +
+                `${result.error ?? "simulation failed"}\n`,
+            );
+          }
+        }
+        return;
+      }
+
+      const receipts = await executeRegistrySolSweep(slrd, plan, options);
+      if (flags.has("json")) {
+        emit(json({ ...printablePlan, receipts }) + "\n");
+      } else {
+        const failed = receipts.filter((result) =>
+          Boolean(result.error),
+        ).length;
+        emit(
+          `SWEEP LIVE  attempted=${receipts.length}  ` +
+            `ok=${receipts.length - failed}  failed=${failed}  ` +
+            `to=${plan.destination}\n`,
+        );
+        for (const result of receipts) {
+          if (!result.error) continue;
+          emit(`FAIL  @${result.row.walletName}  ${result.error}\n`);
+        }
+      }
+      return;
+    }
+
+    if (command === "transfer" || command === "send-sol") {
+      const recipientInput = values[0] === "sol" ? values[1] : values[0];
+      if (!recipientInput) {
+        throw new Error(
+          "Usage: slrd transfer <contact|wallet|address> --wallet <wallet> --sol <amount> [--sender rpc|helius|jito] [--simulate-only]",
+        );
+      }
+
+      const recipient = resolveDestinationRef(slrd, recipientInput);
+      const wallet = need(flags, "wallet");
+      const amount = need(flags, "sol");
+      const via = flags.get("sender") ?? "rpc";
+
+      const cuLimit = Number(flags.get("cu-limit") ?? "10000");
+      const priorityMicroLamports = Number(
+        flags.get("priority-micro-lamports") ?? "0",
+      );
+      if (!Number.isInteger(cuLimit) || cuLimit <= 0)
+        throw new Error("--cu-limit must be a positive integer");
+      if (
+        !Number.isInteger(priorityMicroLamports) ||
+        priorityMicroLamports < 0
+      ) {
+        throw new Error(
+          "--priority-micro-lamports must be a non-negative integer",
+        );
+      }
+
+      const composer = slrd
+        .tx(wallet)
+        .transferSol(recipient.address, sol(amount))
+        .priorityFee({
+          cuLimit,
+          microLamports: priorityMicroLamports,
+        });
+
+      if (flags.has("simulate-only")) {
+        const plan = await composer.build();
+        const result = await slrd.simulatePlan(plan);
         emit(
           json({
-            ...summary,
-            receipts: result.receipts,
-            feeLamports: result.feeLamports,
-            feeSol: formatRaw(BigInt(result.feeLamports), 9),
+            mode: "simulation",
+            wallet,
+            recipient,
+            sol: amount,
+            result,
           }) + "\n",
         );
         return;
       }
 
-      emit(json(summary) + "\n");
+      const receipt = await composer.send({
+        via,
+        kind: "transfer-sol",
+        skipSimulation: flags.has("skip-simulation"),
+        skipPreflight:
+          flags.has("skip-preflight") || flags.has("skip-simulation"),
+      });
+      emit(
+        json({
+          ...receipt,
+          recipient,
+        }) + "\n",
+      );
       return;
     }
 
@@ -1103,6 +1656,104 @@ async function main() {
         skipPreflight:
           flags.has("skip-preflight") || flags.has("skip-simulation"),
       };
+
+      const multiWallet = targets.refs.length > 1;
+      const failFast = flags.has("fail-fast");
+
+      // Multi-wallet/group unwrap is resilient by default. Do not let one
+      // undecryptable wallet prevent unrelated wallets from recovering WSOL.
+      // With --ignore-missing, probe the WSOL ATA using only the public wallet
+      // address BEFORE asking the vault to decrypt the signer.
+      if (multiWallet && !failFast) {
+        const results: Array<Record<string, unknown>> = [];
+
+        for (const walletRef of targets.refs) {
+          const resolved = slrd.resolveWallet(walletRef);
+          const address = resolved.address.toBase58();
+          const label = resolved.row?.name ? `@${resolved.row.name}` : address;
+
+          if (unwrapOptions.skipMissing) {
+            const wsolAccount = wrappedSolAta(resolved.address);
+            const account = await slrd
+              .connection()
+              .getAccountInfo(wsolAccount, "confirmed");
+
+            if (!account) {
+              results.push({
+                wallet: walletRef,
+                address,
+                ok: true,
+                skipped: "missing-wsol",
+                wsolAccount: wsolAccount.toBase58(),
+              });
+              continue;
+            }
+          }
+
+          try {
+            if (flags.has("simulate-only")) {
+              const plan = await slrd
+                .tx(walletRef)
+                .unwrapWsol({ skipMissing: unwrapOptions.skipMissing })
+                .build();
+              const simulation = await slrd.simulatePlan(plan);
+              results.push({
+                wallet: walletRef,
+                address,
+                ok: simulation.success,
+                mode: "simulation",
+                simulation,
+              });
+            } else {
+              const receipt = await slrd.unwrapWsol(walletRef, unwrapOptions);
+              results.push({
+                wallet: walletRef,
+                address,
+                ok: true,
+                receipt,
+              });
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            results.push({
+              wallet: walletRef,
+              address,
+              ok: false,
+              error: message,
+            });
+            process.stderr.write(
+              `${OWL} unwrap-wsol ${label} (${address}) failed: ${message}\n`,
+            );
+          }
+        }
+
+        const succeeded = results.filter(
+          (row) => row.ok === true && !row.skipped,
+        ).length;
+        const skipped = results.filter((row) => Boolean(row.skipped)).length;
+        const failed = results.filter((row) => row.ok === false).length;
+
+        emit(
+          json({
+            mode: flags.has("simulate-only")
+              ? "wallet-by-wallet-simulation"
+              : "wallet-by-wallet",
+            target: targets,
+            summary: {
+              total: results.length,
+              succeeded,
+              skipped,
+              failed,
+            },
+            results,
+          }) + "\n",
+        );
+        return;
+      }
+
+      // Single-wallet unwrap remains fail-fast. --fail-fast also preserves the
+      // old batch behavior for callers that explicitly want all-or-nothing.
       if (flags.has("simulate-only")) {
         const plans =
           targets.refs.length === 1
@@ -1125,6 +1776,7 @@ async function main() {
         emit(json({ mode: "simulation", target: targets, results }) + "\n");
         return;
       }
+
       const receipts =
         targets.refs.length === 1
           ? await slrd.unwrapWsol(targets.refs[0]!, unwrapOptions)
@@ -1198,40 +1850,6 @@ async function main() {
       emit(json({ group, added: members.length, members }) + "\n");
       return;
     }
-    if (command === "group" && values[0] === "add-prefix") {
-      const group = values[1];
-      const prefix = values[2];
-      if (!group || !prefix)
-        throw new Error(
-          "Usage: slrd group add-prefix <group> <wallet-name-prefix>",
-        );
-
-      slrd.groups.create(group);
-      const normalizedPrefix = prefix.toLowerCase();
-      const matches = slrd.wallets
-        .list()
-        .filter((wallet) =>
-          wallet.name.toLowerCase().startsWith(normalizedPrefix),
-        );
-
-      const members = matches.map((wallet) =>
-        slrd.groups.addWallet(group, wallet.address, 10000),
-      );
-
-      emit(
-        json({
-          group,
-          prefix,
-          added: members.length,
-          wallets: matches.map((wallet) => ({
-            name: wallet.name,
-            address: wallet.address,
-          })),
-        }) + "\n",
-      );
-      return;
-    }
-
     if (command === "group" && values[0] === "show") {
       const group = values[1];
       if (!group) throw new Error("Usage: slrd group show <group>");
