@@ -1,12 +1,8 @@
 /**
  * Browser-safe Solard SDK.
  *
- * This entrypoint intentionally does NOT import @solard/core. There is no
- * SQLite, node:fs, Bun API, process.env, or server-side encrypted wallet DB in
- * its import graph.
- *
- * Use:
- *   import { createBrowserSolard } from "@solard/sdk/browser";
+ * Trading uses the same local Pump/PumpSwap venue classes, quote math and
+ * instruction builders as the CLI/core engine. No external swap API is used.
  */
 export {
   BrowserSolard,
@@ -22,17 +18,8 @@ export {
   MemoryBrowserStorage,
   defaultBrowserStorage,
 } from "./storage.ts";
-
 export { BrowserKeyVault, KeypairBrowserSigner } from "./wallet.ts";
-
-export { buildJupiterDirectSwap, fetchJupiterBuild } from "./jupiter.ts";
-
-export type {
-  JupiterBrowserConfig,
-  JupiterBuildOptions,
-  JupiterBuildResponse,
-  JupiterInstruction,
-} from "./jupiter.ts";
+export { buildLocalPumpBuy, buildLocalPumpSell } from "./pump.ts";
 
 export type {
   BrowserBroadcastResult,
@@ -40,9 +27,10 @@ export type {
   BrowserPortfolio,
   BrowserSolardOptions,
   BrowserStorageLike,
-  BrowserSwapBuild,
-  BrowserSwapResult,
   BrowserTokenAlias,
   BrowserTokenBalance,
+  BrowserTradeBuild,
+  BrowserTradeResult,
+  BrowserTradeSide,
   BrowserWalletSigner,
 } from "./types.ts";

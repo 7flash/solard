@@ -1,3 +1,4 @@
+import { Buffer } from "buffer";
 import { Connection, PublicKey } from "@solana/web3.js";
 import type { QuoteAsset } from "../../core/amounts.ts";
 import type { TokenRow } from "../../db/schema.ts";
@@ -46,11 +47,16 @@ export async function resolvePumpRouting(
       : {};
   let feeRecipient: PublicKey | undefined;
   let buybackFeeRecipient: PublicKey | undefined;
+  const runtimeEnv = (
+    globalThis as {
+      process?: { env?: Record<string, string | undefined> };
+    }
+  ).process?.env;
   const feeOverride =
-    stringField(nested, "feeRecipient") ?? process.env.PUMP_FEE_RECIPIENT;
+    stringField(nested, "feeRecipient") ?? runtimeEnv?.PUMP_FEE_RECIPIENT;
   const buybackOverride =
     stringField(nested, "buybackFeeRecipient") ??
-    process.env.PUMP_BUYBACK_FEE_RECIPIENT;
+    runtimeEnv?.PUMP_BUYBACK_FEE_RECIPIENT;
   if (feeOverride) feeRecipient = new PublicKey(feeOverride);
   if (buybackOverride) buybackFeeRecipient = new PublicKey(buybackOverride);
   if (!feeRecipient || !buybackFeeRecipient) {

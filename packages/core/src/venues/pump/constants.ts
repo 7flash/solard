@@ -1,3 +1,4 @@
+import { Buffer } from "buffer";
 import {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,

@@ -7,16 +7,13 @@ import {
 } from "@solana/web3.js";
 
 import { BrowserSolardStore, defaultBrowserStorage } from "./storage.ts";
-import {
-  buildJupiterDirectSwap,
-  type JupiterBrowserConfig,
-} from "./jupiter.ts";
+import { buildLocalPumpBuy, buildLocalPumpSell } from "./pump.ts";
 import type {
   BrowserBroadcastResult,
   BrowserPortfolio,
   BrowserSolardOptions,
-  BrowserSwapBuild,
-  BrowserSwapResult,
+  BrowserTradeBuild,
+  BrowserTradeResult,
   BrowserTokenBalance,
   BrowserWalletSigner,
 } from "./types.ts";
@@ -37,23 +34,20 @@ function createRateLimitedFetch(
   maxRps: number,
 ): typeof globalThis.fetch {
   const rps = Math.max(0.1, maxRps);
-  const spacingMs = Math.ceil(1000 / rps) + 2;
+  const spacingMs = Math.ceil(1000 / rps) + 5;
   let tail = Promise.resolve();
   let nextAt = 0;
-
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     let release!: () => void;
     const previous = tail;
     tail = new Promise<void>((resolve) => {
       release = resolve;
     });
-
     await previous;
     try {
       const delay = Math.max(0, nextAt - Date.now());
-      if (delay > 0) {
+      if (delay > 0)
         await new Promise<void>((resolve) => setTimeout(resolve, delay));
-      }
       nextAt = Date.now() + spacingMs;
     } finally {
       release();
@@ -72,13 +66,11 @@ function requireFetch(
 
 function lamportsFromSol(value: string | number): bigint {
   const text = String(value).trim();
-  if (!/^\d+(?:\.\d+)?$/.test(text)) {
+  if (!/^\d+(?:\.\d+)?$/.test(text))
     throw new Error(`Invalid SOL amount: ${text}`);
-  }
   const [whole = "0", fraction = ""] = text.split(".");
-  if (fraction.length > 9) {
+  if (fraction.length > 9)
     throw new Error("SOL amount supports at most 9 decimal places.");
-  }
   return (
     BigInt(whole) * 1_000_000_000n +
     BigInt((fraction + "000000000").slice(0, 9))
@@ -101,26 +93,23 @@ export class BrowserSolard {
   readonly store: BrowserSolardStore;
   readonly contacts;
   readonly tokens;
-
   private wallet: BrowserWalletSigner | null;
-  private readonly jupiter: JupiterBrowserConfig;
 
   constructor(readonly options: BrowserSolardOptions) {
-    const rawFetch = requireFetch(options.fetch);
-    const rpcFetch = createRateLimitedFetch(rawFetch, options.rpcMaxRps ?? 5);
-
+    const rpcFetch = createRateLimitedFetch(
+      requireFetch(options.fetch),
+      options.rpcMaxRps ?? 5,
+    );
     this.connection = new Connection(options.rpcUrl, {
       commitment: options.commitment ?? "confirmed",
       disableRetryOnRateLimit: true,
       fetch: rpcFetch,
     });
-
     this.wallet = options.wallet ?? null;
     this.store = new BrowserSolardStore(
       options.storage ?? defaultBrowserStorage(),
       options.storageNamespace ?? "solard:browser:v1",
     );
-
     this.contacts = {
       list: () => this.store.listContacts(),
       add: (
@@ -132,7 +121,6 @@ export class BrowserSolard {
       remove: (ref: string) => this.store.removeContact(ref),
       resolve: (ref: string) => this.store.resolveDestination(ref),
     };
-
     this.tokens = {
       list: () => this.store.listTokenAliases(),
       register: (
@@ -142,48 +130,44 @@ export class BrowserSolard {
       ) => this.store.registerToken(alias, mint, registerOptions),
       resolve: (ref: string) => this.store.resolveToken(ref),
     };
-
-    const jupiterRps =
-      options.jupiterMaxRps ?? (options.jupiterApiKey ? 1 : 0.5);
-    this.jupiter = {
-      baseUrl: options.jupiterBaseUrl,
-      apiKey: options.jupiterApiKey,
-      fetch: createRateLimitedFetch(rawFetch, jupiterRps),
-    };
   }
 
   setWallet(wallet: BrowserWalletSigner | null): void {
     this.wallet = wallet;
   }
-
   get publicKey(): PublicKey | null {
     return this.wallet?.publicKey ?? null;
   }
 
   private signer(): BrowserWalletSigner {
-    if (!this.wallet?.publicKey) {
+    if (!this.wallet?.publicKey)
       throw new Error(
         "A connected browser wallet is required for this operation.",
       );
-    }
     return this.wallet;
   }
 
   async connectWallet(): Promise<PublicKey> {
     const wallet = this.signer();
     await wallet.connect?.();
-    if (!wallet.publicKey) {
+    if (!wallet.publicKey)
       throw new Error("Browser wallet connected without a public key.");
-    }
     return wallet.publicKey;
   }
 
   resolveDestination(ref: string): string {
     return this.store.resolveDestination(ref);
   }
-
   resolveToken(ref: string): string {
     return this.store.resolveToken(ref);
+  }
+
+  private resolveTokenOrMint(value: string): string {
+    try {
+      return new PublicKey(value).toBase58();
+    } catch {
+      return this.store.resolveToken(value);
+    }
   }
 
   async getPortfolio(address?: string | PublicKey): Promise<BrowserPortfolio> {
@@ -193,7 +177,6 @@ export class BrowserSolard {
         : address
           ? new PublicKey(address)
           : this.signer().publicKey!;
-
     const [solLamportsNumber, spl, token2022] = await Promise.all([
       this.connection.getBalance(owner, "confirmed"),
       this.connection.getParsedTokenAccountsByOwner(
@@ -207,7 +190,6 @@ export class BrowserSolard {
         "confirmed",
       ),
     ]);
-
     const aggregate = new Map<
       string,
       {
@@ -217,7 +199,6 @@ export class BrowserSolard {
         accounts: string[];
       }
     >();
-
     for (const [program, response] of [
       ["spl-token", spl] as const,
       ["token-2022", token2022] as const,
@@ -231,22 +212,19 @@ export class BrowserSolard {
         const amountRaw = BigInt(raw);
         if (amountRaw === 0n) continue;
         const decimals = Number(amount?.decimals ?? 0);
-
         const existing = aggregate.get(mint);
         if (existing) {
           existing.amountRaw += amountRaw;
           existing.accounts.push(account.pubkey.toBase58());
-        } else {
+        } else
           aggregate.set(mint, {
             amountRaw,
             decimals,
             program,
             accounts: [account.pubkey.toBase58()],
           });
-        }
       }
     }
-
     const aliases = new Map(
       this.store
         .listTokenAliases()
@@ -263,7 +241,6 @@ export class BrowserSolard {
         tokenAccounts: row.accounts,
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
-
     return {
       address: owner.toBase58(),
       solLamports: BigInt(solLamportsNumber),
@@ -279,12 +256,9 @@ export class BrowserSolard {
       skipPreflight?: boolean;
     },
   ): Promise<BrowserBroadcastResult> {
-    const wallet = this.signer();
-    const signed = await wallet.signTransaction(transaction);
-    if (!(signed instanceof VersionedTransaction)) {
+    const signed = await this.signer().signTransaction(transaction);
+    if (!(signed instanceof VersionedTransaction))
       throw new Error("Browser wallet did not return a VersionedTransaction.");
-    }
-
     const signature = await this.connection.sendRawTransaction(
       signed.serialize(),
       {
@@ -293,7 +267,6 @@ export class BrowserSolard {
         maxRetries: 0,
       },
     );
-
     const confirmation = await this.connection.confirmTransaction(
       {
         signature,
@@ -302,13 +275,10 @@ export class BrowserSolard {
       },
       "confirmed",
     );
-
-    if (confirmation.value.err) {
+    if (confirmation.value.err)
       throw new Error(
         `Transaction ${signature} failed: ${JSON.stringify(confirmation.value.err)}`,
       );
-    }
-
     return {
       signature,
       confirmed: true,
@@ -326,14 +296,8 @@ export class BrowserSolard {
       this.store.resolveDestination(destinationRef),
     );
     const lamports = lamportsFromSol(amountSol);
-    if (lamports <= 0n)
-      throw new Error("SOL transfer amount must be positive.");
-    if (lamports > BigInt(Number.MAX_SAFE_INTEGER)) {
-      throw new Error(
-        "SOL transfer amount is too large for SystemProgram.transfer.",
-      );
-    }
-
+    if (lamports <= 0n || lamports > BigInt(Number.MAX_SAFE_INTEGER))
+      throw new Error("Invalid SOL transfer amount.");
     const latest = await this.connection.getLatestBlockhash("confirmed");
     const message = new TransactionMessage({
       payerKey: wallet.publicKey!,
@@ -346,95 +310,121 @@ export class BrowserSolard {
         }),
       ],
     }).compileToV0Message();
-
     return await this.signAndBroadcast(
       new VersionedTransaction(message),
       latest,
     );
   }
 
-  async buildSwap(args: {
-    inputMint: string;
-    outputMint: string;
-    amountRaw: bigint | string;
-    slippageBps?: number | "rtse";
-    mode?: "fast";
-    simulate?: boolean;
-  }): Promise<BrowserSwapBuild> {
-    const wallet = this.signer();
-    return await buildJupiterDirectSwap({
+  async buildBuy(args: {
+    token: string;
+    sol: string | number;
+    slippageBps?: number;
+    cuLimit?: number;
+    priorityMicroLamports?: number;
+  }): Promise<BrowserTradeBuild> {
+    return await buildLocalPumpBuy({
       connection: this.connection,
-      config: this.jupiter,
-      options: {
-        inputMint: this.resolveTokenOrMint(args.inputMint),
-        outputMint: this.resolveTokenOrMint(args.outputMint),
-        amountRaw: args.amountRaw,
-        taker: wallet.publicKey!.toBase58(),
-        slippageBps: args.slippageBps,
-        mode: args.mode,
-        wrapAndUnwrapSol: true,
-      },
-      simulate: args.simulate,
+      user: this.signer().publicKey!,
+      mint: this.resolveTokenOrMint(args.token),
+      quoteInRaw: lamportsFromSol(args.sol),
+      slippageBps: args.slippageBps,
+      cuLimit: args.cuLimit,
+      priorityMicroLamports: args.priorityMicroLamports,
     });
   }
 
-  async swap(args: {
-    inputMint: string;
-    outputMint: string;
-    amountRaw: bigint | string;
-    slippageBps?: number | "rtse";
-    mode?: "fast";
-    simulate?: boolean;
+  async buildSell(args: {
+    token: string;
+    amountRaw: bigint;
+    slippageBps?: number;
+    cuLimit?: number;
+    priorityMicroLamports?: number;
+  }): Promise<BrowserTradeBuild> {
+    if (args.amountRaw <= 0n) throw new Error("Sell amount must be positive.");
+    return await buildLocalPumpSell({
+      connection: this.connection,
+      user: this.signer().publicKey!,
+      mint: this.resolveTokenOrMint(args.token),
+      baseInRaw: args.amountRaw,
+      slippageBps: args.slippageBps,
+      cuLimit: args.cuLimit,
+      priorityMicroLamports: args.priorityMicroLamports,
+    });
+  }
+
+  async buy(args: {
+    token: string;
+    sol: string | number;
+    slippageBps?: number;
+    cuLimit?: number;
+    priorityMicroLamports?: number;
     skipPreflight?: boolean;
-  }): Promise<BrowserSwapResult> {
-    const build = await this.buildSwap(args);
-    const broadcast = await this.signAndBroadcast(build.transaction, {
+  }): Promise<BrowserTradeResult> {
+    const build = await this.buildBuy(args);
+    const receipt = await this.signAndBroadcast(build.transaction, {
       blockhash: build.blockhash,
       lastValidBlockHeight: build.lastValidBlockHeight,
       skipPreflight: args.skipPreflight,
     });
-
     return {
-      ...broadcast,
-      inputMint: build.inputMint,
-      outputMint: build.outputMint,
-      inAmount: build.inAmount,
-      quotedOutAmount: build.outAmount,
+      ...receipt,
+      side: build.side,
+      venue: build.venue,
+      mint: build.mint,
+      inputRaw: build.inputRaw,
+      expectedOutputRaw: build.expectedOutputRaw,
+      minimumOutputRaw: build.minimumOutputRaw,
+    };
+  }
+
+  async sell(args: {
+    token: string;
+    amountRaw: bigint;
+    slippageBps?: number;
+    cuLimit?: number;
+    priorityMicroLamports?: number;
+    skipPreflight?: boolean;
+  }): Promise<BrowserTradeResult> {
+    const build = await this.buildSell(args);
+    const receipt = await this.signAndBroadcast(build.transaction, {
+      blockhash: build.blockhash,
+      lastValidBlockHeight: build.lastValidBlockHeight,
+      skipPreflight: args.skipPreflight,
+    });
+    return {
+      ...receipt,
+      side: build.side,
+      venue: build.venue,
+      mint: build.mint,
+      inputRaw: build.inputRaw,
+      expectedOutputRaw: build.expectedOutputRaw,
+      minimumOutputRaw: build.minimumOutputRaw,
     };
   }
 
   async buyWithSol(args: {
     outputMint: string;
     sol: string | number;
-    slippageBps?: number | "rtse";
-  }): Promise<BrowserSwapResult> {
-    return await this.swap({
-      inputMint: SOL_MINT,
-      outputMint: args.outputMint,
-      amountRaw: lamportsFromSol(args.sol),
+    slippageBps?: number;
+  }): Promise<BrowserTradeResult> {
+    return await this.buy({
+      token: args.outputMint,
+      sol: args.sol,
       slippageBps: args.slippageBps,
     });
   }
 
   async sellToSol(args: {
     inputMint: string;
-    amountRaw: bigint | string;
-    slippageBps?: number | "rtse";
-  }): Promise<BrowserSwapResult> {
-    return await this.swap({
-      inputMint: args.inputMint,
-      outputMint: SOL_MINT,
+    amountRaw: bigint;
+    slippageBps?: number;
+  }): Promise<BrowserTradeResult> {
+    return await this.sell({
+      token: args.inputMint,
       amountRaw: args.amountRaw,
       slippageBps: args.slippageBps,
     });
-  }
-
-  private resolveTokenOrMint(value: string): string {
-    try {
-      return new PublicKey(value).toBase58();
-    } catch {
-      return this.store.resolveToken(value);
-    }
   }
 }
 

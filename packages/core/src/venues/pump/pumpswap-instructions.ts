@@ -1,3 +1,4 @@
+import { Buffer } from "buffer";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   createSyncNativeInstruction,

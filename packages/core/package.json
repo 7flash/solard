@@ -1,6 +1,6 @@
 {
   "name": "@solard/core",
-  "version": "0.2.6",
+  "version": "0.2.2",
   "description": "Core Solana wallet, transaction and trading engine for Solard.",
   "type": "module",
   "main": "./src/index.ts",
@@ -27,7 +27,7 @@
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
     "bs58": "^6.0.0",
-    "measure-fn": "5",
-    "sqlite-zod-orm": "^3.33.0"
+    "sqlite-zod-orm": "^3.33.0",
+    "buffer": "^6.0.3"
   }
 }

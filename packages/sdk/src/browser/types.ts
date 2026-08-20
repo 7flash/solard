@@ -62,24 +62,30 @@ export type BrowserBroadcastResult = {
   lastValidBlockHeight: number;
 };
 
-export type BrowserSwapBuild = {
+export type BrowserTradeSide = "buy" | "sell";
+
+export type BrowserTradeBuild = {
   transaction: VersionedTransaction;
-  inputMint: string;
-  outputMint: string;
-  inAmount: string;
-  outAmount: string;
-  otherAmountThreshold: string;
-  routePlan: unknown[];
+  side: BrowserTradeSide;
+  venue: string;
+  mint: string;
+  inputRaw: bigint;
+  expectedOutputRaw: bigint;
+  minimumOutputRaw: bigint;
+  quoteMint: string;
+  quoteDecimals: number;
   blockhash: string;
   lastValidBlockHeight: number;
-  unitsConsumed?: number;
+  serializedSize: number;
 };
 
-export type BrowserSwapResult = BrowserBroadcastResult & {
-  inputMint: string;
-  outputMint: string;
-  inAmount: string;
-  quotedOutAmount: string;
+export type BrowserTradeResult = BrowserBroadcastResult & {
+  side: BrowserTradeSide;
+  venue: string;
+  mint: string;
+  inputRaw: bigint;
+  expectedOutputRaw: bigint;
+  minimumOutputRaw: bigint;
 };
 
 export type BrowserSolardOptions = {
@@ -89,8 +95,5 @@ export type BrowserSolardOptions = {
   storageNamespace?: string;
   commitment?: "processed" | "confirmed" | "finalized";
   rpcMaxRps?: number;
-  jupiterApiKey?: string;
-  jupiterBaseUrl?: string;
-  jupiterMaxRps?: number;
   fetch?: typeof globalThis.fetch;
 };

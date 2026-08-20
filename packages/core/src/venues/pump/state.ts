@@ -1,9 +1,10 @@
+import { Buffer } from "buffer";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { SOL_ASSET, type QuoteAsset } from "../../core/amounts.ts";
 import type { TokenRow } from "../../db/schema.ts";
 import { bondingCurvePda, globalPda, sharingConfigPda } from "./pda.ts";
-import { PUMP_PROGRAM_ID, WRAPPED_SOL_MINT } from "./constants.ts";
+import { WRAPPED_SOL_MINT } from "./constants.ts";
 
 export type PumpCurve = {
   address: PublicKey;
@@ -101,15 +102,9 @@ export async function fetchCurve(
 ): Promise<PumpCurve | null> {
   const address = bondingCurvePda(new PublicKey(token.mint));
   const account = await connection.getAccountInfo(address, "confirmed");
-  if (!account) return null;
-
-  // A PDA can have an account at the derived address without being a valid
-  // Pump bonding-curve account. Never decode arbitrary account bytes as Pump
-  // state; this also prevents ordinary SPL mints from surfacing misleading
-  // "bonding curve too short" errors during venue inspection.
-  if (!account.owner.equals(PUMP_PROGRAM_ID)) return null;
-
-  return decodeCurve(address, Buffer.from(account.data), token);
+  return account
+    ? decodeCurve(address, Buffer.from(account.data), token)
+    : null;
 }
 export async function fetchPool(
   connection: Connection,
