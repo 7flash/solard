@@ -9,16 +9,36 @@
     "allowImportingTsExtensions": true,
     "baseUrl": ".",
     "paths": {
-      "@solard/core": ["packages/core/src/index.ts"],
-      "@solard/sdk": ["packages/sdk/src/index.ts"]
+      "@solard/core": [
+        "packages/core/src/index.ts"
+      ],
+      "@solard/core/*": [
+        "packages/core/src/*"
+      ],
+      "@solard/sdk": [
+        "packages/sdk/src/index.ts"
+      ],
+      "@solard/sdk/browser": [
+        "packages/sdk/src/browser/index.ts"
+      ],
+      "@solard/cli": [
+        "packages/cli/src/index.ts"
+      ],
+      "@solard/cli/*": [
+        "packages/cli/*"
+      ]
     },
-    "types": ["bun", "node"]
+    "types": [
+      "bun",
+      "node"
+    ]
   },
   "include": [
     "packages/core/src/**/*.ts",
     "packages/core/src/**/*.d.ts",
     "packages/sdk/src/**/*.ts",
     "packages/cli/src/**/*.ts",
-    "packages/cli/bin/**/*.ts"
+    "packages/cli/bin/**/*.ts",
+    "packages/solard-cli/bin/**/*.ts"
   ]
 }
