@@ -218,6 +218,16 @@ export type {
 } from "./venues/meteora/index.ts";
 
 export { SolardAgent } from "./runtime/agent.ts";
+export { MeteoraAgentFacade } from "./runtime/meteora-agent.ts";
+export type { MeteoraAgentActionRecord } from "./runtime/meteora-agent.ts";
+export {
+  METEORA_AGENT_TOOL_NAMES,
+  meteoraAgentTools,
+} from "./runtime/meteora-tools.ts";
+export type {
+  MeteoraAgentToolName,
+  SolardFunctionTool,
+} from "./runtime/meteora-tools.ts";
 export { SolardWatcher } from "./runtime/watcher.ts";
 export type { SolardWatchEvents } from "./runtime/watcher.ts";
 
