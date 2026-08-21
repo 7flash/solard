@@ -99,6 +99,7 @@ import {
   type ClaimSourcePlugin,
 } from "../claims/claim-source.ts";
 import { trace } from "../core/trace.ts";
+import { MeteoraDlmmService } from "../venues/meteora/index.ts";
 
 const m = measure("sdk");
 const BUNDLE_TRANSACTION_LIMIT = 5;
@@ -154,6 +155,7 @@ export class Solard implements ComposerHost {
   readonly prices: PriceRepo;
   readonly alts: AltRepo;
   readonly watcher: SolardWatcher;
+  readonly meteora: MeteoraDlmmService;
   readonly venues = new VenueRegistry();
   readonly claimSources = new ClaimSourceRegistry();
   readonly launches = new LaunchSourceRegistry();
@@ -182,6 +184,10 @@ export class Solard implements ComposerHost {
     this.chain = new SolardConnection(options.rpcUrl);
     this.cache = new AccountCache(options.cacheTtlMs);
     this.watcher = new SolardWatcher(this.db, () => this.connection());
+    this.meteora = new MeteoraDlmmService({
+      connection: () => this.connection(),
+      signer: (ref) => this.signer(ref),
+    });
     for (const venue of options.venues ?? []) this.venues.register(venue);
     for (const source of options.claimSources ?? [])
       this.claimSources.register(source);

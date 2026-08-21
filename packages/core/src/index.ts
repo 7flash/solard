@@ -189,6 +189,34 @@ export type {
 export * as pump from "./venues/pump/pump-instructions.ts";
 export * as pumpswap from "./venues/pump/pumpswap-instructions.ts";
 
+export { MeteoraDlmmService } from "./venues/meteora/index.ts";
+export type {
+  MeteoraDlmmHost,
+  MeteoraActiveBin,
+  MeteoraAddLiquidityArgs,
+  MeteoraDiscoverPoolsArgs,
+  MeteoraExecutionOptions,
+  MeteoraExecutionResult,
+  MeteoraInteger,
+  MeteoraOpenPositionArgs,
+  MeteoraPoolCategory,
+  MeteoraPoolSearchResult,
+  MeteoraPoolState,
+  MeteoraPoolToken,
+  MeteoraPositionActionArgs,
+  MeteoraPositionSnapshot,
+  MeteoraPreparedTransactions,
+  MeteoraRemoveLiquidityArgs,
+  MeteoraStrategy,
+  MeteoraSwapExactInArgs,
+  MeteoraSwapExactOutArgs,
+  MeteoraSwapQuote,
+  MeteoraTimeframe,
+  MeteoraTransaction,
+  MeteoraUiAmount,
+  MeteoraWalletPositions,
+} from "./venues/meteora/index.ts";
+
 export { SolardAgent } from "./runtime/agent.ts";
 export { SolardWatcher } from "./runtime/watcher.ts";
 export type { SolardWatchEvents } from "./runtime/watcher.ts";
