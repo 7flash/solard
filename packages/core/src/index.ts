@@ -99,6 +99,8 @@ export { TokenRepo } from "./db/token-repo.ts";
 export { PriceRepo } from "./db/price-repo.ts";
 export { openDatabase, closeDatabase, resolveDbPath } from "./db/database.ts";
 export {
+  executeJupiterSwap,
+  quoteJupiterSwap,
   executeJupiterTokenToSol,
   quoteJupiterTokenToSol,
 } from "./chain/jupiter-swap.ts";
@@ -214,7 +216,9 @@ export type {
   MeteoraTimeframe,
   MeteoraTransaction,
   MeteoraUiAmount,
+  MeteoraWalletNativeBalance,
   MeteoraWalletPositions,
+  MeteoraWalletTokenBalance,
 } from "./venues/meteora/index.ts";
 
 export { SolardAgent } from "./runtime/agent.ts";
@@ -228,6 +232,69 @@ export type {
   MeteoraAgentToolName,
   SolardFunctionTool,
 } from "./runtime/meteora-tools.ts";
+export {
+  DEFAULT_METEORA_AUTOPILOT_CONFIG,
+  MeteoraAutopilot,
+  WRAPPED_SOL_MINT,
+  scoreMeteoraCandidate,
+} from "./runtime/meteora-autopilot.ts";
+export {
+  METEORA_AUTOPILOT_TOOL_NAMES,
+  meteoraAutopilotTools,
+} from "./runtime/meteora-autopilot-tools.ts";
+export type { MeteoraAutopilotToolName } from "./runtime/meteora-autopilot-tools.ts";
+export type {
+  MeteoraAutopilotActionKind,
+  MeteoraAutopilotBlacklistEntry,
+  MeteoraAutopilotCandidate,
+  MeteoraAutopilotConfig,
+  MeteoraAutopilotCyclePlan,
+  MeteoraAutopilotCycleResult,
+  MeteoraAutopilotCycleReview,
+  MeteoraAutopilotDecision,
+  MeteoraAutopilotLesson,
+  MeteoraAutopilotManagementConfig,
+  MeteoraAutopilotPlannedAction,
+  MeteoraAutopilotPoolMemory,
+  MeteoraAutopilotRiskConfig,
+  MeteoraAutopilotRole,
+  MeteoraAutopilotScreeningConfig,
+  MeteoraAutopilotState,
+  MeteoraAutopilotStrategyConfig,
+  MeteoraAutopilotTrackedPosition,
+} from "./runtime/meteora-autopilot-types.ts";
+export { MeteoraIntelligence } from "./runtime/meteora-intelligence.ts";
+export { OpenAiCompatibleMeteoraDecisionModel } from "./runtime/meteora-decision-model.ts";
+export type { MeteoraDecisionModel } from "./runtime/meteora-decision-model.ts";
+export {
+  METEORA_INTELLIGENCE_TOOL_NAMES,
+  meteoraIntelligenceTools,
+} from "./runtime/meteora-intelligence-tools.ts";
+export type { MeteoraIntelligenceToolName } from "./runtime/meteora-intelligence-tools.ts";
+export type {
+  MeteoraCandidateIntelligence,
+  MeteoraHolder,
+  MeteoraHolderReport,
+  MeteoraIndicatorConfirmation,
+  MeteoraIndicatorPreset,
+  MeteoraIndicatorSignal,
+  MeteoraIntelligenceConfig,
+  MeteoraIntelligenceDecisionInput,
+  MeteoraIntelligenceDecisionRecord,
+  MeteoraIntelligenceState,
+  MeteoraModelCycleDecision,
+  MeteoraModelDeploymentDecision,
+  MeteoraModelManagementDecision,
+  MeteoraNarrative,
+  MeteoraSmartWallet,
+  MeteoraSmartWalletCategory,
+  MeteoraSmartWalletExposure,
+  MeteoraSmartWalletType,
+  MeteoraStrategyDefinition,
+  MeteoraTokenAudit,
+  MeteoraTokenInfo,
+  MeteoraTopLperStudy,
+} from "./runtime/meteora-intelligence-types.ts";
 export { SolardWatcher } from "./runtime/watcher.ts";
 export type { SolardWatchEvents } from "./runtime/watcher.ts";
 

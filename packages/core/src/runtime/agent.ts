@@ -3,10 +3,13 @@ import type { TokenRef, WalletRef } from "../core/refs.ts";
 import type { AgentRow } from "../db/schema.ts";
 import type { AgentRepo } from "../db/agent-repo.ts";
 import type { MeteoraDlmmService } from "../venues/meteora/dlmm.ts";
+import type { GmgnReadService } from "../data/gmgn.ts";
 import { MeteoraAgentFacade } from "./meteora-agent.ts";
+import { GmgnAgentFacade } from "./gmgn-agent.ts";
 
 export interface AgentHost {
   readonly meteora: MeteoraDlmmService;
+  readonly gmgn: GmgnReadService;
   buy(
     token: TokenRef,
     wallet: WalletRef,
@@ -26,6 +29,7 @@ export interface AgentHost {
 }
 export class SolardAgent {
   readonly meteora: MeteoraAgentFacade;
+  readonly gmgn: GmgnAgentFacade;
 
   constructor(
     readonly row: AgentRow,
@@ -40,6 +44,7 @@ export class SolardAgent {
         meteora: action,
       });
     });
+    this.gmgn = new GmgnAgentFacade(host.gmgn);
   }
 
   meteoraTools() {
@@ -48,6 +53,25 @@ export class SolardAgent {
 
   async runMeteoraTool(tool: string, args: unknown = {}) {
     return await this.meteora.call(tool, args);
+  }
+
+  gmgnTools() {
+    return this.gmgn.tools;
+  }
+
+  async runGmgnTool(tool: string, args: unknown = {}) {
+    return await this.gmgn.call(tool, args);
+  }
+
+  tools() {
+    return [...this.meteora.tools, ...this.gmgn.tools];
+  }
+
+  async runTool(tool: string, args: unknown = {}) {
+    if (tool.startsWith("meteora_"))
+      return await this.runMeteoraTool(tool, args);
+    if (tool.startsWith("gmgn_")) return await this.runGmgnTool(tool, args);
+    throw new Error(`Unknown Solard agent tool: ${tool}`);
   }
   async buy(
     token: TokenRef,

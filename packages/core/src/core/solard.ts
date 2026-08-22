@@ -100,6 +100,7 @@ import {
 } from "../claims/claim-source.ts";
 import { trace } from "../core/trace.ts";
 import { MeteoraDlmmService } from "../venues/meteora/index.ts";
+import { GmgnReadService } from "../data/gmgn.ts";
 
 const m = measure("sdk");
 const BUNDLE_TRANSACTION_LIMIT = 5;
@@ -156,6 +157,7 @@ export class Solard implements ComposerHost {
   readonly alts: AltRepo;
   readonly watcher: SolardWatcher;
   readonly meteora: MeteoraDlmmService;
+  readonly gmgn: GmgnReadService;
   readonly venues = new VenueRegistry();
   readonly claimSources = new ClaimSourceRegistry();
   readonly launches = new LaunchSourceRegistry();
@@ -187,7 +189,9 @@ export class Solard implements ComposerHost {
     this.meteora = new MeteoraDlmmService({
       connection: () => this.connection(),
       signer: (ref) => this.signer(ref),
+      walletAddress: (ref) => this.resolveWallet(ref).address,
     });
+    this.gmgn = new GmgnReadService();
     for (const venue of options.venues ?? []) this.venues.register(venue);
     for (const source of options.claimSources ?? [])
       this.claimSources.register(source);

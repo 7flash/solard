@@ -103,12 +103,13 @@ async function jupiterFetch(
 
 function orderUrl(args: {
   inputMint: string;
+  outputMint: string;
   amountRaw: bigint;
   taker?: string;
 }): string {
   const query = new URLSearchParams({
     inputMint: args.inputMint,
-    outputMint: NATIVE_MINT.toBase58(),
+    outputMint: args.outputMint,
     amount: args.amountRaw.toString(),
   });
   if (args.taker) query.set("taker", args.taker);
@@ -129,27 +130,34 @@ async function readOrder(response: Response): Promise<JupiterSwapOrder> {
   }
 }
 
-export async function quoteJupiterTokenToSol(args: {
+function parsedOutAmount(order: JupiterSwapOrder): bigint {
+  const value = String(order.outAmount ?? "0");
+  return /^\d+$/.test(value) ? BigInt(value) : 0n;
+}
+
+export async function quoteJupiterSwap(args: {
   inputMint: string;
+  outputMint: string;
   amountRaw: bigint;
 }): Promise<JupiterSwapQuote> {
   if (args.amountRaw <= 0n)
     throw new Error("Jupiter quote amount must be positive");
+  if (args.inputMint === args.outputMint)
+    throw new Error("Jupiter swap input and output mints must differ");
 
   const order = await readOrder(await jupiterFetch(orderUrl(args)));
-  const outAmount = String(order.outAmount ?? "0");
-  const outAmountRaw = /^\\d+$/.test(outAmount) ? BigInt(outAmount) : 0n;
+  const outAmountRaw = parsedOutAmount(order);
 
   if (order.errorCode != null || outAmountRaw <= 0n) {
     throw new Error(
       order.errorMessage ??
-        `Jupiter has no executable route for ${args.inputMint}`,
+        `Jupiter has no executable route from ${args.inputMint} to ${args.outputMint}`,
     );
   }
 
   return {
     inputMint: args.inputMint,
-    outputMint: NATIVE_MINT.toBase58(),
+    outputMint: args.outputMint,
     amountRaw: args.amountRaw,
     outAmountRaw,
     router: order.router ?? null,
@@ -158,18 +166,22 @@ export async function quoteJupiterTokenToSol(args: {
   };
 }
 
-export async function executeJupiterTokenToSol(args: {
+export async function executeJupiterSwap(args: {
   inputMint: string;
+  outputMint: string;
   amountRaw: bigint;
   signer: Keypair;
 }): Promise<JupiterSwapExecuteResult> {
   if (args.amountRaw <= 0n)
     throw new Error("Jupiter swap amount must be positive");
+  if (args.inputMint === args.outputMint)
+    throw new Error("Jupiter swap input and output mints must differ");
 
   const order = await readOrder(
     await jupiterFetch(
       orderUrl({
         inputMint: args.inputMint,
+        outputMint: args.outputMint,
         amountRaw: args.amountRaw,
         taker: args.signer.publicKey.toBase58(),
       }),
@@ -179,7 +191,7 @@ export async function executeJupiterTokenToSol(args: {
   if (!order.transaction || !order.requestId) {
     throw new Error(
       order.errorMessage ??
-        `Jupiter could not build a transaction for ${args.inputMint}`,
+        `Jupiter could not build a transaction from ${args.inputMint} to ${args.outputMint}`,
     );
   }
 
@@ -220,4 +232,28 @@ export async function executeJupiterTokenToSol(args: {
     );
   }
   return result;
+}
+
+export async function quoteJupiterTokenToSol(args: {
+  inputMint: string;
+  amountRaw: bigint;
+}): Promise<JupiterSwapQuote> {
+  return await quoteJupiterSwap({
+    inputMint: args.inputMint,
+    outputMint: NATIVE_MINT.toBase58(),
+    amountRaw: args.amountRaw,
+  });
+}
+
+export async function executeJupiterTokenToSol(args: {
+  inputMint: string;
+  amountRaw: bigint;
+  signer: Keypair;
+}): Promise<JupiterSwapExecuteResult> {
+  return await executeJupiterSwap({
+    inputMint: args.inputMint,
+    outputMint: NATIVE_MINT.toBase58(),
+    amountRaw: args.amountRaw,
+    signer: args.signer,
+  });
 }

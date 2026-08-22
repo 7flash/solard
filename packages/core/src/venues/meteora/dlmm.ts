@@ -37,6 +37,8 @@ type DlmmPool = Awaited<ReturnType<DlmmModule["default"]["create"]>>;
 export type MeteoraDlmmHost = {
   connection(): Connection;
   signer(ref: WalletRef): Keypair;
+  /** Resolve a public wallet address without decrypting/loading signing material. */
+  walletAddress?(ref: WalletRef): string | PublicKey;
 };
 
 const DEFAULT_DATA_API = "https://dlmm.datapi.meteora.ag";
@@ -325,6 +327,12 @@ export class MeteoraDlmmService {
     ).replace(/\/+$/, "");
   }
 
+  resolveWalletAddress(wallet: WalletRef): string {
+    const publicAddress = this.host.walletAddress?.(wallet);
+    if (publicAddress) return asPublicKey(publicAddress).toBase58();
+    return this.host.signer(wallet).publicKey.toBase58();
+  }
+
   clearPoolCache(pool?: string): void {
     if (pool) this.pools.delete(asPublicKey(pool).toBase58());
     else this.pools.clear();
@@ -464,6 +472,28 @@ export class MeteoraDlmmService {
     return pool.getBinIdFromPrice(pricePerLamport, roundDown);
   }
 
+  async listPools(
+    args: {
+      page?: number;
+      pageSize?: number;
+      query?: string;
+      sortBy?: string;
+      filterBy?: string;
+      volumeTw?: string;
+      feeTvlRatioTw?: string;
+    } = {},
+  ): Promise<unknown> {
+    return await this.dataApiGet("/pools", {
+      page: args.page,
+      page_size: args.pageSize,
+      query: args.query,
+      sort_by: args.sortBy,
+      filter_by: args.filterBy,
+      volume_tw: args.volumeTw,
+      fee_tvl_ratio_tw: args.feeTvlRatioTw,
+    });
+  }
+
   async searchPools(
     query: string,
     limit = 10,
@@ -542,15 +572,25 @@ export class MeteoraDlmmService {
       Math.min(100, Math.trunc(args.pageSize ?? 50)),
     );
     const url = new URL(`${this.discoveryApiBase()}/pools`);
+    if (args.page != null)
+      url.searchParams.set("page", String(Math.max(1, Math.trunc(args.page))));
     url.searchParams.set("page_size", String(pageSize));
     url.searchParams.set("timeframe", args.timeframe ?? "24h");
-    url.searchParams.set("category", args.category ?? "top");
+    // Important: omitted category means the broad discovery universe / UI All tab.
+    // top/new/trending are explicit subsets and must never be silently selected.
+    if (args.category) url.searchParams.set("category", args.category);
+    if (args.sortBy?.trim())
+      url.searchParams.set("sort_by", args.sortBy.trim());
     if (args.filterBy?.trim())
       url.searchParams.set("filter_by", args.filterBy.trim());
 
     const response = await fetch(url);
-    if (!response.ok)
-      throw new Error(`Meteora pool discovery HTTP ${response.status}`);
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(
+        `Meteora pool discovery HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`,
+      );
+    }
     const body = (await response.json()) as any;
     const rows = Array.isArray(body?.data) ? body.data : [];
     return {
@@ -559,6 +599,251 @@ export class MeteoraDlmmService {
         (row: unknown) => (safeJsonValue(row) ?? {}) as Record<string, unknown>,
       ),
     };
+  }
+
+  private async dataApiGet(
+    path: string,
+    query: Record<string, string | number | boolean | undefined> = {},
+  ): Promise<unknown> {
+    const url = new URL(`${this.dataApiBase()}${path}`);
+    for (const [key, value] of Object.entries(query)) {
+      if (value == null) continue;
+      url.searchParams.set(key, String(value));
+    }
+    const response = await fetch(url);
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(
+        `Meteora Data API ${path} HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`,
+      );
+    }
+    return safeJsonValue(await response.json());
+  }
+
+  async getPoolOhlcv(
+    poolAddress: string,
+    args: {
+      timeframe?: MeteoraDiscoverPoolsArgs["timeframe"];
+      startTime?: number;
+      endTime?: number;
+    } = {},
+  ): Promise<unknown> {
+    const pool = asPublicKey(poolAddress).toBase58();
+    return await this.dataApiGet(`/pools/${pool}/ohlcv`, {
+      timeframe: args.timeframe ?? "24h",
+      start_time: args.startTime,
+      end_time: args.endTime,
+    });
+  }
+
+  async getPoolVolumeHistory(
+    poolAddress: string,
+    args: {
+      timeframe?: MeteoraDiscoverPoolsArgs["timeframe"];
+      startTime?: number;
+      endTime?: number;
+    } = {},
+  ): Promise<unknown> {
+    const pool = asPublicKey(poolAddress).toBase58();
+    return await this.dataApiGet(`/pools/${pool}/volume/history`, {
+      timeframe: args.timeframe ?? "24h",
+      start_time: args.startTime,
+      end_time: args.endTime,
+    });
+  }
+
+  async listPoolGroups(
+    args: {
+      page?: number;
+      pageSize?: number;
+      query?: string;
+      sortBy?: string;
+      filterBy?: string;
+      volumeTw?: string;
+      feeTvlRatioTw?: string;
+    } = {},
+  ): Promise<unknown> {
+    return await this.dataApiGet("/pools/groups", {
+      page: args.page,
+      page_size: args.pageSize,
+      query: args.query,
+      sort_by: args.sortBy,
+      filter_by: args.filterBy,
+      volume_tw: args.volumeTw,
+      fee_tvl_ratio_tw: args.feeTvlRatioTw,
+    });
+  }
+
+  async getPoolGroup(
+    lexicalOrderMints: string,
+    args: {
+      page?: number;
+      pageSize?: number;
+      query?: string;
+      sortBy?: string;
+      filterBy?: string;
+    } = {},
+  ): Promise<unknown> {
+    const key = lexicalOrderMints.trim();
+    if (!key) throw new Error("Meteora lexical_order_mints is required");
+    return await this.dataApiGet(`/pools/groups/${encodeURIComponent(key)}`, {
+      page: args.page,
+      page_size: args.pageSize,
+      query: args.query,
+      sort_by: args.sortBy,
+      filter_by: args.filterBy,
+    });
+  }
+
+  async getPortfolio(args: {
+    user: string | PublicKey;
+    page?: number;
+    pageSize?: number;
+    daysBack?: number;
+  }): Promise<unknown> {
+    return await this.dataApiGet("/portfolio", {
+      user: asPublicKey(args.user).toBase58(),
+      page: args.page,
+      page_size: args.pageSize,
+      days_back: args.daysBack,
+    });
+  }
+
+  async getOpenPortfolio(args: {
+    user: string | PublicKey;
+    page?: number;
+    pageSize?: number;
+    sortDirection?: "asc" | "desc";
+    sortBy?: "current_balances" | "unclaimed_fee" | "fee_per_tvl24h";
+  }): Promise<unknown> {
+    return await this.dataApiGet("/portfolio/open", {
+      user: asPublicKey(args.user).toBase58(),
+      page: args.page,
+      page_size: args.pageSize,
+      sort_direction: args.sortDirection,
+      sort_by: args.sortBy,
+    });
+  }
+
+  async getPortfolioTotal(user: string | PublicKey): Promise<unknown> {
+    return await this.dataApiGet("/portfolio/total", {
+      user: asPublicKey(user).toBase58(),
+    });
+  }
+
+  async getPositionHistory(
+    positionAddress: string,
+    args: {
+      eventType?: "add" | "remove" | "claim_fee" | "claim_reward";
+      orderDirection?: "asc" | "desc";
+      page?: number;
+      pageSize?: number;
+    } = {},
+  ): Promise<unknown> {
+    const position = asPublicKey(positionAddress).toBase58();
+    return await this.dataApiGet(`/positions/${position}/historical`, {
+      event_type: args.eventType,
+      order_direction: args.orderDirection,
+      page: args.page,
+      page_size: args.pageSize,
+    });
+  }
+
+  async getProtocolMetrics(): Promise<unknown> {
+    return await this.dataApiGet("/stats/protocol_metrics");
+  }
+
+  async getDailyProtocolFees(): Promise<unknown> {
+    return await this.dataApiGet("/stats/daily/protocol_fees");
+  }
+
+  async getDailyTradingFees(): Promise<unknown> {
+    return await this.dataApiGet("/stats/daily/trading_fees");
+  }
+
+  async getDailyVolume(): Promise<unknown> {
+    return await this.dataApiGet("/stats/daily/volume");
+  }
+
+  async getOpenLimitOrderPools(
+    wallet: string | PublicKey,
+    args: { page?: number; pageSize?: number } = {},
+  ): Promise<unknown> {
+    const address = asPublicKey(wallet).toBase58();
+    return await this.dataApiGet(
+      `/wallets/${address}/limit_orders/open/pools`,
+      {
+        page: args.page,
+        page_size: args.pageSize,
+      },
+    );
+  }
+
+  async getOpenLimitOrders(
+    wallet: string | PublicKey,
+    poolAddress: string,
+    args: { page?: number; pageSize?: number } = {},
+  ): Promise<unknown> {
+    const address = asPublicKey(wallet).toBase58();
+    const pool = asPublicKey(poolAddress).toBase58();
+    return await this.dataApiGet(
+      `/wallets/${address}/limit_orders/open/pools/${pool}`,
+      { page: args.page, page_size: args.pageSize },
+    );
+  }
+
+  async getClosedLimitOrderPools(
+    wallet: string | PublicKey,
+    args: { page?: number; pageSize?: number } = {},
+  ): Promise<unknown> {
+    const address = asPublicKey(wallet).toBase58();
+    return await this.dataApiGet(
+      `/wallets/${address}/limit_orders/closed/pools`,
+      {
+        page: args.page,
+        page_size: args.pageSize,
+      },
+    );
+  }
+
+  async getClosedLimitOrders(
+    wallet: string | PublicKey,
+    poolAddress: string,
+    args: { page?: number; pageSize?: number } = {},
+  ): Promise<unknown> {
+    const address = asPublicKey(wallet).toBase58();
+    const pool = asPublicKey(poolAddress).toBase58();
+    return await this.dataApiGet(
+      `/wallets/${address}/limit_orders/closed/pools/${pool}`,
+      { page: args.page, page_size: args.pageSize },
+    );
+  }
+
+  async getLimitOrderSummary(wallet: string | PublicKey): Promise<unknown> {
+    const address = asPublicKey(wallet).toBase58();
+    return await this.dataApiGet(`/wallets/${address}/limit_orders/summary`);
+  }
+
+  async getLimitOrderBonusClaimed(
+    wallet: string | PublicKey,
+    poolAddress: string,
+  ): Promise<unknown> {
+    const address = asPublicKey(wallet).toBase58();
+    const pool = asPublicKey(poolAddress).toBase58();
+    return await this.dataApiGet(
+      `/wallets/${address}/limit_orders/pools/${pool}/bonus_claimed`,
+    );
+  }
+
+  async getWalletPoolTotalClaims(
+    wallet: string | PublicKey,
+    poolAddress: string,
+  ): Promise<unknown> {
+    const address = asPublicKey(wallet).toBase58();
+    const pool = asPublicKey(poolAddress).toBase58();
+    return await this.dataApiGet(
+      `/wallets/${address}/pools/${pool}/total_claims`,
+    );
   }
 
   async getPositionPnl(args: {
@@ -572,7 +857,7 @@ export class MeteoraDlmmService {
     const url = new URL(`${this.dataApiBase()}/positions/${pool}/pnl`);
     url.searchParams.set("user", wallet);
     url.searchParams.set("status", args.status ?? "open");
-    url.searchParams.set("pageSize", "100");
+    url.searchParams.set("page_size", "100");
     url.searchParams.set("page", "1");
     const response = await fetch(url);
     if (!response.ok)

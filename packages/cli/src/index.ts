@@ -5,12 +5,14 @@ import {
   createSolardMeasureCollector,
   executeRegistrySolSweep,
   executeRegistryTokenLiquidation,
+  executeJupiterSwap,
   findExternalContact,
   getSolardRpcStats,
   listExternalContacts,
   loadWalletAssetPortfolio,
   planRegistrySolSweep,
   planRegistryTokenLiquidation,
+  quoteJupiterSwap,
   removeExternalContact,
   resetSolardRpcStats,
   resolveTokenMintForPolicy,
@@ -27,6 +29,8 @@ function emit(value: string): void {
 }
 
 const OWL = "🦉";
+const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
+const CANONICAL_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 type Flags = Map<string, string>;
 function args(input: string[]): { values: string[]; flags: Flags } {
   const values: string[] = [],
@@ -251,6 +255,7 @@ Diagnostics
   --measure-stream  Restore raw live measure-fn output for low-level debugging
 
 Trading
+  slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]  Jupiter SOL -> token; quote-only unless --live
   slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
@@ -584,6 +589,67 @@ async function main() {
     ]);
   const slrd = createTraderSolard();
   try {
+    if (command === "swap") {
+      const outputRef = values[0]?.trim();
+      if (!outputRef) {
+        throw new Error(
+          "Usage: slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]",
+        );
+      }
+
+      const wallet = need(flags, "wallet");
+      const amountSol = need(flags, "sol");
+      const amountRaw = sol(amountSol).raw;
+      if (amountRaw <= 0n) throw new Error("--sol must be greater than zero");
+
+      const normalizedOutput = outputRef.replace(/^\$/, "").trim();
+      const outputMint =
+        normalizedOutput.toUpperCase() === "USDC"
+          ? CANONICAL_USDC_MINT
+          : resolveTokenMintForPolicy(slrd, normalizedOutput);
+
+      if (outputMint === NATIVE_SOL_MINT) {
+        throw new Error("Swap output is SOL; choose a different token mint.");
+      }
+
+      if (!flags.has("live")) {
+        const quote = await quoteJupiterSwap({
+          inputMint: NATIVE_SOL_MINT,
+          outputMint,
+          amountRaw,
+        });
+        emit(
+          json({
+            mode: "quote",
+            wallet,
+            input: { symbol: "SOL", mint: NATIVE_SOL_MINT, amountSol },
+            output: { ref: outputRef, mint: outputMint },
+            quote,
+            hint: "Re-run with --live to execute this swap.",
+          }) + "\n",
+        );
+        return;
+      }
+
+      const signer = slrd.signer(wallet);
+      const result = await executeJupiterSwap({
+        inputMint: NATIVE_SOL_MINT,
+        outputMint,
+        amountRaw,
+        signer,
+      });
+      emit(
+        json({
+          mode: "live",
+          wallet,
+          input: { symbol: "SOL", mint: NATIVE_SOL_MINT, amountSol },
+          output: { ref: outputRef, mint: outputMint },
+          result,
+        }) + "\n",
+      );
+      return;
+    }
+
     if (command === "contact" || command === "contacts") {
       const action = values[0] ?? "list";
 

@@ -89,15 +89,49 @@ export const meteoraAgentTools: readonly SolardFunctionTool[] = [
     "meteora_discover_pools",
     "Discover Meteora DLMM pools from the discovery API. Use for broad LP opportunity scans; this is read-only.",
     {
+      page: { type: "number", minimum: 1 },
       page_size: { type: "number", minimum: 1, maximum: 100 },
       timeframe: {
         type: "string",
         enum: ["5m", "30m", "1h", "2h", "4h", "12h", "24h"],
       },
-      category: { type: "string", enum: ["top", "new", "trending"] },
+      category: {
+        type: "string",
+        enum: ["top", "new", "trending"],
+        description:
+          "Optional discovery subset. Omit for the broad All universe.",
+      },
+      sort_by: {
+        type: "string",
+        description:
+          "Server-side discovery sort, e.g. fee_active_tvl_ratio:desc.",
+      },
       filter_by: {
         type: "string",
         description: "Optional Meteora discovery API filter expression.",
+      },
+    },
+  ),
+  tool(
+    "meteora_list_pools",
+    "List Meteora indexed DLMM pools with the Data API's generic pagination, query, sort and filter syntax. Read-only.",
+    {
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 1000 },
+      query: { type: "string" },
+      sort_by: {
+        type: "string",
+        description:
+          "Meteora sort expression such as tvl:desc or a windowed metric.",
+      },
+      filter_by: { type: "string", description: "Meteora filter expression." },
+      volume_tw: {
+        type: "string",
+        enum: ["5m", "30m", "1h", "2h", "4h", "12h", "24h"],
+      },
+      fee_tvl_ratio_tw: {
+        type: "string",
+        enum: ["5m", "30m", "1h", "2h", "4h", "12h", "24h"],
       },
     },
   ),
@@ -202,6 +236,192 @@ export const meteoraAgentTools: readonly SolardFunctionTool[] = [
       round_down: { type: "boolean" },
     },
     ["pool_address", "price_per_lamport"],
+  ),
+  tool(
+    "meteora_get_pool_ohlcv",
+    "Fetch indexed OHLCV candles for a Meteora DLMM pool. Read-only; no wallet or RPC signing is required.",
+    {
+      pool_address: poolAddress,
+      timeframe: {
+        type: "string",
+        enum: ["5m", "30m", "1h", "2h", "4h", "12h", "24h"],
+      },
+      start_time: {
+        type: "number",
+        minimum: 0,
+        description: "Unix seconds, inclusive.",
+      },
+      end_time: {
+        type: "number",
+        minimum: 0,
+        description: "Unix seconds, inclusive.",
+      },
+    },
+    ["pool_address"],
+  ),
+  tool(
+    "meteora_get_pool_volume_history",
+    "Fetch indexed volume, LP fees and protocol fees for a Meteora pool over time. Read-only.",
+    {
+      pool_address: poolAddress,
+      timeframe: {
+        type: "string",
+        enum: ["5m", "30m", "1h", "2h", "4h", "12h", "24h"],
+      },
+      start_time: { type: "number", minimum: 0 },
+      end_time: { type: "number", minimum: 0 },
+    },
+    ["pool_address"],
+  ),
+  tool(
+    "meteora_list_pool_groups",
+    "List Meteora DLMM pool groups by token pair with aggregate TVL/volume/fee metrics. Read-only.",
+    {
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 100 },
+      query: { type: "string" },
+      sort_by: { type: "string" },
+      filter_by: { type: "string" },
+      volume_tw: { type: "string" },
+      fee_tvl_ratio_tw: { type: "string" },
+    },
+  ),
+  tool(
+    "meteora_get_pool_group",
+    "Get the DLMM pools inside one Meteora token-pair group. Read-only.",
+    {
+      lexical_order_mints: {
+        type: "string",
+        description: "Meteora lexical_order_mints group key.",
+      },
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 100 },
+      query: { type: "string" },
+      sort_by: { type: "string" },
+      filter_by: { type: "string" },
+    },
+    ["lexical_order_mints"],
+  ),
+  tool(
+    "meteora_get_portfolio",
+    "Get Meteora indexed closed-position portfolio history for a public wallet. Omit wallet_address to use the bound agent wallet. Read-only.",
+    {
+      wallet_address: { type: "string" },
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 50 },
+      days_back: { type: "number", minimum: 1, maximum: 365 },
+    },
+  ),
+  tool(
+    "meteora_get_open_portfolio",
+    "Get Meteora indexed open-position portfolio balances, unclaimed fees and pool metrics for a wallet. Omit wallet_address for the bound agent wallet. Read-only.",
+    {
+      wallet_address: { type: "string" },
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 50 },
+      sort_direction: { type: "string", enum: ["asc", "desc"] },
+      sort_by: {
+        type: "string",
+        enum: ["current_balances", "unclaimed_fee", "fee_per_tvl24h"],
+      },
+    },
+  ),
+  tool(
+    "meteora_get_portfolio_total",
+    "Get all-time total Meteora portfolio PnL for a wallet. Omit wallet_address for the bound agent wallet. Read-only.",
+    { wallet_address: { type: "string" } },
+  ),
+  tool(
+    "meteora_get_position_history",
+    "Get indexed add/remove/claim history for a Meteora position. Read-only.",
+    {
+      position_address: positionAddress,
+      event_type: {
+        type: "string",
+        enum: ["add", "remove", "claim_fee", "claim_reward"],
+      },
+      order_direction: { type: "string", enum: ["asc", "desc"] },
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1 },
+    },
+    ["position_address"],
+  ),
+  tool(
+    "meteora_get_protocol_metrics",
+    "Get aggregate Meteora DLMM protocol TVL, volume, fees and pool count. Read-only.",
+    {},
+  ),
+  tool(
+    "meteora_get_daily_protocol_fees",
+    "Get Meteora DLMM daily protocol-fee time series. Read-only.",
+    {},
+  ),
+  tool(
+    "meteora_get_daily_trading_fees",
+    "Get Meteora DLMM daily trading-fee time series. Read-only.",
+    {},
+  ),
+  tool(
+    "meteora_get_daily_volume",
+    "Get Meteora DLMM daily trading-volume time series. Read-only.",
+    {},
+  ),
+  tool(
+    "meteora_get_open_limit_order_pools",
+    "Get pools containing live Meteora DLMM limit orders for a wallet. Omit wallet_address for the bound agent wallet. Read-only.",
+    {
+      wallet_address: { type: "string" },
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 100 },
+    },
+  ),
+  tool(
+    "meteora_get_open_limit_orders",
+    "Get live Meteora DLMM limit orders for one wallet and pool. Omit wallet_address for the bound agent wallet. Read-only.",
+    {
+      wallet_address: { type: "string" },
+      pool_address: poolAddress,
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 100 },
+    },
+    ["pool_address"],
+  ),
+  tool(
+    "meteora_get_closed_limit_order_pools",
+    "Get pools containing closed Meteora DLMM limit orders for a wallet. Omit wallet_address for the bound agent wallet. Read-only.",
+    {
+      wallet_address: { type: "string" },
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 100 },
+    },
+  ),
+  tool(
+    "meteora_get_closed_limit_orders",
+    "Get closed Meteora DLMM limit-order lifecycle records for one wallet and pool. Omit wallet_address for the bound agent wallet. Read-only.",
+    {
+      wallet_address: { type: "string" },
+      pool_address: poolAddress,
+      page: { type: "number", minimum: 1 },
+      page_size: { type: "number", minimum: 1, maximum: 100 },
+    },
+    ["pool_address"],
+  ),
+  tool(
+    "meteora_get_limit_order_summary",
+    "Get aggregate open/closed DLMM limit-order counts, deposits and bonus fees for a wallet. Read-only.",
+    { wallet_address: { type: "string" } },
+  ),
+  tool(
+    "meteora_get_limit_order_bonus_claimed",
+    "Get realized limit-order bonus claimed by a wallet in one pool. Read-only.",
+    { wallet_address: { type: "string" }, pool_address: poolAddress },
+    ["pool_address"],
+  ),
+  tool(
+    "meteora_get_wallet_pool_total_claims",
+    "Get combined fees and rewards claimed by a wallet in one Meteora pool. Read-only.",
+    { wallet_address: { type: "string" }, pool_address: poolAddress },
+    ["pool_address"],
   ),
   tool(
     "meteora_get_my_positions",

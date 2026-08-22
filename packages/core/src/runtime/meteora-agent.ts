@@ -123,6 +123,13 @@ export class MeteoraAgentFacade {
     private readonly onAction?: (record: MeteoraAgentActionRecord) => void,
   ) {}
 
+  private walletAddress(args: JsonArgs): string {
+    return (
+      str(args, "wallet_address") ??
+      this.service.resolveWalletAddress(this.wallet)
+    );
+  }
+
   async call(
     toolName: MeteoraAgentToolName | string,
     input: unknown = {},
@@ -137,10 +144,22 @@ export class MeteoraAgentFacade {
     switch (toolName) {
       case "meteora_discover_pools":
         return await this.service.discoverPools({
+          page: num(args, "page"),
           pageSize: num(args, "page_size"),
           timeframe: str(args, "timeframe") as any,
           category: str(args, "category") as any,
+          sortBy: str(args, "sort_by"),
           filterBy: str(args, "filter_by"),
+        });
+      case "meteora_list_pools":
+        return await this.service.listPools({
+          page: num(args, "page"),
+          pageSize: num(args, "page_size"),
+          query: str(args, "query"),
+          sortBy: str(args, "sort_by"),
+          filterBy: str(args, "filter_by"),
+          volumeTw: str(args, "volume_tw"),
+          feeTvlRatioTw: str(args, "fee_tvl_ratio_tw"),
         });
       case "meteora_search_pools":
         return await this.service.searchPools(
@@ -206,6 +225,122 @@ export class MeteoraAgentFacade {
           str(args, "pool_address", true)!,
           num(args, "price_per_lamport")!,
           bool(args, "round_down", true) ?? true,
+        );
+      case "meteora_get_pool_ohlcv":
+        return await this.service.getPoolOhlcv(
+          str(args, "pool_address", true)!,
+          {
+            timeframe: (str(args, "timeframe") ?? "24h") as any,
+            startTime: num(args, "start_time"),
+            endTime: num(args, "end_time"),
+          },
+        );
+      case "meteora_get_pool_volume_history":
+        return await this.service.getPoolVolumeHistory(
+          str(args, "pool_address", true)!,
+          {
+            timeframe: (str(args, "timeframe") ?? "24h") as any,
+            startTime: num(args, "start_time"),
+            endTime: num(args, "end_time"),
+          },
+        );
+      case "meteora_list_pool_groups":
+        return await this.service.listPoolGroups({
+          page: num(args, "page"),
+          pageSize: num(args, "page_size"),
+          query: str(args, "query"),
+          sortBy: str(args, "sort_by"),
+          filterBy: str(args, "filter_by"),
+          volumeTw: str(args, "volume_tw"),
+          feeTvlRatioTw: str(args, "fee_tvl_ratio_tw"),
+        });
+      case "meteora_get_pool_group":
+        return await this.service.getPoolGroup(
+          str(args, "lexical_order_mints", true)!,
+          {
+            page: num(args, "page"),
+            pageSize: num(args, "page_size"),
+            query: str(args, "query"),
+            sortBy: str(args, "sort_by"),
+            filterBy: str(args, "filter_by"),
+          },
+        );
+      case "meteora_get_portfolio":
+        return await this.service.getPortfolio({
+          user: this.walletAddress(args),
+          page: num(args, "page"),
+          pageSize: num(args, "page_size"),
+          daysBack: num(args, "days_back"),
+        });
+      case "meteora_get_open_portfolio":
+        return await this.service.getOpenPortfolio({
+          user: this.walletAddress(args),
+          page: num(args, "page"),
+          pageSize: num(args, "page_size"),
+          sortDirection: str(args, "sort_direction") as any,
+          sortBy: str(args, "sort_by") as any,
+        });
+      case "meteora_get_portfolio_total":
+        return await this.service.getPortfolioTotal(this.walletAddress(args));
+      case "meteora_get_position_history":
+        return await this.service.getPositionHistory(
+          str(args, "position_address", true)!,
+          {
+            eventType: str(args, "event_type") as any,
+            orderDirection: str(args, "order_direction") as any,
+            page: num(args, "page"),
+            pageSize: num(args, "page_size"),
+          },
+        );
+      case "meteora_get_protocol_metrics":
+        return await this.service.getProtocolMetrics();
+      case "meteora_get_daily_protocol_fees":
+        return await this.service.getDailyProtocolFees();
+      case "meteora_get_daily_trading_fees":
+        return await this.service.getDailyTradingFees();
+      case "meteora_get_daily_volume":
+        return await this.service.getDailyVolume();
+      case "meteora_get_open_limit_order_pools":
+        return await this.service.getOpenLimitOrderPools(
+          this.walletAddress(args),
+          {
+            page: num(args, "page"),
+            pageSize: num(args, "page_size"),
+          },
+        );
+      case "meteora_get_open_limit_orders":
+        return await this.service.getOpenLimitOrders(
+          this.walletAddress(args),
+          str(args, "pool_address", true)!,
+          { page: num(args, "page"), pageSize: num(args, "page_size") },
+        );
+      case "meteora_get_closed_limit_order_pools":
+        return await this.service.getClosedLimitOrderPools(
+          this.walletAddress(args),
+          {
+            page: num(args, "page"),
+            pageSize: num(args, "page_size"),
+          },
+        );
+      case "meteora_get_closed_limit_orders":
+        return await this.service.getClosedLimitOrders(
+          this.walletAddress(args),
+          str(args, "pool_address", true)!,
+          { page: num(args, "page"), pageSize: num(args, "page_size") },
+        );
+      case "meteora_get_limit_order_summary":
+        return await this.service.getLimitOrderSummary(
+          this.walletAddress(args),
+        );
+      case "meteora_get_limit_order_bonus_claimed":
+        return await this.service.getLimitOrderBonusClaimed(
+          this.walletAddress(args),
+          str(args, "pool_address", true)!,
+        );
+      case "meteora_get_wallet_pool_total_claims":
+        return await this.service.getWalletPoolTotalClaims(
+          this.walletAddress(args),
+          str(args, "pool_address", true)!,
         );
       case "meteora_get_my_positions":
         return await this.service.getMyPositions(this.wallet);
