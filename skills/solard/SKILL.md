@@ -71,6 +71,8 @@ slrd meteora quote <pool> --in-x 10
 slrd meteora swap <pool> --wallet main --in-x 10
 ```
 
+`slrd meteora discover` reads Meteora's Pool Discovery ranked feed. Pool Discovery currently ignores `page=2`, so do not model it as a paginated endpoint. Use `--page-size` (up to the supported 100-row feed) to control breadth, apply server filters where supported, and re-check thresholds locally. The indexed DLMM Data API `/pools` is a separate API and does support normal `page`/`sort_by` pagination.
+
 `slrd meteora create` is accepted as an alias for `slrd meteora open`.
 
 ### Wallet semantics
@@ -152,3 +154,10 @@ For opinionated screening or management loops, use an application/example such a
 ## Policy boundary
 
 Do **not** add application-specific screening scores, autonomous loops, learned lessons, LLM prompts, scheduled portfolio management, or position policy to the Solard SDK. Compose those from the stateless primitives in an application or under `examples/`.
+
+## Example-only DLMM range management
+
+Do not implement automatic range-management policy inside the SDK. The repository's
+`examples/meteora-oob-manager.ts` shows how an application can inspect OOB positions,
+prepare close/reopen actions, or explicitly execute a conservative inventory-preserving
+rebalance. Treat that file as application policy, not as a tool contract.

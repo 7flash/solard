@@ -87,9 +87,8 @@ function tool(
 export const meteoraAgentTools: readonly SolardFunctionTool[] = [
   tool(
     "meteora_discover_pools",
-    "Discover Meteora DLMM pools from the discovery API. Use for broad LP opportunity scans; this is read-only.",
+    "Fetch Meteora DLMM pools from the Pool Discovery ranked feed. Pool Discovery currently behaves as a single feed rather than a paginated list; use page_size to control breadth. Read-only.",
     {
-      page: { type: "number", minimum: 1 },
       page_size: { type: "number", minimum: 1, maximum: 100 },
       timeframe: {
         type: "string",
@@ -100,11 +99,6 @@ export const meteoraAgentTools: readonly SolardFunctionTool[] = [
         enum: ["top", "new", "trending"],
         description:
           "Optional discovery subset. Omit for the broad All universe.",
-      },
-      sort_by: {
-        type: "string",
-        description:
-          "Server-side discovery sort, e.g. fee_active_tvl_ratio:desc.",
       },
       filter_by: {
         type: "string",

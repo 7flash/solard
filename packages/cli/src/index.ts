@@ -5,14 +5,12 @@ import {
   createSolardMeasureCollector,
   executeRegistrySolSweep,
   executeRegistryTokenLiquidation,
-  executeJupiterSwap,
   findExternalContact,
   getSolardRpcStats,
   listExternalContacts,
   loadWalletAssetPortfolio,
   planRegistrySolSweep,
   planRegistryTokenLiquidation,
-  quoteJupiterSwap,
   removeExternalContact,
   resetSolardRpcStats,
   resolveTokenMintForPolicy,
@@ -24,6 +22,8 @@ import {
   type TokenRow,
 } from "@solard/sdk";
 
+import { handleMeteoraCommand } from "./meteora-commands.ts";
+
 function emit(value: string): void {
   process.stdout.write(value);
 }
@@ -31,6 +31,36 @@ function emit(value: string): void {
 const OWL = "🦉";
 const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
 const CANONICAL_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+async function quoteJupiterSwap(
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const sdk = (await import("@solard/sdk")) as Record<string, unknown>;
+  const fn = sdk.quoteJupiterSwap;
+  if (typeof fn !== "function") {
+    throw new Error(
+      "@solard/sdk does not export quoteJupiterSwap required by `slrd swap`.",
+    );
+  }
+  return await (fn as (input: Record<string, unknown>) => Promise<unknown>)(
+    args,
+  );
+}
+
+async function executeJupiterSwap(
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const sdk = (await import("@solard/sdk")) as Record<string, unknown>;
+  const fn = sdk.executeJupiterSwap;
+  if (typeof fn !== "function") {
+    throw new Error(
+      "@solard/sdk does not export executeJupiterSwap required by `slrd swap`.",
+    );
+  }
+  return await (fn as (input: Record<string, unknown>) => Promise<unknown>)(
+    args,
+  );
+}
 type Flags = Map<string, string>;
 function args(input: string[]): { values: string[]; flags: Flags } {
   const values: string[] = [],
@@ -255,7 +285,7 @@ Diagnostics
   --measure-stream  Restore raw live measure-fn output for low-level debugging
 
 Trading
-  slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]  Jupiter SOL -> token; quote-only unless --live
+  slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]   Quote or execute SOL -> token through Jupiter
   slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
@@ -267,6 +297,18 @@ Scripts (strategies stay outside the kernel)
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
+
+Meteora DLMM
+  slrd meteora discover --timeframe 30m --sort fee-active-tvl --limit 20
+  slrd meteora pools --timeframe 30m --sort fee-tvl --limit 20
+  slrd meteora pool <pool> [--timeframe 30m]
+  slrd meteora candles <pool> [--timeframe 5m]
+  slrd meteora positions --wallet <wallet|address>
+  slrd meteora open <pool> --wallet <wallet> --sol 0.1 --bins 40 [--strategy spot] [--live]
+  slrd meteora add|remove|claim|close <position> --wallet <wallet> [--live]
+  slrd meteora quote <pool> (--in-x N|--in-y N|--out-x N|--out-y N)
+  slrd meteora swap <pool> --wallet <wallet> (--in-x N|--in-y N|--out-x N|--out-y N) [--live]
+  slrd meteora help                              Full Meteora command reference
 
 Groups and agents
   slrd group create <name> [description]
@@ -589,6 +631,11 @@ async function main() {
     ]);
   const slrd = createTraderSolard();
   try {
+    if (command === "meteora") {
+      await handleMeteoraCommand({ slrd, values, flags, emit });
+      return;
+    }
+
     if (command === "swap") {
       const outputRef = values[0]?.trim();
       if (!outputRef) {
@@ -649,7 +696,6 @@ async function main() {
       );
       return;
     }
-
     if (command === "contact" || command === "contacts") {
       const action = values[0] ?? "list";
 

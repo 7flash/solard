@@ -53,10 +53,9 @@ let apiTail: Promise<void> = Promise.resolve();
 let apiNextStartAtMs = 0;
 
 async function acquireJupiterSlot(): Promise<void> {
-  const hasApiKey = Boolean(process.env.JUPITER_API_KEY?.trim());
-  // Jupiter currently documents 0.5 RPS for keyless access and 1 RPS for the
-  // free API-key plan. Be conservative by default; paid users may override.
-  const maxRps = envNumber("SLRD_JUPITER_MAX_RPS", hasApiKey ? 1 : 0.5, 0.1);
+  // Swap V2 requires an API key. Keep the local limiter conservative by default;
+  // paid users may override SLRD_JUPITER_MAX_RPS for their Jupiter plan.
+  const maxRps = envNumber("SLRD_JUPITER_MAX_RPS", 1, 0.1);
   const spacingMs = Math.ceil(1000 / maxRps) + 10;
 
   let release!: () => void;
@@ -86,7 +85,12 @@ async function jupiterFetch(
     await acquireJupiterSlot();
     const headers = new Headers(init.headers);
     const key = process.env.JUPITER_API_KEY?.trim();
-    if (key) headers.set("x-api-key", key);
+    if (!key) {
+      throw new Error(
+        "Jupiter Swap V2 requires JUPITER_API_KEY. Set JUPITER_API_KEY in your environment before using slrd swap.",
+      );
+    }
+    headers.set("x-api-key", key);
 
     const response = await fetch(url, { ...init, headers });
     if (response.status !== 429 || attempt >= maxRetries) return response;

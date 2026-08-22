@@ -221,9 +221,11 @@ function usd(value: unknown): string {
 }
 
 function percentRatio(value: unknown): string {
-  const ratio = finiteMetric(value);
-  if (ratio == null) return "-";
-  return `${(ratio * 100).toLocaleString("en-US", {
+  // Pool Discovery already reports fee_active_tvl_ratio in percentage units.
+  // Example: fee=$6.75K and active_tvl=$37.21K => 18.14, not 0.1814.
+  const percent = finiteMetric(value);
+  if (percent == null) return "-";
+  return `${percent.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}%`;
@@ -239,22 +241,21 @@ function pad(
   return align === "right" ? text.padStart(width) : text.padEnd(width);
 }
 
-function isSortedMetric(
-  rows: AnyRow[],
-  field: string,
-  direction: "asc" | "desc",
-): boolean {
-  let previous: number | null = null;
-  for (const row of rows) {
-    const value = finiteMetric(row[field]);
-    if (value == null) continue;
-    if (previous != null) {
-      if (direction === "desc" && value > previous) return false;
-      if (direction === "asc" && value < previous) return false;
-    }
-    previous = value;
-  }
-  return true;
+function discoveryIdentity(row: AnyRow): string {
+  const address = discoveryAddress(row).trim();
+  if (address) return address;
+  return JSON.stringify([
+    row.name ?? null,
+    row.token_x?.address ?? null,
+    row.token_y?.address ?? null,
+  ]);
+}
+
+function sameDiscoveryPage(a: AnyRow[], b: AnyRow[]): boolean {
+  if (a.length !== b.length || a.length === 0) return false;
+  return a.every(
+    (row, index) => discoveryIdentity(row) === discoveryIdentity(b[index]),
+  );
 }
 
 function discoveryTable(rows: AnyRow[], timeframe: MeteoraTimeframe): string {
@@ -266,6 +267,7 @@ function discoveryTable(rows: AnyRow[], timeframe: MeteoraTimeframe): string {
     pad("FEE/ACTIVE", 12, "right"),
     pad(feeLabel, 12, "right"),
     pad("ACTIVE TVL", 12, "right"),
+    pad("TOTAL TVL", 12, "right"),
     pad(volumeLabel, 12, "right"),
     pad("BIN", 5, "right"),
     "POOL",
@@ -276,6 +278,7 @@ function discoveryTable(rows: AnyRow[], timeframe: MeteoraTimeframe): string {
       pad(percentRatio(row.fee_active_tvl_ratio), 12, "right"),
       pad(usd(row.fee), 12, "right"),
       pad(usd(row.active_tvl), 12, "right"),
+      pad(usd(row.tvl), 12, "right"),
       pad(usd(row.volume), 12, "right"),
       pad(row.dlmm_params?.bin_step ?? row.bin_step ?? "-", 5, "right"),
       discoveryAddress(row),
@@ -471,7 +474,7 @@ export async function handleMeteoraCommand(args: {
     emit(
       `Meteora DLMM\n\n` +
         `Read\n` +
-        `  slrd meteora discover [--timeframe 30m] [--category all|top|new|trending] [--sort fee-active-tvl] [--limit 20] [--min-active-tvl N] [--min-volume N]\n` +
+        `  slrd meteora discover [--timeframe 30m] [--category all|top|new|trending] [--sort fee-active-tvl] [--limit 20] [--min-active-tvl N] [--min-volume N] [--page-size 100]\n` +
         `  slrd meteora pools [--timeframe 30m] [--sort fee-tvl|volume|tvl] [--limit 20] [--min-tvl N] [--min-volume N]\n` +
         `  slrd meteora pool <pool> [--timeframe 30m]\n` +
         `  slrd meteora candles <pool> [--timeframe 5m] [--start-time unix] [--end-time unix]\n` +
@@ -507,13 +510,12 @@ export async function handleMeteoraCommand(args: {
       1,
       Math.min(100, positiveIntegerFlag(flags, "limit", 20)!),
     );
-    const requestedPageSize = positiveIntegerFlag(flags, "page-size");
+    // Pool Discovery behaves as a ranked feed, not a paginated list: page=2 is
+    // currently ignored. Request a wider single feed than the displayed limit
+    // so local threshold checks still have headroom.
     const pageSize = Math.max(
       limit,
-      Math.min(
-        100,
-        requestedPageSize ?? Math.max(50, Math.min(100, limit * 5)),
-      ),
+      Math.min(100, positiveIntegerFlag(flags, "page-size", 100)!),
     );
 
     const sort = flag(flags, "sort") ?? "fee-active-tvl";
@@ -538,7 +540,6 @@ export async function handleMeteoraCommand(args: {
         "--sort for discover must be fee-active-tvl, fee, volume, active-tvl, or tvl",
       );
     }
-    const sortBy = `${field}:${direction}`;
 
     const baseFilters: string[] = ["pool_type=dlmm"];
     appendFilter(baseFilters, flag(flags, "filter"));
@@ -548,54 +549,33 @@ export async function handleMeteoraCommand(args: {
     if (minTvl != null) baseFilters.push(`tvl>=${minTvl}`);
     if (minVolume != null) baseFilters.push(`volume>=${minVolume}`);
 
-    // Ask discovery to apply active-TVL before global sorting when supported.
-    // If that expression is rejected by an older deployment, retry with a
-    // total-TVL prefilter and enforce active_tvl locally as the final authority.
-    const requestFilters = [...baseFilters];
+    let activeTvlFilterMode: "server" | "local-fallback" = "server";
+    let requestFilters = [...baseFilters];
     if (minActiveTvl != null)
       requestFilters.push(`active_tvl>=${minActiveTvl}`);
-
-    let payload: Awaited<ReturnType<typeof slrd.meteora.discoverPools>>;
-    let activeTvlFilterMode: "server" | "local-fallback" = "server";
     let appliedFilterBy = requestFilters.join("&&");
-    const page = positiveIntegerFlag(flags, "page", 1);
-    try {
-      payload = await slrd.meteora.discoverPools({
-        page,
+
+    const fetchFeed = async () =>
+      await slrd.meteora.discoverPools({
         pageSize,
         timeframe: tf,
         category: category as any,
-        sortBy,
         filterBy: appliedFilterBy,
       });
+
+    let feed: Awaited<ReturnType<typeof slrd.meteora.discoverPools>>;
+    try {
+      feed = await fetchFeed();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const filterRejected = /HTTP (?:400|422)\b/.test(message);
       if (minActiveTvl == null || !filterRejected) throw error;
       activeTvlFilterMode = "local-fallback";
-      const fallbackFilters = [...baseFilters, `tvl>=${minActiveTvl}`];
-      appliedFilterBy = fallbackFilters.join("&&");
-      payload = await slrd.meteora.discoverPools({
-        page,
-        pageSize,
-        timeframe: tf,
-        category: category as any,
-        sortBy,
-        filterBy: appliedFilterBy,
-      });
+      appliedFilterBy = baseFilters.join("&&");
+      feed = await fetchFeed();
     }
 
-    if (
-      payload.pools.length > 1 &&
-      !isSortedMetric(payload.pools, field, direction as "asc" | "desc")
-    ) {
-      throw new Error(
-        `Meteora discovery did not honor server sort ${sortBy}. Refusing to label a page-local sort as the global ranking. ` +
-          `Use --json to inspect the raw response or select an explicit discovery category until the API sort contract is confirmed.`,
-      );
-    }
-
-    let rows = [...payload.pools];
+    let rows = [...(feed.pools as AnyRow[])];
     if (minActiveTvl != null) {
       rows = rows.filter((row) => {
         const activeTvl = finiteMetric(row.active_tvl);
@@ -615,13 +595,13 @@ export async function handleMeteoraCommand(args: {
       });
     }
 
-    // Keep a defensive local sort so output remains deterministic if an older
-    // discovery deployment ignores sort_by. Server sorting is what makes page 1
-    // a global ranking; this local sort is not presented as a substitute for it.
     const factor = direction === "asc" ? 1 : -1;
     rows.sort((a, b) => {
-      const av = finiteMetric(a[field]) ?? 0;
-      const bv = finiteMetric(b[field]) ?? 0;
+      const av = finiteMetric(a[field]);
+      const bv = finiteMetric(b[field]);
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
       return (av - bv) * factor;
     });
     rows = rows.slice(0, limit);
@@ -629,11 +609,13 @@ export async function handleMeteoraCommand(args: {
     const result = {
       timeframe: tf,
       category: category ?? "all",
-      sortBy,
+      sort: `${field}:${direction}`,
+      rankingMode: "pool-discovery-ranked-feed",
+      rankingScope: `single discovery feed (page_size=${pageSize}); Pool Discovery currently ignores page=2`,
       filterBy: appliedFilterBy,
       activeTvlFilterMode,
-      total: payload.total,
-      fetched: payload.pools.length,
+      reportedTotal: feed.total,
+      feedSize: feed.pools.length,
       returned: rows.length,
       pools: rows,
     };

@@ -144,11 +144,9 @@ export class MeteoraAgentFacade {
     switch (toolName) {
       case "meteora_discover_pools":
         return await this.service.discoverPools({
-          page: num(args, "page"),
           pageSize: num(args, "page_size"),
           timeframe: str(args, "timeframe") as any,
           category: str(args, "category") as any,
-          sortBy: str(args, "sort_by"),
           filterBy: str(args, "filter_by"),
         });
       case "meteora_list_pools":

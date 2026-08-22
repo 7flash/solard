@@ -564,23 +564,23 @@ export class MeteoraDlmmService {
     return row ? (safeJsonValue(row) as Record<string, unknown>) : null;
   }
 
-  async discoverPools(
-    args: MeteoraDiscoverPoolsArgs = {},
-  ): Promise<{ total: number | null; pools: Record<string, unknown>[] }> {
+  async discoverPools(args: MeteoraDiscoverPoolsArgs = {}): Promise<{
+    total: number | null;
+    currentPage: number | null;
+    pages: number | null;
+    pageSize: number | null;
+    pools: Record<string, unknown>[];
+  }> {
     const pageSize = Math.max(
       1,
       Math.min(100, Math.trunc(args.pageSize ?? 50)),
     );
     const url = new URL(`${this.discoveryApiBase()}/pools`);
-    if (args.page != null)
-      url.searchParams.set("page", String(Math.max(1, Math.trunc(args.page))));
     url.searchParams.set("page_size", String(pageSize));
     url.searchParams.set("timeframe", args.timeframe ?? "24h");
     // Important: omitted category means the broad discovery universe / UI All tab.
     // top/new/trending are explicit subsets and must never be silently selected.
     if (args.category) url.searchParams.set("category", args.category);
-    if (args.sortBy?.trim())
-      url.searchParams.set("sort_by", args.sortBy.trim());
     if (args.filterBy?.trim())
       url.searchParams.set("filter_by", args.filterBy.trim());
 
@@ -595,6 +595,9 @@ export class MeteoraDlmmService {
     const rows = Array.isArray(body?.data) ? body.data : [];
     return {
       total: numberOrNull(body?.total),
+      currentPage: numberOrNull(body?.current_page ?? body?.page),
+      pages: numberOrNull(body?.pages ?? body?.total_pages),
+      pageSize: numberOrNull(body?.page_size),
       pools: rows.map(
         (row: unknown) => (safeJsonValue(row) ?? {}) as Record<string, unknown>,
       ),

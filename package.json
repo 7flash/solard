@@ -28,6 +28,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "@meteora-ag/dlmm": "^1.9.14",
     "bn.js": "^5.2.5"
   }
 }

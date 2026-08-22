@@ -118,13 +118,10 @@ export type MeteoraPoolSearchResult = {
 };
 
 export type MeteoraDiscoverPoolsArgs = {
-  page?: number;
   pageSize?: number;
   timeframe?: MeteoraTimeframe;
   /** Omit category for the broad discovery universe (the Meteora UI's All tab). */
   category?: MeteoraPoolCategory;
-  /** Server-side discovery sort expression, e.g. "fee_active_tvl_ratio:desc". */
-  sortBy?: string;
   /**
    * Meteora discovery filter expression, e.g.
    * "pool_type=dlmm&&tvl>=10000&&volume>=1000".
