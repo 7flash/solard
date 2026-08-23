@@ -158,6 +158,62 @@ Do **not** add application-specific screening scores, autonomous loops, learned 
 ## Example-only DLMM range management
 
 Do not implement automatic range-management policy inside the SDK. The repository's
-`examples/meteora-oob-manager.ts` shows how an application can inspect OOB positions,
-prepare close/reopen actions, or explicitly execute a conservative inventory-preserving
-rebalance. Treat that file as application policy, not as a tool contract.
+`examples/meteora-oob-manager.ts` is application policy. It shows compact human status,
+dry-run plans, and explicit live close/reopen composition using the stateless Meteora
+primitives.
+
+The example understands multiple positions and can select the farthest OOB positions
+with `--max-actions N` or `--all`. `--placement same` puts selected one-sided inventory
+at the same current-price edge; `--placement adjacent` spreads it into adjacent ranges
+on the correct side of price. Earlier `--layout stack|ladder` spellings are legacy aliases.
+These are example-policy choices, not Meteora SDK or protocol modes. No token swap is implied.
+
+Live execution uses `--live` plus Solard's normal server live-trading gate; there is no
+second confirmation keyword. The example measures only close-attributable wallet deltas,
+refreshes the active bin before reopen, and never deploys unrelated pre-existing wallet
+balances. `--json` is opt-in; human-readable tables are the default. Treat all of this
+as example/application behavior, not an SDK contract.
+
+## Native inactive-liquidity research views
+
+For human research, prefer the native CLI compositions rather than inventing an agent
+policy:
+
+```bash
+slrd meteora opportunities --timeframe 30m --min-inactive-pct 70 --sort flow-inactive
+slrd meteora token-pools <token-mint> --timeframe 30m --sort flow-inactive
+```
+
+`opportunities` derives `inactive_pct = (tvl-active_tvl)/tvl`, `volume/active_tvl`, and
+`FLOW*INACT = (volume/active_tvl)*(inactive_pct/100)` from Pool Discovery data. These are
+transparent research metrics, not SDK trading policy or promised yield. If active TVL is
+greater than total TVL in a non-atomic snapshot, inactive percentage is left unavailable.
+
+`token-pools` starts from Meteora's indexed pool search and enriches each exact token
+match with Pool Discovery metrics for the selected timeframe. Prefer a mint over a symbol
+when an exact same-token comparison matters.
+
+### Cross-pool migration
+
+For a deterministic human migration between Meteora DLMM pools containing the same two token mints, use `slrd meteora migrate <position> --wallet <wallet> --from-pool <source-pool> --to-pool <pool>` when the source pool is known; omitting `--from-pool` falls back to wallet-wide position discovery. It is dry-run unless `--live` is present. Live migration closes the source, measures close-attributable wallet deltas, remaps them to destination X/Y ordering, and opens near the destination active bin. It does not perform a swap or consume unrelated wallet inventory.
+
+## Market-wide fee-flow radar
+
+`examples/meteora-fee-flow.ts` is an all-pool application-level radar. It pages through the
+indexed DLMM `/pools` universe every 60 seconds by default while using the live API's supported 30m
+rolling metrics for broad triage. It then deep-enriches only the strongest movers with Pool
+Discovery 5m active-liquidity metrics and live bins around the active bin.
+
+Do not describe the one-minute local cadence as a native 1m Meteora API window. The broad
+metric is acceleration of the rolling 30m indexed window between one-minute samples; shortlisted pools are then enriched with 5m Pool Discovery metrics. When cumulative
+fee/volume counters are present, their local deltas are also reported. Bin analysis is used as
+context (active-bin liquidity, nearby liquidity, skew and empty bins), not as an SDK trading
+policy.
+
+### Rolling ladder example (application policy)
+
+`examples/meteora-rolling-ladder.ts` is a policy example, not a Solard/Meteora SDK mode. It can bootstrap a small managed set of DLMM positions and rotate one edge position when price leaves the managed envelope. Cross-side rotations may swap only the closed position's attributable proceeds before reopening. Keep this behavior in examples/application code, not `slrd.meteora` core.
+
+For market-wide fee research, `examples/meteora-fee-flow.ts` can sample all indexed pools every minute using supported rolling 30m indexed metrics, then deep-inspect only the strongest movers with 5m Pool Discovery metrics and live bins. Use `--launchpad pump.fun`, `--min-holders`, and the default blacklist exclusion when a strategy wants those research constraints.
+
+For human research commands, `slrd meteora discover` / `opportunities` support `--launchpad <name>` and `--safe`. The latter adds deterministic Pool Discovery warning/ownership filters. Do not make those policy constraints implicit in the generic SDK or transaction builder.

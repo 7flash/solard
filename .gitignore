@@ -16,7 +16,7 @@ bun.lockb
 *.swo
 
 scripts
-examples
+# examples
 
 package-lock.json
 bun.lock
@@ -38,3 +38,7 @@ run
 *.png
 *.ps1
 *.webp
+*.jsonl
+*.json.lock
+
+.solard

@@ -1,4 +1,5 @@
-import { PublicKey } from "@solana/web3.js";
+import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { PublicKey, type AccountMeta } from "@solana/web3.js";
 import { sameAsset, type RawAmount } from "../../core/amounts.ts";
 import type {
   BuiltInstructions,
@@ -8,7 +9,12 @@ import type {
   VenueContext,
   VenueMarket,
 } from "../venue-plugin.ts";
-import { ammGlobalConfigPda, pumpSwapPoolPda } from "./pda.ts";
+import {
+  ammGlobalConfigPda,
+  ammUserVolumeAccumulatorPda,
+  ata,
+  pumpSwapPoolPda,
+} from "./pda.ts";
 import {
   buildPumpSwapBuyExactQuoteIn,
   buildPumpSwapSell,
@@ -18,6 +24,7 @@ import {
   quoteSellConstantProduct,
   spotPriceQuotePerToken,
 } from "./quote.ts";
+import { WRAPPED_SOL_MINT } from "./constants.ts";
 import { resolvePumpSwapProtocolFeeRecipient, tokenMeta } from "./routing.ts";
 import { defaultTokenProgram, fetchCurve, fetchPool } from "./state.ts";
 import {
@@ -27,6 +34,35 @@ import {
   tokenAccountAmount,
   type PumpSwapMarketMeta,
 } from "./common.ts";
+
+function writable(pubkey: PublicKey): AccountMeta {
+  return { pubkey, isWritable: true, isSigner: false };
+}
+
+function cashbackRemainingAccounts(
+  user: PublicKey,
+  isCashbackCoin: boolean,
+): { buy?: AccountMeta[]; sell?: AccountMeta[] } {
+  if (!isCashbackCoin) return {};
+
+  // Pump's current cashback layout is chain-derived, not metadata-derived:
+  // - PumpSwap buy remaining_accounts[0] = WSOL ATA owned by the AMM
+  //   UserVolumeAccumulator PDA.
+  // - PumpSwap sell remaining_accounts[0] = the same WSOL ATA and
+  //   remaining_accounts[1] = the AMM UserVolumeAccumulator PDA itself.
+  // The program initializes the cashback ATA on buy when needed.
+  const accumulator = ammUserVolumeAccumulatorPda(user);
+  const cashbackWsolAta = ata(
+    WRAPPED_SOL_MINT,
+    accumulator,
+    TOKEN_PROGRAM_ID,
+    true,
+  );
+  return {
+    buy: [writable(cashbackWsolAta)],
+    sell: [writable(cashbackWsolAta), writable(accumulator)],
+  };
+}
 
 /** Canonical PumpSwap AMM only. It is a separate swappable venue plugin from the launch curve. */
 export class PumpSwapVenue implements TradeVenuePlugin {
@@ -75,6 +111,7 @@ export class PumpSwapVenue implements TradeVenuePlugin {
             }
           ).process?.env?.PUMPSWAP_PROTOCOL_FEE_RECIPIENT,
     );
+    const cashback = cashbackRemainingAccounts(ctx.user, state.isCashbackCoin);
     return {
       venue: this.id,
       mint,
@@ -88,8 +125,13 @@ export class PumpSwapVenue implements TradeVenuePlugin {
         protocolFeeRecipient,
         coinCreator: state.coinCreator,
         reserves: { virtualBase: baseReserve, virtualQuote: quoteReserve },
-        extraBuyAccounts: extraAccounts(meta.ammCashbackBuyAccounts),
-        extraSellAccounts: extraAccounts(meta.ammCashbackSellAccounts),
+        // Current on-chain cashback state is authoritative. Keep the metadata
+        // fallback only for older pool layouts / cached tokens that predate the
+        // is_cashback_coin field.
+        extraBuyAccounts:
+          cashback.buy ?? extraAccounts(meta.ammCashbackBuyAccounts),
+        extraSellAccounts:
+          cashback.sell ?? extraAccounts(meta.ammCashbackSellAccounts),
       } satisfies PumpSwapMarketMeta,
     };
   }

@@ -1,4 +1,5 @@
 import BN from "bn.js";
+import bs58 from "bs58";
 import {
   Keypair,
   PublicKey,
@@ -10,11 +11,28 @@ import {
 import type { WalletRef } from "../../core/refs.ts";
 import type {
   MeteoraActiveBin,
+  MeteoraActiveBinSample,
   MeteoraAddLiquidityArgs,
   MeteoraDiscoverPoolsArgs,
   MeteoraExecutionOptions,
   MeteoraExecutionResult,
   MeteoraInteger,
+  MeteoraInfrastructureFundingPolicy,
+  MeteoraInfrastructurePreflight,
+  MeteoraInfrastructureQuote,
+  MeteoraLiquidityDepthMetrics,
+  MeteoraMicrostructureMetrics,
+  MeteoraOhlcvArgs,
+  MeteoraOhlcvResponse,
+  MeteoraCandleRegimeMetrics,
+  MeteoraOracleObservation,
+  MeteoraOracleSnapshot,
+  MeteoraOracleSnapshotArgs,
+  MeteoraOracleTwapWindow,
+  MeteoraPoolMarketMetrics,
+  MeteoraPoolProfileMetrics,
+  MeteoraRangePathMetrics,
+  MeteoraRollingPoolMetrics,
   MeteoraOpenPositionArgs,
   MeteoraPoolSearchResult,
   MeteoraPoolState,
@@ -27,6 +45,7 @@ import type {
   MeteoraSwapExactInArgs,
   MeteoraSwapExactOutArgs,
   MeteoraSwapQuote,
+  MeteoraTimeframe,
   MeteoraUiAmount,
   MeteoraWalletPositions,
 } from "./types.ts";
@@ -226,6 +245,71 @@ function envEnabled(name: string): boolean {
   return value === "1" || value === "true" || value === "yes";
 }
 
+function transportError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /socket|fetch|ECONNRESET|ETIMEDOUT|EAI_AGAIN|429|502|503|504|network|connection.*closed/i.test(
+    message,
+  );
+}
+
+function signedTransactionSignature(
+  transaction: Transaction | VersionedTransaction,
+): string | null {
+  const bytes =
+    transaction instanceof Transaction
+      ? transaction.signature
+      : transaction.signatures[0];
+  if (!bytes || bytes.length === 0) return null;
+  if ([...bytes].every((value) => value === 0)) return null;
+  return bs58.encode(bytes);
+}
+
+function commitmentReached(
+  status: {
+    confirmationStatus?: string | null;
+    confirmations?: number | null;
+  } | null,
+  commitment: Commitment,
+): boolean {
+  if (!status) return false;
+  const level = status.confirmationStatus;
+  if (commitment === "processed") return true;
+  if (commitment === "confirmed")
+    return (
+      level === "confirmed" ||
+      level === "finalized" ||
+      status.confirmations === null
+    );
+  return level === "finalized" || status.confirmations === null;
+}
+
+async function recoverSubmittedSignature(
+  connection: Connection,
+  signature: string,
+  commitment: Commitment,
+  attempts = 6,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const result = await connection.getSignatureStatuses([signature], {
+        searchTransactionHistory: true,
+      });
+      const status = result.value[0];
+      if (status?.err) {
+        throw new Error(
+          `Meteora transaction ${signature} failed on-chain: ${JSON.stringify(status.err)}`,
+        );
+      }
+      if (commitmentReached(status, commitment)) return true;
+    } catch (error) {
+      if (!transportError(error)) throw error;
+    }
+    if (attempt + 1 < attempts)
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+  }
+  return false;
+}
+
 function assertLiveTradingEnabled(options: MeteoraExecutionOptions): void {
   if (options.live !== true)
     throw new Error("Meteora write refused: execution requires { live: true }");
@@ -277,6 +361,147 @@ function safeJsonValue(value: unknown, depth = 0): unknown {
     return out;
   }
   return String(value);
+}
+
+export class MeteoraInfrastructureFundingRequiredError extends Error {
+  readonly quote: MeteoraInfrastructureQuote;
+
+  constructor(message: string, quote: MeteoraInfrastructureQuote) {
+    super(message);
+    this.name = "MeteoraInfrastructureFundingRequiredError";
+    this.quote = quote;
+  }
+}
+
+function bigintOrZero(value: unknown): bigint {
+  const text = integerString(value, "0");
+  try {
+    const out = BigInt(text);
+    return out >= 0n ? out : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+function finiteNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function integerLikeNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = finiteNumber(
+    typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "bigint"
+      ? value
+      : String(value),
+  );
+  return parsed != null && Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function mean(values: number[]): number | null {
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function median(values: number[]): number | null {
+  return percentile(values, 0.5);
+}
+
+function percentile(values: number[], q: number): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 1) return sorted[0]!;
+  const index = Math.max(
+    0,
+    Math.min(sorted.length - 1, q * (sorted.length - 1)),
+  );
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sorted[lower]!;
+  const fraction = index - lower;
+  return sorted[lower]! * (1 - fraction) + sorted[upper]! * fraction;
+}
+
+function standardDeviation(values: number[]): number | null {
+  if (values.length < 2) return null;
+  const avg = mean(values)!;
+  const variance =
+    values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+function coefficientOfVariation(values: number[]): number | null {
+  const avg = mean(values);
+  const sd = standardDeviation(values);
+  if (avg == null || sd == null || avg === 0) return null;
+  return sd / Math.abs(avg);
+}
+
+function pearson(xs: number[], ys: number[]): number | null {
+  if (xs.length !== ys.length || xs.length < 3) return null;
+  const mx = mean(xs)!;
+  const my = mean(ys)!;
+  let numerator = 0;
+  let dx2 = 0;
+  let dy2 = 0;
+  for (let i = 0; i < xs.length; i += 1) {
+    const dx = xs[i]! - mx;
+    const dy = ys[i]! - my;
+    numerator += dx * dy;
+    dx2 += dx * dx;
+    dy2 += dy * dy;
+  }
+  const denominator = Math.sqrt(dx2 * dy2);
+  return denominator > 0 ? numerator / denominator : null;
+}
+
+function ratioOrNull(
+  numerator: number | null,
+  denominator: number | null,
+): number | null {
+  if (numerator == null || denominator == null || denominator === 0)
+    return null;
+  return numerator / denominator;
+}
+
+function rawField(row: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null) continue;
+    const text = integerString(value, "");
+    if (/^\d+$/.test(text)) return text;
+  }
+  return "0";
+}
+
+function rawToUi(raw: string, decimals: number | null): number | null {
+  if (decimals == null || !Number.isInteger(decimals) || decimals < 0)
+    return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return n / 10 ** decimals;
+}
+
+function rowArray(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value))
+    return value.filter((row) => row && typeof row === "object") as Record<
+      string,
+      unknown
+    >[];
+  if (value && typeof value === "object") {
+    const row = value as Record<string, unknown>;
+    if (Array.isArray(row.bins))
+      return row.bins.filter(
+        (entry) => entry && typeof entry === "object",
+      ) as Record<string, unknown>[];
+    if (Array.isArray(row.data))
+      return row.data.filter(
+        (entry) => entry && typeof entry === "object",
+      ) as Record<string, unknown>[];
+  }
+  return [];
 }
 
 function extractBinId(bin: unknown): number | null {
@@ -409,6 +634,505 @@ export class MeteoraDlmmService {
       price: String(pool.fromPricePerLamport(Number(rawPrice))),
       pricePerLamport: rawPrice,
     };
+  }
+
+  async getActiveBinSample(
+    poolAddress: string,
+    refresh = true,
+  ): Promise<MeteoraActiveBinSample> {
+    const observedAt = Date.now();
+    const pool = await this.rawPool(poolAddress, refresh);
+    const [active, slot] = await Promise.all([
+      pool.getActiveBin(),
+      this.host
+        .connection()
+        .getSlot("processed")
+        .then((value) => Number(value))
+        .catch(() => null),
+    ]);
+    const rawPrice = finiteNumber(String((active as any)?.price));
+    const priceYPerX =
+      rawPrice != null
+        ? (finiteNumber(pool.fromPricePerLamport(rawPrice)) ?? Number.NaN)
+        : Number.NaN;
+    const binId =
+      extractBinId(active) ?? numberOrNull((pool.lbPair as any)?.activeId);
+    if (binId == null || !Number.isFinite(priceYPerX))
+      throw new Error("Meteora active-bin sample is unavailable");
+    let dynamicFeePct: number | null = null;
+    try {
+      dynamicFeePct = finiteNumber(String(pool.getDynamicFee()));
+    } catch {}
+    return {
+      version: 1,
+      observedAt,
+      slot,
+      pool: pool.pubkey.toBase58(),
+      binId,
+      priceYPerX,
+      pricePerLamport: rawPrice,
+      dynamicFeePct,
+    };
+  }
+
+  analyzeActiveBinSamples(
+    samples: MeteoraActiveBinSample[],
+  ): MeteoraMicrostructureMetrics {
+    const ordered = [...samples]
+      .filter(
+        (sample) =>
+          Number.isFinite(sample.observedAt) &&
+          Number.isInteger(sample.binId) &&
+          Number.isFinite(sample.priceYPerX) &&
+          sample.priceYPerX > 0,
+      )
+      .sort((a, b) => a.observedAt - b.observedAt);
+    const pool = ordered[0]?.pool ?? samples[0]?.pool ?? "";
+    if (ordered.some((sample) => sample.pool !== pool))
+      throw new Error("Meteora active-bin samples must belong to one pool");
+
+    const start = ordered[0] ?? null;
+    const end = ordered.at(-1) ?? null;
+    const durationSec =
+      start && end && end.observedAt >= start.observedAt
+        ? (end.observedAt - start.observedAt) / 1000
+        : null;
+    const durationMin = durationSec != null ? durationSec / 60 : null;
+    const intervalsSec: number[] = [];
+    const signedSteps: number[] = [];
+    const nonzeroAbsSteps: number[] = [];
+    const logMovesPct: number[] = [];
+    let stationarySec = 0;
+    let pathBins = 0;
+    let binChanges = 0;
+    let directionFlips = 0;
+    let previousDirection = 0;
+
+    for (let i = 1; i < ordered.length; i += 1) {
+      const a = ordered[i - 1]!;
+      const b = ordered[i]!;
+      const dtSec = (b.observedAt - a.observedAt) / 1000;
+      if (!(dtSec > 0)) continue;
+      intervalsSec.push(dtSec);
+      const step = b.binId - a.binId;
+      signedSteps.push(step);
+      pathBins += Math.abs(step);
+      if (step === 0) stationarySec += dtSec;
+      else {
+        binChanges += 1;
+        nonzeroAbsSteps.push(Math.abs(step));
+        const direction = Math.sign(step);
+        if (previousDirection !== 0 && direction !== previousDirection)
+          directionFlips += 1;
+        previousDirection = direction;
+      }
+      if (a.priceYPerX > 0 && b.priceYPerX > 0)
+        logMovesPct.push(Math.log(b.priceYPerX / a.priceYPerX) * 100);
+    }
+
+    const dwellSec: number[] = [];
+    if (ordered.length) {
+      let runStart = ordered[0]!.observedAt;
+      let runBin = ordered[0]!.binId;
+      for (let i = 1; i < ordered.length; i += 1) {
+        const sample = ordered[i]!;
+        if (sample.binId === runBin) continue;
+        dwellSec.push(Math.max(0, (sample.observedAt - runStart) / 1000));
+        runStart = sample.observedAt;
+        runBin = sample.binId;
+      }
+      if (end) {
+        const finalDwell = Math.max(0, (end.observedAt - runStart) / 1000);
+        if (finalDwell > 0 || dwellSec.length === 0) dwellSec.push(finalDwell);
+      }
+    }
+
+    const bins = ordered.map((sample) => sample.binId);
+    const prices = ordered.map((sample) => sample.priceYPerX);
+    const dynamicFees = ordered
+      .map((sample) => sample.dynamicFeePct)
+      .filter(
+        (value): value is number => value != null && Number.isFinite(value),
+      );
+    const displacementBins = start && end ? end.binId - start.binId : null;
+    const priceReturnPct =
+      start && end && start.priceYPerX > 0
+        ? (end.priceYPerX / start.priceYPerX - 1) * 100
+        : null;
+
+    return {
+      version: 1,
+      pool,
+      sampleCount: ordered.length,
+      startAt: start?.observedAt ?? null,
+      endAt: end?.observedAt ?? null,
+      durationSec,
+      meanSampleIntervalSec: mean(intervalsSec),
+      p90SampleIntervalSec: percentile(intervalsSec, 0.9),
+      maxSampleIntervalSec: intervalsSec.length
+        ? Math.max(...intervalsSec)
+        : null,
+      startBin: start?.binId ?? null,
+      endBin: end?.binId ?? null,
+      displacementBins,
+      totalPathBins: ordered.length ? pathBins : null,
+      totalSpanBins: bins.length ? Math.max(...bins) - Math.min(...bins) : null,
+      pathBinsPerMinute:
+        durationMin != null && durationMin > 0 ? pathBins / durationMin : null,
+      netBinsPerMinute:
+        durationMin != null && durationMin > 0 && displacementBins != null
+          ? displacementBins / durationMin
+          : null,
+      trendEfficiency:
+        displacementBins != null && pathBins > 0
+          ? Math.min(1, Math.abs(displacementBins) / pathBins)
+          : pathBins === 0 && ordered.length > 1
+            ? 0
+            : null,
+      binChanges,
+      binChangesPerMinute:
+        durationMin != null && durationMin > 0
+          ? binChanges / durationMin
+          : null,
+      stationaryTimePct:
+        durationSec != null && durationSec > 0
+          ? (stationarySec / durationSec) * 100
+          : null,
+      uniqueBinsVisited: new Set(bins).size,
+      directionFlips,
+      meanAbsMovePerChangeBins: mean(nonzeroAbsSteps),
+      medianAbsMovePerChangeBins: median(nonzeroAbsSteps),
+      p90AbsMovePerChangeBins: percentile(nonzeroAbsSteps, 0.9),
+      maxAbsMovePerChangeBins: nonzeroAbsSteps.length
+        ? Math.max(...nonzeroAbsSteps)
+        : null,
+      realizedStepVolBins: standardDeviation(signedSteps),
+      meanDwellSec: mean(dwellSec),
+      medianDwellSec: median(dwellSec),
+      p90DwellSec: percentile(dwellSec, 0.9),
+      maxDwellSec: dwellSec.length ? Math.max(...dwellSec) : null,
+      startPriceYPerX: start?.priceYPerX ?? null,
+      endPriceYPerX: end?.priceYPerX ?? null,
+      priceReturnPct,
+      highLowSpanPct:
+        prices.length && Math.min(...prices) > 0
+          ? (Math.max(...prices) / Math.min(...prices) - 1) * 100
+          : null,
+      realizedLogVolPct: standardDeviation(logMovesPct),
+      meanDynamicFeePct: mean(dynamicFees),
+      p90DynamicFeePct: percentile(dynamicFees, 0.9),
+    };
+  }
+
+  analyzeRangeFromActiveBinSamples(
+    samples: MeteoraActiveBinSample[],
+    minBinId: number,
+    maxBinId: number,
+  ): MeteoraRangePathMetrics {
+    if (!Number.isInteger(minBinId) || !Number.isInteger(maxBinId))
+      throw new Error("Meteora range bins must be integers");
+    if (minBinId > maxBinId)
+      throw new Error("Meteora minBinId cannot be greater than maxBinId");
+    const ordered = [...samples]
+      .filter(
+        (sample) =>
+          Number.isFinite(sample.observedAt) && Number.isInteger(sample.binId),
+      )
+      .sort((a, b) => a.observedAt - b.observedAt);
+    const pool = ordered[0]?.pool ?? samples[0]?.pool ?? "";
+    if (ordered.some((sample) => sample.pool !== pool))
+      throw new Error("Meteora active-bin samples must belong to one pool");
+    const start = ordered[0] ?? null;
+    const end = ordered.at(-1) ?? null;
+    const durationSec =
+      start && end && end.observedAt >= start.observedAt
+        ? (end.observedAt - start.observedAt) / 1000
+        : null;
+    const contains = (binId: number) => binId >= minBinId && binId <= maxBinId;
+    const distance = (binId: number) =>
+      binId < minBinId
+        ? minBinId - binId
+        : binId > maxBinId
+          ? binId - maxBinId
+          : 0;
+    let inRangeSec = 0;
+    let outOfRangeSec = 0;
+    let entries = 0;
+    let exits = 0;
+    let firstExitAfterSec: number | null = null;
+    let firstEntryAfterSec: number | null = null;
+    let longestInRangeSec = 0;
+    let longestOutOfRangeSec = 0;
+    let currentState = start ? contains(start.binId) : null;
+    let stateStartedAt = start?.observedAt ?? null;
+    let maxOutOfRangeDistanceBins: number | null = null;
+
+    for (let i = 0; i < ordered.length; i += 1) {
+      const sample = ordered[i]!;
+      const d = distance(sample.binId);
+      if (d > 0)
+        maxOutOfRangeDistanceBins = Math.max(maxOutOfRangeDistanceBins ?? 0, d);
+      if (i === 0) continue;
+      const previous = ordered[i - 1]!;
+      const dtSec = Math.max(
+        0,
+        (sample.observedAt - previous.observedAt) / 1000,
+      );
+      if (contains(previous.binId)) inRangeSec += dtSec;
+      else outOfRangeSec += dtSec;
+      const nextState = contains(sample.binId);
+      if (currentState != null && nextState !== currentState) {
+        const stateDuration =
+          stateStartedAt != null
+            ? Math.max(0, (sample.observedAt - stateStartedAt) / 1000)
+            : 0;
+        if (currentState) {
+          exits += 1;
+          longestInRangeSec = Math.max(longestInRangeSec, stateDuration);
+          if (firstExitAfterSec == null && start)
+            firstExitAfterSec = (sample.observedAt - start.observedAt) / 1000;
+        } else {
+          entries += 1;
+          longestOutOfRangeSec = Math.max(longestOutOfRangeSec, stateDuration);
+          if (firstEntryAfterSec == null && start)
+            firstEntryAfterSec = (sample.observedAt - start.observedAt) / 1000;
+        }
+        currentState = nextState;
+        stateStartedAt = sample.observedAt;
+      }
+    }
+    if (end && currentState != null && stateStartedAt != null) {
+      const finalDuration = Math.max(
+        0,
+        (end.observedAt - stateStartedAt) / 1000,
+      );
+      if (currentState)
+        longestInRangeSec = Math.max(longestInRangeSec, finalDuration);
+      else longestOutOfRangeSec = Math.max(longestOutOfRangeSec, finalDuration);
+    }
+    const totalMeasuredSec = inRangeSec + outOfRangeSec;
+    return {
+      version: 1,
+      pool,
+      minBinId,
+      maxBinId,
+      width: maxBinId - minBinId + 1,
+      sampleCount: ordered.length,
+      durationSec,
+      inRangeTimePct:
+        totalMeasuredSec > 0 ? (inRangeSec / totalMeasuredSec) * 100 : null,
+      inRangeSec: ordered.length > 1 ? inRangeSec : null,
+      outOfRangeSec: ordered.length > 1 ? outOfRangeSec : null,
+      entries,
+      exits,
+      finalInRange: end ? contains(end.binId) : null,
+      maxOutOfRangeDistanceBins,
+      firstExitAfterSec,
+      firstEntryAfterSec,
+      longestInRangeSec: ordered.length > 1 ? longestInRangeSec : null,
+      longestOutOfRangeSec: ordered.length > 1 ? longestOutOfRangeSec : null,
+    };
+  }
+
+  async getPoolOracleSnapshot(
+    poolAddress: string,
+    args: MeteoraOracleSnapshotArgs = {},
+  ): Promise<MeteoraOracleSnapshot> {
+    const observedAt = Date.now();
+    const pool = await this.rawPool(poolAddress, args.refresh ?? true);
+    const active = await pool.getActiveBin();
+    const spotBin =
+      extractBinId(active) ?? numberOrNull((pool.lbPair as any)?.activeId) ?? 0;
+    const rawPrice = finiteNumber(String((active as any)?.price));
+    const spotPriceYPerX =
+      rawPrice != null
+        ? (finiteNumber(pool.fromPricePerLamport(rawPrice)) ?? Number.NaN)
+        : Number.NaN;
+    if (!Number.isFinite(spotPriceYPerX))
+      throw new Error("Meteora oracle snapshot requires an active pool price");
+
+    const poolClockUnixSec = integerLikeNumber(
+      (pool as any)?.clock?.unixTimestamp,
+    );
+    let rpcBlockTimeUnixSec: number | null = null;
+    if (poolClockUnixSec == null) {
+      try {
+        const slot = await this.host.connection().getSlot("confirmed");
+        rpcBlockTimeUnixSec = await this.host.connection().getBlockTime(slot);
+      } catch {}
+    }
+    const currentTimestampUnixSec =
+      poolClockUnixSec ?? rpcBlockTimeUnixSec ?? Math.floor(observedAt / 1000);
+    const currentTimestampSource =
+      poolClockUnixSec != null
+        ? ("pool-clock" as const)
+        : rpcBlockTimeUnixSec != null
+          ? ("rpc-block-time" as const)
+          : ("local-clock" as const);
+    const base: Omit<
+      MeteoraOracleSnapshot,
+      | "supported"
+      | "available"
+      | "oracleAddress"
+      | "metadata"
+      | "initializedObservationCount"
+      | "earliestObservationAtUnixSec"
+      | "latestObservationAtUnixSec"
+      | "latestObservationAgeSec"
+      | "maxDurationSec"
+      | "twaps"
+      | "observations"
+      | "error"
+    > = {
+      version: 1,
+      observedAt,
+      pool: pool.pubkey.toBase58(),
+      currentTimestampUnixSec,
+      currentTimestampSource,
+      spotBin,
+      spotPriceYPerX,
+    };
+
+    if (typeof (pool as any).getOracle !== "function") {
+      return {
+        ...base,
+        supported: false,
+        available: false,
+        oracleAddress: null,
+        metadata: null,
+        initializedObservationCount: 0,
+        earliestObservationAtUnixSec: null,
+        latestObservationAtUnixSec: null,
+        latestObservationAgeSec: null,
+        maxDurationSec: null,
+        twaps: [],
+        observations: null,
+        error:
+          "Installed @meteora-ag/dlmm does not expose getOracle(); upgrade to an oracle-capable release",
+      };
+    }
+
+    try {
+      const oracle: any = await (pool as any).getOracle();
+      const now = new BN(String(currentTimestampUnixSec), 10);
+      const decoded: MeteoraOracleObservation[] = Array.isArray(
+        oracle?.observations,
+      )
+        ? oracle.observations.map((observation: any, index: number) => ({
+            index,
+            initialized:
+              typeof observation?.isInitialized === "function"
+                ? observation.isInitialized()
+                : (() => {
+                    const created = integerLikeNumber(observation?.createdAt);
+                    const updated = integerLikeNumber(
+                      observation?.lastUpdatedAt,
+                    );
+                    return (
+                      created != null &&
+                      created !== 0 &&
+                      updated != null &&
+                      updated !== 0
+                    );
+                  })(),
+            cumulativeActiveBinId: integerString(
+              observation?.cumulativeActiveBinId,
+              "0",
+            ),
+            createdAtUnixSec: integerLikeNumber(observation?.createdAt),
+            lastUpdatedAtUnixSec: integerLikeNumber(observation?.lastUpdatedAt),
+          }))
+        : [];
+      const initialized = decoded.filter(
+        (observation) => observation.initialized,
+      );
+      const updatedTimes = initialized
+        .map((observation) => observation.lastUpdatedAtUnixSec)
+        .filter((value): value is number => value != null);
+      const windows = [...new Set(args.twapWindowsSec ?? [60, 300, 900, 3600])]
+        .map((value) => Math.trunc(Number(value)))
+        .filter((value) => value > 0 && value <= 7 * 24 * 60 * 60)
+        .sort((a, b) => a - b);
+      const twaps: MeteoraOracleTwapWindow[] = windows.map((requestedSec) => {
+        const start = now.sub(new BN(requestedSec));
+        const activeResult = oracle.getActiveIdByTime(start, now);
+        const priceResult = oracle.getUiPriceByTime(start, now);
+        const twapActiveBin = activeResult
+          ? integerLikeNumber(activeResult.value)
+          : null;
+        const twapPrice = priceResult
+          ? finiteNumber(String(priceResult.value))
+          : null;
+        const durationSec =
+          integerLikeNumber(activeResult?.duration) ??
+          integerLikeNumber(priceResult?.duration);
+        const covered =
+          twapActiveBin != null && twapPrice != null && twapPrice > 0;
+        return {
+          requestedSec,
+          covered,
+          durationSec,
+          activeBin: twapActiveBin,
+          uiPriceYPerX: twapPrice,
+          spotDeviationBins:
+            twapActiveBin != null ? spotBin - twapActiveBin : null,
+          spotVsTwapPct:
+            twapPrice != null && twapPrice > 0
+              ? (spotPriceYPerX / twapPrice - 1) * 100
+              : null,
+        };
+      });
+      const metadataRaw = (safeJsonValue(oracle?.metadata) ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const maxDurationSec =
+        typeof oracle?.getMaxDuration === "function"
+          ? integerLikeNumber(oracle.getMaxDuration(now))
+          : null;
+      return {
+        ...base,
+        supported: true,
+        available: true,
+        oracleAddress: publicKeyString(oracle?.oracleAddress),
+        metadata: {
+          idx: integerLikeNumber(oracle?.metadata?.idx),
+          activeSize: integerLikeNumber(oracle?.metadata?.activeSize),
+          length: integerLikeNumber(oracle?.metadata?.length),
+          raw: metadataRaw,
+        },
+        initializedObservationCount: initialized.length,
+        earliestObservationAtUnixSec: updatedTimes.length
+          ? Math.min(...updatedTimes)
+          : null,
+        latestObservationAtUnixSec: updatedTimes.length
+          ? Math.max(...updatedTimes)
+          : null,
+        latestObservationAgeSec: updatedTimes.length
+          ? Math.max(0, currentTimestampUnixSec - Math.max(...updatedTimes))
+          : null,
+        maxDurationSec,
+        twaps,
+        observations: args.includeObservations ? decoded : null,
+        error: null,
+      };
+    } catch (error) {
+      return {
+        ...base,
+        supported: true,
+        available: false,
+        oracleAddress: null,
+        metadata: null,
+        initializedObservationCount: 0,
+        earliestObservationAtUnixSec: null,
+        latestObservationAtUnixSec: null,
+        latestObservationAgeSec: null,
+        maxDurationSec: null,
+        twaps: [],
+        observations: null,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   async getBinsAroundActiveBin(
@@ -547,6 +1271,87 @@ export class MeteoraDlmmService {
     >;
   }
 
+  async getPoolProfileMetrics(
+    poolAddress: string,
+  ): Promise<MeteoraPoolProfileMetrics> {
+    const pool = asPublicKey(poolAddress).toBase58();
+    const raw = (await this.getIndexedPool(pool)) as any;
+    const config = raw?.pool_config ?? {};
+    const cumulative = raw?.cumulative_metrics ?? {};
+    const windows: MeteoraTimeframe[] = [
+      "5m",
+      "30m",
+      "1h",
+      "2h",
+      "4h",
+      "12h",
+      "24h",
+    ];
+    const windowMap = (
+      value: unknown,
+    ): Partial<Record<MeteoraTimeframe, number>> => {
+      const row =
+        value && typeof value === "object"
+          ? (value as Record<string, unknown>)
+          : {};
+      const out: Partial<Record<MeteoraTimeframe, number>> = {};
+      for (const timeframe of windows) {
+        const number = finiteNumber(row[timeframe]);
+        if (number != null) out[timeframe] = number;
+      }
+      return out;
+    };
+    const createdAtRaw = finiteNumber(raw?.created_at ?? raw?.pool_created_at);
+    const createdAtUnixSec =
+      createdAtRaw == null
+        ? null
+        : createdAtRaw > 10_000_000_000
+          ? createdAtRaw / 1000
+          : createdAtRaw;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const tvl = finiteNumber(raw?.tvl ?? raw?.liquidity);
+    const feesByWindow = windowMap(raw?.fees);
+    const feeTvlPctByWindow: Partial<Record<MeteoraTimeframe, number>> = {};
+    if (tvl != null && tvl > 0) {
+      for (const [timeframe, fee] of Object.entries(feesByWindow)) {
+        if (fee != null)
+          feeTvlPctByWindow[timeframe as MeteoraTimeframe] =
+            (Number(fee) / tvl) * 100;
+      }
+    }
+    return {
+      pool,
+      createdAtUnixSec,
+      ageSec:
+        createdAtUnixSec != null && createdAtUnixSec >= 0
+          ? Math.max(0, nowSec - createdAtUnixSec)
+          : null,
+      currentPrice: finiteNumber(raw?.current_price),
+      binStep: finiteNumber(config?.bin_step ?? raw?.bin_step),
+      baseFeePct: finiteNumber(config?.base_fee_pct ?? raw?.base_fee_pct),
+      dynamicFeePct: finiteNumber(raw?.dynamic_fee_pct),
+      maxFeePct: finiteNumber(config?.max_fee_pct ?? raw?.max_fee_pct),
+      protocolFeePct: finiteNumber(
+        config?.protocol_fee_pct ?? raw?.protocol_fee_pct,
+      ),
+      tvl,
+      apr24h: finiteNumber(raw?.apr),
+      apy24h: finiteNumber(raw?.apy),
+      farmApr24h: finiteNumber(raw?.farm_apr),
+      farmApy24h: finiteNumber(raw?.farm_apy),
+      hasFarm: typeof raw?.has_farm === "boolean" ? raw.has_farm : null,
+      isBlacklisted:
+        typeof raw?.is_blacklisted === "boolean" ? raw.is_blacklisted : null,
+      volumeByWindow: windowMap(raw?.volume),
+      feesByWindow,
+      feeTvlPctByWindow,
+      cumulativeVolume: finiteNumber(cumulative?.volume),
+      cumulativeTradeFee: finiteNumber(cumulative?.trade_fee),
+      cumulativeProtocolFee: finiteNumber(cumulative?.protocol_fee),
+      raw: (safeJsonValue(raw) ?? {}) as Record<string, unknown>,
+    };
+  }
+
   async getPoolDetail(
     poolAddress: string,
     timeframe: MeteoraDiscoverPoolsArgs["timeframe"] = "5m",
@@ -625,18 +1430,513 @@ export class MeteoraDlmmService {
 
   async getPoolOhlcv(
     poolAddress: string,
-    args: {
-      timeframe?: MeteoraDiscoverPoolsArgs["timeframe"];
-      startTime?: number;
-      endTime?: number;
-    } = {},
-  ): Promise<unknown> {
+    args: MeteoraOhlcvArgs = {},
+  ): Promise<MeteoraOhlcvResponse> {
     const pool = asPublicKey(poolAddress).toBase58();
-    return await this.dataApiGet(`/pools/${pool}/ohlcv`, {
+    const raw = (await this.dataApiGet(`/pools/${pool}/ohlcv`, {
       timeframe: args.timeframe ?? "24h",
       start_time: args.startTime,
       end_time: args.endTime,
-    });
+    })) as any;
+    const rows = Array.isArray(raw?.data)
+      ? raw.data
+      : Array.isArray(raw)
+        ? raw
+        : [];
+    const candles = rows
+      .map((row: any) => ({
+        timestamp: finiteNumber(row?.timestamp),
+        timestampStr:
+          row?.timestamp_str == null ? null : String(row.timestamp_str),
+        open: finiteNumber(row?.open),
+        high: finiteNumber(row?.high),
+        low: finiteNumber(row?.low),
+        close: finiteNumber(row?.close),
+        volume: finiteNumber(row?.volume) ?? 0,
+      }))
+      .filter(
+        (row: any) =>
+          row.timestamp != null &&
+          row.open != null &&
+          row.high != null &&
+          row.low != null &&
+          row.close != null,
+      )
+      .sort((a: any, b: any) => a.timestamp - b.timestamp)
+      .map((row: any) => ({
+        timestamp: row.timestamp as number,
+        timestampStr: row.timestampStr as string | null,
+        open: row.open as number,
+        high: row.high as number,
+        low: row.low as number,
+        close: row.close as number,
+        volume: row.volume as number,
+      }));
+    return {
+      pool,
+      timeframe:
+        raw?.timeframe == null
+          ? (args.timeframe ?? "24h")
+          : String(raw.timeframe),
+      startTime: finiteNumber(raw?.start_time),
+      endTime: finiteNumber(raw?.end_time),
+      candles,
+    };
+  }
+
+  async getPoolRollingMetrics(
+    poolAddress: string,
+    timeframe: MeteoraDiscoverPoolsArgs["timeframe"] = "5m",
+  ): Promise<MeteoraRollingPoolMetrics | null> {
+    const pool = asPublicKey(poolAddress).toBase58();
+    const detail = (await this.getPoolDetail(pool, timeframe)) as any;
+    if (!detail) return null;
+    const tvl = finiteNumber(detail.tvl ?? detail.liquidity);
+    const activeTvl = finiteNumber(detail.active_tvl ?? detail.activeTvl);
+    const volume = finiteNumber(
+      detail.volume ??
+        detail.volume_window ??
+        detail.volume_24h ??
+        detail.volume24h,
+    );
+    const fee = finiteNumber(detail.fee ?? detail.fees);
+    const directFeeActive = finiteNumber(
+      detail.fee_active_tvl_ratio ?? detail.feeActiveTvlRatio,
+    );
+    const directVolumeActive = finiteNumber(
+      detail.volume_active_tvl_ratio ?? detail.volumeActiveTvlRatio,
+    );
+    return {
+      pool,
+      timeframe: timeframe ?? "5m",
+      tvl,
+      activeTvl,
+      volume,
+      fee,
+      feeActiveTvlPct:
+        fee != null && activeTvl != null && activeTvl > 0
+          ? (fee / activeTvl) * 100
+          : directFeeActive,
+      volumeActiveTvlPct:
+        volume != null && activeTvl != null && activeTvl > 0
+          ? (volume / activeTvl) * 100
+          : directVolumeActive,
+      swapCount: finiteNumber(detail.swap_count ?? detail.swapCount),
+      uniqueTraders: finiteNumber(
+        detail.unique_traders ?? detail.uniqueTraders,
+      ),
+      uniqueLps: finiteNumber(detail.unique_lps ?? detail.uniqueLps),
+      priceChangePct: finiteNumber(
+        detail.pool_price_change_pct ??
+          detail.price_change_pct ??
+          detail.priceChangePct,
+      ),
+      raw: (safeJsonValue(detail) ?? {}) as Record<string, unknown>,
+    };
+  }
+
+  private async candleRegimeFromOhlcv(
+    poolAddress: string,
+    ohlcv: MeteoraOhlcvResponse,
+  ): Promise<MeteoraCandleRegimeMetrics> {
+    const candles = ohlcv.candles;
+    const pool = await this.rawPool(poolAddress);
+    const pctMoves: number[] = [];
+    const absPctMoves: number[] = [];
+    const logMoves: number[] = [];
+    const candleRangesPct: number[] = [];
+    const bodyToRangePct: number[] = [];
+    const closeLocationPct: number[] = [];
+    const volumes: number[] = [];
+    const directions: number[] = [];
+    const candleRangeBins: number[] = [];
+    const closeMoveBins: number[] = [];
+    const closeBins: number[] = [];
+    const lowBins: number[] = [];
+    const highBins: number[] = [];
+
+    const binFor = (price: number, roundDown: boolean): number | null => {
+      if (!(price > 0)) return null;
+      try {
+        return pool.getBinIdFromPrice(
+          Number(pool.toPricePerLamport(price)),
+          roundDown,
+        );
+      } catch {
+        return null;
+      }
+    };
+
+    for (let i = 0; i < candles.length; i += 1) {
+      const candle = candles[i]!;
+      volumes.push(candle.volume);
+      const range = candle.high - candle.low;
+      if (candle.open > 0) candleRangesPct.push((range / candle.open) * 100);
+      if (range > 0) {
+        bodyToRangePct.push(
+          (Math.abs(candle.close - candle.open) / range) * 100,
+        );
+        closeLocationPct.push(((candle.close - candle.low) / range) * 100);
+      }
+      directions.push(
+        candle.close > candle.open ? 1 : candle.close < candle.open ? -1 : 0,
+      );
+      const lowBin = binFor(candle.low, true);
+      const highBin = binFor(candle.high, false);
+      const closeBin = binFor(candle.close, true);
+      if (lowBin != null) lowBins.push(lowBin);
+      if (highBin != null) highBins.push(highBin);
+      if (closeBin != null) closeBins.push(closeBin);
+      if (lowBin != null && highBin != null)
+        candleRangeBins.push(Math.abs(highBin - lowBin));
+
+      if (i > 0) {
+        const previous = candles[i - 1]!;
+        if (previous.close > 0 && candle.close > 0) {
+          const move = (candle.close / previous.close - 1) * 100;
+          pctMoves.push(move);
+          absPctMoves.push(Math.abs(move));
+          logMoves.push(Math.log(candle.close / previous.close) * 100);
+        }
+        const previousBin =
+          closeBins.length >= 2 ? closeBins[closeBins.length - 2] : null;
+        if (previousBin != null && closeBin != null)
+          closeMoveBins.push(Math.abs(closeBin - previousBin));
+      }
+    }
+
+    let directionFlips = 0;
+    let previousDirection = 0;
+    for (const direction of directions) {
+      if (direction === 0) continue;
+      if (previousDirection !== 0 && direction !== previousDirection)
+        directionFlips += 1;
+      previousDirection = direction;
+    }
+
+    const start = candles[0] ?? null;
+    const end = candles.at(-1) ?? null;
+    const startPrice = start?.open ?? null;
+    const endPrice = end?.close ?? null;
+    const maxHigh = candles.length
+      ? Math.max(...candles.map((c) => c.high))
+      : null;
+    const minLow = candles.length
+      ? Math.min(...candles.map((c) => c.low))
+      : null;
+    const durationSec =
+      start && end ? Math.max(0, end.timestamp - start.timestamp) : null;
+    const pathPct = absPctMoves.reduce((sum, value) => sum + value, 0);
+    const netPct =
+      startPrice != null && endPrice != null && startPrice > 0
+        ? Math.abs((endPrice / startPrice - 1) * 100)
+        : null;
+
+    const half = Math.floor(candles.length / 2);
+    const prior = half > 0 ? candles.slice(0, half) : [];
+    const recent = half > 0 ? candles.slice(candles.length - half) : [];
+    const avgRangePct = (rows: typeof candles): number | null =>
+      mean(
+        rows
+          .filter((c) => c.open > 0)
+          .map((c) => ((c.high - c.low) / c.open) * 100),
+      );
+    const avgVolume = (rows: typeof candles): number | null =>
+      mean(rows.map((c) => c.volume));
+    const closeVol = (rows: typeof candles): number | null => {
+      const values: number[] = [];
+      for (let i = 1; i < rows.length; i += 1) {
+        if (rows[i - 1]!.close > 0 && rows[i]!.close > 0)
+          values.push(Math.log(rows[i]!.close / rows[i - 1]!.close) * 100);
+      }
+      return standardDeviation(values);
+    };
+
+    const up = directions.filter((x) => x > 0).length;
+    const down = directions.filter((x) => x < 0).length;
+    const flat = directions.filter((x) => x === 0).length;
+    const startBin = startPrice == null ? null : binFor(startPrice, true);
+    const endBin = endPrice == null ? null : binFor(endPrice, true);
+    const pathBins = closeMoveBins.reduce((sum, value) => sum + value, 0);
+    const durationMin =
+      durationSec != null && durationSec > 0 ? durationSec / 60 : null;
+
+    return {
+      version: 1,
+      pool: asPublicKey(poolAddress).toBase58(),
+      timeframe: ohlcv.timeframe,
+      candleCount: candles.length,
+      startTime: ohlcv.startTime ?? start?.timestamp ?? null,
+      endTime: ohlcv.endTime ?? end?.timestamp ?? null,
+      durationSec,
+      startPriceYPerX: startPrice,
+      endPriceYPerX: endPrice,
+      returnPct:
+        startPrice != null && endPrice != null && startPrice > 0
+          ? (endPrice / startPrice - 1) * 100
+          : null,
+      highLowSpanPct:
+        minLow != null && maxHigh != null && minLow > 0
+          ? (maxHigh / minLow - 1) * 100
+          : null,
+      realizedCloseVolPct: standardDeviation(logMoves),
+      meanAbsCloseMovePct: mean(absPctMoves),
+      medianAbsCloseMovePct: median(absPctMoves),
+      p90AbsCloseMovePct: percentile(absPctMoves, 0.9),
+      maxAbsCloseMovePct: absPctMoves.length ? Math.max(...absPctMoves) : null,
+      meanCandleRangePct: mean(candleRangesPct),
+      p75CandleRangePct: percentile(candleRangesPct, 0.75),
+      p90CandleRangePct: percentile(candleRangesPct, 0.9),
+      maxCandleRangePct: candleRangesPct.length
+        ? Math.max(...candleRangesPct)
+        : null,
+      meanBodyToRangePct: mean(bodyToRangePct),
+      meanCloseLocationPct: mean(closeLocationPct),
+      trendEfficiency:
+        netPct != null && pathPct > 0 ? Math.min(1, netPct / pathPct) : null,
+      directionFlips,
+      upCandlePct: directions.length ? (up / directions.length) * 100 : null,
+      downCandlePct: directions.length
+        ? (down / directions.length) * 100
+        : null,
+      flatCandlePct: directions.length
+        ? (flat / directions.length) * 100
+        : null,
+      totalVolume: volumes.length
+        ? volumes.reduce((sum, value) => sum + value, 0)
+        : null,
+      meanVolume: mean(volumes),
+      medianVolume: median(volumes),
+      volumeCv: coefficientOfVariation(volumes),
+      volumeAbsMoveCorrelation:
+        absPctMoves.length && volumes.length > 1
+          ? pearson(volumes.slice(1, absPctMoves.length + 1), absPctMoves)
+          : null,
+      recentToPriorVolumeRatio: ratioOrNull(
+        avgVolume(recent),
+        avgVolume(prior),
+      ),
+      recentToPriorRangeRatio: ratioOrNull(
+        avgRangePct(recent),
+        avgRangePct(prior),
+      ),
+      recentToPriorVolatilityRatio: ratioOrNull(
+        closeVol(recent),
+        closeVol(prior),
+      ),
+      startBin,
+      endBin,
+      displacementBins:
+        startBin != null && endBin != null ? endBin - startBin : null,
+      totalSpanBins:
+        lowBins.length && highBins.length
+          ? Math.max(...highBins) - Math.min(...lowBins)
+          : null,
+      meanCandleRangeBins: mean(candleRangeBins),
+      p75CandleRangeBins: percentile(candleRangeBins, 0.75),
+      p90CandleRangeBins: percentile(candleRangeBins, 0.9),
+      maxCandleRangeBins: candleRangeBins.length
+        ? Math.max(...candleRangeBins)
+        : null,
+      meanAbsCloseMoveBins: mean(closeMoveBins),
+      p90AbsCloseMoveBins: percentile(closeMoveBins, 0.9),
+      pathBinsPerMinute:
+        durationMin != null && durationMin > 0 ? pathBins / durationMin : null,
+      netBinsPerMinute:
+        durationMin != null &&
+        durationMin > 0 &&
+        startBin != null &&
+        endBin != null
+          ? (endBin - startBin) / durationMin
+          : null,
+    };
+  }
+
+  async getPoolCandleRegime(
+    poolAddress: string,
+    args: MeteoraOhlcvArgs = {},
+  ): Promise<MeteoraCandleRegimeMetrics> {
+    const ohlcv = await this.getPoolOhlcv(poolAddress, args);
+    return await this.candleRegimeFromOhlcv(poolAddress, ohlcv);
+  }
+
+  async getPoolLiquidityDepth(
+    poolAddress: string,
+    radius = 20,
+    refresh = true,
+  ): Promise<MeteoraLiquidityDepthMetrics> {
+    const normalizedRadius = Math.max(1, Math.min(200, Math.trunc(radius)));
+    const pool = await this.rawPool(poolAddress, refresh);
+    const active = await pool.getActiveBin();
+    const activeBin =
+      extractBinId(active) ?? numberOrNull((pool.lbPair as any)?.activeId) ?? 0;
+    const activePriceYPerX = Number(
+      pool.fromPricePerLamport(Number((active as any).price)),
+    );
+    const xToken = tokenReserve(pool.tokenX);
+    const yToken = tokenReserve(pool.tokenY);
+    const around = await pool.getBinsAroundActiveBin(
+      normalizedRadius,
+      normalizedRadius,
+    );
+    const rows = rowArray(around);
+    const bins = rows
+      .map((row) => {
+        const binId =
+          finiteNumber(row.binId ?? row.id ?? row.bin_id) ?? Number.NaN;
+        if (!Number.isInteger(binId)) return null;
+        const xRaw = rawField(row, ["xAmount", "amountX", "x_amount"]);
+        const yRaw = rawField(row, ["yAmount", "amountY", "y_amount"]);
+        const xUi = rawToUi(xRaw, xToken.decimals);
+        const yUi = rawToUi(yRaw, yToken.decimals);
+        const xValueY =
+          xUi == null || !Number.isFinite(activePriceYPerX)
+            ? null
+            : xUi * activePriceYPerX;
+        const totalValueY =
+          xValueY == null || yUi == null ? null : xValueY + yUi;
+        return {
+          binId,
+          distanceFromActive: binId - activeBin,
+          xRaw,
+          yRaw,
+          xUi,
+          yUi,
+          xValueY,
+          totalValueY,
+        };
+      })
+      .filter((row): row is NonNullable<typeof row> => row != null)
+      .sort((a, b) => a.binId - b.binId);
+
+    const nonEmpty = bins.filter(
+      (bin) => bigintOrZero(bin.xRaw) > 0n || bigintOrZero(bin.yRaw) > 0n,
+    );
+    const valued = bins.filter((bin) => bin.totalValueY != null);
+    const lower = valued.filter((bin) => bin.distanceFromActive < 0);
+    const activeRows = valued.filter((bin) => bin.distanceFromActive === 0);
+    const upper = valued.filter((bin) => bin.distanceFromActive > 0);
+    const sumValue = (rowsToSum: typeof valued): number =>
+      rowsToSum.reduce((sum, bin) => sum + (bin.totalValueY ?? 0), 0);
+    const lowerValueY = valued.length ? sumValue(lower) : null;
+    const activeValueY = valued.length ? sumValue(activeRows) : null;
+    const upperValueY = valued.length ? sumValue(upper) : null;
+    const totalValueY = valued.length ? sumValue(valued) : null;
+    const xValueY = valued.length
+      ? valued.reduce((sum, bin) => sum + (bin.xValueY ?? 0), 0)
+      : null;
+    const yValueY = valued.length
+      ? valued.reduce((sum, bin) => sum + (bin.yUi ?? 0), 0)
+      : null;
+    const nearestLower = nonEmpty
+      .filter((bin) => bin.distanceFromActive < 0)
+      .map((bin) => Math.abs(bin.distanceFromActive));
+    const nearestUpper = nonEmpty
+      .filter((bin) => bin.distanceFromActive > 0)
+      .map((bin) => bin.distanceFromActive);
+    const topBinValue = valued.length
+      ? Math.max(...valued.map((bin) => bin.totalValueY ?? 0))
+      : null;
+    const weightedDistanceNumerator = valued.reduce(
+      (sum, bin) =>
+        sum + Math.abs(bin.distanceFromActive) * (bin.totalValueY ?? 0),
+      0,
+    );
+
+    return {
+      version: 1,
+      pool: pool.pubkey.toBase58(),
+      radius: normalizedRadius,
+      activeBin,
+      activePriceYPerX,
+      binsSeen: bins.length,
+      nonEmptyBins: nonEmpty.length,
+      emptyBinPct: bins.length
+        ? ((bins.length - nonEmpty.length) / bins.length) * 100
+        : null,
+      activeBinHasLiquidity: nonEmpty.some(
+        (bin) => bin.distanceFromActive === 0,
+      ),
+      nearestLowerLiquidityBins: nearestLower.length
+        ? Math.min(...nearestLower)
+        : null,
+      nearestUpperLiquidityBins: nearestUpper.length
+        ? Math.min(...nearestUpper)
+        : null,
+      lowerValueY,
+      activeValueY,
+      upperValueY,
+      totalValueY,
+      xValueY,
+      yValueY,
+      xSharePct:
+        totalValueY != null && totalValueY > 0 && xValueY != null
+          ? (xValueY / totalValueY) * 100
+          : null,
+      ySharePct:
+        totalValueY != null && totalValueY > 0 && yValueY != null
+          ? (yValueY / totalValueY) * 100
+          : null,
+      upperVsLowerValueRatio: ratioOrNull(upperValueY, lowerValueY),
+      sideImbalancePct:
+        upperValueY != null &&
+        lowerValueY != null &&
+        upperValueY + lowerValueY > 0
+          ? ((upperValueY - lowerValueY) / (upperValueY + lowerValueY)) * 100
+          : null,
+      topBinValueSharePct:
+        totalValueY != null && totalValueY > 0 && topBinValue != null
+          ? (topBinValue / totalValueY) * 100
+          : null,
+      weightedMeanAbsDistanceBins:
+        totalValueY != null && totalValueY > 0
+          ? weightedDistanceNumerator / totalValueY
+          : null,
+      bins,
+    };
+  }
+
+  async getPoolMarketMetrics(
+    poolAddress: string,
+    args: MeteoraOhlcvArgs & {
+      depthRadius?: number;
+      oracleTwapWindowsSec?: number[];
+      includeOracleObservations?: boolean;
+    } = {},
+  ): Promise<MeteoraPoolMarketMetrics> {
+    const pool = asPublicKey(poolAddress).toBase58();
+    const timeframe = args.timeframe ?? "5m";
+
+    // Establish one refreshed pool state first, then reuse the cached pool for
+    // the remaining reads to reduce avoidable active-bin skew within this snapshot.
+    const state = await this.getPoolState(pool, true);
+    const [activeBinSample, oracle, profile, rolling, ohlcv, liquidityDepth] =
+      await Promise.all([
+        this.getActiveBinSample(pool, false),
+        this.getPoolOracleSnapshot(pool, {
+          refresh: false,
+          twapWindowsSec: args.oracleTwapWindowsSec,
+          includeObservations: args.includeOracleObservations ?? false,
+        }),
+        this.getPoolProfileMetrics(pool),
+        this.getPoolRollingMetrics(pool, timeframe),
+        this.getPoolOhlcv(pool, args),
+        this.getPoolLiquidityDepth(pool, args.depthRadius ?? 20, false),
+      ]);
+    const candleRegime = await this.candleRegimeFromOhlcv(pool, ohlcv);
+    return {
+      version: 2,
+      observedAt: Date.now(),
+      pool,
+      state,
+      activeBinSample,
+      oracle,
+      profile,
+      rolling,
+      ohlcv,
+      candleRegime,
+      liquidityDepth,
+    };
   }
 
   async getPoolVolumeHistory(
@@ -1099,17 +2399,207 @@ export class MeteoraDlmmService {
     return { minBinId, maxBinId, activeBinId };
   }
 
+  private async quoteInfrastructureForRange(
+    pool: DlmmPool,
+    minBinId: number,
+    maxBinId: number,
+    strategy: MeteoraStrategy,
+  ): Promise<MeteoraInfrastructureQuote> {
+    const quoteCreatePosition = (pool as any).quoteCreatePosition;
+    if (typeof quoteCreatePosition !== "function") {
+      throw new Error(
+        "Meteora infrastructure preflight unavailable: installed @meteora-ag/dlmm does not expose quoteCreatePosition(). Refusing to build a liquidity transaction because shared bin-array funding cannot be proven zero.",
+      );
+    }
+    const { StrategyType } = await dlmmSdk();
+    const strategyType = normalizeStrategy(strategy, StrategyType);
+    const rawQuote = await quoteCreatePosition.call(pool, {
+      strategy: { minBinId, maxBinId, strategyType },
+    });
+    const row = (rawQuote ?? {}) as Record<string, unknown>;
+    const own = (key: string): boolean =>
+      Object.prototype.hasOwnProperty.call(row, key);
+    const binCostKeys = [
+      "binArrayCost",
+      "bin_array_cost",
+      "binArraysCost",
+      "bin_arrays_cost",
+    ];
+    const bitmapCostKeys = [
+      "bitmapExtensionCost",
+      "bitmap_extension_cost",
+      "binArrayBitmapExtensionCost",
+      "bin_array_bitmap_extension_cost",
+    ];
+    if (!binCostKeys.some(own) || !bitmapCostKeys.some(own)) {
+      throw new Error(
+        "Meteora infrastructure preflight incompatible: quoteCreatePosition() returned an unrecognized cost schema. Refusing to build liquidity because bin-array/bitmap funding cannot be proven zero.",
+      );
+    }
+    const binArrayCost = bigintOrZero(
+      row.binArrayCost ??
+        row.bin_array_cost ??
+        row.binArraysCost ??
+        row.bin_arrays_cost,
+    );
+    const bitmapExtensionCost = bigintOrZero(
+      row.bitmapExtensionCost ??
+        row.bitmap_extension_cost ??
+        row.binArrayBitmapExtensionCost ??
+        row.bin_array_bitmap_extension_cost,
+    );
+    const positionCostRaw =
+      row.positionCost ??
+      row.position_cost ??
+      row.positionRent ??
+      row.position_rent;
+    const reallocCostRaw =
+      row.reallocPositionCost ??
+      row.positionReallocCost ??
+      row.position_realloc_cost ??
+      row.realloc_position_cost;
+    const count =
+      numberOrNull(
+        row.binArrayCount ?? row.bin_array_count ?? row.binArraysCount,
+      ) ?? null;
+    const txCount =
+      numberOrNull(
+        row.transactionCount ?? row.transaction_count ?? row.txCount,
+      ) ?? null;
+    const nonRefundable = binArrayCost + bitmapExtensionCost;
+    return {
+      pool: pool.pubkey.toBase58(),
+      minBinId,
+      maxBinId,
+      strategy,
+      binArrayCount: count,
+      binArrayCostLamports: binArrayCost.toString(),
+      bitmapExtensionCostLamports: bitmapExtensionCost.toString(),
+      nonRefundableInfrastructureLamports: nonRefundable.toString(),
+      positionCostLamports:
+        positionCostRaw == null
+          ? null
+          : bigintOrZero(positionCostRaw).toString(),
+      positionReallocCostLamports:
+        reallocCostRaw == null ? null : bigintOrZero(reallocCostRaw).toString(),
+      transactionCount: txCount,
+      requiresBinArrayInit: binArrayCost > 0n,
+      requiresBitmapExtensionInit: bitmapExtensionCost > 0n,
+      requiresNonRefundableInfrastructure: nonRefundable > 0n,
+      raw: (safeJsonValue(rawQuote) ?? {}) as Record<string, unknown>,
+    };
+  }
+
+  async inspectPositionInfrastructure(args: {
+    pool: string;
+    minBinId: number;
+    maxBinId: number;
+    strategy?: MeteoraStrategy;
+  }): Promise<MeteoraInfrastructureQuote> {
+    if (!Number.isInteger(args.minBinId) || !Number.isInteger(args.maxBinId))
+      throw new Error("Meteora bin IDs must be integers");
+    if (args.minBinId > args.maxBinId)
+      throw new Error("Meteora minBinId cannot be greater than maxBinId");
+    const pool = await this.rawPool(args.pool, true);
+    return await this.quoteInfrastructureForRange(
+      pool,
+      args.minBinId,
+      args.maxBinId,
+      args.strategy ?? "spot",
+    );
+  }
+
+  private assertInfrastructurePolicy(
+    quote: MeteoraInfrastructureQuote,
+    policy: MeteoraInfrastructureFundingPolicy | undefined,
+  ): void {
+    if (!quote.requiresNonRefundableInfrastructure) return;
+
+    const binArrayAllowed =
+      !quote.requiresBinArrayInit || policy?.allowBinArrayInit === true;
+    const bitmapAllowed =
+      !quote.requiresBitmapExtensionInit ||
+      policy?.allowBitmapExtensionInit === true;
+
+    if (!binArrayAllowed || !bitmapAllowed) {
+      const reasons: string[] = [];
+      if (quote.requiresBinArrayInit && !binArrayAllowed)
+        reasons.push(
+          `bin-array initialization=${quote.binArrayCostLamports} lamports`,
+        );
+      if (quote.requiresBitmapExtensionInit && !bitmapAllowed)
+        reasons.push(
+          `bitmap-extension initialization=${quote.bitmapExtensionCostLamports} lamports`,
+        );
+      throw new MeteoraInfrastructureFundingRequiredError(
+        `Meteora liquidity build refused: requested range ${quote.minBinId}..${quote.maxBinId} requires caller-funded shared infrastructure (${reasons.join(
+          ", ",
+        )}). This is denied by default. Explicitly opt in with the corresponding infrastructure allow flag and maxNonRefundableLamports. No Meteora transaction was constructed.`,
+        quote,
+      );
+    }
+
+    if (policy?.maxNonRefundableLamports == null) {
+      throw new MeteoraInfrastructureFundingRequiredError(
+        `Meteora liquidity build refused: shared infrastructure was explicitly allowed but maxNonRefundableLamports was not provided. A hard expenditure cap is required.`,
+        quote,
+      );
+    }
+    const maximum = BigInt(
+      toBN(
+        policy.maxNonRefundableLamports,
+        "maxNonRefundableLamports",
+      ).toString(10),
+    );
+    const required = BigInt(quote.nonRefundableInfrastructureLamports);
+    if (required > maximum) {
+      throw new MeteoraInfrastructureFundingRequiredError(
+        `Meteora liquidity build refused: shared infrastructure requires ${required} lamports, exceeding maxNonRefundableLamports=${maximum}. No Meteora transaction was constructed.`,
+        quote,
+      );
+    }
+  }
+
+  private infrastructurePreflight(
+    quote: MeteoraInfrastructureQuote,
+    policy: MeteoraInfrastructureFundingPolicy | undefined,
+  ): MeteoraInfrastructurePreflight {
+    return {
+      checked: true,
+      quote,
+      authorization: {
+        allowBinArrayInit: policy?.allowBinArrayInit === true,
+        allowBitmapExtensionInit: policy?.allowBitmapExtensionInit === true,
+        maxNonRefundableLamports:
+          policy?.maxNonRefundableLamports == null
+            ? null
+            : toBN(
+                policy.maxNonRefundableLamports,
+                "maxNonRefundableLamports",
+              ).toString(10),
+      },
+    };
+  }
+
   async buildOpenPosition(
     args: MeteoraOpenPositionArgs,
   ): Promise<MeteoraPreparedTransactions> {
     const pool = await this.rawPool(args.pool, true);
     const wallet = this.host.signer(args.wallet);
-    const position = Keypair.generate();
     const { StrategyType } = await dlmmSdk();
     const strategy = args.strategy ?? "spot";
     const strategyType = normalizeStrategy(strategy, StrategyType);
     const { x, y } = await this.resolveAmounts(pool, args);
     const range = await this.resolveRange(pool, args);
+    const infrastructure = await this.quoteInfrastructureForRange(
+      pool,
+      range.minBinId,
+      range.maxBinId,
+      strategy,
+    );
+    this.assertInfrastructurePolicy(infrastructure, args.infrastructure);
+    // Generate the position only after the shared-infrastructure gate passes.
+    const position = Keypair.generate();
     const slippageBps = Math.max(
       0,
       Math.min(10_000, Math.trunc(args.slippageBps ?? 100)),
@@ -1167,6 +2657,10 @@ export class MeteoraDlmmService {
       transactions,
       extraSigners: [position],
       position: position.publicKey.toBase58(),
+      infrastructurePreflight: this.infrastructurePreflight(
+        infrastructure,
+        args.infrastructure,
+      ),
       metadata: {
         strategy,
         minBinId: range.minBinId,
@@ -1175,6 +2669,7 @@ export class MeteoraDlmmService {
         amountXRaw: x.toString(),
         amountYRaw: y.toString(),
         slippageBps,
+        infrastructure,
       },
     };
   }
@@ -1197,6 +2692,13 @@ export class MeteoraDlmmService {
       numberOrNull(args.maxBinId) ?? numberOrNull(data.upperBinId);
     if (minBinId == null || maxBinId == null)
       throw new Error("Could not determine position bin range");
+    const infrastructure = await this.quoteInfrastructureForRange(
+      pool,
+      minBinId,
+      maxBinId,
+      strategy,
+    );
+    this.assertInfrastructurePolicy(infrastructure, args.infrastructure);
     const slippageBps = Math.max(
       0,
       Math.min(10_000, Math.trunc(args.slippageBps ?? 100)),
@@ -1223,6 +2725,10 @@ export class MeteoraDlmmService {
       transactions: asTxArray(built),
       extraSigners: [],
       position: positionKey.toBase58(),
+      infrastructurePreflight: this.infrastructurePreflight(
+        infrastructure,
+        args.infrastructure,
+      ),
       metadata: {
         strategy,
         minBinId,
@@ -1230,6 +2736,7 @@ export class MeteoraDlmmService {
         amountXRaw: x.toString(),
         amountYRaw: y.toString(),
         slippageBps,
+        infrastructure,
       },
     };
   }
@@ -1638,6 +3145,24 @@ export class MeteoraDlmmService {
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
     assertLiveTradingEnabled(options);
+    if (
+      prepared.kind === "open-position" ||
+      prepared.kind === "add-liquidity"
+    ) {
+      const preflight = prepared.infrastructurePreflight;
+      if (!preflight?.checked) {
+        throw new Error(
+          `Meteora ${prepared.kind} execution refused: prepared liquidity transaction lacks Solard infrastructure preflight attestation. Rebuild it with the current Solard SDK before execution.`,
+        );
+      }
+      this.assertInfrastructurePolicy(preflight.quote, {
+        allowBinArrayInit: preflight.authorization.allowBinArrayInit,
+        allowBitmapExtensionInit:
+          preflight.authorization.allowBitmapExtensionInit,
+        maxNonRefundableLamports:
+          preflight.authorization.maxNonRefundableLamports ?? undefined,
+      });
+    }
     if (prepared.transactions.length === 0) {
       throw new Error(`Meteora ${prepared.kind} produced no transactions`);
     }
@@ -1676,15 +3201,51 @@ export class MeteoraDlmmService {
         }
       }
 
-      const signature = await connection.sendRawTransaction(
-        transaction.serialize(),
-        {
-          skipPreflight: options.skipPreflight ?? false,
-          preflightCommitment: commitment,
-          maxRetries: options.maxRetries,
-        },
-      );
-      await connection.confirmTransaction(signature, commitment);
+      const expectedSignature = signedTransactionSignature(transaction);
+      let signature: string;
+      try {
+        signature = await connection.sendRawTransaction(
+          transaction.serialize(),
+          {
+            skipPreflight: options.skipPreflight ?? false,
+            preflightCommitment: commitment,
+            maxRetries: options.maxRetries,
+          },
+        );
+      } catch (error) {
+        if (expectedSignature && transportError(error)) {
+          const landed = await recoverSubmittedSignature(
+            connection,
+            expectedSignature,
+            commitment,
+          );
+          if (landed) {
+            signature = expectedSignature;
+          } else {
+            throw new Error(
+              `Meteora ${prepared.kind} send response was lost and transaction ${expectedSignature} could not be confirmed on-chain: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        } else {
+          throw error;
+        }
+      }
+
+      try {
+        await connection.confirmTransaction(signature, commitment);
+      } catch (error) {
+        if (!transportError(error)) throw error;
+        const landed = await recoverSubmittedSignature(
+          connection,
+          signature,
+          commitment,
+        );
+        if (!landed) {
+          throw new Error(
+            `Meteora ${prepared.kind} transaction ${signature} was submitted but confirmation remained uncertain after a transport error: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       signatures.push(signature);
     }
 

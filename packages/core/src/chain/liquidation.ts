@@ -19,6 +19,7 @@ export type RegistryTokenLiquidationActionKind =
   | "sell"
   | "jupiter-sell"
   | "unwrap-wsol"
+  | "close-empty"
   | "keep-protected"
   | "skip-unsupported";
 
@@ -35,6 +36,10 @@ export type RegistryTokenLiquidationAction = {
   venue?: string;
   reason?: string;
   jupiterQuote?: JupiterSwapQuote;
+  /** Exact token-account metadata for zero-balance rent cleanup. */
+  tokenAccount?: string;
+  tokenProgram?: string;
+  rentLamports?: bigint;
   /** Ephemeral routing metadata; never contains secret key material. */
   token?: TokenRow;
 };
@@ -47,6 +52,7 @@ export type RegistryTokenLiquidationPlan = {
     sell: number;
     jupiterSell: number;
     unwrapWsol: number;
+    closeEmpty: number;
     keepProtected: number;
     skipUnsupported: number;
   };
@@ -199,6 +205,62 @@ function ephemeralToken(
     baseTokenProgram: holding.programId,
     ...(inspected ?? {}),
   } as TokenRow;
+}
+
+function emptyAccountAction(args: {
+  walletName: string;
+  walletAddress: string;
+  account: Awaited<ReturnType<Solard["tokenAccounts"]>>[number];
+  token?: TokenRow | null;
+}): RegistryTokenLiquidationAction {
+  return {
+    kind: "close-empty",
+    walletName: args.walletName,
+    walletAddress: args.walletAddress,
+    mint: args.account.mint,
+    name: args.token?.name ?? null,
+    symbol: args.token?.symbol ?? null,
+    decimals: args.account.decimals,
+    amountRaw: 0n,
+    amountUi: "0",
+    tokenAccount: args.account.address,
+    tokenProgram: args.account.tokenProgram,
+    rentLamports: args.account.lamports,
+  };
+}
+
+async function discoverEmptyTokenAccountActions(
+  slrd: Solard,
+  walletRows: Array<{ walletName: string; walletAddress: string }>,
+  protectedMints: ReadonlySet<string>,
+): Promise<RegistryTokenLiquidationAction[]> {
+  const out: RegistryTokenLiquidationAction[] = [];
+  const tokenByMint = new Map(
+    slrd.tokens.list().map((token) => [token.mint, token] as const),
+  );
+  for (const row of walletRows) {
+    const accounts = await slrd.tokenAccounts(row.walletAddress);
+    for (const account of accounts) {
+      if (account.amountRaw !== 0n) continue;
+      if (protectedMints.has(account.mint)) continue;
+      // The wallet must be able to authorize account closure. A different explicit
+      // close authority is intentionally left alone.
+      if (
+        account.closeAuthority &&
+        account.closeAuthority !== row.walletAddress
+      )
+        continue;
+      out.push(
+        emptyAccountAction({
+          walletName: row.walletName,
+          walletAddress: row.walletAddress,
+          account,
+          token: tokenByMint.get(account.mint) ?? null,
+        }),
+      );
+    }
+  }
+  return out;
 }
 
 export async function planRegistryTokenLiquidation(
@@ -355,6 +417,23 @@ export async function planRegistryTokenLiquidation(
     }
   }
 
+  // Zero-balance token accounts require no route. Include them even when their
+  // mint is unsupported so `slrd liquidate tokens` also reclaims dead-account rent.
+  const existingEmptyAccounts = await discoverEmptyTokenAccountActions(
+    slrd,
+    portfolio.rows.map((row) => ({
+      walletName: row.walletName,
+      walletAddress: row.walletAddress,
+    })),
+    protectedMints,
+  );
+  const seenEmpty = new Set<string>();
+  for (const action of existingEmptyAccounts) {
+    if (!action.tokenAccount || seenEmpty.has(action.tokenAccount)) continue;
+    seenEmpty.add(action.tokenAccount);
+    actions.push(action);
+  }
+
   const count = (kind: RegistryTokenLiquidationActionKind) =>
     actions.filter((action) => action.kind === kind).length;
 
@@ -366,6 +445,7 @@ export async function planRegistryTokenLiquidation(
       sell: count("sell"),
       jupiterSell: count("jupiter-sell"),
       unwrapWsol: count("unwrap-wsol"),
+      closeEmpty: count("close-empty"),
       keepProtected: count("keep-protected"),
       skipUnsupported: count("skip-unsupported"),
     },
@@ -406,6 +486,25 @@ async function simulateAction(
       return { action, simulation: await slrd.simulatePlan(plan) };
     }
 
+    if (action.kind === "close-empty") {
+      if (!action.tokenAccount || !action.tokenProgram)
+        throw new Error("Missing zero-balance token-account metadata");
+      // Re-read before even simulating. Planning data may already be stale.
+      const current = (await slrd.tokenAccounts(action.walletAddress)).find(
+        (account) => account.address === action.tokenAccount,
+      );
+      if (!current) return { action };
+      if (current.amountRaw !== 0n)
+        throw new Error(
+          `Refusing to close non-empty token account ${action.tokenAccount}`,
+        );
+      const plan = await slrd
+        .tx(action.walletAddress)
+        .closeTokenAccountAddress(action.tokenAccount, action.tokenProgram)
+        .build();
+      return { action, simulation: await slrd.simulatePlan(plan) };
+    }
+
     return { action };
   } catch (error) {
     return {
@@ -427,7 +526,8 @@ export async function simulateRegistryTokenLiquidation(
     (action) =>
       action.kind === "sell" ||
       action.kind === "jupiter-sell" ||
-      action.kind === "unwrap-wsol",
+      action.kind === "unwrap-wsol" ||
+      action.kind === "close-empty",
   );
   for (let index = 0; index < executable.length; index += 1) {
     const action = executable[index]!;
@@ -469,19 +569,21 @@ export async function executeRegistryTokenLiquidation(
   const delayMs = Math.max(0, options.delayMs ?? 250);
   const via = options.via ?? "rpc";
 
-  const executable = plan.actions.filter(
+  // Phase 1 changes balances. Do not attempt account closure until every sell /
+  // unwrap has finished, then derive cleanup candidates from fresh on-chain state.
+  const primary = plan.actions.filter(
     (action) =>
       action.kind === "sell" ||
       action.kind === "jupiter-sell" ||
       action.kind === "unwrap-wsol",
   );
 
-  for (let index = 0; index < executable.length; index += 1) {
-    const action = executable[index]!;
+  for (let index = 0; index < primary.length; index += 1) {
+    const action = primary[index]!;
     options.onProgress?.({
       stage: "action-start",
       index: index + 1,
-      total: executable.length,
+      total: primary.length,
       action,
     });
 
@@ -521,7 +623,7 @@ export async function executeRegistryTokenLiquidation(
       options.onProgress?.({
         stage: "action-done",
         index: index + 1,
-        total: executable.length,
+        total: primary.length,
         action,
       });
     } catch (error) {
@@ -530,12 +632,101 @@ export async function executeRegistryTokenLiquidation(
       options.onProgress?.({
         stage: "action-error",
         index: index + 1,
-        total: executable.length,
+        total: primary.length,
         action,
         error: message,
       });
     }
 
+    await pause(delayMs);
+  }
+
+  // Phase 2 is intentionally based on a fresh scan, not the original plan. This
+  // both catches accounts emptied by successful sales and prevents closing an
+  // account that received tokens after planning. Protected mints remain protected.
+  const protectedMints = new Set(plan.protectedMints);
+  const walletRows = Array.from(
+    new Map(
+      plan.actions.map(
+        (action) =>
+          [
+            action.walletAddress,
+            {
+              walletName: action.walletName,
+              walletAddress: action.walletAddress,
+            },
+          ] as const,
+      ),
+    ).values(),
+  );
+  const cleanup = await discoverEmptyTokenAccountActions(
+    slrd,
+    walletRows,
+    protectedMints,
+  );
+
+  for (let index = 0; index < cleanup.length; index += 1) {
+    const action = cleanup[index]!;
+    options.onProgress?.({
+      stage: "action-start",
+      index: index + 1,
+      total: cleanup.length,
+      action,
+    });
+    try {
+      if (!action.tokenAccount || !action.tokenProgram)
+        throw new Error("Missing zero-balance token-account metadata");
+
+      // Race guard immediately before building the close transaction.
+      const current = (await slrd.tokenAccounts(action.walletAddress)).find(
+        (account) => account.address === action.tokenAccount,
+      );
+      if (!current) {
+        // Already closed (for example WSOL was closed by unwrap). Treat as done.
+        out.push({ action });
+      } else {
+        if (current.amountRaw !== 0n)
+          throw new Error(
+            `Refusing to close non-empty token account ${action.tokenAccount}`,
+          );
+        if (
+          current.closeAuthority &&
+          current.closeAuthority !== action.walletAddress
+        )
+          throw new Error(
+            `Refusing token account with different close authority ${current.closeAuthority}`,
+          );
+        const receipt = await slrd
+          .tx(action.walletAddress)
+          .closeTokenAccountAddress(
+            action.tokenAccount,
+            current.tokenProgram ?? action.tokenProgram,
+          )
+          .send({
+            via,
+            kind: "registry-token-liquidation:close-empty",
+            skipSimulation: false,
+            skipPreflight: false,
+          });
+        out.push({ action, receipt });
+      }
+      options.onProgress?.({
+        stage: "action-done",
+        index: index + 1,
+        total: cleanup.length,
+        action,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      out.push({ action, error: message });
+      options.onProgress?.({
+        stage: "action-error",
+        index: index + 1,
+        total: cleanup.length,
+        action,
+        error: message,
+      });
+    }
     await pause(delayMs);
   }
 

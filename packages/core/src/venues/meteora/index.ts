@@ -1,6 +1,28 @@
-export { MeteoraDlmmService } from "./dlmm.ts";
+export {
+  MeteoraDlmmService,
+  MeteoraInfrastructureFundingRequiredError,
+} from "./dlmm.ts";
 export type { MeteoraDlmmHost } from "./dlmm.ts";
 export type {
+  MeteoraActiveBinSample,
+  MeteoraCandleRegimeMetrics,
+  MeteoraInfrastructureFundingPolicy,
+  MeteoraInfrastructurePreflight,
+  MeteoraInfrastructureQuote,
+  MeteoraLiquidityDepthBin,
+  MeteoraLiquidityDepthMetrics,
+  MeteoraMicrostructureMetrics,
+  MeteoraOhlcvArgs,
+  MeteoraOhlcvCandle,
+  MeteoraOhlcvResponse,
+  MeteoraOracleObservation,
+  MeteoraOracleSnapshot,
+  MeteoraOracleSnapshotArgs,
+  MeteoraOracleTwapWindow,
+  MeteoraPoolMarketMetrics,
+  MeteoraPoolProfileMetrics,
+  MeteoraRangePathMetrics,
+  MeteoraRollingPoolMetrics,
   MeteoraActiveBin,
   MeteoraAddLiquidityArgs,
   MeteoraDiscoverPoolsArgs,

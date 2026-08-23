@@ -133,6 +133,80 @@ function duration(value: string | undefined, fallbackMs: number): number {
   ];
   return Math.floor(n * scale);
 }
+
+function txAccountKeys(tx: any): string[] {
+  const message = tx?.transaction?.message;
+  if (!message) return [];
+  const toStringKey = (value: any): string => {
+    if (!value) return "";
+    if (typeof value === "string") return value;
+    if (typeof value?.toBase58 === "function") return value.toBase58();
+    if (typeof value?.pubkey?.toBase58 === "function")
+      return value.pubkey.toBase58();
+    if (typeof value?.pubkey === "string") return value.pubkey;
+    return String(value);
+  };
+  if (Array.isArray(message.accountKeys))
+    return message.accountKeys.map(toStringKey);
+  if (Array.isArray(message.staticAccountKeys)) {
+    const keys = message.staticAccountKeys.map(toStringKey);
+    const loaded = tx?.meta?.loadedAddresses;
+    if (Array.isArray(loaded?.writable))
+      keys.push(...loaded.writable.map(toStringKey));
+    if (Array.isArray(loaded?.readonly))
+      keys.push(...loaded.readonly.map(toStringKey));
+    return keys;
+  }
+  try {
+    if (typeof message.getAccountKeys === "function") {
+      const accountKeys = message.getAccountKeys({
+        accountKeysFromLookups: tx?.meta?.loadedAddresses,
+      });
+      const keys: string[] = [];
+      for (let i = 0; i < Number(accountKeys?.length ?? 0); i += 1)
+        keys.push(toStringKey(accountKeys.get(i)));
+      return keys;
+    }
+  } catch {}
+  return [];
+}
+
+function txWalletTokenBalances(
+  tx: any,
+  owner: string,
+): Map<string, { decimals: number; pre: bigint; post: bigint }> {
+  const out = new Map<
+    string,
+    { decimals: number; pre: bigint; post: bigint }
+  >();
+  const add = (side: "pre" | "post", rows: any[] | null | undefined) => {
+    for (const row of rows ?? []) {
+      const rowOwner =
+        typeof row?.owner === "string"
+          ? row.owner
+          : typeof row?.owner?.toBase58 === "function"
+            ? row.owner.toBase58()
+            : "";
+      if (rowOwner !== owner || typeof row?.mint !== "string") continue;
+      const amount = row?.uiTokenAmount?.amount;
+      const decimals = Number(row?.uiTokenAmount?.decimals ?? 0);
+      if (typeof amount !== "string" || !/^\d+$/.test(amount)) continue;
+      const existing = out.get(row.mint) ?? { decimals, pre: 0n, post: 0n };
+      existing.decimals = decimals;
+      existing[side] += BigInt(amount);
+      out.set(row.mint, existing);
+    }
+  };
+  add("pre", tx?.meta?.preTokenBalances);
+  add("post", tx?.meta?.postTokenBalances);
+  return out;
+}
+
+function formatSignedRaw(value: bigint, decimals: number): string {
+  const sign = value > 0n ? "+" : value < 0n ? "-" : "";
+  const abs = value < 0n ? -value : value;
+  return `${sign}${formatRaw(abs, decimals)}`;
+}
 function formatDurationMs(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "0ms";
   if (value < 1_000) return `${value.toFixed(value < 10 ? 1 : 0)}ms`;
@@ -234,8 +308,11 @@ External contacts (public addresses only; never signing wallets or group members
   slrd contact list
   slrd contact show <name|address>
   slrd contact remove <name|address>
-  slrd wallets [--group <name>] [--token <token> | --tokens] [--token-totals] [--only-with-tokens] [--rpc-concurrency <n>] [--rpc-delay-ms <n>] [--addresses-only]
+  slrd wallets [--wallet <wallet>] [--group <name>] [--token <token> | --tokens] [--token-totals] [--only-with-tokens] [--rpc-concurrency <n>] [--rpc-delay-ms <n>] [--addresses-only]
                                                         Show SOL by default; token scans are opt-in
+  slrd balances --wallet <wallet> [--token <token>] [--show-zero]        Show SOL + all SPL token balances for one wallet
+  slrd fees --wallet <wallet> [--since 30m] [--limit 100]               Sum actual on-chain transaction fees paid by this wallet
+  slrd sol-flow --wallet <wallet> [--since 30m] [--limit 100]            Audit native SOL + WSOL + SPL deltas from actual transactions
   slrd token <token_ca> [name] [--metadata-json <json>]
   slrd token set <token|ca> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>]
   slrd token refresh <token|ca>
@@ -272,7 +349,7 @@ Transfers and consolidation
 
 Token liquidation
   slrd liquidate tokens --except <token|mint> [--wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--simulate | --live]
-                                                        Plan/sell all supported tokens except protected mint(s); WSOL is unwrapped
+                                                        Sell supported tokens except protected mint(s); unwrap WSOL; close unprotected zero-balance token accounts and reclaim rent
 
 RPC
   All Solard JSON-RPC traffic is globally rate-limited to 5 req/s by default.
@@ -300,12 +377,17 @@ Scripts (strategies stay outside the kernel)
 
 Meteora DLMM
   slrd meteora discover --timeframe 30m --sort fee-active-tvl --limit 20
+  slrd meteora opportunities --timeframe 30m --sort flow-inactive --min-inactive-pct 70 --limit 20
+  slrd meteora token-pools <mint|symbol> --timeframe 30m
   slrd meteora pools --timeframe 30m --sort fee-tvl --limit 20
   slrd meteora pool <pool> [--timeframe 30m]
   slrd meteora candles <pool> [--timeframe 5m]
   slrd meteora positions --wallet <wallet|address>
   slrd meteora open <pool> --wallet <wallet> --sol 0.1 --bins 40 [--strategy spot] [--live]
+  slrd meteora move <position> --wallet <wallet> [--bins 10] [--live]
+  slrd meteora migrate <position> --wallet <wallet> --to-pool <pool> [--bins 10] [--live]
   slrd meteora add|remove|claim|close <position> --wallet <wallet> [--live]
+  slrd meteora close-all <pool> --wallet <wallet> [--live]
   slrd meteora quote <pool> (--in-x N|--in-y N|--out-x N|--out-y N)
   slrd meteora swap <pool> --wallet <wallet> (--in-x N|--in-y N|--out-x N|--out-y N) [--live]
   slrd meteora help                              Full Meteora command reference
@@ -809,7 +891,7 @@ async function main() {
       emit(`${OWL} imported @${wallet.name} ${wallet.address}\n`);
       return;
     }
-    if (command === "wallets") {
+    if (command === "wallets" || command === "balances") {
       if (
         flags.get("token") &&
         (flags.has("tokens") || flags.has("all-tokens"))
@@ -818,6 +900,18 @@ async function main() {
       }
 
       let wallets = slrd.wallets.list();
+      const singleWalletRef =
+        flags.get("wallet") ?? (command === "balances" ? values[0] : undefined);
+      if (singleWalletRef) {
+        const wanted = slrd.resolveWallet(singleWalletRef).address.toBase58();
+        wallets = wallets.filter(
+          (wallet) => slrd.resolveWallet(wallet).address.toBase58() === wanted,
+        );
+        if (wallets.length === 0)
+          throw new Error(`Wallet ${singleWalletRef} is not a stored wallet`);
+      }
+      if (command === "balances" && !singleWalletRef)
+        throw new Error("Usage: slrd balances --wallet <wallet>");
       const group = flags.get("group");
       if (group) {
         const addresses = new Set(
@@ -834,7 +928,10 @@ async function main() {
         return;
       }
 
-      const allTokens = flags.has("tokens") || flags.has("all-tokens");
+      const allTokens =
+        command === "balances" ||
+        flags.has("tokens") ||
+        flags.has("all-tokens");
       const tokenRef = flags.get("token");
       if (!allTokens && !tokenRef) {
         // Cheap native-SOL-only default: <=100 wallets per RPC call.
@@ -1007,6 +1104,347 @@ async function main() {
           }
         }
       }
+      return;
+    }
+    if (command === "fees" || (command === "tx" && values[0] === "fees")) {
+      const walletRef = need(flags, "wallet");
+      const wallet = slrd.resolveWallet(walletRef);
+      const address = wallet.address;
+      const addressText = address.toBase58();
+      const limit = Math.max(
+        1,
+        Math.min(1_000, Math.trunc(int(flags, "limit", 100) ?? 100)),
+      );
+      const sinceMs = duration(flags.get("since"), 30 * 60_000);
+      const cutoff = Date.now() - sinceMs;
+      const connection = slrd.connection();
+      const signatures = await connection.getSignaturesForAddress(
+        address,
+        { limit },
+        "confirmed",
+      );
+      const recent = signatures.filter(
+        (entry) => entry.blockTime == null || entry.blockTime * 1_000 >= cutoff,
+      );
+      let totalLamports = 0n;
+      let feeMetaFound = 0;
+      let paidByWalletCount = 0;
+      let failed = 0;
+      const rows: Array<{
+        signature: string;
+        blockTime: number | null | undefined;
+        feeLamports: number | null;
+        paidByWallet: boolean;
+        err: unknown;
+      }> = [];
+      for (const entry of recent) {
+        try {
+          const tx = await connection.getTransaction(entry.signature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          const fee = tx?.meta?.fee;
+          const payer = txAccountKeys(tx)[0] ?? "";
+          const paidByWallet = payer === addressText;
+          if (typeof fee === "number" && Number.isFinite(fee)) {
+            feeMetaFound += 1;
+            if (paidByWallet) {
+              totalLamports += BigInt(Math.trunc(fee));
+              paidByWalletCount += 1;
+            }
+            rows.push({
+              signature: entry.signature,
+              blockTime: entry.blockTime,
+              feeLamports: Math.trunc(fee),
+              paidByWallet,
+              err: entry.err,
+            });
+          } else {
+            rows.push({
+              signature: entry.signature,
+              blockTime: entry.blockTime,
+              feeLamports: null,
+              paidByWallet,
+              err: entry.err,
+            });
+          }
+        } catch {
+          failed += 1;
+          rows.push({
+            signature: entry.signature,
+            blockTime: entry.blockTime,
+            feeLamports: null,
+            paidByWallet: false,
+            err: entry.err,
+          });
+        }
+      }
+      emit(
+        `FEES  @${wallet.row?.name ?? walletRef}  ${addressText}\n` +
+          `Window: ${flags.get("since") ?? "30m"}  transactions=${recent.length}  fee-meta=${feeMetaFound}  wallet-paid=${paidByWalletCount}  unavailable=${recent.length - feeMetaFound}\n` +
+          `Actual network fees paid by wallet: ${(Number(totalLamports) / 1e9).toFixed(9)} SOL (${totalLamports.toString()} lamports)\n`,
+      );
+      if (!flags.has("summary-only")) {
+        emit(
+          "\nTIME                      FEE SOL       PAYER   STATUS   SIGNATURE\n",
+        );
+        for (const row of rows) {
+          const time = row.blockTime
+            ? new Date(row.blockTime * 1_000).toISOString()
+            : "-";
+          const feeSol =
+            row.feeLamports == null ? "-" : (row.feeLamports / 1e9).toFixed(9);
+          emit(
+            `${time.padEnd(25)} ${feeSol.padStart(12)}  ${(row.paidByWallet ? "YOU" : "OTHER").padEnd(6)}  ${(row.err ? "FAILED" : "OK").padEnd(7)}  ${row.signature}\n`,
+          );
+        }
+      }
+      if (failed > 0)
+        process.stderr.write(
+          `${OWL} ${failed} transaction lookup(s) failed; rerun after RPC history catches up.\n`,
+        );
+      return;
+    }
+    if (command === "sol-flow" || (command === "tx" && values[0] === "flow")) {
+      const walletRef = need(flags, "wallet");
+      const wallet = slrd.resolveWallet(walletRef);
+      const address = wallet.address;
+      const addressText = address.toBase58();
+      const limit = Math.max(
+        1,
+        Math.min(1_000, Math.trunc(int(flags, "limit", 100) ?? 100)),
+      );
+      const sinceMs = duration(flags.get("since"), 30 * 60_000);
+      const cutoff = Date.now() - sinceMs;
+      const connection = slrd.connection();
+      const signatures = await connection.getSignaturesForAddress(
+        address,
+        { limit },
+        "confirmed",
+      );
+      const recent = signatures.filter(
+        (entry) => entry.blockTime == null || entry.blockTime * 1_000 >= cutoff,
+      );
+
+      type FlowRow = {
+        signature: string;
+        blockTime: number | null | undefined;
+        err: unknown;
+        nativeDeltaLamports: bigint | null;
+        feeLamports: bigint;
+        feePaidByWallet: boolean;
+        wsolDeltaRaw: bigint;
+        tokenDeltas: Array<{
+          mint: string;
+          decimals: number;
+          deltaRaw: bigint;
+        }>;
+      };
+
+      const rows: FlowRow[] = [];
+      let nativeDeltaLamports = 0n;
+      let nativeAvailable = 0;
+      let walletFeeLamports = 0n;
+      let wsolDeltaRaw = 0n;
+      let failed = 0;
+      const tokenTotals = new Map<
+        string,
+        { decimals: number; deltaRaw: bigint }
+      >();
+
+      for (const entry of recent) {
+        try {
+          const tx = await connection.getTransaction(entry.signature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          if (!tx?.meta) {
+            rows.push({
+              signature: entry.signature,
+              blockTime: entry.blockTime,
+              err: entry.err,
+              nativeDeltaLamports: null,
+              feeLamports: 0n,
+              feePaidByWallet: false,
+              wsolDeltaRaw: 0n,
+              tokenDeltas: [],
+            });
+            continue;
+          }
+
+          const keys = txAccountKeys(tx);
+          const walletIndex = keys.indexOf(addressText);
+          let txNativeDelta: bigint | null = null;
+          if (
+            walletIndex >= 0 &&
+            typeof tx.meta.preBalances?.[walletIndex] === "number" &&
+            typeof tx.meta.postBalances?.[walletIndex] === "number"
+          ) {
+            txNativeDelta =
+              BigInt(Math.trunc(tx.meta.postBalances[walletIndex]!)) -
+              BigInt(Math.trunc(tx.meta.preBalances[walletIndex]!));
+            nativeDeltaLamports += txNativeDelta;
+            nativeAvailable += 1;
+          }
+
+          const fee =
+            typeof tx.meta.fee === "number" && Number.isFinite(tx.meta.fee)
+              ? BigInt(Math.trunc(tx.meta.fee))
+              : 0n;
+          const feePaidByWallet = keys[0] === addressText;
+          if (feePaidByWallet) walletFeeLamports += fee;
+
+          const balances = txWalletTokenBalances(tx, addressText);
+          const tokenDeltas: Array<{
+            mint: string;
+            decimals: number;
+            deltaRaw: bigint;
+          }> = [];
+          let txWsol = 0n;
+          for (const [mint, balance] of balances.entries()) {
+            const deltaRaw = balance.post - balance.pre;
+            if (deltaRaw === 0n) continue;
+            tokenDeltas.push({ mint, decimals: balance.decimals, deltaRaw });
+            const total = tokenTotals.get(mint) ?? {
+              decimals: balance.decimals,
+              deltaRaw: 0n,
+            };
+            total.decimals = balance.decimals;
+            total.deltaRaw += deltaRaw;
+            tokenTotals.set(mint, total);
+            if (mint === NATIVE_SOL_MINT) {
+              txWsol += deltaRaw;
+              wsolDeltaRaw += deltaRaw;
+            }
+          }
+
+          rows.push({
+            signature: entry.signature,
+            blockTime: entry.blockTime,
+            err: entry.err,
+            nativeDeltaLamports: txNativeDelta,
+            feeLamports: fee,
+            feePaidByWallet,
+            wsolDeltaRaw: txWsol,
+            tokenDeltas,
+          });
+        } catch {
+          failed += 1;
+          rows.push({
+            signature: entry.signature,
+            blockTime: entry.blockTime,
+            err: entry.err,
+            nativeDeltaLamports: null,
+            feeLamports: 0n,
+            feePaidByWallet: false,
+            wsolDeltaRaw: 0n,
+            tokenDeltas: [],
+          });
+        }
+      }
+
+      const nonFeeNativeDelta = nativeDeltaLamports + walletFeeLamports;
+      const nativePlusWsol = nativeDeltaLamports + wsolDeltaRaw;
+      const tokenSummary = [...tokenTotals.entries()]
+        .filter(([, value]) => value.deltaRaw !== 0n)
+        .sort((left, right) => {
+          const leftAbs =
+            left[1].deltaRaw < 0n ? -left[1].deltaRaw : left[1].deltaRaw;
+          const rightAbs =
+            right[1].deltaRaw < 0n ? -right[1].deltaRaw : right[1].deltaRaw;
+          return leftAbs === rightAbs
+            ? left[0].localeCompare(right[0])
+            : leftAbs > rightAbs
+              ? -1
+              : 1;
+        });
+
+      if (flags.has("json")) {
+        emit(
+          json({
+            wallet: addressText,
+            window: flags.get("since") ?? "30m",
+            transactions: recent.length,
+            nativeAvailable,
+            nativeDeltaLamports,
+            walletFeeLamports,
+            nonFeeNativeDeltaLamports: nonFeeNativeDelta,
+            wsolDeltaRaw,
+            nativePlusWsolLamports: nativePlusWsol,
+            tokenDeltas: tokenSummary.map(([mint, value]) => ({
+              mint,
+              ...value,
+            })),
+            rows,
+            failedLookups: failed,
+          }) + "\n",
+        );
+        return;
+      }
+
+      emit(
+        `SOL FLOW  @${wallet.row?.name ?? walletRef}  ${addressText}\n` +
+          `Window: ${flags.get("since") ?? "30m"}  transactions=${recent.length}  native-meta=${nativeAvailable}  unavailable=${recent.length - nativeAvailable}\n` +
+          `Native SOL delta:               ${formatSignedRaw(nativeDeltaLamports, 9)} SOL\n` +
+          `Network fees paid by wallet:    -${formatRaw(walletFeeLamports, 9)} SOL\n` +
+          `Native delta excluding fees:    ${formatSignedRaw(nonFeeNativeDelta, 9)} SOL\n` +
+          `WSOL token-account delta:       ${formatSignedRaw(wsolDeltaRaw, 9)} WSOL\n` +
+          `Native + WSOL wallet delta:     ${formatSignedRaw(nativePlusWsol, 9)} SOL-like\n`,
+      );
+
+      if (tokenSummary.length > 0) {
+        emit("\nNET SPL TOKEN DELTAS IN WALLET\n");
+        for (const [mint, value] of tokenSummary) {
+          const label =
+            mint === NATIVE_SOL_MINT
+              ? "WSOL"
+              : mint === CANONICAL_USDC_MINT
+                ? "USDC"
+                : shortKey(mint);
+          emit(
+            `  ${label.padEnd(12)} ${formatSignedRaw(value.deltaRaw, value.decimals).padStart(20)}  ${mint}\n`,
+          );
+        }
+      }
+
+      if (!flags.has("summary-only")) {
+        emit("\nPER TRANSACTION\n");
+        emit(
+          "TIME                      NATIVE Δ SOL   FEE SOL      WSOL Δ      TOKEN DELTAS                         STATUS   SIGNATURE\n",
+        );
+        for (const row of rows) {
+          const time = row.blockTime
+            ? new Date(row.blockTime * 1_000).toISOString()
+            : "-";
+          const native =
+            row.nativeDeltaLamports == null
+              ? "-"
+              : formatSignedRaw(row.nativeDeltaLamports, 9);
+          const fee = row.feePaidByWallet ? formatRaw(row.feeLamports, 9) : "0";
+          const wsol = formatSignedRaw(row.wsolDeltaRaw, 9);
+          const other =
+            row.tokenDeltas
+              .filter((delta) => delta.mint !== NATIVE_SOL_MINT)
+              .slice(0, 2)
+              .map(
+                (delta) =>
+                  `${shortKey(delta.mint)} ${formatSignedRaw(delta.deltaRaw, delta.decimals)}`,
+              )
+              .join(", ") || "-";
+          emit(
+            `${time.padEnd(25)} ${native.padStart(13)}  ${fee.padStart(10)}  ${wsol.padStart(11)}  ${other.padEnd(35)}  ${(row.err ? "FAILED" : "OK").padEnd(7)}  ${row.signature}\n`,
+          );
+        }
+      }
+
+      emit(
+        "\nNative SOL delta is a cash-flow number, not P&L: LP deposits, SOL->token swaps, account rent, and WSOL wrapping can all reduce it without being network fees.\n" +
+          "Use the per-transaction rows to find the large negative native-SOL transactions; their token deltas show what the wallet received or deployed.\n",
+      );
+      if (failed > 0)
+        process.stderr.write(
+          `${OWL} ${failed} transaction lookup(s) failed; rerun after RPC history catches up.\n`,
+        );
       return;
     }
     if (command === "deploy") {
@@ -1258,7 +1696,8 @@ async function main() {
         const label = action.symbol ?? action.name ?? shortKey(action.mint);
         emit(
           `${prefix} ${index}/${total}  @${action.walletName}  ` +
-            `${action.kind === "unwrap-wsol" ? "WSOL" : label}  ${action.amountUi}\n`,
+            `${action.kind === "unwrap-wsol" ? "WSOL" : label}  ${action.amountUi}` +
+            `${action.kind === "close-empty" ? "  [close empty account]" : ""}\n`,
         );
       };
 
@@ -1303,8 +1742,8 @@ async function main() {
       const plan = await planRegistryTokenLiquidation(slrd, options);
       emit(
         `PLAN     native=${plan.totals.sell}  jupiter=${plan.totals.jupiterSell}  ` +
-          `unwrap=${plan.totals.unwrapWsol}  keep=${plan.totals.keepProtected}  ` +
-          `unsupported=${plan.totals.skipUnsupported}\n`,
+          `unwrap=${plan.totals.unwrapWsol}  close-empty-now=${plan.totals.closeEmpty}  ` +
+          `keep=${plan.totals.keepProtected}  unsupported=${plan.totals.skipUnsupported}\n`,
       );
 
       if (!flags.has("simulate") && !flags.has("live")) {
@@ -1312,16 +1751,19 @@ async function main() {
           (action) =>
             action.kind === "sell" ||
             action.kind === "jupiter-sell" ||
-            action.kind === "unwrap-wsol",
+            action.kind === "unwrap-wsol" ||
+            action.kind === "close-empty",
         );
         for (const action of actionable) {
           const label = action.symbol ?? action.name ?? shortKey(action.mint);
           const verb =
             action.kind === "unwrap-wsol"
               ? "UNWRAP"
-              : action.kind === "jupiter-sell"
-                ? "JUPITER"
-                : "SELL";
+              : action.kind === "close-empty"
+                ? "CLOSE"
+                : action.kind === "jupiter-sell"
+                  ? "JUPITER"
+                  : "SELL";
           emit(
             `${verb.padEnd(7)} @${action.walletName.padEnd(16)} ` +
               `${label.padEnd(14)} ${action.amountUi}` +
@@ -1350,6 +1792,9 @@ async function main() {
         } else {
           emit("\n");
         }
+        emit(
+          `AUTO-CLOSE  after successful liquidation, the command re-scans on-chain state and closes every unprotected token account that is actually zero.\n`,
+        );
         emit(`\n${OWL} plan only. Use --simulate, then --live.\n`);
         return;
       }
@@ -1369,10 +1814,17 @@ async function main() {
       const unwrapped = succeeded.filter(
         (result) => result.action.kind === "unwrap-wsol",
       ).length;
+      const closedEmpty = succeeded.filter(
+        (result) => result.action.kind === "close-empty",
+      ).length;
+      const reclaimedRentLamports = succeeded
+        .filter((result) => result.action.kind === "close-empty")
+        .reduce((sum, result) => sum + (result.action.rentLamports ?? 0n), 0n);
       emit(
         `DONE     ok=${succeeded.length}  failed=${failed}  ` +
           `native-sold=${soldNative}  jupiter-sold=${soldJupiter}  ` +
-          `unwrapped=${unwrapped}\n`,
+          `unwrapped=${unwrapped}  closed-empty=${closedEmpty}  ` +
+          `reclaimed-rent≈${(Number(reclaimedRentLamports) / 1e9).toFixed(6)} SOL\n`,
       );
       return;
     }
