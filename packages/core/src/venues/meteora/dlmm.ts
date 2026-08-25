@@ -675,6 +675,34 @@ function bigintOrZero(value: unknown): bigint {
   }
 }
 
+/**
+ * Meteora quoteCreatePosition() currently reports its *Cost fields as SOL
+ * numbers (POSITION_FEE, BIN_ARRAY_FEE, bitmap fee, and realloc Decimal values),
+ * despite several downstream integrations naturally expecting lamports. Normalize
+ * those values at the Solard boundary. The large-integer branch retains
+ * compatibility with older/custom SDK builds that may already return lamports.
+ */
+function meteoraQuotedSolCostToLamports(value: unknown): bigint | null {
+  const n = numberOrNull(value);
+  if (n == null || n < 0) return null;
+  if (Number.isInteger(n) && n >= 1_000_000) return BigInt(n);
+  const lamports = Math.round(n * 1_000_000_000);
+  return Number.isSafeInteger(lamports) ? BigInt(lamports) : null;
+}
+
+function sdkRentConstantLamports(
+  sdk: Record<string, unknown>,
+  bnKey: string,
+  solKey: string,
+): bigint | null {
+  const bn = sdk[bnKey];
+  if (bn != null) {
+    const text = integerString(bn, "");
+    if (/^\d+$/.test(text)) return BigInt(text);
+  }
+  return meteoraQuotedSolCostToLamports(sdk[solKey]);
+}
+
 function finiteNumber(value: unknown): number | null {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -3606,6 +3634,7 @@ export class MeteoraDlmmService {
     minBinId: number,
     maxBinId: number,
     strategy: MeteoraStrategy,
+    commitment: Commitment = "confirmed",
   ): Promise<MeteoraInfrastructureQuote> {
     const quoteCreatePosition = (pool as any).quoteCreatePosition;
     if (typeof quoteCreatePosition !== "function") {
@@ -3614,82 +3643,171 @@ export class MeteoraDlmmService {
         "SDK_INCOMPATIBLE",
       );
     }
-    const { StrategyType } = await dlmmSdk();
+    const sdk = (await dlmmSdk()) as unknown as Record<string, any>;
+    const { StrategyType } = sdk as any;
     const strategyType = normalizeStrategy(strategy, StrategyType);
     const rawQuote = await quoteCreatePosition.call(pool, {
       strategy: { minBinId, maxBinId, strategyType },
     });
     const row = (rawQuote ?? {}) as Record<string, unknown>;
-    const own = (key: string): boolean =>
-      Object.prototype.hasOwnProperty.call(row, key);
-    const binCostKeys = [
-      "binArrayCost",
-      "bin_array_cost",
-      "binArraysCost",
-      "bin_arrays_cost",
-    ];
-    const bitmapCostKeys = [
-      "bitmapExtensionCost",
-      "bitmap_extension_cost",
-      "binArrayBitmapExtensionCost",
-      "bin_array_bitmap_extension_cost",
-    ];
-    if (!binCostKeys.some(own) || !bitmapCostKeys.some(own)) {
-      throw new MeteoraError(
-        "Meteora infrastructure preflight incompatible: quoteCreatePosition() returned an unrecognized cost schema. Refusing to build liquidity because bin-array/bitmap funding cannot be proven zero.",
-        "SDK_INCOMPATIBLE",
-        { rawQuote: safeJsonValue(rawQuote) },
-      );
-    }
-    const binArrayCost = bigintOrZero(
-      row.binArrayCost ??
-        row.bin_array_cost ??
-        row.binArraysCost ??
-        row.bin_arrays_cost,
-    );
-    const bitmapExtensionCost = bigintOrZero(
-      row.bitmapExtensionCost ??
-        row.bitmap_extension_cost ??
-        row.binArrayBitmapExtensionCost ??
-        row.bin_array_bitmap_extension_cost,
-    );
+
+    // Current upstream quoteCreatePosition() reports the cost fields in SOL,
+    // not lamports. Normalize recoverable rent explicitly at the SDK boundary.
+    const positionCount =
+      numberOrNull(row.positionCount ?? row.position_count) ?? null;
     const positionCostRaw =
       row.positionCost ??
       row.position_cost ??
       row.positionRent ??
       row.position_rent;
     const reallocCostRaw =
-      row.reallocPositionCost ??
       row.positionReallocCost ??
+      row.reallocPositionCost ??
       row.position_realloc_cost ??
       row.realloc_position_cost;
-    const count =
-      numberOrNull(
-        row.binArrayCount ?? row.bin_array_count ?? row.binArraysCount,
-      ) ?? null;
+    const quotedPositionRent = meteoraQuotedSolCostToLamports(positionCostRaw);
+    const positionFeeLamports = sdkRentConstantLamports(
+      sdk,
+      "POSITION_FEE_BN",
+      "POSITION_FEE",
+    );
+    const positionCostLamports =
+      positionCount != null && positionCount >= 0 && positionFeeLamports != null
+        ? BigInt(Math.trunc(positionCount)) * positionFeeLamports
+        : quotedPositionRent;
+    const positionReallocCostLamports =
+      reallocCostRaw == null
+        ? 0n
+        : meteoraQuotedSolCostToLamports(reallocCostRaw);
+    if (positionCostLamports == null || positionReallocCostLamports == null) {
+      throw new MeteoraError(
+        "Meteora position-rent preflight incompatible: quoteCreatePosition() returned an unrecognized rent schema.",
+        "SDK_INCOMPATIBLE",
+        { rawQuote: safeJsonValue(rawQuote) },
+      );
+    }
+
+    const binIdToBinArrayIndex = sdk.binIdToBinArrayIndex;
+    const deriveBinArray = sdk.deriveBinArray;
+    const deriveBinArrayBitmapExtension = sdk.deriveBinArrayBitmapExtension;
+    const isOverflowDefaultBinArrayBitmap = sdk.isOverflowDefaultBinArrayBitmap;
+    const programId = (pool as any)?.program?.programId as
+      PublicKey | undefined;
+    if (
+      typeof binIdToBinArrayIndex !== "function" ||
+      typeof deriveBinArray !== "function" ||
+      typeof isOverflowDefaultBinArrayBitmap !== "function" ||
+      !programId
+    ) {
+      throw new MeteoraError(
+        "Meteora infrastructure preflight incompatible: required bin-array coverage helpers are unavailable.",
+        "SDK_INCOMPATIBLE",
+      );
+    }
+
+    // Mirror quoteCreatePosition() coverage exactly: it always considers at least
+    // the lower bin array and the immediately following bin array.
+    const lowerIndexBn = binIdToBinArrayIndex(new BN(minBinId));
+    const rawUpperIndexBn = binIdToBinArrayIndex(new BN(maxBinId));
+    const lowerIndex = Number(lowerIndexBn.toString());
+    const rawUpperIndex = Number(rawUpperIndexBn.toString());
+    const upperIndex = Math.max(rawUpperIndex, lowerIndex + 1);
+    const indexes = Array.from(
+      { length: upperIndex - lowerIndex + 1 },
+      (_, i) => lowerIndex + i,
+    );
+    const keys = indexes.map((index) => {
+      const [key] = deriveBinArray(pool.pubkey, new BN(index), programId) as [
+        PublicKey,
+        number,
+      ];
+      return key;
+    });
+    const infos = keys.length
+      ? await this.host.connection().getMultipleAccountsInfo(keys, commitment)
+      : [];
+    const requiredBinArrays = indexes.map((index, i) => ({
+      index,
+      address: keys[i]!.toBase58(),
+      initialized: infos[i] != null,
+    }));
+    const missingBinArrays = requiredBinArrays
+      .filter((entry) => !entry.initialized)
+      .map(({ index, address }) => ({ index, address }));
+
+    const lowerOverflow = Boolean(
+      isOverflowDefaultBinArrayBitmap(lowerIndexBn),
+    );
+    const upperOverflow = Boolean(
+      isOverflowDefaultBinArrayBitmap(new BN(upperIndex)),
+    );
+    const bitmapExtensionRequired = lowerOverflow || upperOverflow;
+    let bitmapExtensionAddress: string | null = null;
+    let bitmapExtensionInitialized: boolean | null = null;
+    if (bitmapExtensionRequired) {
+      if (typeof deriveBinArrayBitmapExtension !== "function") {
+        throw new MeteoraError(
+          "Meteora infrastructure preflight incompatible: bitmap-extension derivation helper is unavailable.",
+          "SDK_INCOMPATIBLE",
+        );
+      }
+      const [bitmapKey] = deriveBinArrayBitmapExtension(
+        pool.pubkey,
+        programId,
+      ) as [PublicKey, number];
+      bitmapExtensionAddress = bitmapKey.toBase58();
+      bitmapExtensionInitialized =
+        (await this.host.connection().getAccountInfo(bitmapKey, commitment)) !=
+        null;
+    }
+
+    const binArrayFeeLamports = sdkRentConstantLamports(
+      sdk,
+      "BIN_ARRAY_FEE_BN",
+      "BIN_ARRAY_FEE",
+    );
+    const bitmapFeeLamports = sdkRentConstantLamports(
+      sdk,
+      "BIN_ARRAY_BITMAP_FEE_BN",
+      "BIN_ARRAY_BITMAP_FEE",
+    );
+    if (binArrayFeeLamports == null || bitmapFeeLamports == null) {
+      throw new MeteoraError(
+        "Meteora infrastructure preflight incompatible: rent constants are unavailable.",
+        "SDK_INCOMPATIBLE",
+      );
+    }
+    const binArrayCost = BigInt(missingBinArrays.length) * binArrayFeeLamports;
+    const requiresBitmapExtensionInit =
+      bitmapExtensionRequired && bitmapExtensionInitialized === false;
+    const bitmapExtensionCost = requiresBitmapExtensionInit
+      ? bitmapFeeLamports
+      : 0n;
+    const nonRefundable = binArrayCost + bitmapExtensionCost;
     const txCount =
       numberOrNull(
         row.transactionCount ?? row.transaction_count ?? row.txCount,
       ) ?? null;
-    const nonRefundable = binArrayCost + bitmapExtensionCost;
+
     return {
       pool: pool.pubkey.toBase58(),
       minBinId,
       maxBinId,
       strategy,
-      binArrayCount: count,
+      binArrayCount: missingBinArrays.length,
       binArrayCostLamports: binArrayCost.toString(),
       bitmapExtensionCostLamports: bitmapExtensionCost.toString(),
       nonRefundableInfrastructureLamports: nonRefundable.toString(),
-      positionCostLamports:
-        positionCostRaw == null
-          ? null
-          : bigintOrZero(positionCostRaw).toString(),
-      positionReallocCostLamports:
-        reallocCostRaw == null ? null : bigintOrZero(reallocCostRaw).toString(),
+      positionCostLamports: positionCostLamports.toString(),
+      positionReallocCostLamports: positionReallocCostLamports.toString(),
       transactionCount: txCount,
-      requiresBinArrayInit: binArrayCost > 0n,
-      requiresBitmapExtensionInit: bitmapExtensionCost > 0n,
+      requiredBinArrays,
+      missingBinArrays,
+      bitmapExtensionRequired,
+      bitmapExtensionAddress,
+      bitmapExtensionInitialized,
+      requiresBinArrayInit: missingBinArrays.length > 0,
+      requiresBitmapExtensionInit,
       requiresNonRefundableInfrastructure: nonRefundable > 0n,
       raw: (safeJsonValue(rawQuote) ?? {}) as Record<string, unknown>,
     };
@@ -3714,15 +3832,98 @@ export class MeteoraDlmmService {
     );
   }
 
+  private async inspectPreparedTransactionsForPreflight(
+    prepared: MeteoraPreparedTransactions,
+    commitment: Commitment,
+  ): Promise<{
+    transactionCount: number;
+    requiredSignerPubkeys: string[];
+    requiredSigners: Array<{
+      pubkey: string;
+      role: "wallet" | "generated-position" | "unknown";
+    }>;
+    missingRequiredSignerPubkeys: string[];
+    estimatedNetworkFeeLamports: string | null;
+    networkFeeEstimateComplete: boolean;
+  }> {
+    const connection = this.host.connection();
+    const wallet = this.host.signer(prepared.wallet);
+    const availableSignerPubkeys = new Set(
+      [wallet, ...prepared.extraSigners].map((signer) =>
+        signer.publicKey.toBase58(),
+      ),
+    );
+    const required = new Set<string>();
+    const missing = new Set<string>();
+    let feeTotal = 0n;
+    let feeComplete = true;
+    let latestBlockhash: string | null = null;
+
+    for (const transaction of prepared.transactions) {
+      if (isLegacyTransaction(transaction)) {
+        if (!transaction.feePayer) transaction.feePayer = wallet.publicKey;
+        if (!transaction.recentBlockhash) {
+          latestBlockhash ??= (await connection.getLatestBlockhash(commitment))
+            .blockhash;
+          transaction.recentBlockhash = latestBlockhash;
+        }
+      }
+      const signerKeys = transactionRequiredSignerKeys(transaction);
+      for (const key of signerKeys) {
+        const text = key.toBase58();
+        required.add(text);
+        if (!availableSignerPubkeys.has(text)) missing.add(text);
+      }
+      try {
+        const message = isLegacyTransaction(transaction)
+          ? transaction.compileMessage()
+          : transaction.message;
+        const fee = await connection.getFeeForMessage(message, commitment);
+        if (fee.value == null) feeComplete = false;
+        else feeTotal += BigInt(fee.value);
+      } catch {
+        feeComplete = false;
+      }
+    }
+
+    const extra = new Set(
+      prepared.extraSigners.map((signer) => signer.publicKey.toBase58()),
+    );
+    const requiredSignerPubkeys = [...required].sort();
+    return {
+      transactionCount: prepared.transactions.length,
+      requiredSignerPubkeys,
+      requiredSigners: requiredSignerPubkeys.map((pubkey) => ({
+        pubkey,
+        role:
+          pubkey === wallet.publicKey.toBase58()
+            ? "wallet"
+            : extra.has(pubkey)
+              ? "generated-position"
+              : "unknown",
+      })),
+      missingRequiredSignerPubkeys: [...missing].sort(),
+      estimatedNetworkFeeLamports: feeComplete ? feeTotal.toString() : null,
+      networkFeeEstimateComplete: feeComplete,
+    };
+  }
+
   async preflightOpenBatch(
     args: MeteoraOpenBatchPreflightArgs,
   ): Promise<MeteoraOpenBatchPreflight> {
     const commitment = args.commitment ?? "confirmed";
+    if (!Array.isArray(args.candidates) || args.candidates.length === 0) {
+      throw new MeteoraError(
+        "preflightOpenBatch requires at least one candidate",
+        "INVALID_ARGUMENT",
+      );
+    }
     const pool = await this.rawPool(args.pool, true);
+    const poolAddress = pool.pubkey.toBase58();
     const walletAddress = this.resolveWalletAddress(args.wallet);
     const balances = await this.getWalletPoolBalances({
       wallet: args.wallet,
-      pool: pool.pubkey.toBase58(),
+      pool: poolAddress,
       commitment,
     });
     const availableNativeLamports = BigInt(balances.nativeLamports);
@@ -3745,6 +3946,17 @@ export class MeteoraDlmmService {
       let errorMessage: string | null = null;
       let requestedAmountXRaw = "0";
       let requestedAmountYRaw = "0";
+      let transactionCount: number | null = null;
+      let requiredSignerPubkeys: string[] = [];
+      let requiredSigners: Array<{
+        pubkey: string;
+        role: "wallet" | "generated-position" | "unknown";
+      }> = [];
+      let missingRequiredSignerPubkeys: string[] = [];
+      let estimatedNetworkFeeLamports: string | null = null;
+      let networkFeeEstimateComplete = false;
+      let sharedInfrastructureAuthorized = false;
+
       try {
         requestedAmountXRaw = toBN(
           candidate.amountXRaw ?? 0,
@@ -3778,18 +3990,38 @@ export class MeteoraDlmmService {
         executable = false;
         errorCode = "SDK_INCOMPATIBLE";
         errorMessage = `range width ${width} requires Meteora extended-position support that is unavailable in the installed SDK`;
-      } else if (executable) {
+      }
+
+      if (executable) {
         try {
           infrastructure = await this.quoteInfrastructureForRange(
             pool,
             candidate.minBinId,
             candidate.maxBinId,
             strategy,
+            commitment,
           );
-          this.assertInfrastructurePolicy(
-            infrastructure,
-            candidate.infrastructure ?? args.infrastructure,
-          );
+          try {
+            this.assertInfrastructurePolicy(
+              infrastructure,
+              candidate.infrastructure ?? args.infrastructure,
+            );
+            sharedInfrastructureAuthorized =
+              infrastructure.requiresNonRefundableInfrastructure;
+          } catch {
+            sharedInfrastructureAuthorized = false;
+          }
+
+          // Autonomous batch preflight is intentionally stricter than the generic
+          // builder policy: any missing shared pool infrastructure makes the candidate
+          // non-executable. It is reported, never budgeted or silently paid.
+          if (infrastructure.requiresNonRefundableInfrastructure) {
+            executable = false;
+            errorCode = "INFRASTRUCTURE_FUNDING_REQUIRED";
+            errorMessage =
+              `candidate ${candidate.id} requires persistent Meteora infrastructure: ` +
+              `${infrastructure.nonRefundableInfrastructureLamports} lamports`;
+          }
         } catch (error) {
           executable = false;
           errorCode = error instanceof MeteoraError ? error.code : "UNKNOWN";
@@ -3797,19 +4029,65 @@ export class MeteoraDlmmService {
         }
       }
 
-      const positionCost =
+      // Only safe-zero-infrastructure candidates reach transaction construction.
+      // These are unsigned/local-RPC builds: no signatures are produced and nothing
+      // is submitted to the network.
+      if (executable) {
+        try {
+          const prepared = await this.buildOpenPosition({
+            wallet: args.wallet,
+            pool: poolAddress,
+            strategy,
+            amountXRaw: requestedAmountXRaw,
+            amountYRaw: requestedAmountYRaw,
+            minBinId: candidate.minBinId,
+            maxBinId: candidate.maxBinId,
+            slippageBps: candidate.slippageBps,
+          });
+          const txInspection =
+            await this.inspectPreparedTransactionsForPreflight(
+              prepared,
+              commitment,
+            );
+          transactionCount = txInspection.transactionCount;
+          requiredSignerPubkeys = txInspection.requiredSignerPubkeys;
+          requiredSigners = txInspection.requiredSigners;
+          missingRequiredSignerPubkeys =
+            txInspection.missingRequiredSignerPubkeys;
+          estimatedNetworkFeeLamports =
+            txInspection.estimatedNetworkFeeLamports;
+          networkFeeEstimateComplete = txInspection.networkFeeEstimateComplete;
+          if (missingRequiredSignerPubkeys.length) {
+            executable = false;
+            errorCode = "MISSING_REQUIRED_SIGNER";
+            errorMessage =
+              `candidate ${candidate.id} requires unavailable signer(s): ` +
+              missingRequiredSignerPubkeys.join(", ");
+          }
+        } catch (error) {
+          executable = false;
+          errorCode = error instanceof MeteoraError ? error.code : "UNKNOWN";
+          errorMessage = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      const positionRent =
         infrastructure?.positionCostLamports == null
           ? null
           : BigInt(infrastructure.positionCostLamports);
-      const reallocCost =
+      const reallocRent =
         infrastructure?.positionReallocCostLamports == null
-          ? 0n
+          ? null
           : BigInt(infrastructure.positionReallocCostLamports);
-      const refundableUpper =
-        positionCost == null ? null : positionCost + reallocCost;
-
+      const refundablePositionLamports =
+        positionRent == null || reallocRent == null
+          ? null
+          : positionRent + reallocRent;
+      const nonRefundableInfrastructureLamports =
+        infrastructure?.nonRefundableInfrastructureLamports ?? "0";
       const requiresSharedInfrastructure =
-        BigInt(infrastructure?.nonRefundableInfrastructureLamports ?? "0") > 0n;
+        BigInt(nonRefundableInfrastructureLamports) > 0n;
+
       candidates.push({
         id: String(candidate.id),
         strategy,
@@ -3821,17 +4099,41 @@ export class MeteoraDlmmService {
         errorCode,
         errorMessage,
         infrastructure,
-        transactionCount: infrastructure?.transactionCount ?? null,
-        positionCostLamports: infrastructure?.positionCostLamports ?? null,
+        transactionCount,
+        quotedTransactionCount: infrastructure?.transactionCount ?? null,
+        requiredSignerPubkeys,
+        requiredSigners,
+        missingRequiredSignerPubkeys,
+        estimatedNetworkFeeLamports,
+        networkFeeEstimateComplete,
+        positionRentLamports:
+          positionRent == null ? null : positionRent.toString(),
+        positionReallocRentLamports:
+          reallocRent == null ? null : reallocRent.toString(),
+        refundablePositionLamports:
+          refundablePositionLamports == null
+            ? null
+            : refundablePositionLamports.toString(),
+        positionCostLamports:
+          positionRent == null ? null : positionRent.toString(),
         positionReallocCostLamports:
-          infrastructure?.positionReallocCostLamports ?? null,
+          reallocRent == null ? null : reallocRent.toString(),
         refundablePositionLamportsUpperBound:
-          refundableUpper == null ? null : refundableUpper.toString(),
+          refundablePositionLamports == null
+            ? null
+            : refundablePositionLamports.toString(),
+        nonRefundableInfrastructureLamports,
         nonRefundableInfrastructureLamportsUpperBound:
-          infrastructure?.nonRefundableInfrastructureLamports ?? "0",
+          nonRefundableInfrastructureLamports,
+        requiredBinArrays: infrastructure?.requiredBinArrays ?? [],
+        missingBinArrays: infrastructure?.missingBinArrays ?? [],
+        bitmapExtensionRequired:
+          infrastructure?.requiresBitmapExtensionInit ?? false,
+        bitmapExtensionAddress: infrastructure?.bitmapExtensionAddress ?? null,
+        bitmapExtensionInitialized:
+          infrastructure?.bitmapExtensionInitialized ?? null,
         requiresSharedInfrastructure,
-        sharedInfrastructureAuthorized:
-          requiresSharedInfrastructure && executable,
+        sharedInfrastructureAuthorized,
         safeWithoutSharedInfrastructureFunding: !requiresSharedInfrastructure,
         requestedAmountXRaw,
         requestedAmountYRaw,
@@ -3839,31 +4141,37 @@ export class MeteoraDlmmService {
     }
 
     const executableCandidates = candidates.filter((row) => row.executable);
+    const rejectedCandidates = candidates.length - executableCandidates.length;
+    const allCandidatesExecutable = rejectedCandidates === 0;
     const allRefundableKnown = executableCandidates.every(
-      (row) => row.refundablePositionLamportsUpperBound != null,
+      (row) => row.refundablePositionLamports != null,
     );
     const refundableTotal = allRefundableKnown
       ? executableCandidates.reduce(
-          (sum, row) =>
-            sum + BigInt(row.refundablePositionLamportsUpperBound ?? "0"),
+          (sum, row) => sum + BigInt(row.refundablePositionLamports ?? "0"),
           0n,
         )
       : null;
-    // Upper bound because independently quoted executable candidates can overlap
-    // the same not-yet-initialized shared bin arrays. Rejected candidates are
-    // deliberately excluded: default-denied infrastructure must never be budgeted
-    // as though it might be paid.
-    const nonRefundableUpper = executableCandidates.reduce(
-      (sum, row) =>
-        sum + BigInt(row.nonRefundableInfrastructureLamportsUpperBound),
+    // Report the forbidden infrastructure requirement across all requested
+    // candidates, but never include it in executable funding requirements.
+    const nonRefundableTotal = candidates.reduce(
+      (sum, row) => sum + BigInt(row.nonRefundableInfrastructureLamports),
       0n,
     );
-    const requiredBeforeNetwork =
-      refundableTotal == null
+    const networkFeeEstimateComplete = executableCandidates.every(
+      (row) => row.networkFeeEstimateComplete,
+    );
+    const estimatedNetworkFeeTotal = networkFeeEstimateComplete
+      ? executableCandidates.reduce(
+          (sum, row) => sum + BigInt(row.estimatedNetworkFeeLamports ?? "0"),
+          0n,
+        )
+      : null;
+    const requiredNativeExcludingPrincipal =
+      refundableTotal == null || estimatedNetworkFeeTotal == null
         ? null
-        : refundableTotal + nonRefundableUpper + nativeReserveLamports;
-    const rejectedCandidates = candidates.length - executableCandidates.length;
-    const safeToBuild = rejectedCandidates === 0;
+        : refundableTotal + estimatedNetworkFeeTotal + nativeReserveLamports;
+
     const requestedPrincipalXRaw = executableCandidates.reduce(
       (sum, row) => sum + BigInt(row.requestedAmountXRaw),
       0n,
@@ -3884,35 +4192,53 @@ export class MeteoraDlmmService {
     const tokenYPrincipalSufficient =
       balances.tokenY.mint === WSOL_MINT ||
       BigInt(balances.tokenYRaw) >= requestedPrincipalYRaw;
-    const requiredNativeIncludingWsol =
-      requiredBeforeNetwork == null
+    const maxDeployableWsolPrincipalLamports =
+      requiredNativeExcludingPrincipal == null
         ? null
-        : requiredBeforeNetwork + requestedWsolPrincipalLamports;
-    const nativeFundingSufficientBeforeNetworkFee =
-      requiredNativeIncludingWsol == null
+        : availableNativeLamports > requiredNativeExcludingPrincipal
+          ? availableNativeLamports - requiredNativeExcludingPrincipal
+          : 0n;
+    const nativeFundingSufficient =
+      maxDeployableWsolPrincipalLamports == null
         ? null
-        : availableNativeLamports >= requiredNativeIncludingWsol;
-    const wsolPrincipalSufficient =
-      availableNativeLamports >= requestedWsolPrincipalLamports;
+        : maxDeployableWsolPrincipalLamports >= requestedWsolPrincipalLamports;
     const principalFundingSufficient =
       tokenXPrincipalSufficient &&
       tokenYPrincipalSufficient &&
-      wsolPrincipalSufficient;
-    const safeToExecuteBeforeNetworkFee =
+      nativeFundingSufficient === true;
+    const requiredNativeIncludingWsol =
+      requiredNativeExcludingPrincipal == null
+        ? null
+        : requiredNativeExcludingPrincipal + requestedWsolPrincipalLamports;
+    const suggestedWsolPrincipalScaleBps =
+      maxDeployableWsolPrincipalLamports == null
+        ? null
+        : requestedWsolPrincipalLamports <= 0n
+          ? 10_000
+          : Number(
+              (BigInt(10_000) *
+                (maxDeployableWsolPrincipalLamports <
+                requestedWsolPrincipalLamports
+                  ? maxDeployableWsolPrincipalLamports
+                  : requestedWsolPrincipalLamports)) /
+                requestedWsolPrincipalLamports,
+            );
+    const safeToBuild = allCandidatesExecutable;
+    const safeToExecute =
       safeToBuild &&
+      networkFeeEstimateComplete &&
       principalFundingSufficient &&
-      nativeFundingSufficientBeforeNetworkFee === true;
-    const safeToExecute = safeToExecuteBeforeNetworkFee;
+      nativeFundingSufficient === true;
 
     return {
-      version: 1,
+      version: 2,
       observedAt: Date.now(),
       wallet: walletAddress,
-      pool: pool.pubkey.toBase58(),
+      pool: poolAddress,
       safeToBuild,
       principalFundingSufficient,
-      safeToExecuteBeforeNetworkFee,
       safeToExecute,
+      safeToExecuteBeforeNetworkFee: safeToExecute,
       availableNativeLamports: availableNativeLamports.toString(),
       balances,
       nativeReserveLamports: nativeReserveLamports.toString(),
@@ -3920,26 +4246,48 @@ export class MeteoraDlmmService {
       total: {
         executableCandidates: executableCandidates.length,
         rejectedCandidates,
+        allCandidatesExecutable,
+        networkFeeEstimateComplete,
+        refundablePositionLamports:
+          refundableTotal == null ? null : refundableTotal.toString(),
         refundablePositionLamportsUpperBound:
           refundableTotal == null ? null : refundableTotal.toString(),
+        nonRefundableInfrastructureLamports: nonRefundableTotal.toString(),
         nonRefundableInfrastructureLamportsUpperBound:
-          nonRefundableUpper.toString(),
-        estimatedNetworkFeeLamports: null,
-        requiredNativeLamportsBeforeNetworkFeeUpperBound:
-          requiredBeforeNetwork == null
+          nonRefundableTotal.toString(),
+        estimatedNetworkFeeLamports:
+          estimatedNetworkFeeTotal == null
             ? null
-            : requiredBeforeNetwork.toString(),
+            : estimatedNetworkFeeTotal.toString(),
+        requiredNativeLamportsExcludingPrincipal:
+          requiredNativeExcludingPrincipal == null
+            ? null
+            : requiredNativeExcludingPrincipal.toString(),
+        requiredNativeLamportsBeforeNetworkFeeUpperBound:
+          requiredNativeExcludingPrincipal == null
+            ? null
+            : requiredNativeExcludingPrincipal.toString(),
         requestedPrincipalXRaw: requestedPrincipalXRaw.toString(),
         requestedPrincipalYRaw: requestedPrincipalYRaw.toString(),
         requestedWsolPrincipalLamports:
           requestedWsolPrincipalLamports.toString(),
+        requiredNativeLamportsIncludingWsolPrincipal:
+          requiredNativeIncludingWsol == null
+            ? null
+            : requiredNativeIncludingWsol.toString(),
         requiredNativeLamportsIncludingWsolPrincipalBeforeNetworkFeeUpperBound:
           requiredNativeIncludingWsol == null
             ? null
             : requiredNativeIncludingWsol.toString(),
+        maxDeployableWsolPrincipalLamports:
+          maxDeployableWsolPrincipalLamports == null
+            ? null
+            : maxDeployableWsolPrincipalLamports.toString(),
+        suggestedWsolPrincipalScaleBps,
         tokenXPrincipalSufficient,
         tokenYPrincipalSufficient,
-        nativeFundingSufficientBeforeNetworkFee,
+        nativeFundingSufficient,
+        nativeFundingSufficientBeforeNetworkFee: nativeFundingSufficient,
       },
     };
   }
@@ -4235,25 +4583,29 @@ export class MeteoraDlmmService {
       relativeBin: undefined,
     });
     const binArrayCount = numberOrNull(raw?.binArraysCount);
-    const binArrayCostLamports = BigInt(
-      Math.max(0, Math.trunc(Number(raw?.binArrayCost ?? 0))),
+    // Current upstream quoteCreateLimitOrder() returns all four cost fields in SOL:
+    // limitOrderCost is rent/1e9, while binArrayCost and bitmapExtensionCost are
+    // count * SOL-denominated constants. Normalize every cost at the Solard boundary.
+    const binArrayCostLamports = meteoraQuotedSolCostToLamports(
+      raw?.binArrayCost,
     );
-    const bitmapExtensionCostLamports = BigInt(
-      Math.max(0, Math.trunc(Number(raw?.bitmapExtensionCost ?? 0))),
+    const bitmapExtensionCostLamports = meteoraQuotedSolCostToLamports(
+      raw?.bitmapExtensionCost,
     );
-    // Upstream quoteCreateLimitOrder intentionally returns limitOrderCost in SOL,
-    // while binArrayCost/bitmapExtensionCost are lamport-denominated constants.
-    const limitOrderRentSol = Number(raw?.limitOrderCost ?? NaN);
-    if (!Number.isFinite(limitOrderRentSol) || limitOrderRentSol < 0) {
+    const limitOrderRentLamports = meteoraQuotedSolCostToLamports(
+      raw?.limitOrderCost,
+    );
+    if (
+      binArrayCostLamports == null ||
+      bitmapExtensionCostLamports == null ||
+      limitOrderRentLamports == null
+    ) {
       throw new MeteoraError(
-        "Meteora quoteCreateLimitOrder returned an invalid limitOrderCost",
+        "Meteora quoteCreateLimitOrder returned an invalid cost schema",
         "SDK_INCOMPATIBLE",
         { raw: safeJsonValue(raw) },
       );
     }
-    const limitOrderRentLamports = BigInt(
-      Math.round(limitOrderRentSol * 1_000_000_000),
-    );
     const nonRefundable = binArrayCostLamports + bitmapExtensionCostLamports;
     return {
       kind: "limit-order",

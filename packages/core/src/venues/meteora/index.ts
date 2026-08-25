@@ -25,6 +25,7 @@ export type {
   MeteoraWalletPoolBalances,
   MeteoraOpenBatchCandidate,
   MeteoraOpenBatchPreflightArgs,
+  MeteoraBinArrayPreflight,
   MeteoraOpenBatchPreflightCandidate,
   MeteoraOpenBatchPreflight,
   MeteoraPoolWalletSnapshotArgs,

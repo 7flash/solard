@@ -87,6 +87,8 @@ export type MeteoraOpenBatchCandidate = {
   maxBinId: number;
   amountXRaw?: MeteoraInteger;
   amountYRaw?: MeteoraInteger;
+  /** Used only to build unsigned transactions for tx-count/signer/fee estimation. */
+  slippageBps?: number;
   infrastructure?: MeteoraInfrastructureFundingPolicy;
 };
 
@@ -101,6 +103,12 @@ export type MeteoraOpenBatchPreflightArgs = {
   commitment?: Commitment;
 };
 
+export type MeteoraBinArrayPreflight = {
+  index: number;
+  address: string;
+  initialized: boolean;
+};
+
 export type MeteoraOpenBatchPreflightCandidate = {
   id: string;
   strategy: MeteoraStrategy;
@@ -108,15 +116,47 @@ export type MeteoraOpenBatchPreflightCandidate = {
   maxBinId: number;
   width: number;
   positionKind: "standard" | "extended";
+  /** True only when this candidate can be built without caller-funded shared pool infrastructure. */
   executable: boolean;
   errorCode: MeteoraErrorCode | null;
   errorMessage: string | null;
   infrastructure: MeteoraInfrastructureQuote | null;
+  /** Actual unsigned transaction count produced by Solard's current builder when safe to build. */
   transactionCount: number | null;
+  /** Meteora quote's transaction count, retained as a diagnostic. */
+  quotedTransactionCount: number | null;
+  /** Union of all signer pubkeys required across the unsigned preflight transactions. */
+  requiredSignerPubkeys: string[];
+  /** Signer provenance; generated-position pubkeys are intentionally ephemeral to this read-only preflight. */
+  requiredSigners: Array<{
+    pubkey: string;
+    role: "wallet" | "generated-position" | "unknown";
+  }>;
+  /** Required signers Solard cannot provide from the wallet + generated position keypair. */
+  missingRequiredSignerPubkeys: string[];
+  /** Estimated current network fee for the unsigned transaction set. */
+  estimatedNetworkFeeLamports: string | null;
+  networkFeeEstimateComplete: boolean;
+  /** Recoverable account rent for the initial position account(s). */
+  positionRentLamports: string | null;
+  /** Recoverable dynamic-position realloc rent. */
+  positionReallocRentLamports: string | null;
+  /** Total recoverable position rent = positionRent + realloc rent. */
+  refundablePositionLamports: string | null;
+  /** @deprecated Alias of positionRentLamports. */
   positionCostLamports: string | null;
+  /** @deprecated Alias of positionReallocRentLamports. */
   positionReallocCostLamports: string | null;
+  /** @deprecated Alias of refundablePositionLamports. */
   refundablePositionLamportsUpperBound: string | null;
+  nonRefundableInfrastructureLamports: string;
+  /** @deprecated Alias of nonRefundableInfrastructureLamports. */
   nonRefundableInfrastructureLamportsUpperBound: string;
+  requiredBinArrays: MeteoraBinArrayPreflight[];
+  missingBinArrays: Array<{ index: number; address: string }>;
+  bitmapExtensionRequired: boolean;
+  bitmapExtensionAddress: string | null;
+  bitmapExtensionInitialized: boolean | null;
   requiresSharedInfrastructure: boolean;
   sharedInfrastructureAuthorized: boolean;
   safeWithoutSharedInfrastructureFunding: boolean;
@@ -125,22 +165,22 @@ export type MeteoraOpenBatchPreflightCandidate = {
 };
 
 export type MeteoraOpenBatchPreflight = {
-  version: 1;
+  version: 2;
   observedAt: number;
   wallet: string;
   pool: string;
-  /** All candidates passed range/SDK/infrastructure policy checks. */
+  /** True only when every requested candidate is executable under the zero-shared-infrastructure safety rule. */
   safeToBuild: boolean;
-  /** All requested principal can be sourced from the wallet under Solard's current SOL-wrapping behavior. */
+  /** All requested principal for the executable subset can be sourced from the wallet. */
   principalFundingSufficient: boolean;
   /**
-   * Full preflight except transaction network/priority fees, which are not known
-   * without constructing the transactions. Keep nativeReserveLamports large enough
-   * to absorb those fees.
+   * True only when every requested candidate is executable, fee estimation is complete,
+   * principal is funded, and native SOL covers principal + recoverable rent + estimated
+   * network fees + reserve. Any missing bin-array/bitmap initialization makes this false.
    */
-  safeToExecuteBeforeNetworkFee: boolean;
-  /** @deprecated Alias of safeToExecuteBeforeNetworkFee. */
   safeToExecute: boolean;
+  /** @deprecated Alias of safeToExecute. */
+  safeToExecuteBeforeNetworkFee: boolean;
   availableNativeLamports: string;
   balances: MeteoraWalletPoolBalances;
   nativeReserveLamports: string;
@@ -148,9 +188,17 @@ export type MeteoraOpenBatchPreflight = {
   total: {
     executableCandidates: number;
     rejectedCandidates: number;
+    allCandidatesExecutable: boolean;
+    networkFeeEstimateComplete: boolean;
+    refundablePositionLamports: string | null;
+    /** @deprecated Alias of refundablePositionLamports. */
     refundablePositionLamportsUpperBound: string | null;
+    nonRefundableInfrastructureLamports: string;
+    /** @deprecated Alias of nonRefundableInfrastructureLamports. */
     nonRefundableInfrastructureLamportsUpperBound: string;
-    estimatedNetworkFeeLamports: null;
+    estimatedNetworkFeeLamports: string | null;
+    requiredNativeLamportsExcludingPrincipal: string | null;
+    /** @deprecated Compatibility field from v1; now includes network fee when known. */
     requiredNativeLamportsBeforeNetworkFeeUpperBound: string | null;
     requestedPrincipalXRaw: string;
     requestedPrincipalYRaw: string;
@@ -159,11 +207,22 @@ export type MeteoraOpenBatchPreflight = {
      * wrapping path for position opens, so this is conservatively treated as native SOL.
      */
     requestedWsolPrincipalLamports: string;
-    /** Recoverable rent + authorized shared infrastructure + reserve + WSOL principal. */
+    /** Recoverable rent + estimated network fees + reserve + WSOL principal. */
+    requiredNativeLamportsIncludingWsolPrincipal: string | null;
+    /** @deprecated Alias of requiredNativeLamportsIncludingWsolPrincipal. */
     requiredNativeLamportsIncludingWsolPrincipalBeforeNetworkFeeUpperBound:
       string | null;
+    /**
+     * Native SOL remaining for WSOL principal after reserving recoverable rent,
+     * estimated network fees, and nativeReserveLamports for the executable subset.
+     */
+    maxDeployableWsolPrincipalLamports: string | null;
+    /** Proportional scale for requested WSOL principal, 0..10000 bps. */
+    suggestedWsolPrincipalScaleBps: number | null;
     tokenXPrincipalSufficient: boolean;
     tokenYPrincipalSufficient: boolean;
+    nativeFundingSufficient: boolean | null;
+    /** @deprecated Alias of nativeFundingSufficient. */
     nativeFundingSufficientBeforeNetworkFee: boolean | null;
   };
 };
@@ -310,16 +369,25 @@ export type MeteoraInfrastructureQuote = {
   minBinId: number;
   maxBinId: number;
   strategy: MeteoraStrategy;
+  /** Number of currently missing bin arrays required by this range. */
   binArrayCount: number | null;
   binArrayCostLamports: string;
   bitmapExtensionCostLamports: string;
   nonRefundableInfrastructureLamports: string;
+  /** Recoverable base position-account rent, normalized to lamports. */
   positionCostLamports: string | null;
+  /** Recoverable dynamic-position realloc rent, normalized to lamports. */
   positionReallocCostLamports: string | null;
   transactionCount: number | null;
+  requiredBinArrays?: MeteoraBinArrayPreflight[];
+  missingBinArrays?: Array<{ index: number; address: string }>;
+  bitmapExtensionRequired?: boolean;
+  bitmapExtensionAddress?: string | null;
+  bitmapExtensionInitialized?: boolean | null;
   requiresBinArrayInit: boolean;
   requiresBitmapExtensionInit: boolean;
   requiresNonRefundableInfrastructure: boolean;
+  /** Raw upstream quote. Current Meteora quoteCreatePosition cost fields are SOL-denominated. */
   raw: Record<string, unknown>;
 };
 
