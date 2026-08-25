@@ -14,6 +14,242 @@ export type MeteoraTransaction = Transaction | VersionedTransaction;
 export type MeteoraInteger = bigint | number | string;
 export type MeteoraUiAmount = number | string;
 
+export type MeteoraErrorCode =
+  | "INFRASTRUCTURE_FUNDING_REQUIRED"
+  | "MISSING_REQUIRED_SIGNER"
+  | "LIVE_TRADING_DISABLED"
+  | "SIMULATION_FAILED"
+  | "TRANSACTION_FAILED"
+  | "PARTIAL_EXECUTION"
+  | "VERIFICATION_FAILED"
+  | "MOVE_FAILED"
+  | "SNAPSHOT_INCONSISTENT"
+  | "POSITION_NOT_FOUND"
+  | "POOL_MISMATCH"
+  | "OWNER_MISMATCH"
+  | "RANGE_MISMATCH"
+  | "INSUFFICIENT_FUNDS"
+  | "INVALID_ARGUMENT"
+  | "SDK_INCOMPATIBLE"
+  | "UNKNOWN";
+
+export type MeteoraRange = {
+  minBinId: number;
+  maxBinId: number;
+};
+
+export type MeteoraPairSide = "x" | "y";
+
+export type MeteoraPairDescriptor = {
+  version: 1;
+  pool: string;
+  tokenX: MeteoraPoolToken;
+  tokenY: MeteoraPoolToken;
+  quoteMint: string;
+  baseMint: string;
+  quoteSide: MeteoraPairSide;
+  baseSide: MeteoraPairSide;
+  /**
+   * +1 means increasing bin id increases base-token price in quote units.
+   * -1 means increasing bin id decreases base-token price in quote units.
+   */
+  basePriceBinDirection: 1 | -1;
+};
+
+export type MeteoraWalletPoolBalances = {
+  version: 1;
+  observedAt: number;
+  wallet: string;
+  pool: string;
+  nativeLamports: string;
+  tokenX: MeteoraPoolToken;
+  tokenY: MeteoraPoolToken;
+  tokenXRaw: string;
+  tokenYRaw: string;
+  tokenXAccountCount: number;
+  tokenYAccountCount: number;
+};
+
+export type MeteoraOpenBatchCandidate = {
+  id: string;
+  strategy?: MeteoraStrategy;
+  minBinId: number;
+  maxBinId: number;
+  amountXRaw?: MeteoraInteger;
+  amountYRaw?: MeteoraInteger;
+  infrastructure?: MeteoraInfrastructureFundingPolicy;
+};
+
+export type MeteoraOpenBatchPreflightArgs = {
+  wallet: WalletRef;
+  pool: string;
+  candidates: MeteoraOpenBatchCandidate[];
+  /** Applied when a candidate does not provide its own infrastructure policy. */
+  infrastructure?: MeteoraInfrastructureFundingPolicy;
+  /** Native SOL to leave untouched after position-account/infrastructure costs. */
+  nativeReserveLamports?: MeteoraInteger;
+  commitment?: Commitment;
+};
+
+export type MeteoraOpenBatchPreflightCandidate = {
+  id: string;
+  strategy: MeteoraStrategy;
+  minBinId: number;
+  maxBinId: number;
+  width: number;
+  positionKind: "standard" | "extended";
+  executable: boolean;
+  errorCode: MeteoraErrorCode | null;
+  errorMessage: string | null;
+  infrastructure: MeteoraInfrastructureQuote | null;
+  transactionCount: number | null;
+  positionCostLamports: string | null;
+  positionReallocCostLamports: string | null;
+  refundablePositionLamportsUpperBound: string | null;
+  nonRefundableInfrastructureLamportsUpperBound: string;
+};
+
+export type MeteoraOpenBatchPreflight = {
+  version: 1;
+  observedAt: number;
+  wallet: string;
+  pool: string;
+  safeToExecute: boolean;
+  availableNativeLamports: string;
+  nativeReserveLamports: string;
+  candidates: MeteoraOpenBatchPreflightCandidate[];
+  total: {
+    executableCandidates: number;
+    rejectedCandidates: number;
+    refundablePositionLamportsUpperBound: string | null;
+    nonRefundableInfrastructureLamportsUpperBound: string;
+    estimatedNetworkFeeLamports: null;
+    requiredNativeLamportsBeforeNetworkFeeUpperBound: string | null;
+  };
+};
+
+export type MeteoraPoolWalletSnapshotArgs = {
+  pool: string;
+  wallet: WalletRef;
+  /** When present, return only these exact position addresses. */
+  positionIds?: string[];
+  includeMarketMetrics?: boolean;
+  marketMetrics?: MeteoraOhlcvArgs & {
+    depthRadius?: number;
+    oracleTwapWindowsSec?: number[];
+    includeOracleObservations?: boolean;
+  };
+  commitment?: Commitment;
+  consistency?: {
+    /** Allowed active-bin movement across the snapshot read. Default 0. */
+    maxActiveBinDrift?: number;
+    /** Number of whole-snapshot attempts. Default 3. */
+    attempts?: number;
+    /** Delay between inconsistent attempts. Default 150ms. */
+    retryDelayMs?: number;
+  };
+  /** Fail when any requested position id is absent. Default false. */
+  requireAllPositions?: boolean;
+};
+
+export type MeteoraPoolWalletSnapshot = {
+  version: 1;
+  observedAt: number;
+  wallet: string;
+  pool: string;
+  activeBin: number;
+  priceYPerX: number;
+  slotBefore: number | null;
+  slotAfter: number | null;
+  balances: MeteoraWalletPoolBalances;
+  positions: MeteoraPositionSnapshot[];
+  positionsById: Record<string, MeteoraPositionSnapshot>;
+  requestedPositionIds: string[];
+  missingPositionIds: string[];
+  marketMetrics: MeteoraPoolMarketMetrics | null;
+  consistency: {
+    attempts: number;
+    activeBinBefore: number;
+    activeBinAfter: number;
+    activeBinDrift: number;
+    maxActiveBinDrift: number;
+    stable: boolean;
+  };
+};
+
+export type MeteoraMarketFeatureVectorV1 = {
+  schema: "meteora-market-features-v1";
+  semanticsVersion: 1;
+  /**
+   * Stable identity for feature semantics/units. Persist this with learning rows
+   * and do not mix populations whose semanticsId differs.
+   */
+  semanticsId: "meteora-market-features-v1-20260825";
+  observedAtMs: number;
+  pool: string;
+  slot: number | null;
+  activeBin: number;
+  priceYPerX: number;
+  activeTvlUsd: number | null;
+  feeActiveTvlPct: number | null;
+  volumeActiveTvlPct: number | null;
+  dynamicFeePct: number | null;
+  candleRangeP90Bins: number | null;
+  candleCloseMoveP90Bins: number | null;
+  pathBinsPerMinute: number | null;
+  netBinsPerMinute: number | null;
+  trendEfficiency: number | null;
+  directionFlips: number | null;
+  stationaryTimePct: number | null;
+  realizedVolPct: number | null;
+  moveP90Bins: number | null;
+  dwellP90Sec: number | null;
+  spotVsTwap60Bins: number | null;
+  spotVsTwap300Bins: number | null;
+  oracleAgeSec: number | null;
+  emptyBinPct: number | null;
+  sideImbalancePct: number | null;
+  concentrationPct: number | null;
+  quality: {
+    candleCount: number;
+    microSampleCount: number;
+    oracleSupported: boolean;
+    oracleAvailable: boolean;
+    oracleTwap60Covered: boolean | null;
+    oracleTwap300Covered: boolean | null;
+    nonNullFeatureCount: number;
+  };
+};
+
+export type MeteoraMarketFeatureVectorArgs = MeteoraOhlcvArgs & {
+  depthRadius?: number;
+  oracleTwapWindowsSec?: number[];
+  includeOracleObservations?: boolean;
+  /** Optional already-collected short-horizon samples for microstructure features. */
+  activeBinSamples?: MeteoraActiveBinSample[];
+  /** Optional already-fetched metrics to avoid another API/RPC snapshot. */
+  marketMetrics?: MeteoraPoolMarketMetrics;
+};
+
+export type MeteoraPositionSnapshotComparison = {
+  version: 1;
+  pool: string;
+  quoteMint: string;
+  quoteSide: MeteoraPairSide;
+  initialValueQuote: number | null;
+  finalPrincipalValueQuote: number | null;
+  feeDeltaXRaw: string;
+  feeDeltaYRaw: string;
+  feeValueQuote: number | null;
+  finalValueQuote: number | null;
+  pnlQuote: number | null;
+  returnPct: number | null;
+  holdValueQuote: number | null;
+  excessVsHoldQuote: number | null;
+  excessVsHoldPct: number | null;
+  inventoryEffectVsHoldQuote: number | null;
+};
+
 export type MeteoraInfrastructureFundingPolicy = {
   /** Shared bin-array initialization is denied unless explicitly enabled. */
   allowBinArrayInit?: boolean;
@@ -424,6 +660,15 @@ export type MeteoraExecutionAccounting = {
     lockedLamports: string | null;
     returnedLamports: string | null;
   };
+  /** Present for swap operations; null for liquidity/claim actions. */
+  swap: {
+    inputMint: string;
+    outputMint: string;
+    requestedInputRaw: string | null;
+    quotedOutputRaw: string | null;
+    actualInputDebitedRaw: string | null;
+    actualOutputCreditedRaw: string | null;
+  } | null;
   networkFeeLamports: string | null;
   infrastructure: {
     /** Quote produced before the transaction. Position-account rent is excluded. */
@@ -476,6 +721,51 @@ export type MeteoraPreparedTransactions = {
   metadata?: Record<string, unknown>;
 };
 
+export type MeteoraPositionVerificationChecks = {
+  accountExists: boolean | null;
+  accountClosed: boolean | null;
+  poolMatches: boolean | null;
+  ownerMatches: boolean | null;
+  rangeMatches: boolean | null;
+  absentFromWalletPool: boolean | null;
+};
+
+export type MeteoraPositionVerification = {
+  kind:
+    "position-open" | "position-present" | "position-closed" | "not-applicable";
+  ok: boolean;
+  checkedAt: number;
+  attempts: number;
+  pool: string;
+  position: string | null;
+  expected: {
+    owner: string | null;
+    minBinId: number | null;
+    maxBinId: number | null;
+  };
+  actual: MeteoraPositionSnapshot | null;
+  checks: MeteoraPositionVerificationChecks;
+  errors: string[];
+  warnings: string[];
+};
+
+export type MeteoraPositionVerificationOptions = {
+  commitment?: Commitment;
+  /** Number of chain re-reads before verification fails. Defaults to 4. */
+  attempts?: number;
+  /** Delay between verification attempts. Defaults to 400ms. */
+  retryDelayMs?: number;
+};
+
+export type MeteoraVerifyPositionArgs = MeteoraPositionVerificationOptions & {
+  pool: string;
+  position: string;
+  /** WalletRef or public-address string resolvable by the configured Solard host. */
+  wallet?: WalletRef;
+  minBinId?: number;
+  maxBinId?: number;
+};
+
 export type MeteoraExecutionResult = {
   kind: MeteoraPreparedTransactions["kind"];
   pool: string;
@@ -483,6 +773,8 @@ export type MeteoraExecutionResult = {
   signatures: string[];
   /** Present for position-mutating writes prepared/executed by the current SDK. */
   accounting?: MeteoraExecutionAccounting;
+  /** Present when executePreparedAndVerify() or a verified convenience method is used. */
+  verification?: MeteoraPositionVerification;
 };
 
 export type MeteoraPoolToken = {
@@ -609,6 +901,57 @@ export type MeteoraPositionActionArgs = {
   wallet: WalletRef;
   pool: string;
   position: string;
+};
+
+export type MeteoraMovePositionArgs = {
+  wallet: WalletRef;
+  pool: string;
+  /** Exact source position whose attributable inventory is the only LP principal source. */
+  position: string;
+  strategy?: MeteoraStrategy;
+  minBinId?: number;
+  maxBinId?: number;
+  binsBelow?: number;
+  binsAbove?: number;
+  downsidePct?: number;
+  upsidePct?: number;
+  slippageBps?: number;
+  /** Default-deny policy for shared Meteora infrastructure required by the target range. */
+  infrastructure?: MeteoraInfrastructureFundingPolicy;
+};
+
+export type MeteoraMoveCapitalAttribution = {
+  sourcePosition: string;
+  principalSource: "source-position-only";
+  /** Source position inventory + unclaimed fees immediately before close. */
+  sourceAttributableXRaw: string;
+  sourceAttributableYRaw: string;
+  /** Positive SPL wallet deltas produced by the source close, before source-cap clipping. */
+  observedRecoveredXRaw: string;
+  observedRecoveredYRaw: string;
+  /** Amounts eligible to become new LP principal: min(observed close delta, source attributable cap). */
+  eligibleReopenXRaw: string;
+  eligibleReopenYRaw: string;
+  /** Amounts requested for the replacement position. */
+  reopenedXRaw: string;
+  reopenedYRaw: string;
+  freshWalletPrincipalXRaw: "0";
+  freshWalletPrincipalYRaw: "0";
+  nativeSolUsedAsPrincipal: false;
+  marketSwapPerformed: false;
+  closeUsedSkipUnwrapSol: true;
+};
+
+export type MeteoraMovePositionResult = {
+  version: 1;
+  wallet: string;
+  pool: string;
+  sourcePosition: string;
+  targetPosition: string;
+  sourceSnapshot: MeteoraPositionSnapshot;
+  attribution: MeteoraMoveCapitalAttribution;
+  close: MeteoraExecutionResult;
+  open: MeteoraExecutionResult;
 };
 
 export type MeteoraSwapExactInArgs = {

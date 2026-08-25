@@ -17,12 +17,16 @@ import type {
   MeteoraExecutionAccounting,
   MeteoraExecutionOptions,
   MeteoraExecutionResult,
+  MeteoraErrorCode,
   MeteoraInteger,
   MeteoraInfrastructureFundingPolicy,
   MeteoraInfrastructurePreflight,
   MeteoraInfrastructureQuote,
   MeteoraLiquidityDepthMetrics,
   MeteoraMicrostructureMetrics,
+  MeteoraMoveCapitalAttribution,
+  MeteoraMovePositionArgs,
+  MeteoraMovePositionResult,
   MeteoraOhlcvArgs,
   MeteoraOhlcvResponse,
   MeteoraCandleRegimeMetrics,
@@ -31,17 +35,28 @@ import type {
   MeteoraOracleSnapshotArgs,
   MeteoraOracleTwapWindow,
   MeteoraPoolMarketMetrics,
+  MeteoraMarketFeatureVectorArgs,
+  MeteoraMarketFeatureVectorV1,
   MeteoraPoolProfileMetrics,
   MeteoraRangePathMetrics,
   MeteoraRollingPoolMetrics,
   MeteoraOpenPositionArgs,
   MeteoraPoolSearchResult,
   MeteoraPoolState,
+  MeteoraPairDescriptor,
+  MeteoraRange,
   MeteoraPoolToken,
   MeteoraPositionAccountingSnapshot,
   MeteoraPositionActionArgs,
   MeteoraPositionSnapshot,
+  MeteoraPositionSnapshotComparison,
+  MeteoraPositionVerification,
+  MeteoraPositionVerificationOptions,
+  MeteoraVerifyPositionArgs,
   MeteoraPreparedTransactions,
+  MeteoraOpenBatchPreflight,
+  MeteoraOpenBatchPreflightArgs,
+  MeteoraOpenBatchPreflightCandidate,
   MeteoraRemoveLiquidityArgs,
   MeteoraStrategy,
   MeteoraSwapExactInArgs,
@@ -50,6 +65,9 @@ import type {
   MeteoraTimeframe,
   MeteoraUiAmount,
   MeteoraWalletAccountingSnapshot,
+  MeteoraWalletPoolBalances,
+  MeteoraPoolWalletSnapshot,
+  MeteoraPoolWalletSnapshotArgs,
   MeteoraWalletPositions,
 } from "./types.ts";
 
@@ -299,8 +317,11 @@ async function recoverSubmittedSignature(
       });
       const status = result.value[0];
       if (status?.err) {
-        throw new Error(
+        throw new MeteoraError(
           `Meteora transaction ${signature} failed on-chain: ${JSON.stringify(status.err)}`,
+          "TRANSACTION_FAILED",
+          { signature, error: status.err },
+          false,
         );
       }
       if (commitmentReached(status, commitment)) return true;
@@ -315,15 +336,19 @@ async function recoverSubmittedSignature(
 
 function assertLiveTradingEnabled(options: MeteoraExecutionOptions): void {
   if (options.live !== true)
-    throw new Error("Meteora write refused: execution requires { live: true }");
+    throw new MeteoraError(
+      "Meteora write refused: execution requires { live: true }",
+      "LIVE_TRADING_DISABLED",
+    );
 
   const enabled =
     envEnabled("SOLARD_ENABLE_LIVE_TRADES") ||
     envEnabled("SOLWAL_ENABLE_LIVE_TRADES") ||
     envEnabled("SLRD_ENABLE_LIVE_TRADES");
   if (!enabled) {
-    throw new Error(
+    throw new MeteoraError(
       "Meteora write refused: set SOLARD_ENABLE_LIVE_TRADES=1 to enable live transactions",
+      "LIVE_TRADING_DISABLED",
     );
   }
 }
@@ -409,9 +434,7 @@ function assertTransactionFullySigned(
   }
 
   if (missing.length) {
-    throw new Error(
-      `Meteora transaction is missing required signer(s): ${missing.join(", ")}`,
-    );
+    throw new MeteoraMissingRequiredSignerError(missing);
   }
 }
 
@@ -443,25 +466,103 @@ function safeJsonValue(value: unknown, depth = 0): unknown {
   return String(value);
 }
 
-export class MeteoraInfrastructureFundingRequiredError extends Error {
+export class MeteoraError extends Error {
+  readonly code: MeteoraErrorCode;
+  readonly details: unknown;
+  readonly retryable: boolean;
+
+  constructor(
+    message: string,
+    code: MeteoraErrorCode = "UNKNOWN",
+    details: unknown = null,
+    retryable = false,
+  ) {
+    super(message);
+    this.name = "MeteoraError";
+    this.code = code;
+    this.details = details;
+    this.retryable = retryable;
+  }
+}
+
+export function meteoraErrorCode(error: unknown): MeteoraErrorCode | null {
+  return error instanceof MeteoraError ? error.code : null;
+}
+
+export class MeteoraMissingRequiredSignerError extends MeteoraError {
+  readonly missingSignerPubkeys: string[];
+
+  constructor(missingSignerPubkeys: string[]) {
+    super(
+      `Meteora transaction is missing required signer(s): ${missingSignerPubkeys.join(", ")}`,
+      "MISSING_REQUIRED_SIGNER",
+      { missingSignerPubkeys: [...missingSignerPubkeys] },
+      false,
+    );
+    this.name = "MeteoraMissingRequiredSignerError";
+    this.missingSignerPubkeys = [...missingSignerPubkeys];
+  }
+}
+
+export class MeteoraInfrastructureFundingRequiredError extends MeteoraError {
   readonly quote: MeteoraInfrastructureQuote;
 
   constructor(message: string, quote: MeteoraInfrastructureQuote) {
-    super(message);
+    super(message, "INFRASTRUCTURE_FUNDING_REQUIRED", { quote }, false);
     this.name = "MeteoraInfrastructureFundingRequiredError";
     this.quote = quote;
   }
 }
 
-export class MeteoraPartialExecutionError extends Error {
+export class MeteoraPartialExecutionError extends MeteoraError {
   readonly result: MeteoraExecutionResult;
   readonly cause: unknown;
 
   constructor(message: string, result: MeteoraExecutionResult, cause: unknown) {
-    super(message);
+    super(message, "PARTIAL_EXECUTION", { result }, true);
     this.name = "MeteoraPartialExecutionError";
     this.result = result;
     this.cause = cause;
+  }
+}
+
+export class MeteoraVerificationError extends MeteoraError {
+  readonly result: MeteoraExecutionResult;
+
+  constructor(message: string, result: MeteoraExecutionResult) {
+    super(message, "VERIFICATION_FAILED", { result }, true);
+    this.name = "MeteoraVerificationError";
+    this.result = result;
+  }
+}
+
+export class MeteoraMovePositionError extends MeteoraError {
+  readonly stage: "close" | "reopen";
+  readonly sourcePosition: string;
+  readonly closeResult: MeteoraExecutionResult | null;
+  readonly attribution: MeteoraMoveCapitalAttribution | null;
+  override readonly cause: unknown;
+
+  constructor(args: {
+    message: string;
+    stage: "close" | "reopen";
+    sourcePosition: string;
+    closeResult?: MeteoraExecutionResult | null;
+    attribution?: MeteoraMoveCapitalAttribution | null;
+    cause?: unknown;
+  }) {
+    super(
+      args.message,
+      "MOVE_FAILED",
+      { stage: args.stage, sourcePosition: args.sourcePosition },
+      args.stage === "reopen",
+    );
+    this.name = "MeteoraMovePositionError";
+    this.stage = args.stage;
+    this.sourcePosition = args.sourcePosition;
+    this.closeResult = args.closeResult ?? null;
+    this.attribution = args.attribution ?? null;
+    this.cause = args.cause;
   }
 }
 
@@ -640,7 +741,7 @@ function negativeBigintDeltaMagnitude(after: string, before: string): string {
   return (delta > 0n ? delta : 0n).toString();
 }
 
-function accountingPositionKind(
+function accountingSupportedKind(
   kind: MeteoraPreparedTransactions["kind"],
 ): boolean {
   return (
@@ -648,7 +749,9 @@ function accountingPositionKind(
     kind === "add-liquidity" ||
     kind === "remove-liquidity" ||
     kind === "close-position" ||
-    kind === "claim-fees"
+    kind === "claim-fees" ||
+    kind === "swap-exact-in" ||
+    kind === "swap-exact-out"
   );
 }
 
@@ -657,13 +760,41 @@ type MeteoraExecutionAccountingBefore = {
   tokenXMint: string;
   tokenYMint: string;
   wallet: MeteoraWalletAccountingSnapshot;
-  position: MeteoraPositionAccountingSnapshot;
+  position: MeteoraPositionAccountingSnapshot | null;
 };
 
 export class MeteoraDlmmService {
   private readonly pools = new Map<string, Promise<DlmmPool>>();
+  /**
+   * Process-local wallet write serialization. This intentionally covers the whole
+   * close -> recover -> reopen move so another Solard Meteora write cannot consume
+   * or mutate the same wallet inventory between those stages.
+   */
+  private readonly walletWriteTails = new Map<string, Promise<void>>();
 
   constructor(private readonly host: MeteoraDlmmHost) {}
+
+  private async withWalletWriteLock<T>(
+    wallet: WalletRef,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const key = this.resolveWalletAddress(wallet);
+    const previous = this.walletWriteTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => {}).then(() => gate);
+    this.walletWriteTails.set(key, tail);
+    await previous.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.walletWriteTails.get(key) === tail)
+        this.walletWriteTails.delete(key);
+    }
+  }
 
   private dataApiBase(): string {
     return (
@@ -682,6 +813,146 @@ export class MeteoraDlmmService {
     const publicAddress = this.host.walletAddress?.(wallet);
     if (publicAddress) return asPublicKey(publicAddress).toBase58();
     return this.host.signer(wallet).publicKey.toBase58();
+  }
+
+  createPositionScope(args: {
+    wallet: WalletRef;
+    pool: string;
+  }): MeteoraManagedPositionScope {
+    return new MeteoraManagedPositionScope(this, args.wallet, args.pool);
+  }
+
+  /** Describe X/Y orientation relative to an explicit quote mint. */
+  async describePair(
+    poolAddress: string,
+    args: { quoteMint: string | PublicKey },
+  ): Promise<MeteoraPairDescriptor> {
+    const state = await this.getPoolState(poolAddress, true);
+    const quoteMint = asPublicKey(args.quoteMint).toBase58();
+    const xIsQuote = state.tokenX.mint === quoteMint;
+    const yIsQuote = state.tokenY.mint === quoteMint;
+    if (xIsQuote === yIsQuote) {
+      throw new MeteoraError(
+        `Quote mint ${quoteMint} is not exactly one side of Meteora pool ${state.pool}`,
+        "INVALID_ARGUMENT",
+        {
+          pool: state.pool,
+          quoteMint,
+          tokenX: state.tokenX.mint,
+          tokenY: state.tokenY.mint,
+        },
+      );
+    }
+    return {
+      version: 1,
+      pool: state.pool,
+      tokenX: state.tokenX,
+      tokenY: state.tokenY,
+      quoteMint,
+      baseMint: xIsQuote ? state.tokenY.mint : state.tokenX.mint,
+      quoteSide: xIsQuote ? "x" : "y",
+      baseSide: xIsQuote ? "y" : "x",
+      basePriceBinDirection: xIsQuote ? -1 : 1,
+    };
+  }
+
+  centeredRange(activeBin: number, width: number): MeteoraRange {
+    if (
+      !Number.isInteger(activeBin) ||
+      !Number.isInteger(width) ||
+      width <= 0
+    ) {
+      throw new MeteoraError(
+        "Meteora centeredRange requires integer activeBin and positive integer width",
+        "INVALID_ARGUMENT",
+        { activeBin, width },
+      );
+    }
+    const below = Math.floor((width - 1) / 2);
+    return {
+      minBinId: activeBin - below,
+      maxBinId: activeBin + (width - 1 - below),
+    };
+  }
+
+  rangeOnBasePriceSide(
+    activeBin: number,
+    width: number,
+    gapBins: number,
+    pair: MeteoraPairDescriptor,
+    side: "below" | "above",
+  ): MeteoraRange {
+    if (
+      !Number.isInteger(activeBin) ||
+      !Number.isInteger(width) ||
+      width <= 0 ||
+      !Number.isInteger(gapBins) ||
+      gapBins < 1
+    ) {
+      throw new MeteoraError(
+        "Meteora rangeOnBasePriceSide requires integer activeBin, positive width, and gapBins >= 1",
+        "INVALID_ARGUMENT",
+        { activeBin, width, gapBins, side },
+      );
+    }
+    const higherBin =
+      (side === "above" && pair.basePriceBinDirection === 1) ||
+      (side === "below" && pair.basePriceBinDirection === -1);
+    if (higherBin) {
+      const minBinId = activeBin + gapBins;
+      return { minBinId, maxBinId: minBinId + width - 1 };
+    }
+    const maxBinId = activeBin - gapBins;
+    return { minBinId: maxBinId - width + 1, maxBinId };
+  }
+
+  rangeDistance(activeBin: number, range: MeteoraRange): number {
+    if (activeBin < range.minBinId) return range.minBinId - activeBin;
+    if (activeBin > range.maxBinId) return activeBin - range.maxBinId;
+    return 0;
+  }
+
+  orientedBaseBinMove(
+    fromBin: number,
+    toBin: number,
+    pair: MeteoraPairDescriptor,
+  ): number {
+    return (toBin - fromBin) * pair.basePriceBinDirection;
+  }
+
+  priceBaseInQuote(priceYPerX: number, pair: MeteoraPairDescriptor): number {
+    if (!(priceYPerX > 0)) {
+      throw new MeteoraError(
+        "Meteora priceYPerX must be positive",
+        "INVALID_ARGUMENT",
+        { priceYPerX },
+      );
+    }
+    return pair.quoteSide === "y" ? priceYPerX : 1 / priceYPerX;
+  }
+
+  amountsFromBaseQuote(
+    baseRaw: MeteoraInteger,
+    quoteRaw: MeteoraInteger,
+    pair: MeteoraPairDescriptor,
+  ): { xRaw: string; yRaw: string } {
+    const base = toBN(baseRaw, "baseRaw").toString(10);
+    const quote = toBN(quoteRaw, "quoteRaw").toString(10);
+    return pair.baseSide === "x"
+      ? { xRaw: base, yRaw: quote }
+      : { xRaw: quote, yRaw: base };
+  }
+
+  amountsToBaseQuote(
+    xRaw: MeteoraInteger,
+    yRaw: MeteoraInteger,
+    pair: MeteoraPairDescriptor,
+  ): { baseRaw: string; quoteRaw: string } {
+    const x = toBN(xRaw, "xRaw").toString(10);
+    const y = toBN(yRaw, "yRaw").toString(10);
+    return pair.baseSide === "x"
+      ? { baseRaw: x, quoteRaw: y }
+      : { baseRaw: y, quoteRaw: x };
   }
 
   clearPoolCache(pool?: string): void {
@@ -2065,6 +2336,83 @@ export class MeteoraDlmmService {
     };
   }
 
+  async getMarketFeatureVector(
+    poolAddress: string,
+    args: MeteoraMarketFeatureVectorArgs = {},
+  ): Promise<MeteoraMarketFeatureVectorV1> {
+    const metrics =
+      args.marketMetrics ??
+      (await this.getPoolMarketMetrics(poolAddress, {
+        timeframe: args.timeframe,
+        startTime: args.startTime,
+        endTime: args.endTime,
+        depthRadius: args.depthRadius,
+        oracleTwapWindowsSec: args.oracleTwapWindowsSec,
+        includeOracleObservations: args.includeOracleObservations,
+      }));
+    const samples = (args.activeBinSamples ?? []).filter(
+      (sample) => sample.pool === metrics.pool,
+    );
+    const micro =
+      samples.length >= 2 ? this.analyzeActiveBinSamples(samples) : null;
+    const twap60 =
+      metrics.oracle.twaps.find((row) => row.requestedSec === 60) ?? null;
+    const twap300 =
+      metrics.oracle.twaps.find((row) => row.requestedSec === 300) ?? null;
+
+    const vectorCore = {
+      activeTvlUsd: metrics.rolling?.activeTvl ?? null,
+      feeActiveTvlPct: metrics.rolling?.feeActiveTvlPct ?? null,
+      volumeActiveTvlPct: metrics.rolling?.volumeActiveTvlPct ?? null,
+      dynamicFeePct: metrics.activeBinSample.dynamicFeePct,
+      candleRangeP90Bins: metrics.candleRegime.p90CandleRangeBins,
+      candleCloseMoveP90Bins: metrics.candleRegime.p90AbsCloseMoveBins,
+      pathBinsPerMinute:
+        micro?.pathBinsPerMinute ?? metrics.candleRegime.pathBinsPerMinute,
+      netBinsPerMinute:
+        micro?.netBinsPerMinute ?? metrics.candleRegime.netBinsPerMinute,
+      trendEfficiency:
+        micro?.trendEfficiency ?? metrics.candleRegime.trendEfficiency,
+      directionFlips:
+        micro?.directionFlips ?? metrics.candleRegime.directionFlips,
+      stationaryTimePct: micro?.stationaryTimePct ?? null,
+      realizedVolPct:
+        micro?.realizedLogVolPct ?? metrics.candleRegime.realizedCloseVolPct,
+      moveP90Bins: micro?.p90AbsMovePerChangeBins ?? null,
+      dwellP90Sec: micro?.p90DwellSec ?? null,
+      spotVsTwap60Bins: twap60?.spotDeviationBins ?? null,
+      spotVsTwap300Bins: twap300?.spotDeviationBins ?? null,
+      oracleAgeSec: metrics.oracle.latestObservationAgeSec,
+      emptyBinPct: metrics.liquidityDepth.emptyBinPct,
+      sideImbalancePct: metrics.liquidityDepth.sideImbalancePct,
+      concentrationPct: metrics.liquidityDepth.topBinValueSharePct,
+    };
+    const nonNullFeatureCount = Object.values(vectorCore).filter(
+      (value) => value != null && Number.isFinite(Number(value)),
+    ).length;
+
+    return {
+      schema: "meteora-market-features-v1",
+      semanticsVersion: 1,
+      semanticsId: "meteora-market-features-v1-20260825",
+      observedAtMs: metrics.observedAt,
+      pool: metrics.pool,
+      slot: metrics.activeBinSample.slot,
+      activeBin: metrics.activeBinSample.binId,
+      priceYPerX: metrics.activeBinSample.priceYPerX,
+      ...vectorCore,
+      quality: {
+        candleCount: metrics.candleRegime.candleCount,
+        microSampleCount: micro?.sampleCount ?? samples.length,
+        oracleSupported: metrics.oracle.supported,
+        oracleAvailable: metrics.oracle.available,
+        oracleTwap60Covered: twap60?.covered ?? null,
+        oracleTwap300Covered: twap300?.covered ?? null,
+        nonNullFeatureCount,
+      },
+    };
+  }
+
   async getPoolVolumeHistory(
     poolAddress: string,
     args: {
@@ -2422,6 +2770,233 @@ export class MeteoraDlmmService {
     return this.normalizePosition(pool.pubkey.toBase58(), info, position);
   }
 
+  async getPoolWalletSnapshot(
+    args: MeteoraPoolWalletSnapshotArgs,
+  ): Promise<MeteoraPoolWalletSnapshot> {
+    const poolAddress = asPublicKey(args.pool).toBase58();
+    const walletAddress = this.resolveWalletAddress(args.wallet);
+    const maxDrift = Math.max(
+      0,
+      Math.trunc(args.consistency?.maxActiveBinDrift ?? 0),
+    );
+    const attempts = Math.max(
+      1,
+      Math.min(10, Math.trunc(args.consistency?.attempts ?? 3)),
+    );
+    const retryDelayMs = Math.max(
+      0,
+      Math.min(5_000, Math.trunc(args.consistency?.retryDelayMs ?? 150)),
+    );
+    const requestedPositionIds = [
+      ...new Set(
+        (args.positionIds ?? []).map((value) => asPublicKey(value).toBase58()),
+      ),
+    ];
+
+    let last: MeteoraPoolWalletSnapshot | null = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const activeBefore = await this.getActiveBinSample(poolAddress, true);
+      const [allPositions, balances, marketMetrics] = await Promise.all([
+        this.getPoolPositions(poolAddress, walletAddress),
+        this.getWalletPoolBalances({
+          wallet: args.wallet,
+          pool: poolAddress,
+          commitment: args.commitment,
+        }),
+        args.includeMarketMetrics
+          ? this.getPoolMarketMetrics(poolAddress, args.marketMetrics ?? {})
+          : Promise.resolve(null),
+      ]);
+      const activeAfter = await this.getActiveBinSample(poolAddress, false);
+      const drift = Math.abs(activeAfter.binId - activeBefore.binId);
+      const selected = requestedPositionIds.length
+        ? allPositions.filter((row) =>
+            requestedPositionIds.includes(row.position),
+          )
+        : allPositions;
+      const positionsById = Object.fromEntries(
+        selected.map((row) => [row.position, row]),
+      );
+      const missingPositionIds = requestedPositionIds.filter(
+        (position) => positionsById[position] == null,
+      );
+      last = {
+        version: 1,
+        observedAt: Date.now(),
+        wallet: walletAddress,
+        pool: poolAddress,
+        activeBin: activeAfter.binId,
+        priceYPerX: activeAfter.priceYPerX,
+        slotBefore: activeBefore.slot,
+        slotAfter: activeAfter.slot,
+        balances,
+        positions: selected,
+        positionsById,
+        requestedPositionIds,
+        missingPositionIds,
+        marketMetrics,
+        consistency: {
+          attempts: attempt,
+          activeBinBefore: activeBefore.binId,
+          activeBinAfter: activeAfter.binId,
+          activeBinDrift: drift,
+          maxActiveBinDrift: maxDrift,
+          stable: drift <= maxDrift,
+        },
+      };
+      if (drift <= maxDrift) {
+        if (args.requireAllPositions && missingPositionIds.length) {
+          throw new MeteoraError(
+            `Meteora coherent snapshot is missing requested position(s): ${missingPositionIds.join(", ")}`,
+            "POSITION_NOT_FOUND",
+            { snapshot: last, missingPositionIds },
+            true,
+          );
+        }
+        return last;
+      }
+      if (attempt < attempts && retryDelayMs > 0)
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+
+    throw new MeteoraError(
+      `Meteora pool/wallet snapshot remained inconsistent after ${attempts} attempt(s): active bin moved more than ${maxDrift} bin(s) during every read`,
+      "SNAPSHOT_INCONSISTENT",
+      { lastSnapshot: last },
+      true,
+    );
+  }
+
+  comparePositionSnapshots(args: {
+    initial: MeteoraPositionSnapshot;
+    final: MeteoraPositionSnapshot;
+    initialPriceYPerX: number;
+    finalPriceYPerX: number;
+    quoteMint: string | PublicKey;
+  }): MeteoraPositionSnapshotComparison {
+    const { initial, final } = args;
+    if (
+      initial.pool !== final.pool ||
+      initial.tokenX.mint !== final.tokenX.mint ||
+      initial.tokenY.mint !== final.tokenY.mint
+    ) {
+      throw new MeteoraError(
+        "Meteora position snapshots are not comparable: pool/token identity differs",
+        "INVALID_ARGUMENT",
+        {
+          initialPool: initial.pool,
+          finalPool: final.pool,
+          initialX: initial.tokenX.mint,
+          finalX: final.tokenX.mint,
+          initialY: initial.tokenY.mint,
+          finalY: final.tokenY.mint,
+        },
+      );
+    }
+    if (!(args.initialPriceYPerX > 0) || !(args.finalPriceYPerX > 0)) {
+      throw new MeteoraError(
+        "Meteora snapshot comparison requires positive initial/final Y-per-X prices",
+        "INVALID_ARGUMENT",
+      );
+    }
+    const quoteMint = asPublicKey(args.quoteMint).toBase58();
+    const quoteSide =
+      quoteMint === initial.tokenY.mint
+        ? "y"
+        : quoteMint === initial.tokenX.mint
+          ? "x"
+          : null;
+    if (!quoteSide) {
+      throw new MeteoraError(
+        `Quote mint ${quoteMint} is not a pool token`,
+        "INVALID_ARGUMENT",
+        { quoteMint, tokenX: initial.tokenX.mint, tokenY: initial.tokenY.mint },
+      );
+    }
+    const xDecimals = initial.tokenX.decimals;
+    const yDecimals = initial.tokenY.decimals;
+    const value = (
+      xRaw: string,
+      yRaw: string,
+      priceYPerX: number,
+    ): number | null => {
+      const x = rawToUi(xRaw, xDecimals);
+      const y = rawToUi(yRaw, yDecimals);
+      if (x == null || y == null) return null;
+      return quoteSide === "y" ? x * priceYPerX + y : x + y / priceYPerX;
+    };
+    const initialValueQuote = value(
+      initial.totalXRaw,
+      initial.totalYRaw,
+      args.initialPriceYPerX,
+    );
+    const finalPrincipalValueQuote = value(
+      final.totalXRaw,
+      final.totalYRaw,
+      args.finalPriceYPerX,
+    );
+    const feeDeltaX =
+      bigintOrZero(final.feeXRaw) > bigintOrZero(initial.feeXRaw)
+        ? bigintOrZero(final.feeXRaw) - bigintOrZero(initial.feeXRaw)
+        : 0n;
+    const feeDeltaY =
+      bigintOrZero(final.feeYRaw) > bigintOrZero(initial.feeYRaw)
+        ? bigintOrZero(final.feeYRaw) - bigintOrZero(initial.feeYRaw)
+        : 0n;
+    const feeValueQuote = value(
+      feeDeltaX.toString(),
+      feeDeltaY.toString(),
+      args.finalPriceYPerX,
+    );
+    const holdValueQuote = value(
+      initial.totalXRaw,
+      initial.totalYRaw,
+      args.finalPriceYPerX,
+    );
+    const finalValueQuote =
+      finalPrincipalValueQuote == null || feeValueQuote == null
+        ? null
+        : finalPrincipalValueQuote + feeValueQuote;
+    const pnlQuote =
+      finalValueQuote == null || initialValueQuote == null
+        ? null
+        : finalValueQuote - initialValueQuote;
+    const excessVsHoldQuote =
+      finalValueQuote == null || holdValueQuote == null
+        ? null
+        : finalValueQuote - holdValueQuote;
+    const inventoryEffectVsHoldQuote =
+      finalPrincipalValueQuote == null || holdValueQuote == null
+        ? null
+        : finalPrincipalValueQuote - holdValueQuote;
+    return {
+      version: 1,
+      pool: initial.pool,
+      quoteMint,
+      quoteSide,
+      initialValueQuote,
+      finalPrincipalValueQuote,
+      feeDeltaXRaw: feeDeltaX.toString(),
+      feeDeltaYRaw: feeDeltaY.toString(),
+      feeValueQuote,
+      finalValueQuote,
+      pnlQuote,
+      returnPct:
+        pnlQuote != null && initialValueQuote != null && initialValueQuote > 0
+          ? (pnlQuote / initialValueQuote) * 100
+          : null,
+      holdValueQuote,
+      excessVsHoldQuote,
+      excessVsHoldPct:
+        excessVsHoldQuote != null &&
+        holdValueQuote != null &&
+        holdValueQuote > 0
+          ? (excessVsHoldQuote / holdValueQuote) * 100
+          : null,
+      inventoryEffectVsHoldQuote,
+    };
+  }
+
   async findPoolForPosition(
     positionAddress: string,
     wallet: string | PublicKey,
@@ -2431,8 +3006,11 @@ export class MeteoraDlmmService {
       (position) => position.position === positionAddress,
     );
     if (!found)
-      throw new Error(
+      throw new MeteoraError(
         `Meteora position ${positionAddress} was not found for wallet ${positions.wallet}`,
+        "POSITION_NOT_FOUND",
+        { position: positionAddress, wallet: positions.wallet },
+        true,
       );
     return found.pool;
   }
@@ -2533,8 +3111,9 @@ export class MeteoraDlmmService {
   ): Promise<MeteoraInfrastructureQuote> {
     const quoteCreatePosition = (pool as any).quoteCreatePosition;
     if (typeof quoteCreatePosition !== "function") {
-      throw new Error(
+      throw new MeteoraError(
         "Meteora infrastructure preflight unavailable: installed @meteora-ag/dlmm does not expose quoteCreatePosition(). Refusing to build a liquidity transaction because shared bin-array funding cannot be proven zero.",
+        "SDK_INCOMPATIBLE",
       );
     }
     const { StrategyType } = await dlmmSdk();
@@ -2558,8 +3137,10 @@ export class MeteoraDlmmService {
       "bin_array_bitmap_extension_cost",
     ];
     if (!binCostKeys.some(own) || !bitmapCostKeys.some(own)) {
-      throw new Error(
+      throw new MeteoraError(
         "Meteora infrastructure preflight incompatible: quoteCreatePosition() returned an unrecognized cost schema. Refusing to build liquidity because bin-array/bitmap funding cannot be proven zero.",
+        "SDK_INCOMPATIBLE",
+        { rawQuote: safeJsonValue(rawQuote) },
       );
     }
     const binArrayCost = bigintOrZero(
@@ -2633,6 +3214,156 @@ export class MeteoraDlmmService {
       args.maxBinId,
       args.strategy ?? "spot",
     );
+  }
+
+  async preflightOpenBatch(
+    args: MeteoraOpenBatchPreflightArgs,
+  ): Promise<MeteoraOpenBatchPreflight> {
+    const commitment = args.commitment ?? "confirmed";
+    const pool = await this.rawPool(args.pool, true);
+    const walletAddress = this.resolveWalletAddress(args.wallet);
+    const availableNativeLamports = BigInt(
+      await this.host
+        .connection()
+        .getBalance(asPublicKey(walletAddress), commitment),
+    );
+    const nativeReserveLamports =
+      args.nativeReserveLamports == null
+        ? 0n
+        : BigInt(
+            toBN(args.nativeReserveLamports, "nativeReserveLamports").toString(
+              10,
+            ),
+          );
+
+    const candidates: MeteoraOpenBatchPreflightCandidate[] = [];
+    for (const candidate of args.candidates) {
+      const strategy = candidate.strategy ?? "spot";
+      const width = candidate.maxBinId - candidate.minBinId + 1;
+      let infrastructure: MeteoraInfrastructureQuote | null = null;
+      let executable = true;
+      let errorCode: MeteoraErrorCode | null = null;
+      let errorMessage: string | null = null;
+
+      if (
+        !Number.isInteger(candidate.minBinId) ||
+        !Number.isInteger(candidate.maxBinId) ||
+        candidate.minBinId > candidate.maxBinId
+      ) {
+        executable = false;
+        errorCode = "INVALID_ARGUMENT";
+        errorMessage = `invalid range ${candidate.minBinId}..${candidate.maxBinId}`;
+      } else if (
+        width > STANDARD_POSITION_BINS &&
+        (typeof (pool as any).createExtendedEmptyPosition !== "function" ||
+          typeof (pool as any).addLiquidityByStrategyChunkable !== "function")
+      ) {
+        executable = false;
+        errorCode = "SDK_INCOMPATIBLE";
+        errorMessage = `range width ${width} requires Meteora extended-position support that is unavailable in the installed SDK`;
+      } else {
+        try {
+          infrastructure = await this.quoteInfrastructureForRange(
+            pool,
+            candidate.minBinId,
+            candidate.maxBinId,
+            strategy,
+          );
+          this.assertInfrastructurePolicy(
+            infrastructure,
+            candidate.infrastructure ?? args.infrastructure,
+          );
+        } catch (error) {
+          executable = false;
+          errorCode = error instanceof MeteoraError ? error.code : "UNKNOWN";
+          errorMessage = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      const positionCost =
+        infrastructure?.positionCostLamports == null
+          ? null
+          : BigInt(infrastructure.positionCostLamports);
+      const reallocCost =
+        infrastructure?.positionReallocCostLamports == null
+          ? 0n
+          : BigInt(infrastructure.positionReallocCostLamports);
+      const refundableUpper =
+        positionCost == null ? null : positionCost + reallocCost;
+
+      candidates.push({
+        id: String(candidate.id),
+        strategy,
+        minBinId: candidate.minBinId,
+        maxBinId: candidate.maxBinId,
+        width,
+        positionKind: width > STANDARD_POSITION_BINS ? "extended" : "standard",
+        executable,
+        errorCode,
+        errorMessage,
+        infrastructure,
+        transactionCount: infrastructure?.transactionCount ?? null,
+        positionCostLamports: infrastructure?.positionCostLamports ?? null,
+        positionReallocCostLamports:
+          infrastructure?.positionReallocCostLamports ?? null,
+        refundablePositionLamportsUpperBound:
+          refundableUpper == null ? null : refundableUpper.toString(),
+        nonRefundableInfrastructureLamportsUpperBound:
+          infrastructure?.nonRefundableInfrastructureLamports ?? "0",
+      });
+    }
+
+    const executableCandidates = candidates.filter((row) => row.executable);
+    const allRefundableKnown = executableCandidates.every(
+      (row) => row.refundablePositionLamportsUpperBound != null,
+    );
+    const refundableTotal = allRefundableKnown
+      ? executableCandidates.reduce(
+          (sum, row) =>
+            sum + BigInt(row.refundablePositionLamportsUpperBound ?? "0"),
+          0n,
+        )
+      : null;
+    // Upper bound because independently quoted candidates can overlap the same
+    // not-yet-initialized shared bin arrays.
+    const nonRefundableUpper = candidates.reduce(
+      (sum, row) =>
+        sum + BigInt(row.nonRefundableInfrastructureLamportsUpperBound),
+      0n,
+    );
+    const requiredBeforeNetwork =
+      refundableTotal == null
+        ? null
+        : refundableTotal + nonRefundableUpper + nativeReserveLamports;
+    const rejectedCandidates = candidates.length - executableCandidates.length;
+    const safeToExecute =
+      rejectedCandidates === 0 &&
+      requiredBeforeNetwork != null &&
+      availableNativeLamports >= requiredBeforeNetwork;
+
+    return {
+      version: 1,
+      observedAt: Date.now(),
+      wallet: walletAddress,
+      pool: pool.pubkey.toBase58(),
+      safeToExecute,
+      availableNativeLamports: availableNativeLamports.toString(),
+      nativeReserveLamports: nativeReserveLamports.toString(),
+      candidates,
+      total: {
+        executableCandidates: executableCandidates.length,
+        rejectedCandidates,
+        refundablePositionLamportsUpperBound:
+          refundableTotal == null ? null : refundableTotal.toString(),
+        nonRefundableInfrastructureLamportsUpperBound:
+          nonRefundableUpper.toString(),
+        estimatedNetworkFeeLamports: null,
+        requiredNativeLamportsBeforeNetworkFeeUpperBound:
+          requiredBeforeNetwork == null
+            ? null
+            : requiredBeforeNetwork.toString(),
+      },
+    };
   }
 
   private assertInfrastructurePolicy(
@@ -3266,11 +3997,11 @@ export class MeteoraDlmmService {
     };
   }
 
-  private async tokenBalanceRaw(
+  private async tokenBalanceSummary(
     owner: PublicKey,
     mint: string,
     commitment: Commitment,
-  ): Promise<string> {
+  ): Promise<{ raw: string; accountCount: number }> {
     const response = await this.host
       .connection()
       .getParsedTokenAccountsByOwner(
@@ -3285,7 +4016,48 @@ export class MeteoraDlmmService {
       if (typeof amount === "string" && /^\d+$/.test(amount))
         total += BigInt(amount);
     }
-    return total.toString();
+    return { raw: total.toString(), accountCount: response.value.length };
+  }
+
+  private async tokenBalanceRaw(
+    owner: PublicKey,
+    mint: string,
+    commitment: Commitment,
+  ): Promise<string> {
+    return (await this.tokenBalanceSummary(owner, mint, commitment)).raw;
+  }
+
+  async getWalletPoolBalances(args: {
+    wallet: WalletRef;
+    pool: string;
+    commitment?: Commitment;
+  }): Promise<MeteoraWalletPoolBalances> {
+    const commitment = args.commitment ?? "confirmed";
+    const pool = await this.rawPool(args.pool, false);
+    const tokenX = tokenReserve(pool.tokenX);
+    const tokenY = tokenReserve(pool.tokenY);
+    const owner = asPublicKey(this.resolveWalletAddress(args.wallet));
+    const observedAt = Date.now();
+    const [nativeLamports, x, y] = await Promise.all([
+      this.host.connection().getBalance(owner, commitment),
+      this.tokenBalanceSummary(owner, tokenX.mint, commitment),
+      tokenY.mint === tokenX.mint
+        ? this.tokenBalanceSummary(owner, tokenX.mint, commitment)
+        : this.tokenBalanceSummary(owner, tokenY.mint, commitment),
+    ]);
+    return {
+      version: 1,
+      observedAt,
+      wallet: owner.toBase58(),
+      pool: pool.pubkey.toBase58(),
+      nativeLamports: String(nativeLamports),
+      tokenX,
+      tokenY,
+      tokenXRaw: x.raw,
+      tokenYRaw: y.raw,
+      tokenXAccountCount: x.accountCount,
+      tokenYAccountCount: y.accountCount,
+    };
   }
 
   private async walletAccountingSnapshot(
@@ -3394,23 +4166,24 @@ export class MeteoraDlmmService {
     prepared: MeteoraPreparedTransactions,
     commitment: Commitment,
   ): Promise<MeteoraExecutionAccountingBefore> {
-    if (!prepared.position)
-      throw new Error(
-        `Meteora ${prepared.kind} accounting requires an explicit position address`,
-      );
     const pool = await this.rawPool(prepared.pool, true);
     const tokenXMint = tokenReserve(pool.tokenX).mint;
     const tokenYMint = tokenReserve(pool.tokenY).mint;
     if (!tokenXMint || !tokenYMint)
-      throw new Error("Meteora accounting could not resolve pool token mints");
+      throw new MeteoraError(
+        "Meteora accounting could not resolve pool token mints",
+        "SDK_INCOMPATIBLE",
+      );
     const wallet = this.host.signer(prepared.wallet).publicKey;
     const [walletSnapshot, positionSnapshot] = await Promise.all([
       this.walletAccountingSnapshot(wallet, tokenXMint, tokenYMint, commitment),
-      this.positionAccountingSnapshot(
-        prepared.pool,
-        prepared.position,
-        commitment,
-      ),
+      prepared.position
+        ? this.positionAccountingSnapshot(
+            prepared.pool,
+            prepared.position,
+            commitment,
+          )
+        : Promise.resolve(null),
     ]);
     return {
       walletAddress: wallet.toBase58(),
@@ -3444,16 +4217,18 @@ export class MeteoraDlmmService {
         `post-wallet-accounting-unavailable:${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    try {
-      afterPosition = await this.positionAccountingSnapshot(
-        prepared.pool,
-        prepared.position!,
-        commitment,
-      );
-    } catch (error) {
-      warnings.push(
-        `post-position-accounting-unavailable:${error instanceof Error ? error.message : String(error)}`,
-      );
+    if (prepared.position) {
+      try {
+        afterPosition = await this.positionAccountingSnapshot(
+          prepared.pool,
+          prepared.position,
+          commitment,
+        );
+      } catch (error) {
+        warnings.push(
+          `post-position-accounting-unavailable:${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     const network = await this.transactionNetworkFees(signatures, commitment);
@@ -3461,8 +4236,14 @@ export class MeteoraDlmmService {
 
     const bpos = before.position;
     const apos = afterPosition;
-    const positionComparable = apos != null;
+    const positionComparable = bpos != null && apos != null;
     const walletComparable = afterWallet != null;
+    const tokenXDelta = afterWallet
+      ? signedBigintDelta(afterWallet.tokenXRaw, before.wallet.tokenXRaw)
+      : null;
+    const tokenYDelta = afterWallet
+      ? signedBigintDelta(afterWallet.tokenYRaw, before.wallet.tokenYRaw)
+      : null;
 
     const infrastructure = prepared.infrastructurePreflight
       ? {
@@ -3483,10 +4264,36 @@ export class MeteoraDlmmService {
         }
       : null;
 
+    const isSwap =
+      prepared.kind === "swap-exact-in" || prepared.kind === "swap-exact-out";
+    const inputMint = isSwap ? String(prepared.metadata?.inputMint ?? "") : "";
+    const outputMint = isSwap
+      ? String(prepared.metadata?.outputMint ?? "")
+      : "";
+    const deltaForMint = (mint: string): string | null => {
+      if (mint === before.tokenXMint) return tokenXDelta;
+      if (mint === before.tokenYMint) return tokenYDelta;
+      return null;
+    };
+    const inputDelta = inputMint ? deltaForMint(inputMint) : null;
+    const outputDelta = outputMint ? deltaForMint(outputMint) : null;
+    const debitMagnitude = (delta: string | null): string | null => {
+      if (delta == null) return null;
+      const value = BigInt(delta);
+      return (value < 0n ? -value : 0n).toString();
+    };
+    const positiveCredit = (delta: string | null): string | null => {
+      if (delta == null) return null;
+      const value = BigInt(delta);
+      return (value > 0n ? value : 0n).toString();
+    };
+
     return {
       version: 1,
       complete:
-        walletComparable && positionComparable && network.lamports != null,
+        walletComparable &&
+        network.lamports != null &&
+        (prepared.position ? positionComparable : true),
       wallet: before.walletAddress,
       pool: prepared.pool,
       position: prepared.position ?? null,
@@ -3501,12 +4308,8 @@ export class MeteoraDlmmService {
         position: afterPosition,
       },
       walletDelta: {
-        tokenXRaw: afterWallet
-          ? signedBigintDelta(afterWallet.tokenXRaw, before.wallet.tokenXRaw)
-          : null,
-        tokenYRaw: afterWallet
-          ? signedBigintDelta(afterWallet.tokenYRaw, before.wallet.tokenYRaw)
-          : null,
+        tokenXRaw: tokenXDelta,
+        tokenYRaw: tokenYDelta,
         nativeLamports: afterWallet
           ? signedBigintDelta(
               afterWallet.nativeLamports,
@@ -3523,61 +4326,477 @@ export class MeteoraDlmmService {
           prepared.kind === "open-position" || prepared.kind === "add-liquidity"
             ? integerString(prepared.metadata?.amountYRaw, "0")
             : null,
-        preActionPositionXRaw: bpos.totalXRaw,
-        preActionPositionYRaw: bpos.totalYRaw,
+        preActionPositionXRaw: bpos?.totalXRaw ?? "0",
+        preActionPositionYRaw: bpos?.totalYRaw ?? "0",
         postActionPositionXRaw: apos?.totalXRaw ?? null,
         postActionPositionYRaw: apos?.totalYRaw ?? null,
         positionIncreaseXRaw: positionComparable
-          ? positiveBigintDelta(apos!.totalXRaw, bpos.totalXRaw)
+          ? positiveBigintDelta(apos!.totalXRaw, bpos!.totalXRaw)
           : null,
         positionIncreaseYRaw: positionComparable
-          ? positiveBigintDelta(apos!.totalYRaw, bpos.totalYRaw)
+          ? positiveBigintDelta(apos!.totalYRaw, bpos!.totalYRaw)
           : null,
         positionDecreaseXRaw: positionComparable
-          ? negativeBigintDeltaMagnitude(apos!.totalXRaw, bpos.totalXRaw)
+          ? negativeBigintDeltaMagnitude(apos!.totalXRaw, bpos!.totalXRaw)
           : null,
         positionDecreaseYRaw: positionComparable
-          ? negativeBigintDeltaMagnitude(apos!.totalYRaw, bpos.totalYRaw)
+          ? negativeBigintDeltaMagnitude(apos!.totalYRaw, bpos!.totalYRaw)
           : null,
       },
       positionFees: {
-        preActionUnclaimedXRaw: bpos.feeXRaw,
-        preActionUnclaimedYRaw: bpos.feeYRaw,
+        preActionUnclaimedXRaw: bpos?.feeXRaw ?? null,
+        preActionUnclaimedYRaw: bpos?.feeYRaw ?? null,
         postActionUnclaimedXRaw: apos?.feeXRaw ?? null,
         postActionUnclaimedYRaw: apos?.feeYRaw ?? null,
         counterIncreaseXRaw: positionComparable
-          ? positiveBigintDelta(apos!.feeXRaw, bpos.feeXRaw)
+          ? positiveBigintDelta(apos!.feeXRaw, bpos!.feeXRaw)
           : null,
         counterIncreaseYRaw: positionComparable
-          ? positiveBigintDelta(apos!.feeYRaw, bpos.feeYRaw)
+          ? positiveBigintDelta(apos!.feeYRaw, bpos!.feeYRaw)
           : null,
         counterDecreaseXRaw: positionComparable
-          ? negativeBigintDeltaMagnitude(apos!.feeXRaw, bpos.feeXRaw)
+          ? negativeBigintDeltaMagnitude(apos!.feeXRaw, bpos!.feeXRaw)
           : null,
         counterDecreaseYRaw: positionComparable
-          ? negativeBigintDeltaMagnitude(apos!.feeYRaw, bpos.feeYRaw)
+          ? negativeBigintDeltaMagnitude(apos!.feeYRaw, bpos!.feeYRaw)
           : null,
       },
       positionRent: {
-        beforeLamports: bpos.accountLamports,
+        beforeLamports: bpos?.accountLamports ?? null,
         afterLamports: apos?.accountLamports ?? null,
         lockedLamports: positionComparable
-          ? positiveBigintDelta(apos!.accountLamports, bpos.accountLamports)
+          ? positiveBigintDelta(apos!.accountLamports, bpos!.accountLamports)
           : null,
         returnedLamports: positionComparable
           ? negativeBigintDeltaMagnitude(
               apos!.accountLamports,
-              bpos.accountLamports,
+              bpos!.accountLamports,
             )
           : null,
       },
+      swap: isSwap
+        ? {
+            inputMint,
+            outputMint,
+            requestedInputRaw:
+              prepared.kind === "swap-exact-in"
+                ? integerString(prepared.metadata?.inAmountRaw, "0")
+                : integerString(prepared.metadata?.maxInAmountRaw, "0"),
+            quotedOutputRaw: integerString(
+              prepared.metadata?.outAmountRaw,
+              "0",
+            ),
+            actualInputDebitedRaw: debitMagnitude(inputDelta),
+            actualOutputCreditedRaw: positiveCredit(outputDelta),
+          }
+        : null,
       networkFeeLamports: network.lamports,
       infrastructure,
       warnings,
     };
   }
 
-  async executePrepared(
+  private verificationAttempts(options: MeteoraPositionVerificationOptions): {
+    attempts: number;
+    retryDelayMs: number;
+    commitment: Commitment;
+  } {
+    return {
+      attempts: Math.max(1, Math.min(10, Math.trunc(options.attempts ?? 4))),
+      retryDelayMs: Math.max(
+        0,
+        Math.min(5_000, Math.trunc(options.retryDelayMs ?? 400)),
+      ),
+      commitment: options.commitment ?? "confirmed",
+    };
+  }
+
+  private async verificationDelay(ms: number): Promise<void> {
+    if (ms <= 0) return;
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private verificationExpectedOwner(wallet?: WalletRef): string | null {
+    return wallet == null ? null : this.resolveWalletAddress(wallet);
+  }
+
+  private notApplicableVerification(
+    prepared: MeteoraPreparedTransactions,
+  ): MeteoraPositionVerification {
+    return {
+      kind: "not-applicable",
+      ok: true,
+      checkedAt: Date.now(),
+      attempts: 0,
+      pool: prepared.pool,
+      position: prepared.position ?? null,
+      expected: { owner: null, minBinId: null, maxBinId: null },
+      actual: null,
+      checks: {
+        accountExists: null,
+        accountClosed: null,
+        poolMatches: null,
+        ownerMatches: null,
+        rangeMatches: null,
+        absentFromWalletPool: null,
+      },
+      errors: [],
+      warnings: [
+        `No standardized position-state verification is defined for Meteora ${prepared.kind}`,
+      ],
+    };
+  }
+
+  private async verifyPositionPresentInternal(
+    args: MeteoraVerifyPositionArgs,
+    kind: "position-open" | "position-present",
+  ): Promise<MeteoraPositionVerification> {
+    const poolAddress = asPublicKey(args.pool).toBase58();
+    const positionAddress = asPublicKey(args.position).toBase58();
+    const positionKey = asPublicKey(positionAddress);
+    const expectedOwner = this.verificationExpectedOwner(args.wallet);
+    const minBinId = numberOrNull(args.minBinId);
+    const maxBinId = numberOrNull(args.maxBinId);
+    if ((minBinId == null) !== (maxBinId == null)) {
+      throw new Error(
+        "Meteora verification requires both minBinId and maxBinId when checking a range",
+      );
+    }
+    if (minBinId != null && maxBinId != null && minBinId > maxBinId) {
+      throw new Error("Meteora verification minBinId cannot exceed maxBinId");
+    }
+
+    const policy = this.verificationAttempts(args);
+    let last: MeteoraPositionVerification | null = null;
+
+    for (let attempt = 1; attempt <= policy.attempts; attempt += 1) {
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      let accountExists: boolean | null = null;
+      let actual: MeteoraPositionSnapshot | null = null;
+      try {
+        const info = await this.host
+          .connection()
+          .getAccountInfo(positionKey, policy.commitment);
+        accountExists = info != null;
+        if (!accountExists) errors.push("position account does not exist");
+      } catch (error) {
+        warnings.push(
+          `position-account-read-unavailable:${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      if (accountExists !== false) {
+        try {
+          const pool = await this.rawPool(poolAddress, true);
+          const raw = await pool.getPosition(positionKey);
+          const info = {
+            lbPair: pool.lbPair,
+            tokenX: pool.tokenX,
+            tokenY: pool.tokenY,
+          };
+          actual = this.normalizePosition(pool.pubkey.toBase58(), info, raw);
+        } catch (error) {
+          errors.push(
+            `position-not-readable-in-pool:${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      const poolMatches = actual ? actual.pool === poolAddress : null;
+      const ownerMatches =
+        expectedOwner == null
+          ? null
+          : actual
+            ? actual.owner === expectedOwner
+            : null;
+      const rangeMatches =
+        minBinId == null || maxBinId == null
+          ? null
+          : actual
+            ? actual.lowerBin === minBinId && actual.upperBin === maxBinId
+            : null;
+
+      if (poolMatches === false)
+        errors.push("position pool does not match expectation");
+      if (ownerMatches === false)
+        errors.push("position owner does not match expectation");
+      if (rangeMatches === false) {
+        errors.push(
+          `position range does not match expectation: expected ${minBinId}..${maxBinId}, got ${actual?.lowerBin ?? "?"}..${actual?.upperBin ?? "?"}`,
+        );
+      }
+
+      const ok =
+        accountExists === true &&
+        actual != null &&
+        poolMatches === true &&
+        ownerMatches !== false &&
+        rangeMatches !== false;
+
+      last = {
+        kind,
+        ok,
+        checkedAt: Date.now(),
+        attempts: attempt,
+        pool: poolAddress,
+        position: positionAddress,
+        expected: { owner: expectedOwner, minBinId, maxBinId },
+        actual,
+        checks: {
+          accountExists,
+          accountClosed: accountExists == null ? null : !accountExists,
+          poolMatches,
+          ownerMatches,
+          rangeMatches,
+          absentFromWalletPool: null,
+        },
+        errors,
+        warnings,
+      };
+      if (ok) return last;
+      if (attempt < policy.attempts)
+        await this.verificationDelay(policy.retryDelayMs);
+    }
+
+    return last!;
+  }
+
+  async verifyPositionOpen(
+    args: MeteoraVerifyPositionArgs,
+  ): Promise<MeteoraPositionVerification> {
+    return await this.verifyPositionPresentInternal(args, "position-open");
+  }
+
+  async verifyPositionRange(
+    args: MeteoraVerifyPositionArgs & { minBinId: number; maxBinId: number },
+  ): Promise<MeteoraPositionVerification> {
+    return await this.verifyPositionPresentInternal(args, "position-open");
+  }
+
+  async verifyPositionPresent(
+    args: MeteoraVerifyPositionArgs,
+  ): Promise<MeteoraPositionVerification> {
+    return await this.verifyPositionPresentInternal(args, "position-present");
+  }
+
+  async verifyPositionClosed(
+    args: Omit<MeteoraVerifyPositionArgs, "minBinId" | "maxBinId">,
+  ): Promise<MeteoraPositionVerification> {
+    const poolAddress = asPublicKey(args.pool).toBase58();
+    const positionAddress = asPublicKey(args.position).toBase58();
+    const positionKey = asPublicKey(positionAddress);
+    const expectedOwner = this.verificationExpectedOwner(args.wallet);
+    const policy = this.verificationAttempts(args);
+    let last: MeteoraPositionVerification | null = null;
+
+    for (let attempt = 1; attempt <= policy.attempts; attempt += 1) {
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      let accountExists: boolean | null = null;
+      let actual: MeteoraPositionSnapshot | null = null;
+      let absentFromWalletPool: boolean | null = null;
+
+      try {
+        const info = await this.host
+          .connection()
+          .getAccountInfo(positionKey, policy.commitment);
+        accountExists = info != null;
+      } catch (error) {
+        warnings.push(
+          `position-account-read-unavailable:${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      if (accountExists === true) {
+        try {
+          const pool = await this.rawPool(poolAddress, true);
+          const raw = await pool.getPosition(positionKey);
+          const info = {
+            lbPair: pool.lbPair,
+            tokenX: pool.tokenX,
+            tokenY: pool.tokenY,
+          };
+          actual = this.normalizePosition(pool.pubkey.toBase58(), info, raw);
+        } catch (error) {
+          warnings.push(
+            `position-present-but-not-readable:${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      if (args.wallet != null) {
+        try {
+          const walletAddress = this.resolveWalletAddress(args.wallet);
+          const positions = await this.getPoolPositions(
+            poolAddress,
+            walletAddress,
+          );
+          absentFromWalletPool = !positions.some(
+            (position) => position.position === positionAddress,
+          );
+        } catch (error) {
+          warnings.push(
+            `wallet-pool-position-read-unavailable:${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      const accountClosed = accountExists == null ? null : !accountExists;
+      const poolMatches = actual ? actual.pool === poolAddress : null;
+      const ownerMatches =
+        expectedOwner == null
+          ? null
+          : actual
+            ? actual.owner === expectedOwner
+            : null;
+      const ok = accountClosed === true;
+      if (!ok && accountExists === true)
+        errors.push("position account still exists");
+      if (absentFromWalletPool === false) {
+        if (accountClosed === true)
+          warnings.push(
+            "position-account-is-closed-but-wallet-pool-read-still-lists-it",
+          );
+        else errors.push("position still appears in wallet pool positions");
+      }
+
+      last = {
+        kind: "position-closed",
+        ok,
+        checkedAt: Date.now(),
+        attempts: attempt,
+        pool: poolAddress,
+        position: positionAddress,
+        expected: { owner: expectedOwner, minBinId: null, maxBinId: null },
+        actual,
+        checks: {
+          accountExists,
+          accountClosed,
+          poolMatches,
+          ownerMatches,
+          rangeMatches: null,
+          absentFromWalletPool,
+        },
+        errors,
+        warnings,
+      };
+      if (ok) return last;
+      if (attempt < policy.attempts)
+        await this.verificationDelay(policy.retryDelayMs);
+    }
+
+    return last!;
+  }
+
+  private async verifyPreparedOutcome(
+    prepared: MeteoraPreparedTransactions,
+    options: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraPositionVerification> {
+    if (!prepared.position) return this.notApplicableVerification(prepared);
+
+    const base = {
+      pool: prepared.pool,
+      position: prepared.position,
+      wallet: prepared.wallet,
+      ...options,
+    };
+    if (prepared.kind === "close-position") {
+      return await this.verifyPositionClosed(base);
+    }
+
+    const minBinId = numberOrNull(prepared.metadata?.minBinId);
+    const maxBinId = numberOrNull(prepared.metadata?.maxBinId);
+    if (
+      (prepared.kind === "open-position" ||
+        prepared.kind === "add-liquidity") &&
+      minBinId != null &&
+      maxBinId != null
+    ) {
+      return await this.verifyPositionRange({
+        ...base,
+        minBinId,
+        maxBinId,
+      });
+    }
+
+    if (
+      prepared.kind === "open-position" ||
+      prepared.kind === "add-liquidity" ||
+      prepared.kind === "remove-liquidity" ||
+      prepared.kind === "claim-fees" ||
+      prepared.kind === "claim-rewards" ||
+      prepared.kind === "claim-position-rewards"
+    ) {
+      return await this.verifyPositionPresent(base);
+    }
+
+    return this.notApplicableVerification(prepared);
+  }
+
+  private async executePreparedAndVerifyUnlocked(
+    prepared: MeteoraPreparedTransactions,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    try {
+      const result = await this.executePreparedUnlocked(prepared, options);
+      const verification = await this.verifyPreparedOutcome(
+        prepared,
+        verificationOptions,
+      );
+      const verifiedResult = { ...result, verification };
+      if (!verification.ok) {
+        throw new MeteoraVerificationError(
+          `Meteora ${prepared.kind} transaction(s) confirmed but intended on-chain state could not be verified: ${verification.errors.join("; ") || "verification failed"}`,
+          verifiedResult,
+        );
+      }
+      return verifiedResult;
+    } catch (error) {
+      if (error instanceof MeteoraPartialExecutionError) {
+        let verification: MeteoraPositionVerification;
+        try {
+          verification = await this.verifyPreparedOutcome(
+            prepared,
+            verificationOptions,
+          );
+        } catch (verifyError) {
+          verification = {
+            kind: prepared.position ? "position-present" : "not-applicable",
+            ok: false,
+            checkedAt: Date.now(),
+            attempts: 0,
+            pool: prepared.pool,
+            position: prepared.position ?? null,
+            expected: { owner: null, minBinId: null, maxBinId: null },
+            actual: null,
+            checks: {
+              accountExists: null,
+              accountClosed: null,
+              poolMatches: null,
+              ownerMatches: null,
+              rangeMatches: null,
+              absentFromWalletPool: null,
+            },
+            errors: [
+              `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
+            ],
+            warnings: [],
+          };
+        }
+        const enriched = { ...error.result, verification };
+        throw new MeteoraPartialExecutionError(
+          error.message,
+          enriched,
+          error.cause,
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async executePreparedUnlocked(
     prepared: MeteoraPreparedTransactions,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
@@ -3588,8 +4807,9 @@ export class MeteoraDlmmService {
     ) {
       const preflight = prepared.infrastructurePreflight;
       if (!preflight?.checked) {
-        throw new Error(
+        throw new MeteoraError(
           `Meteora ${prepared.kind} execution refused: prepared liquidity transaction lacks Solard infrastructure preflight attestation. Rebuild it with the current Solard SDK before execution.`,
+          "SDK_INCOMPATIBLE",
         );
       }
       this.assertInfrastructurePolicy(preflight.quote, {
@@ -3601,7 +4821,10 @@ export class MeteoraDlmmService {
       });
     }
     if (prepared.transactions.length === 0) {
-      throw new Error(`Meteora ${prepared.kind} produced no transactions`);
+      throw new MeteoraError(
+        `Meteora ${prepared.kind} produced no transactions`,
+        "SDK_INCOMPATIBLE",
+      );
     }
 
     const connection = this.host.connection();
@@ -3611,7 +4834,7 @@ export class MeteoraDlmmService {
     const signatures: string[] = [];
     // Position-mutating writes are snapshotted before any transaction is sent.
     // If this pre-write accounting read fails, fail closed: no transaction has landed yet.
-    const accountingBefore = accountingPositionKind(prepared.kind)
+    const accountingBefore = accountingSupportedKind(prepared.kind)
       ? await this.captureExecutionAccountingBefore(prepared, commitment)
       : null;
 
@@ -3640,10 +4863,16 @@ export class MeteoraDlmmService {
                 sigVerify: false,
               });
           if (simulation.value.err) {
-            throw new Error(
+            throw new MeteoraError(
               `Meteora ${prepared.kind} simulation failed: ${JSON.stringify(
                 simulation.value.err,
               )}\n${simulation.value.logs?.join("\n") ?? ""}`,
+              "SIMULATION_FAILED",
+              {
+                error: simulation.value.err,
+                logs: simulation.value.logs ?? [],
+              },
+              false,
             );
           }
         }
@@ -3669,8 +4898,14 @@ export class MeteoraDlmmService {
             if (landed) {
               signature = expectedSignature;
             } else {
-              throw new Error(
+              throw new MeteoraError(
                 `Meteora ${prepared.kind} send response was lost and transaction ${expectedSignature} could not be confirmed on-chain: ${error instanceof Error ? error.message : String(error)}`,
+                "TRANSACTION_FAILED",
+                {
+                  expectedSignature,
+                  cause: error instanceof Error ? error.message : String(error),
+                },
+                true,
               );
             }
           } else {
@@ -3686,8 +4921,11 @@ export class MeteoraDlmmService {
             commitment,
           );
           if (confirmation.value.err) {
-            throw new Error(
+            throw new MeteoraError(
               `Meteora ${prepared.kind} transaction ${signature} failed on-chain: ${JSON.stringify(confirmation.value.err)}`,
+              "TRANSACTION_FAILED",
+              { signature, error: confirmation.value.err },
+              false,
             );
           }
         } catch (error) {
@@ -3698,8 +4936,14 @@ export class MeteoraDlmmService {
             commitment,
           );
           if (!landed) {
-            throw new Error(
+            throw new MeteoraError(
               `Meteora ${prepared.kind} transaction ${signature} was submitted but confirmation remained uncertain after a transport error: ${error instanceof Error ? error.message : String(error)}`,
+              "TRANSACTION_FAILED",
+              {
+                signature,
+                cause: error instanceof Error ? error.message : String(error),
+              },
+              true,
             );
           }
         }
@@ -3749,12 +4993,340 @@ export class MeteoraDlmmService {
     };
   }
 
+  private async buildAndExecuteLocked(
+    wallet: WalletRef,
+    build: () => Promise<MeteoraPreparedTransactions>,
+    options: MeteoraExecutionOptions,
+  ): Promise<MeteoraExecutionResult> {
+    return await this.withWalletWriteLock(
+      wallet,
+      async () => await this.executePreparedUnlocked(await build(), options),
+    );
+  }
+
+  private async buildExecuteVerifyLocked(
+    wallet: WalletRef,
+    build: () => Promise<MeteoraPreparedTransactions>,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions,
+  ): Promise<MeteoraExecutionResult> {
+    return await this.withWalletWriteLock(
+      wallet,
+      async () =>
+        await this.executePreparedAndVerifyUnlocked(
+          await build(),
+          options,
+          verificationOptions,
+        ),
+    );
+  }
+
+  async executePrepared(
+    prepared: MeteoraPreparedTransactions,
+    options: MeteoraExecutionOptions,
+  ): Promise<MeteoraExecutionResult> {
+    return await this.withWalletWriteLock(
+      prepared.wallet,
+      async () => await this.executePreparedUnlocked(prepared, options),
+    );
+  }
+
+  async executePreparedAndVerify(
+    prepared: MeteoraPreparedTransactions,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.withWalletWriteLock(
+      prepared.wallet,
+      async () =>
+        await this.executePreparedAndVerifyUnlocked(
+          prepared,
+          options,
+          verificationOptions,
+        ),
+    );
+  }
+
+  /**
+   * Close one exact source position and reopen a replacement using only the X/Y
+   * inventory attributable to that close. No swap is performed, native SOL is
+   * never treated as WSOL principal, and fresh wallet token balances are never
+   * added to the replacement principal.
+   *
+   * The close deliberately uses skipUnwrapSol=true so recovered WSOL is observed
+   * as an SPL-token delta. This keeps refundable native position rent completely
+   * outside principal attribution.
+   */
+  async movePositionFromSource(
+    args: MeteoraMovePositionArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraMovePositionResult> {
+    return await this.withWalletWriteLock(args.wallet, async () => {
+      const walletAddress = this.resolveWalletAddress(args.wallet);
+      const commitment: Commitment = options.commitment ?? "confirmed";
+      const source = await this.getPosition(args.pool, args.position);
+      if (
+        !source.position ||
+        source.position !== asPublicKey(args.position).toBase58()
+      ) {
+        throw new Error(
+          `Meteora source position ${args.position} could not be resolved exactly`,
+        );
+      }
+      if (source.pool !== asPublicKey(args.pool).toBase58()) {
+        throw new Error(
+          `Meteora source position ${args.position} belongs to pool ${source.pool}, not ${args.pool}`,
+        );
+      }
+      if (source.owner !== walletAddress) {
+        throw new Error(
+          `Meteora source position ${args.position} owner mismatch: expected ${walletAddress}, received ${source.owner ?? "unknown"}`,
+        );
+      }
+
+      const sourceAttributableX =
+        bigintOrZero(source.totalXRaw) + bigintOrZero(source.feeXRaw);
+      const sourceAttributableY =
+        bigintOrZero(source.totalYRaw) + bigintOrZero(source.feeYRaw);
+      const beforeCloseWallet = await this.walletAccountingSnapshot(
+        walletAddress,
+        source.tokenX.mint,
+        source.tokenY.mint,
+        commitment,
+      );
+
+      let closeResult: MeteoraExecutionResult;
+      try {
+        const closePrepared = await this.buildRemoveLiquidity({
+          wallet: args.wallet,
+          pool: args.pool,
+          position: args.position,
+          bps: 10_000,
+          claimAndClose: true,
+          skipUnwrapSol: true,
+        });
+        closeResult = await this.executePreparedAndVerifyUnlocked(
+          closePrepared,
+          options,
+          verificationOptions,
+        );
+      } catch (cause) {
+        throw new MeteoraMovePositionError({
+          message: `Meteora source-only move failed while closing ${args.position}: ${cause instanceof Error ? cause.message : String(cause)}`,
+          stage: "close",
+          sourcePosition: args.position,
+          cause,
+        });
+      }
+
+      const afterCloseWallet = await this.walletAccountingSnapshot(
+        walletAddress,
+        source.tokenX.mint,
+        source.tokenY.mint,
+        commitment,
+      );
+      const positiveDelta = (afterRaw: string, beforeRaw: string): bigint => {
+        const delta = bigintOrZero(afterRaw) - bigintOrZero(beforeRaw);
+        return delta > 0n ? delta : 0n;
+      };
+      const observedRecoveredX = positiveDelta(
+        afterCloseWallet.tokenXRaw,
+        beforeCloseWallet.tokenXRaw,
+      );
+      const observedRecoveredY = positiveDelta(
+        afterCloseWallet.tokenYRaw,
+        beforeCloseWallet.tokenYRaw,
+      );
+      const eligibleX =
+        observedRecoveredX < sourceAttributableX
+          ? observedRecoveredX
+          : sourceAttributableX;
+      const eligibleY =
+        observedRecoveredY < sourceAttributableY
+          ? observedRecoveredY
+          : sourceAttributableY;
+
+      const attribution: MeteoraMoveCapitalAttribution = {
+        sourcePosition: source.position,
+        principalSource: "source-position-only",
+        sourceAttributableXRaw: sourceAttributableX.toString(),
+        sourceAttributableYRaw: sourceAttributableY.toString(),
+        observedRecoveredXRaw: observedRecoveredX.toString(),
+        observedRecoveredYRaw: observedRecoveredY.toString(),
+        eligibleReopenXRaw: eligibleX.toString(),
+        eligibleReopenYRaw: eligibleY.toString(),
+        reopenedXRaw: eligibleX.toString(),
+        reopenedYRaw: eligibleY.toString(),
+        freshWalletPrincipalXRaw: "0",
+        freshWalletPrincipalYRaw: "0",
+        nativeSolUsedAsPrincipal: false,
+        marketSwapPerformed: false,
+        closeUsedSkipUnwrapSol: true,
+      };
+
+      if (eligibleX === 0n && eligibleY === 0n) {
+        throw new MeteoraMovePositionError({
+          message: `Meteora source-only move closed ${args.position}, but no attributable SPL X/Y inventory was recovered for reopening`,
+          stage: "reopen",
+          sourcePosition: args.position,
+          closeResult,
+          attribution,
+        });
+      }
+
+      let openPrepared: MeteoraPreparedTransactions;
+      try {
+        openPrepared = await this.buildOpenPosition({
+          wallet: args.wallet,
+          pool: args.pool,
+          strategy: args.strategy,
+          amountXRaw: eligibleX.toString(),
+          amountYRaw: eligibleY.toString(),
+          minBinId: args.minBinId,
+          maxBinId: args.maxBinId,
+          binsBelow: args.binsBelow,
+          binsAbove: args.binsAbove,
+          downsidePct: args.downsidePct,
+          upsidePct: args.upsidePct,
+          slippageBps: args.slippageBps,
+          infrastructure: args.infrastructure,
+        });
+        const openResult = await this.executePreparedAndVerifyUnlocked(
+          openPrepared,
+          options,
+          verificationOptions,
+        );
+        const targetPosition = openResult.position ?? openPrepared.position;
+        if (!targetPosition) {
+          throw new Error("replacement open returned no position address");
+        }
+        return {
+          version: 1,
+          wallet: walletAddress,
+          pool: asPublicKey(args.pool).toBase58(),
+          sourcePosition: source.position,
+          targetPosition,
+          sourceSnapshot: source,
+          attribution,
+          close: closeResult,
+          open: openResult,
+        };
+      } catch (cause) {
+        throw new MeteoraMovePositionError({
+          message: `Meteora source-only move closed ${args.position} but replacement open failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          stage: "reopen",
+          sourcePosition: args.position,
+          closeResult,
+          attribution,
+          cause,
+        });
+      }
+    });
+  }
+
+  async openPositionVerifiedRegistered(
+    args: MeteoraOpenPositionArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+    onPreparedPosition?: (position: string) => void,
+  ): Promise<MeteoraExecutionResult> {
+    return await this.withWalletWriteLock(args.wallet, async () => {
+      const prepared = await this.buildOpenPosition(args);
+      if (prepared.position) onPreparedPosition?.(prepared.position);
+      return await this.executePreparedAndVerifyUnlocked(
+        prepared,
+        options,
+        verificationOptions,
+      );
+    });
+  }
+
+  async openPositionVerified(
+    args: MeteoraOpenPositionArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildExecuteVerifyLocked(
+      args.wallet,
+      () => this.buildOpenPosition(args),
+      options,
+      verificationOptions,
+    );
+  }
+
+  async addLiquidityVerified(
+    args: MeteoraAddLiquidityArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildExecuteVerifyLocked(
+      args.wallet,
+      () => this.buildAddLiquidity(args),
+      options,
+      verificationOptions,
+    );
+  }
+
+  async removeLiquidityVerified(
+    args: MeteoraRemoveLiquidityArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildExecuteVerifyLocked(
+      args.wallet,
+      () => this.buildRemoveLiquidity(args),
+      options,
+      verificationOptions,
+    );
+  }
+
+  async closePositionVerified(
+    args: MeteoraPositionActionArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildExecuteVerifyLocked(
+      args.wallet,
+      () => this.buildClosePosition(args),
+      options,
+      verificationOptions,
+    );
+  }
+
+  async swapExactInVerified(
+    args: MeteoraSwapExactInArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildExecuteVerifyLocked(
+      args.wallet,
+      () => this.buildSwapExactIn(args),
+      options,
+      verificationOptions,
+    );
+  }
+
+  async swapExactOutVerified(
+    args: MeteoraSwapExactOutArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildExecuteVerifyLocked(
+      args.wallet,
+      () => this.buildSwapExactOut(args),
+      options,
+      verificationOptions,
+    );
+  }
+
   async openPosition(
     args: MeteoraOpenPositionArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildOpenPosition(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildOpenPosition(args),
       options,
     );
   }
@@ -3771,8 +5343,9 @@ export class MeteoraDlmmService {
     args: MeteoraAddLiquidityArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildAddLiquidity(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildAddLiquidity(args),
       options,
     );
   }
@@ -3781,8 +5354,9 @@ export class MeteoraDlmmService {
     args: MeteoraRemoveLiquidityArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildRemoveLiquidity(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildRemoveLiquidity(args),
       options,
     );
   }
@@ -3791,15 +5365,20 @@ export class MeteoraDlmmService {
     args: MeteoraPositionActionArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(await this.buildClaimFees(args), options);
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildClaimFees(args),
+      options,
+    );
   }
 
   async claimRewards(
     args: MeteoraPositionActionArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildClaimRewards(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildClaimRewards(args),
       options,
     );
   }
@@ -3808,8 +5387,9 @@ export class MeteoraDlmmService {
     args: MeteoraPositionActionArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildClaimPositionRewards(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildClaimPositionRewards(args),
       options,
     );
   }
@@ -3818,8 +5398,9 @@ export class MeteoraDlmmService {
     args: { wallet: WalletRef; pool: string },
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildClaimAllFees(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildClaimAllFees(args),
       options,
     );
   }
@@ -3828,8 +5409,9 @@ export class MeteoraDlmmService {
     args: { wallet: WalletRef; pool: string },
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildClaimAllLmRewards(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildClaimAllLmRewards(args),
       options,
     );
   }
@@ -3838,8 +5420,9 @@ export class MeteoraDlmmService {
     args: { wallet: WalletRef; pool: string },
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildClaimAllRewards(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildClaimAllRewards(args),
       options,
     );
   }
@@ -3848,8 +5431,9 @@ export class MeteoraDlmmService {
     args: MeteoraPositionActionArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildClosePosition(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildClosePosition(args),
       options,
     );
   }
@@ -3858,8 +5442,9 @@ export class MeteoraDlmmService {
     args: MeteoraSwapExactInArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildSwapExactIn(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildSwapExactIn(args),
       options,
     );
   }
@@ -3868,9 +5453,114 @@ export class MeteoraDlmmService {
     args: MeteoraSwapExactOutArgs,
     options: MeteoraExecutionOptions,
   ): Promise<MeteoraExecutionResult> {
-    return await this.executePrepared(
-      await this.buildSwapExactOut(args),
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildSwapExactOut(args),
       options,
     );
+  }
+}
+
+export class MeteoraManagedPositionScope {
+  private readonly managed = new Set<string>();
+
+  constructor(
+    private readonly service: MeteoraDlmmService,
+    readonly wallet: WalletRef,
+    readonly pool: string,
+  ) {}
+
+  positionIds(): string[] {
+    return [...this.managed];
+  }
+
+  has(position: string): boolean {
+    return this.managed.has(asPublicKey(position).toBase58());
+  }
+
+  async openVerified(
+    args: Omit<MeteoraOpenPositionArgs, "wallet" | "pool">,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    try {
+      const result = await this.service.openPositionVerifiedRegistered(
+        { ...args, wallet: this.wallet, pool: this.pool },
+        options,
+        verificationOptions,
+        (position) => this.managed.add(asPublicKey(position).toBase58()),
+      );
+      if (result.position)
+        this.managed.add(asPublicKey(result.position).toBase58());
+      return result;
+    } catch (error) {
+      if (
+        error instanceof MeteoraPartialExecutionError ||
+        error instanceof MeteoraVerificationError
+      ) {
+        const position = error.result.position;
+        if (position) this.managed.add(asPublicKey(position).toBase58());
+      }
+      throw error;
+    }
+  }
+
+  async closeVerified(
+    position: string,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    const normalized = asPublicKey(position).toBase58();
+    if (!this.managed.has(normalized)) {
+      throw new MeteoraError(
+        `Meteora managed scope refuses to close unregistered position ${normalized}`,
+        "INVALID_ARGUMENT",
+        { pool: this.pool, position: normalized },
+      );
+    }
+    const result = await this.service.closePositionVerified(
+      { wallet: this.wallet, pool: this.pool, position: normalized },
+      options,
+      verificationOptions,
+    );
+    if (result.verification?.ok) this.managed.delete(normalized);
+    return result;
+  }
+
+  async closeAllVerified(
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<{
+    closed: MeteoraExecutionResult[];
+    failures: Array<{
+      position: string;
+      code: MeteoraErrorCode | null;
+      message: string;
+      error: unknown;
+    }>;
+    remaining: string[];
+  }> {
+    const closed: MeteoraExecutionResult[] = [];
+    const failures: Array<{
+      position: string;
+      code: MeteoraErrorCode | null;
+      message: string;
+      error: unknown;
+    }> = [];
+    for (const position of [...this.managed]) {
+      try {
+        closed.push(
+          await this.closeVerified(position, options, verificationOptions),
+        );
+      } catch (error) {
+        failures.push({
+          position,
+          code: meteoraErrorCode(error),
+          message: error instanceof Error ? error.message : String(error),
+          error,
+        });
+      }
+    }
+    return { closed, failures, remaining: this.positionIds() };
   }
 }
