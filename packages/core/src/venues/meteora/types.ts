@@ -39,6 +39,8 @@ export type MeteoraErrorCode =
   | "INVALID_ARGUMENT"
   | "SDK_INCOMPATIBLE"
   | "DATA_API_ERROR"
+  | "LIMIT_ORDER_UNSUPPORTED"
+  | "LIMIT_ORDER_NOT_FOUND"
   | "UNKNOWN";
 
 export type MeteoraRange = {
@@ -303,6 +305,7 @@ export type MeteoraInfrastructureFundingPolicy = {
 };
 
 export type MeteoraInfrastructureQuote = {
+  kind?: "position";
   pool: string;
   minBinId: number;
   maxBinId: number;
@@ -320,15 +323,138 @@ export type MeteoraInfrastructureQuote = {
   raw: Record<string, unknown>;
 };
 
+export type MeteoraLimitOrderSide = "ask" | "bid";
+
+export type MeteoraLimitOrderBinInput = {
+  binId: number;
+  amountRaw: MeteoraInteger;
+};
+
+export type MeteoraLimitOrderInfrastructureQuote = {
+  kind: "limit-order";
+  pool: string;
+  binIds: number[];
+  minBinId: number;
+  maxBinId: number;
+  binArrayCount: number | null;
+  binArrayCostLamports: string;
+  bitmapExtensionCostLamports: string;
+  nonRefundableInfrastructureLamports: string;
+  /** Recoverable rent for the limit-order account itself. */
+  limitOrderRentLamports: string;
+  requiresBinArrayInit: boolean;
+  requiresBitmapExtensionInit: boolean;
+  requiresNonRefundableInfrastructure: boolean;
+  raw: Record<string, unknown>;
+};
+
+export type MeteoraSharedInfrastructureQuote =
+  MeteoraInfrastructureQuote | MeteoraLimitOrderInfrastructureQuote;
+
 export type MeteoraInfrastructurePreflight = {
   checked: true;
-  quote: MeteoraInfrastructureQuote;
+  quote: MeteoraSharedInfrastructureQuote;
   authorization: {
     allowBinArrayInit: boolean;
     allowBitmapExtensionInit: boolean;
     maxNonRefundableLamports: string | null;
   };
 };
+
+export type MeteoraPlaceLimitOrderArgs = {
+  wallet: WalletRef;
+  pool: string;
+  side: MeteoraLimitOrderSide;
+  bins: MeteoraLimitOrderBinInput[];
+  infrastructure?: MeteoraInfrastructureFundingPolicy;
+};
+
+export type MeteoraCancelLimitOrderArgs = {
+  wallet: WalletRef;
+  pool: string;
+  limitOrder: string;
+  /** Omit to cancel every currently non-empty bin. */
+  binIds?: number[];
+  /** Defaults to the owner wallet. */
+  rentReceiver?: string;
+};
+
+export type MeteoraLimitOrderPreflight = {
+  version: 1;
+  observedAt: number;
+  wallet: string;
+  pool: string;
+  side: MeteoraLimitOrderSide;
+  inputMint: string;
+  inputBalanceRaw: string;
+  totalInputRaw: string;
+  binIds: number[];
+  maxBinsPerOrder: number;
+  quote: MeteoraLimitOrderInfrastructureQuote;
+  sharedInfrastructureAuthorized: boolean;
+  safeWithoutSharedInfrastructureFunding: boolean;
+  inputFundingSufficient: boolean;
+  availableNativeLamports: string;
+  requiredNativeLamportsBeforeNetworkFee: string;
+  executable: boolean;
+  safeToExecuteBeforeNetworkFee: boolean;
+  estimatedNetworkFeeLamports: null;
+  warnings: string[];
+};
+
+export type MeteoraLimitOrderStatus =
+  "not-filled" | "partial-filled" | "fulfilled" | "unknown";
+
+export type MeteoraLimitOrderBinSnapshot = {
+  binId: number;
+  empty: boolean;
+  status: MeteoraLimitOrderStatus;
+  raw: Record<string, unknown>;
+};
+
+export type MeteoraLimitOrderSnapshot = {
+  version: 1;
+  observedAt: number;
+  pool: string;
+  limitOrder: string;
+  exists: boolean;
+  owner: string | null;
+  side: MeteoraLimitOrderSide | null;
+  tokenX: MeteoraPoolToken;
+  tokenY: MeteoraPoolToken;
+  bins: MeteoraLimitOrderBinSnapshot[];
+  openBinIds: number[];
+  raw: Record<string, unknown> | null;
+};
+
+export type MeteoraLimitOrderVerificationChecks = {
+  accountExists: boolean | null;
+  accountClosed: boolean | null;
+  ownerMatches: boolean | null;
+  binsMatch: boolean | null;
+  requestedBinsCancelled: boolean | null;
+};
+
+export type MeteoraLimitOrderVerification = {
+  kind: "limit-order-placed" | "limit-order-cancelled";
+  ok: boolean;
+  checkedAt: number;
+  attempts: number;
+  pool: string;
+  limitOrder: string;
+  expected: {
+    owner: string | null;
+    binIds: number[];
+    closed: boolean | null;
+  };
+  actual: MeteoraLimitOrderSnapshot | null;
+  checks: MeteoraLimitOrderVerificationChecks;
+  errors: string[];
+  warnings: string[];
+};
+
+export type MeteoraExecutionVerification =
+  MeteoraPositionVerification | MeteoraLimitOrderVerification;
 
 export type MeteoraOhlcvArgs = {
   timeframe?: MeteoraTimeframe;
@@ -700,7 +826,7 @@ export type MeteoraExecutionAccounting = {
     lockedLamports: string | null;
     returnedLamports: string | null;
   };
-  /** Present for swap operations; null for liquidity/claim actions. */
+  /** Present for swap operations; null for liquidity/claim/limit-order actions. */
   swap: {
     inputMint: string;
     outputMint: string;
@@ -708,6 +834,20 @@ export type MeteoraExecutionAccounting = {
     quotedOutputRaw: string | null;
     actualInputDebitedRaw: string | null;
     actualOutputCreditedRaw: string | null;
+  } | null;
+  /** Present for native Meteora limit-order placement/cancellation. */
+  limitOrder: {
+    address: string;
+    side: MeteoraLimitOrderSide | null;
+    inputMint: string | null;
+    requestedInputRaw: string | null;
+    actualInputDebitedRaw: string | null;
+    returnedXRaw: string | null;
+    returnedYRaw: string | null;
+    beforeAccountLamports: string | null;
+    afterAccountLamports: string | null;
+    rentLockedLamports: string | null;
+    rentReturnedLamports: string | null;
   } | null;
   networkFeeLamports: string | null;
   infrastructure: {
@@ -750,13 +890,17 @@ export type MeteoraPreparedTransactions = {
     | "claim-all-lm-rewards"
     | "claim-all-rewards"
     | "swap-exact-in"
-    | "swap-exact-out";
+    | "swap-exact-out"
+    | "place-limit-order"
+    | "cancel-limit-order"
+    | "close-limit-order";
   wallet: WalletRef;
   pool: string;
   transactions: MeteoraTransaction[];
   extraSigners: Keypair[];
   position?: string;
-  /** Required attestation for open/add-liquidity prepared by Solard. */
+  limitOrder?: string;
+  /** Required attestation for open/add-liquidity/place-limit-order prepared by Solard. */
   infrastructurePreflight?: MeteoraInfrastructurePreflight;
   metadata?: Record<string, unknown>;
 };
@@ -810,11 +954,12 @@ export type MeteoraExecutionResult = {
   kind: MeteoraPreparedTransactions["kind"];
   pool: string;
   position?: string;
+  limitOrder?: string;
   signatures: string[];
   /** Present for position-mutating writes prepared/executed by the current SDK. */
   accounting?: MeteoraExecutionAccounting;
   /** Present when executePreparedAndVerify() or a verified convenience method is used. */
-  verification?: MeteoraPositionVerification;
+  verification?: MeteoraExecutionVerification;
 };
 
 export type MeteoraPoolToken = {

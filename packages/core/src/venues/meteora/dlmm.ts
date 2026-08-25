@@ -27,6 +27,15 @@ import type {
   MeteoraInfrastructureFundingPolicy,
   MeteoraInfrastructurePreflight,
   MeteoraInfrastructureQuote,
+  MeteoraSharedInfrastructureQuote,
+  MeteoraLimitOrderInfrastructureQuote,
+  MeteoraLimitOrderSide,
+  MeteoraLimitOrderSnapshot,
+  MeteoraLimitOrderVerification,
+  MeteoraExecutionVerification,
+  MeteoraPlaceLimitOrderArgs,
+  MeteoraCancelLimitOrderArgs,
+  MeteoraLimitOrderPreflight,
   MeteoraLiquidityDepthMetrics,
   MeteoraMicrostructureMetrics,
   MeteoraMoveCapitalAttribution,
@@ -475,6 +484,56 @@ function safeJsonValue(value: unknown, depth = 0): unknown {
   return String(value);
 }
 
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function boolOrNull(value: unknown): boolean | null {
+  return typeof value === "boolean"
+    ? value
+    : value == null
+      ? null
+      : Boolean(value);
+}
+
+function normalizeLimitOrderStatus(
+  value: unknown,
+): "not-filled" | "partial-filled" | "fulfilled" | "unknown" {
+  if (typeof value === "number") {
+    if (value === 0) return "not-filled";
+    if (value === 1) return "partial-filled";
+    if (value === 2) return "fulfilled";
+  }
+  const text = String(value ?? "")
+    .replace(/[\s_-]+/g, "")
+    .toLowerCase();
+  if (text === "notfilled" || text === "0") return "not-filled";
+  if (text === "partialfilled" || text === "1") return "partial-filled";
+  if (text === "fulfilled" || text === "2") return "fulfilled";
+  return "unknown";
+}
+
+function limitOrderBinId(row: Record<string, unknown>): number | null {
+  const candidate = firstFiniteValue(row.binId, row.id, row.bin_id);
+  return candidate != null && Number.isInteger(candidate) ? candidate : null;
+}
+
+function limitOrderBinEmpty(row: Record<string, unknown>): boolean {
+  if (typeof row.empty === "boolean") return row.empty;
+  const status = normalizeLimitOrderStatus(row.status);
+  if (status === "fulfilled") return true;
+  const amount = integerString(
+    row.amount ??
+      row.openOrderAmount ??
+      row.remainingAmount ??
+      row.remaining_amount,
+    "0",
+  );
+  return amount === "0" && status === "unknown";
+}
+
 export class MeteoraError extends Error {
   readonly code: MeteoraErrorCode;
   readonly details: unknown;
@@ -545,9 +604,9 @@ export class MeteoraDataApiError extends MeteoraError {
 }
 
 export class MeteoraInfrastructureFundingRequiredError extends MeteoraError {
-  readonly quote: MeteoraInfrastructureQuote;
+  readonly quote: MeteoraSharedInfrastructureQuote;
 
-  constructor(message: string, quote: MeteoraInfrastructureQuote) {
+  constructor(message: string, quote: MeteoraSharedInfrastructureQuote) {
     super(message, "INFRASTRUCTURE_FUNDING_REQUIRED", { quote }, false);
     this.name = "MeteoraInfrastructureFundingRequiredError";
     this.quote = quote;
@@ -880,7 +939,10 @@ function accountingSupportedKind(
     kind === "close-position" ||
     kind === "claim-fees" ||
     kind === "swap-exact-in" ||
-    kind === "swap-exact-out"
+    kind === "swap-exact-out" ||
+    kind === "place-limit-order" ||
+    kind === "cancel-limit-order" ||
+    kind === "close-limit-order"
   );
 }
 
@@ -890,6 +952,7 @@ type MeteoraExecutionAccountingBefore = {
   tokenYMint: string;
   wallet: MeteoraWalletAccountingSnapshot;
   position: MeteoraPositionAccountingSnapshot | null;
+  limitOrder: { exists: boolean; accountLamports: string } | null;
 };
 
 export class MeteoraDlmmService {
@@ -983,6 +1046,35 @@ export class MeteoraDlmmService {
       baseSide: xIsQuote ? "y" : "x",
       basePriceBinDirection: xIsQuote ? -1 : 1,
     };
+  }
+
+  /** Native Meteora limit-order side for the token being deposited. ASK deposits X; BID deposits Y. */
+  limitOrderSideForInputMint(
+    pair: MeteoraPairDescriptor,
+    inputMint: string | PublicKey,
+  ): MeteoraLimitOrderSide {
+    const mint = asPublicKey(inputMint).toBase58();
+    if (mint === pair.tokenX.mint) return "ask";
+    if (mint === pair.tokenY.mint) return "bid";
+    throw new MeteoraError(
+      `Limit-order input mint ${mint} is not part of pool ${pair.pool}`,
+      "INVALID_ARGUMENT",
+      {
+        pool: pair.pool,
+        inputMint: mint,
+        tokenX: pair.tokenX.mint,
+        tokenY: pair.tokenY.mint,
+      },
+    );
+  }
+
+  /** Resolve the non-replenishing side for buying or selling the pair's base token. */
+  limitOrderSideForBaseAction(
+    pair: MeteoraPairDescriptor,
+    action: "sell-base" | "buy-base",
+  ): MeteoraLimitOrderSide {
+    if (action === "sell-base") return pair.baseSide === "x" ? "ask" : "bid";
+    return pair.quoteSide === "x" ? "ask" : "bid";
   }
 
   centeredRange(activeBin: number, width: number): MeteoraRange {
@@ -3853,7 +3945,7 @@ export class MeteoraDlmmService {
   }
 
   private assertInfrastructurePolicy(
-    quote: MeteoraInfrastructureQuote,
+    quote: MeteoraSharedInfrastructureQuote,
     policy: MeteoraInfrastructureFundingPolicy | undefined,
   ): void {
     if (!quote.requiresNonRefundableInfrastructure) return;
@@ -3874,8 +3966,12 @@ export class MeteoraDlmmService {
         reasons.push(
           `bitmap-extension initialization=${quote.bitmapExtensionCostLamports} lamports`,
         );
+      const subject =
+        quote.kind === "limit-order"
+          ? `limit-order bins ${quote.binIds.join(",")}`
+          : `liquidity range ${quote.minBinId}..${quote.maxBinId}`;
       throw new MeteoraInfrastructureFundingRequiredError(
-        `Meteora liquidity build refused: requested range ${quote.minBinId}..${quote.maxBinId} requires caller-funded shared infrastructure (${reasons.join(
+        `Meteora build refused: ${subject} requires caller-funded shared infrastructure (${reasons.join(
           ", ",
         )}). This is denied by default. Explicitly opt in with the corresponding infrastructure allow flag and maxNonRefundableLamports. No Meteora transaction was constructed.`,
         quote,
@@ -3884,7 +3980,7 @@ export class MeteoraDlmmService {
 
     if (policy?.maxNonRefundableLamports == null) {
       throw new MeteoraInfrastructureFundingRequiredError(
-        `Meteora liquidity build refused: shared infrastructure was explicitly allowed but maxNonRefundableLamports was not provided. A hard expenditure cap is required.`,
+        `Meteora build refused: shared infrastructure was explicitly allowed but maxNonRefundableLamports was not provided. A hard expenditure cap is required.`,
         quote,
       );
     }
@@ -3897,14 +3993,14 @@ export class MeteoraDlmmService {
     const required = BigInt(quote.nonRefundableInfrastructureLamports);
     if (required > maximum) {
       throw new MeteoraInfrastructureFundingRequiredError(
-        `Meteora liquidity build refused: shared infrastructure requires ${required} lamports, exceeding maxNonRefundableLamports=${maximum}. No Meteora transaction was constructed.`,
+        `Meteora build refused: shared infrastructure requires ${required} lamports, exceeding maxNonRefundableLamports=${maximum}. No Meteora transaction was constructed.`,
         quote,
       );
     }
   }
 
   private infrastructurePreflight(
-    quote: MeteoraInfrastructureQuote,
+    quote: MeteoraSharedInfrastructureQuote,
     policy: MeteoraInfrastructureFundingPolicy | undefined,
   ): MeteoraInfrastructurePreflight {
     return {
@@ -3920,6 +4016,492 @@ export class MeteoraDlmmService {
                 policy.maxNonRefundableLamports,
                 "maxNonRefundableLamports",
               ).toString(10),
+      },
+    };
+  }
+
+  private async assertLimitOrderSupported(pool: DlmmPool): Promise<void> {
+    const sdk = (await dlmmSdk()) as any;
+    const checker = sdk?.isSupportLimitOrder;
+    if (typeof checker !== "function") {
+      throw new MeteoraError(
+        "Installed @meteora-ag/dlmm does not expose isSupportLimitOrder(); refusing native limit-order operations because pool capability cannot be proven.",
+        "SDK_INCOMPATIBLE",
+        { pool: pool.pubkey.toBase58() },
+      );
+    }
+    if (!checker((pool as any).lbPair)) {
+      throw new MeteoraError(
+        `Meteora pool ${pool.pubkey.toBase58()} does not support native limit orders`,
+        "LIMIT_ORDER_UNSUPPORTED",
+        { pool: pool.pubkey.toBase58() },
+      );
+    }
+    for (const method of [
+      "quoteCreateLimitOrder",
+      "placeLimitOrder",
+      "getLimitOrder",
+      "getLimitOrderByUserAndLbPair",
+      "cancelLimitOrder",
+      "closeLimitOrderIfEmpty",
+    ]) {
+      if (typeof (pool as any)[method] !== "function") {
+        throw new MeteoraError(
+          `Installed @meteora-ag/dlmm is missing ${method}() required for native limit orders`,
+          "SDK_INCOMPATIBLE",
+          { pool: pool.pubkey.toBase58(), method },
+        );
+      }
+    }
+  }
+
+  private async maxBinsPerLimitOrder(): Promise<number> {
+    const sdk = (await dlmmSdk()) as any;
+    const raw = sdk?.MAX_BIN_PER_LIMIT_ORDER;
+    const value = numberOrNull(raw);
+    if (value != null && Number.isInteger(value) && value > 0) return value;
+    throw new MeteoraError(
+      "Installed @meteora-ag/dlmm does not expose MAX_BIN_PER_LIMIT_ORDER; refusing to guess the protocol limit",
+      "SDK_INCOMPATIBLE",
+    );
+  }
+
+  private validateLimitOrderBins(
+    bins: MeteoraPlaceLimitOrderArgs["bins"],
+    maximum: number,
+  ): { binIds: number[]; amounts: BN[]; totalInputRaw: string } {
+    if (!Array.isArray(bins) || bins.length < 1 || bins.length > maximum) {
+      throw new MeteoraError(
+        `Limit order must contain between 1 and ${maximum} bins`,
+        "INVALID_ARGUMENT",
+        { count: Array.isArray(bins) ? bins.length : null, maximum },
+      );
+    }
+    const binIds: number[] = [];
+    const amounts: BN[] = [];
+    let total = 0n;
+    for (let index = 0; index < bins.length; index += 1) {
+      const bin = bins[index]!;
+      if (!Number.isInteger(bin.binId)) {
+        throw new MeteoraError(
+          `Limit-order binIds must be integers (index ${index})`,
+          "INVALID_ARGUMENT",
+          { index, binId: bin.binId },
+        );
+      }
+      if (index > 0 && bin.binId <= bins[index - 1]!.binId) {
+        throw new MeteoraError(
+          "Limit-order binIds must be strictly increasing; Solard never reorders amount-to-bin mappings implicitly",
+          "INVALID_ARGUMENT",
+          { binIds: bins.map((x) => x.binId) },
+        );
+      }
+      const amount = toBN(bin.amountRaw, `bins[${index}].amountRaw`);
+      if (amount.lte(new BN(0))) {
+        throw new MeteoraError(
+          `Limit-order amount must be positive at bin ${bin.binId}`,
+          "INVALID_ARGUMENT",
+          { binId: bin.binId, amountRaw: amount.toString(10) },
+        );
+      }
+      binIds.push(bin.binId);
+      amounts.push(amount);
+      total += BigInt(amount.toString(10));
+    }
+    return { binIds, amounts, totalInputRaw: total.toString() };
+  }
+
+  private normalizeLimitOrderSnapshot(
+    pool: DlmmPool,
+    parsed: unknown,
+    exists = true,
+  ): MeteoraLimitOrderSnapshot {
+    const row = recordOrNull(parsed) ?? {};
+    const data = recordOrNull(row.limitOrderData) ?? row;
+    const address =
+      publicKeyString(row.publicKey) ??
+      publicKeyString(row.limitOrder) ??
+      publicKeyString(data.publicKey) ??
+      "";
+    const owner =
+      publicKeyString(data.owner) ??
+      publicKeyString(data.user) ??
+      publicKeyString(data.creator) ??
+      null;
+    const ask = boolOrNull(data.isAskSide ?? data.askSide ?? data.is_ask_side);
+    const side: MeteoraLimitOrderSide | null =
+      ask == null ? null : ask ? "ask" : "bid";
+    const rawBins =
+      (Array.isArray(data.limitOrderBinData) ? data.limitOrderBinData : null) ??
+      (Array.isArray(data.bins) ? data.bins : null) ??
+      [];
+    const bins = rawBins
+      .map((entry: unknown) => recordOrNull(entry))
+      .filter((entry): entry is Record<string, unknown> => entry != null)
+      .map((entry) => {
+        const binId = limitOrderBinId(entry);
+        if (binId == null) return null;
+        const empty = limitOrderBinEmpty(entry);
+        return {
+          binId,
+          empty,
+          status: normalizeLimitOrderStatus(entry.status),
+          raw: (safeJsonValue(entry) ?? {}) as Record<string, unknown>,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry != null)
+      .sort((a, b) => a.binId - b.binId);
+    return {
+      version: 1,
+      observedAt: Date.now(),
+      pool: pool.pubkey.toBase58(),
+      limitOrder: address,
+      exists,
+      owner,
+      side,
+      tokenX: tokenReserve(pool.tokenX),
+      tokenY: tokenReserve(pool.tokenY),
+      bins,
+      openBinIds: bins.filter((bin) => !bin.empty).map((bin) => bin.binId),
+      raw: exists
+        ? ((safeJsonValue(parsed) ?? {}) as Record<string, unknown>)
+        : null,
+    };
+  }
+
+  async getLimitOrder(
+    poolAddress: string,
+    limitOrderAddress: string,
+  ): Promise<MeteoraLimitOrderSnapshot> {
+    const pool = await this.rawPool(poolAddress, true);
+    await this.assertLimitOrderSupported(pool);
+    const pubkey = asPublicKey(limitOrderAddress);
+    const account = await this.host
+      .connection()
+      .getAccountInfo(pubkey, "confirmed");
+    if (!account) {
+      return {
+        version: 1,
+        observedAt: Date.now(),
+        pool: pool.pubkey.toBase58(),
+        limitOrder: pubkey.toBase58(),
+        exists: false,
+        owner: null,
+        side: null,
+        tokenX: tokenReserve(pool.tokenX),
+        tokenY: tokenReserve(pool.tokenY),
+        bins: [],
+        openBinIds: [],
+        raw: null,
+      };
+    }
+    try {
+      const parsed = await (pool as any).getLimitOrder(pubkey);
+      const normalized = this.normalizeLimitOrderSnapshot(pool, parsed, true);
+      return { ...normalized, limitOrder: pubkey.toBase58() };
+    } catch (cause) {
+      throw new MeteoraError(
+        `Failed to parse Meteora limit order ${pubkey.toBase58()}`,
+        "SDK_INCOMPATIBLE",
+        {
+          pool: pool.pubkey.toBase58(),
+          limitOrder: pubkey.toBase58(),
+          cause: safeJsonValue(cause),
+        },
+        true,
+      );
+    }
+  }
+
+  async getLimitOrdersByWallet(
+    poolAddress: string,
+    wallet: WalletRef,
+  ): Promise<MeteoraLimitOrderSnapshot[]> {
+    const pool = await this.rawPool(poolAddress, true);
+    await this.assertLimitOrderSupported(pool);
+    const owner = asPublicKey(this.resolveWalletAddress(wallet));
+    const rows = await (pool as any).getLimitOrderByUserAndLbPair(owner);
+    return (Array.isArray(rows) ? rows : []).map((row: unknown) =>
+      this.normalizeLimitOrderSnapshot(pool, row, true),
+    );
+  }
+
+  private async quoteLimitOrderInfrastructure(
+    pool: DlmmPool,
+    binIds: number[],
+  ): Promise<MeteoraLimitOrderInfrastructureQuote> {
+    const raw = await (pool as any).quoteCreateLimitOrder({
+      bins: binIds.map((id) => ({ id })),
+      relativeBin: undefined,
+    });
+    const binArrayCount = numberOrNull(raw?.binArraysCount);
+    const binArrayCostLamports = BigInt(
+      Math.max(0, Math.trunc(Number(raw?.binArrayCost ?? 0))),
+    );
+    const bitmapExtensionCostLamports = BigInt(
+      Math.max(0, Math.trunc(Number(raw?.bitmapExtensionCost ?? 0))),
+    );
+    // Upstream quoteCreateLimitOrder intentionally returns limitOrderCost in SOL,
+    // while binArrayCost/bitmapExtensionCost are lamport-denominated constants.
+    const limitOrderRentSol = Number(raw?.limitOrderCost ?? NaN);
+    if (!Number.isFinite(limitOrderRentSol) || limitOrderRentSol < 0) {
+      throw new MeteoraError(
+        "Meteora quoteCreateLimitOrder returned an invalid limitOrderCost",
+        "SDK_INCOMPATIBLE",
+        { raw: safeJsonValue(raw) },
+      );
+    }
+    const limitOrderRentLamports = BigInt(
+      Math.round(limitOrderRentSol * 1_000_000_000),
+    );
+    const nonRefundable = binArrayCostLamports + bitmapExtensionCostLamports;
+    return {
+      kind: "limit-order",
+      pool: pool.pubkey.toBase58(),
+      binIds: [...binIds],
+      minBinId: Math.min(...binIds),
+      maxBinId: Math.max(...binIds),
+      binArrayCount,
+      binArrayCostLamports: binArrayCostLamports.toString(),
+      bitmapExtensionCostLamports: bitmapExtensionCostLamports.toString(),
+      nonRefundableInfrastructureLamports: nonRefundable.toString(),
+      limitOrderRentLamports: limitOrderRentLamports.toString(),
+      requiresBinArrayInit:
+        binArrayCostLamports > 0n || (binArrayCount ?? 0) > 0,
+      requiresBitmapExtensionInit: bitmapExtensionCostLamports > 0n,
+      requiresNonRefundableInfrastructure: nonRefundable > 0n,
+      raw: (safeJsonValue(raw) ?? {}) as Record<string, unknown>,
+    };
+  }
+
+  private infrastructurePolicyAuthorized(
+    quote: MeteoraSharedInfrastructureQuote,
+    policy: MeteoraInfrastructureFundingPolicy | undefined,
+  ): boolean {
+    try {
+      this.assertInfrastructurePolicy(quote, policy);
+      return true;
+    } catch (error) {
+      if (error instanceof MeteoraInfrastructureFundingRequiredError)
+        return false;
+      throw error;
+    }
+  }
+
+  async preflightLimitOrder(
+    args: MeteoraPlaceLimitOrderArgs,
+  ): Promise<MeteoraLimitOrderPreflight> {
+    const pool = await this.rawPool(args.pool, true);
+    await this.assertLimitOrderSupported(pool);
+    const maximum = await this.maxBinsPerLimitOrder();
+    const validated = this.validateLimitOrderBins(args.bins, maximum);
+    const wallet = asPublicKey(this.resolveWalletAddress(args.wallet));
+    const tokenX = tokenReserve(pool.tokenX);
+    const tokenY = tokenReserve(pool.tokenY);
+    const inputMint = args.side === "ask" ? tokenX.mint : tokenY.mint;
+    const balances = await this.getWalletPoolBalances({
+      wallet: args.wallet,
+      pool: pool.pubkey.toBase58(),
+      commitment: "confirmed",
+    });
+    const inputBalanceRaw =
+      args.side === "ask" ? balances.tokenXRaw : balances.tokenYRaw;
+    const quote = await this.quoteLimitOrderInfrastructure(
+      pool,
+      validated.binIds,
+    );
+    const sharedInfrastructureAuthorized = this.infrastructurePolicyAuthorized(
+      quote,
+      args.infrastructure,
+    );
+    const inputIsNative = inputMint === WSOL_MINT;
+    const requiredInput = BigInt(validated.totalInputRaw);
+    const availableNative = BigInt(balances.nativeLamports);
+    const sharedCost = BigInt(quote.nonRefundableInfrastructureLamports);
+    const rent = BigInt(quote.limitOrderRentLamports);
+    const requiredNative =
+      rent + sharedCost + (inputIsNative ? requiredInput : 0n);
+    const inputFundingSufficient = inputIsNative
+      ? availableNative >=
+        requiredInput +
+          rent +
+          (sharedInfrastructureAuthorized ? sharedCost : 0n)
+      : BigInt(inputBalanceRaw) >= requiredInput;
+    const nativeFundingSufficient =
+      availableNative >=
+      rent +
+        (sharedInfrastructureAuthorized ? sharedCost : 0n) +
+        (inputIsNative ? requiredInput : 0n);
+    const safeWithoutSharedInfrastructureFunding =
+      !quote.requiresNonRefundableInfrastructure;
+    const executable =
+      sharedInfrastructureAuthorized &&
+      inputFundingSufficient &&
+      nativeFundingSufficient;
+    return {
+      version: 1,
+      observedAt: Date.now(),
+      wallet: wallet.toBase58(),
+      pool: pool.pubkey.toBase58(),
+      side: args.side,
+      inputMint,
+      inputBalanceRaw,
+      totalInputRaw: validated.totalInputRaw,
+      binIds: validated.binIds,
+      maxBinsPerOrder: maximum,
+      quote,
+      sharedInfrastructureAuthorized,
+      safeWithoutSharedInfrastructureFunding,
+      inputFundingSufficient,
+      availableNativeLamports: availableNative.toString(),
+      requiredNativeLamportsBeforeNetworkFee: requiredNative.toString(),
+      executable,
+      safeToExecuteBeforeNetworkFee: executable,
+      estimatedNetworkFeeLamports: null,
+      warnings: inputIsNative
+        ? [
+            "Input is WSOL/native mint; current Meteora path wraps native SOL, so native funding includes the full order input.",
+          ]
+        : [],
+    };
+  }
+
+  async buildPlaceLimitOrder(
+    args: MeteoraPlaceLimitOrderArgs,
+  ): Promise<MeteoraPreparedTransactions> {
+    const pool = await this.rawPool(args.pool, true);
+    await this.assertLimitOrderSupported(pool);
+    const preflight = await this.preflightLimitOrder(args);
+    this.assertInfrastructurePolicy(preflight.quote, args.infrastructure);
+    if (
+      !preflight.inputFundingSufficient ||
+      !preflight.safeToExecuteBeforeNetworkFee
+    ) {
+      throw new MeteoraError(
+        `Insufficient funding for Meteora ${args.side} limit order before network fees`,
+        "INSUFFICIENT_FUNDS",
+        { preflight },
+      );
+    }
+    const wallet = this.host.signer(args.wallet);
+    const maximum = await this.maxBinsPerLimitOrder();
+    const validated = this.validateLimitOrderBins(args.bins, maximum);
+    const limitOrder = Keypair.generate();
+    const tx = await (pool as any).placeLimitOrder({
+      owner: wallet.publicKey,
+      payer: wallet.publicKey,
+      sender: wallet.publicKey,
+      limitOrder: limitOrder.publicKey,
+      params: {
+        isAskSide: args.side === "ask",
+        relativeBin: null,
+        bins: validated.binIds.map((id, index) => ({
+          id,
+          amount: validated.amounts[index],
+        })),
+      },
+    });
+    return {
+      kind: "place-limit-order",
+      wallet: args.wallet,
+      pool: pool.pubkey.toBase58(),
+      limitOrder: limitOrder.publicKey.toBase58(),
+      transactions: asTxArray(tx),
+      extraSigners: [limitOrder],
+      infrastructurePreflight: this.infrastructurePreflight(
+        preflight.quote,
+        args.infrastructure,
+      ),
+      metadata: {
+        side: args.side,
+        inputMint: preflight.inputMint,
+        requestedInputRaw: validated.totalInputRaw,
+        binIds: validated.binIds,
+        maxBinsPerOrder: preflight.maxBinsPerOrder,
+      },
+    };
+  }
+
+  async buildCancelLimitOrder(
+    args: MeteoraCancelLimitOrderArgs,
+  ): Promise<MeteoraPreparedTransactions> {
+    const pool = await this.rawPool(args.pool, true);
+    await this.assertLimitOrderSupported(pool);
+    const wallet = this.host.signer(args.wallet);
+    const snapshot = await this.getLimitOrder(
+      pool.pubkey.toBase58(),
+      args.limitOrder,
+    );
+    if (!snapshot.exists) {
+      throw new MeteoraError(
+        `Meteora limit order ${args.limitOrder} was not found`,
+        "LIMIT_ORDER_NOT_FOUND",
+        { pool: pool.pubkey.toBase58(), limitOrder: args.limitOrder },
+      );
+    }
+    if (snapshot.owner && snapshot.owner !== wallet.publicKey.toBase58()) {
+      throw new MeteoraError(
+        `Meteora limit order ${args.limitOrder} is not owned by ${wallet.publicKey.toBase58()}`,
+        "OWNER_MISMATCH",
+        {
+          expectedOwner: wallet.publicKey.toBase58(),
+          actualOwner: snapshot.owner,
+        },
+      );
+    }
+    const openBins = new Set(snapshot.openBinIds);
+    const requested =
+      args.binIds == null ? [...snapshot.openBinIds] : [...args.binIds];
+    const unique = [...new Set(requested)];
+    if (
+      unique.length !== requested.length ||
+      unique.some((id) => !Number.isInteger(id))
+    ) {
+      throw new MeteoraError(
+        "cancelLimitOrder binIds must be unique integers",
+        "INVALID_ARGUMENT",
+        { binIds: requested },
+      );
+    }
+    const inactive = unique.filter((id) => !openBins.has(id));
+    if (inactive.length) {
+      throw new MeteoraError(
+        `cancelLimitOrder requested binIds that are not currently open: ${inactive.join(",")}`,
+        "INVALID_ARGUMENT",
+        { inactiveBinIds: inactive, openBinIds: [...openBins] },
+      );
+    }
+    unique.sort((a, b) => a - b);
+    const rentReceiver = args.rentReceiver
+      ? asPublicKey(args.rentReceiver)
+      : wallet.publicKey;
+    const cancelAll = snapshot.openBinIds.every((id) => unique.includes(id));
+    const tx = unique.length
+      ? await (pool as any).cancelLimitOrder({
+          limitOrderPubkey: asPublicKey(args.limitOrder),
+          owner: wallet.publicKey,
+          rentReceiver,
+          binIds: unique,
+        })
+      : await (pool as any).closeLimitOrderIfEmpty({
+          limitOrder: asPublicKey(args.limitOrder),
+          owner: wallet.publicKey,
+          rentReceiver,
+        });
+    return {
+      kind: unique.length ? "cancel-limit-order" : "close-limit-order",
+      wallet: args.wallet,
+      pool: pool.pubkey.toBase58(),
+      limitOrder: asPublicKey(args.limitOrder).toBase58(),
+      transactions: asTxArray(tx),
+      extraSigners: [],
+      metadata: {
+        side: snapshot.side,
+        requestedCancelBinIds: unique,
+        cancelAll,
+        expectedClosed: cancelAll || unique.length === 0,
+        owner: wallet.publicKey.toBase58(),
+        rentReceiver: rentReceiver.toBase58(),
       },
     };
   }
@@ -4608,6 +5190,19 @@ export class MeteoraDlmmService {
     };
   }
 
+  private async limitOrderAccountSnapshot(
+    limitOrderAddress: string,
+    commitment: Commitment,
+  ): Promise<{ exists: boolean; accountLamports: string }> {
+    const account = await this.host
+      .connection()
+      .getAccountInfo(asPublicKey(limitOrderAddress), commitment);
+    return {
+      exists: account != null,
+      accountLamports: String(account?.lamports ?? 0),
+    };
+  }
+
   private async transactionNetworkFees(
     signatures: string[],
     commitment: Commitment,
@@ -4661,22 +5256,32 @@ export class MeteoraDlmmService {
         "SDK_INCOMPATIBLE",
       );
     const wallet = this.host.signer(prepared.wallet).publicKey;
-    const [walletSnapshot, positionSnapshot] = await Promise.all([
-      this.walletAccountingSnapshot(wallet, tokenXMint, tokenYMint, commitment),
-      prepared.position
-        ? this.positionAccountingSnapshot(
-            prepared.pool,
-            prepared.position,
-            commitment,
-          )
-        : Promise.resolve(null),
-    ]);
+    const [walletSnapshot, positionSnapshot, limitOrderSnapshot] =
+      await Promise.all([
+        this.walletAccountingSnapshot(
+          wallet,
+          tokenXMint,
+          tokenYMint,
+          commitment,
+        ),
+        prepared.position
+          ? this.positionAccountingSnapshot(
+              prepared.pool,
+              prepared.position,
+              commitment,
+            )
+          : Promise.resolve(null),
+        prepared.limitOrder
+          ? this.limitOrderAccountSnapshot(prepared.limitOrder, commitment)
+          : Promise.resolve(null),
+      ]);
     return {
       walletAddress: wallet.toBase58(),
       tokenXMint,
       tokenYMint,
       wallet: walletSnapshot,
       position: positionSnapshot,
+      limitOrder: limitOrderSnapshot,
     };
   }
 
@@ -4690,6 +5295,8 @@ export class MeteoraDlmmService {
     const owner = asPublicKey(before.walletAddress);
     let afterWallet: MeteoraWalletAccountingSnapshot | null = null;
     let afterPosition: MeteoraPositionAccountingSnapshot | null = null;
+    let afterLimitOrder: { exists: boolean; accountLamports: string } | null =
+      null;
 
     try {
       afterWallet = await this.walletAccountingSnapshot(
@@ -4713,6 +5320,19 @@ export class MeteoraDlmmService {
       } catch (error) {
         warnings.push(
           `post-position-accounting-unavailable:${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    if (prepared.limitOrder) {
+      try {
+        afterLimitOrder = await this.limitOrderAccountSnapshot(
+          prepared.limitOrder,
+          commitment,
+        );
+      } catch (error) {
+        warnings.push(
+          `post-limit-order-accounting-unavailable:${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
@@ -4773,13 +5393,35 @@ export class MeteoraDlmmService {
       const value = BigInt(delta);
       return (value > 0n ? value : 0n).toString();
     };
+    const isLimitOrder =
+      prepared.kind === "place-limit-order" ||
+      prepared.kind === "cancel-limit-order" ||
+      prepared.kind === "close-limit-order";
+    const limitOrderInputMint = isLimitOrder
+      ? String(prepared.metadata?.inputMint ?? "")
+      : "";
+    const limitOrderInputDelta = limitOrderInputMint
+      ? deltaForMint(limitOrderInputMint)
+      : null;
+    const beforeLimitOrderLamports = before.limitOrder?.accountLamports ?? null;
+    const afterLimitOrderLamports = afterLimitOrder?.accountLamports ?? null;
+    if (
+      isLimitOrder &&
+      prepared.kind === "place-limit-order" &&
+      limitOrderInputMint === WSOL_MINT
+    ) {
+      warnings.push(
+        "limit-order-wsol-input-debit-not-inferred-from-native-sol: native SOL remains separate from SPL accounting",
+      );
+    }
 
     return {
       version: 1,
       complete:
         walletComparable &&
         network.lamports != null &&
-        (prepared.position ? positionComparable : true),
+        (prepared.position ? positionComparable : true) &&
+        (prepared.limitOrder ? afterLimitOrder != null : true),
       wallet: before.walletAddress,
       pool: prepared.pool,
       position: prepared.position ?? null,
@@ -4876,6 +5518,55 @@ export class MeteoraDlmmService {
             actualOutputCreditedRaw: positiveCredit(outputDelta),
           }
         : null,
+      limitOrder:
+        isLimitOrder && prepared.limitOrder
+          ? {
+              address: prepared.limitOrder,
+              side:
+                prepared.metadata?.side === "ask" ||
+                prepared.metadata?.side === "bid"
+                  ? prepared.metadata.side
+                  : null,
+              inputMint: limitOrderInputMint || null,
+              requestedInputRaw:
+                prepared.kind === "place-limit-order"
+                  ? integerString(prepared.metadata?.requestedInputRaw, "0")
+                  : null,
+              actualInputDebitedRaw:
+                prepared.kind === "place-limit-order" &&
+                limitOrderInputMint !== WSOL_MINT
+                  ? debitMagnitude(limitOrderInputDelta)
+                  : null,
+              returnedXRaw:
+                prepared.kind === "cancel-limit-order" ||
+                prepared.kind === "close-limit-order"
+                  ? positiveCredit(tokenXDelta)
+                  : null,
+              returnedYRaw:
+                prepared.kind === "cancel-limit-order" ||
+                prepared.kind === "close-limit-order"
+                  ? positiveCredit(tokenYDelta)
+                  : null,
+              beforeAccountLamports: beforeLimitOrderLamports,
+              afterAccountLamports: afterLimitOrderLamports,
+              rentLockedLamports:
+                beforeLimitOrderLamports != null &&
+                afterLimitOrderLamports != null
+                  ? positiveBigintDelta(
+                      afterLimitOrderLamports,
+                      beforeLimitOrderLamports,
+                    )
+                  : null,
+              rentReturnedLamports:
+                beforeLimitOrderLamports != null &&
+                afterLimitOrderLamports != null
+                  ? negativeBigintDeltaMagnitude(
+                      afterLimitOrderLamports,
+                      beforeLimitOrderLamports,
+                    )
+                  : null,
+            }
+          : null,
       networkFeeLamports: network.lamports,
       infrastructure,
       warnings,
@@ -5175,10 +5866,195 @@ export class MeteoraDlmmService {
     return last!;
   }
 
+  async verifyLimitOrderPlaced(
+    args: {
+      pool: string;
+      limitOrder: string;
+      wallet?: WalletRef;
+      binIds: number[];
+    } & MeteoraPositionVerificationOptions,
+  ): Promise<MeteoraLimitOrderVerification> {
+    const policy = this.verificationAttempts(args);
+    const expectedOwner = this.verificationExpectedOwner(args.wallet);
+    const expectedBins = [...new Set(args.binIds)].sort((a, b) => a - b);
+    let last: MeteoraLimitOrderVerification | null = null;
+    for (let attempt = 1; attempt <= policy.attempts; attempt += 1) {
+      let actual: MeteoraLimitOrderSnapshot | null = null;
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      try {
+        actual = await this.getLimitOrder(args.pool, args.limitOrder);
+      } catch (error) {
+        errors.push(
+          `limit-order-read-failed:${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const accountExists = actual?.exists ?? false;
+      const actualBins =
+        actual?.bins.map((bin) => bin.binId).sort((a, b) => a - b) ?? [];
+      const binsMatch =
+        accountExists &&
+        actualBins.length === expectedBins.length &&
+        actualBins.every((id, index) => id === expectedBins[index]);
+      const ownerMatches =
+        expectedOwner == null || actual?.owner == null
+          ? actual?.owner == null && expectedOwner != null
+            ? null
+            : true
+          : actual.owner === expectedOwner;
+      if (!accountExists) errors.push("limit-order-account-missing");
+      if (!binsMatch) errors.push("limit-order-bin-set-mismatch");
+      if (ownerMatches === false) errors.push("limit-order-owner-mismatch");
+      if (ownerMatches == null)
+        warnings.push("limit-order-owner-not-exposed-by-installed-sdk-parser");
+      const ok = accountExists && binsMatch && ownerMatches !== false;
+      last = {
+        kind: "limit-order-placed",
+        ok,
+        checkedAt: Date.now(),
+        attempts: attempt,
+        pool: asPublicKey(args.pool).toBase58(),
+        limitOrder: asPublicKey(args.limitOrder).toBase58(),
+        expected: { owner: expectedOwner, binIds: expectedBins, closed: false },
+        actual,
+        checks: {
+          accountExists,
+          accountClosed: accountExists ? false : null,
+          ownerMatches,
+          binsMatch,
+          requestedBinsCancelled: null,
+        },
+        errors,
+        warnings,
+      };
+      if (ok) return last;
+      if (attempt < policy.attempts)
+        await this.verificationDelay(policy.retryDelayMs);
+    }
+    return last!;
+  }
+
+  async verifyLimitOrderCancelled(
+    args: {
+      pool: string;
+      limitOrder: string;
+      wallet?: WalletRef;
+      cancelledBinIds: number[];
+      expectClosed: boolean;
+    } & MeteoraPositionVerificationOptions,
+  ): Promise<MeteoraLimitOrderVerification> {
+    const policy = this.verificationAttempts(args);
+    const expectedOwner = this.verificationExpectedOwner(args.wallet);
+    const cancelled = [...new Set(args.cancelledBinIds)].sort((a, b) => a - b);
+    const orderKey = asPublicKey(args.limitOrder);
+    let last: MeteoraLimitOrderVerification | null = null;
+    for (let attempt = 1; attempt <= policy.attempts; attempt += 1) {
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      const account = await this.host
+        .connection()
+        .getAccountInfo(orderKey, policy.commitment);
+      const accountClosed = account == null;
+      let actual: MeteoraLimitOrderSnapshot | null = null;
+      if (!accountClosed) {
+        try {
+          actual = await this.getLimitOrder(args.pool, args.limitOrder);
+        } catch (error) {
+          errors.push(
+            `limit-order-read-failed:${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      const accountExists = !accountClosed;
+      const requestedBinsCancelled = args.expectClosed
+        ? accountClosed
+        : actual != null
+          ? cancelled.every((id) => !actual.openBinIds.includes(id))
+          : false;
+      const ownerMatches =
+        accountClosed || expectedOwner == null
+          ? null
+          : actual?.owner == null
+            ? null
+            : actual.owner === expectedOwner;
+      if (args.expectClosed && !accountClosed)
+        errors.push("limit-order-account-still-open");
+      if (!args.expectClosed && !requestedBinsCancelled)
+        errors.push("requested-limit-order-bins-still-open");
+      if (ownerMatches === false) errors.push("limit-order-owner-mismatch");
+      if (!accountClosed && ownerMatches == null && expectedOwner != null)
+        warnings.push("limit-order-owner-not-exposed-by-installed-sdk-parser");
+      const ok = args.expectClosed
+        ? accountClosed
+        : requestedBinsCancelled && ownerMatches !== false;
+      last = {
+        kind: "limit-order-cancelled",
+        ok,
+        checkedAt: Date.now(),
+        attempts: attempt,
+        pool: asPublicKey(args.pool).toBase58(),
+        limitOrder: orderKey.toBase58(),
+        expected: {
+          owner: expectedOwner,
+          binIds: cancelled,
+          closed: args.expectClosed,
+        },
+        actual,
+        checks: {
+          accountExists,
+          accountClosed,
+          ownerMatches,
+          binsMatch: null,
+          requestedBinsCancelled,
+        },
+        errors,
+        warnings,
+      };
+      if (ok) return last;
+      if (attempt < policy.attempts)
+        await this.verificationDelay(policy.retryDelayMs);
+    }
+    return last!;
+  }
+
   private async verifyPreparedOutcome(
     prepared: MeteoraPreparedTransactions,
     options: MeteoraPositionVerificationOptions = {},
-  ): Promise<MeteoraPositionVerification> {
+  ): Promise<MeteoraExecutionVerification> {
+    if (prepared.limitOrder) {
+      if (prepared.kind === "place-limit-order") {
+        const binIds = Array.isArray(prepared.metadata?.binIds)
+          ? prepared.metadata!.binIds!.map(Number).filter(Number.isInteger)
+          : [];
+        return await this.verifyLimitOrderPlaced({
+          pool: prepared.pool,
+          limitOrder: prepared.limitOrder,
+          wallet: prepared.wallet,
+          binIds,
+          ...options,
+        });
+      }
+      if (
+        prepared.kind === "cancel-limit-order" ||
+        prepared.kind === "close-limit-order"
+      ) {
+        const cancelledBinIds = Array.isArray(
+          prepared.metadata?.requestedCancelBinIds,
+        )
+          ? prepared
+              .metadata!.requestedCancelBinIds!.map(Number)
+              .filter(Number.isInteger)
+          : [];
+        return await this.verifyLimitOrderCancelled({
+          pool: prepared.pool,
+          limitOrder: prepared.limitOrder,
+          wallet: prepared.wallet,
+          cancelledBinIds,
+          expectClosed: Boolean(prepared.metadata?.expectedClosed),
+          ...options,
+        });
+      }
+    }
     if (!prepared.position) return this.notApplicableVerification(prepared);
 
     const base = {
@@ -5241,35 +6117,60 @@ export class MeteoraDlmmService {
       return verifiedResult;
     } catch (error) {
       if (error instanceof MeteoraPartialExecutionError) {
-        let verification: MeteoraPositionVerification;
+        let verification: MeteoraExecutionVerification;
         try {
           verification = await this.verifyPreparedOutcome(
             prepared,
             verificationOptions,
           );
         } catch (verifyError) {
-          verification = {
-            kind: prepared.position ? "position-present" : "not-applicable",
-            ok: false,
-            checkedAt: Date.now(),
-            attempts: 0,
-            pool: prepared.pool,
-            position: prepared.position ?? null,
-            expected: { owner: null, minBinId: null, maxBinId: null },
-            actual: null,
-            checks: {
-              accountExists: null,
-              accountClosed: null,
-              poolMatches: null,
-              ownerMatches: null,
-              rangeMatches: null,
-              absentFromWalletPool: null,
-            },
-            errors: [
-              `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
-            ],
-            warnings: [],
-          };
+          verification = prepared.limitOrder
+            ? {
+                kind:
+                  prepared.kind === "place-limit-order"
+                    ? "limit-order-placed"
+                    : "limit-order-cancelled",
+                ok: false,
+                checkedAt: Date.now(),
+                attempts: 0,
+                pool: prepared.pool,
+                limitOrder: prepared.limitOrder,
+                expected: { owner: null, binIds: [], closed: null },
+                actual: null,
+                checks: {
+                  accountExists: null,
+                  accountClosed: null,
+                  ownerMatches: null,
+                  binsMatch: null,
+                  requestedBinsCancelled: null,
+                },
+                errors: [
+                  `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
+                ],
+                warnings: [],
+              }
+            : {
+                kind: prepared.position ? "position-present" : "not-applicable",
+                ok: false,
+                checkedAt: Date.now(),
+                attempts: 0,
+                pool: prepared.pool,
+                position: prepared.position ?? null,
+                expected: { owner: null, minBinId: null, maxBinId: null },
+                actual: null,
+                checks: {
+                  accountExists: null,
+                  accountClosed: null,
+                  poolMatches: null,
+                  ownerMatches: null,
+                  rangeMatches: null,
+                  absentFromWalletPool: null,
+                },
+                errors: [
+                  `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
+                ],
+                warnings: [],
+              };
         }
         const enriched = { ...error.result, verification };
         throw new MeteoraPartialExecutionError(
@@ -5289,12 +6190,13 @@ export class MeteoraDlmmService {
     assertLiveTradingEnabled(options);
     if (
       prepared.kind === "open-position" ||
-      prepared.kind === "add-liquidity"
+      prepared.kind === "add-liquidity" ||
+      prepared.kind === "place-limit-order"
     ) {
       const preflight = prepared.infrastructurePreflight;
       if (!preflight?.checked) {
         throw new MeteoraError(
-          `Meteora ${prepared.kind} execution refused: prepared liquidity transaction lacks Solard infrastructure preflight attestation. Rebuild it with the current Solard SDK before execution.`,
+          `Meteora ${prepared.kind} execution refused: prepared transaction lacks Solard infrastructure preflight attestation. Rebuild it with the current Solard SDK before execution.`,
           "SDK_INCOMPATIBLE",
         );
       }
@@ -5449,6 +6351,7 @@ export class MeteoraDlmmService {
           kind: prepared.kind,
           pool: prepared.pool,
           position: prepared.position,
+          limitOrder: prepared.limitOrder,
           signatures: [...signatures],
           ...(accounting ? { accounting } : {}),
         };
@@ -5474,6 +6377,7 @@ export class MeteoraDlmmService {
       kind: prepared.kind,
       pool: prepared.pool,
       position: prepared.position,
+      limitOrder: prepared.limitOrder,
       signatures,
       ...(accounting ? { accounting } : {}),
     };
@@ -5728,6 +6632,32 @@ export class MeteoraDlmmService {
     });
   }
 
+  async placeLimitOrderVerified(
+    args: MeteoraPlaceLimitOrderArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildExecuteVerifyLocked(
+      args.wallet,
+      () => this.buildPlaceLimitOrder(args),
+      options,
+      verificationOptions,
+    );
+  }
+
+  async cancelLimitOrderVerified(
+    args: MeteoraCancelLimitOrderArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildExecuteVerifyLocked(
+      args.wallet,
+      () => this.buildCancelLimitOrder(args),
+      options,
+      verificationOptions,
+    );
+  }
+
   async openPositionVerified(
     args: MeteoraOpenPositionArgs,
     options: MeteoraExecutionOptions,
@@ -5803,6 +6733,28 @@ export class MeteoraDlmmService {
       () => this.buildSwapExactOut(args),
       options,
       verificationOptions,
+    );
+  }
+
+  async placeLimitOrder(
+    args: MeteoraPlaceLimitOrderArgs,
+    options: MeteoraExecutionOptions,
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildPlaceLimitOrder(args),
+      options,
+    );
+  }
+
+  async cancelLimitOrder(
+    args: MeteoraCancelLimitOrderArgs,
+    options: MeteoraExecutionOptions,
+  ): Promise<MeteoraExecutionResult> {
+    return await this.buildAndExecuteLocked(
+      args.wallet,
+      () => this.buildCancelLimitOrder(args),
+      options,
     );
   }
 
