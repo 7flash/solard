@@ -9,6 +9,11 @@ import {
   type Connection,
 } from "@solana/web3.js";
 import type { WalletRef } from "../../core/refs.ts";
+import {
+  METEORA_MARKET_FEATURE_SCHEMA_V1,
+  METEORA_MARKET_FEATURE_SEMANTICS_HASH_V1,
+  METEORA_POOL_DISCOVERY_SCHEMA_V1,
+} from "./types.ts";
 import type {
   MeteoraActiveBin,
   MeteoraActiveBinSample,
@@ -42,6 +47,9 @@ import type {
   MeteoraRollingPoolMetrics,
   MeteoraOpenPositionArgs,
   MeteoraPoolSearchResult,
+  MeteoraPoolDiscoveryArgs,
+  MeteoraPoolDiscoveryCandidateV1,
+  MeteoraPoolDiscoveryPageV1,
   MeteoraPoolState,
   MeteoraPairDescriptor,
   MeteoraRange,
@@ -84,6 +92,7 @@ export type MeteoraDlmmHost = {
 const DEFAULT_DATA_API = "https://dlmm.datapi.meteora.ag";
 const DEFAULT_DISCOVERY_API = "https://pool-discovery-api.datapi.meteora.ag";
 const STANDARD_POSITION_BINS = 69;
+const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
 type MeteoraCluster = "mainnet-beta" | "devnet" | "localhost";
 
@@ -504,6 +513,37 @@ export class MeteoraMissingRequiredSignerError extends MeteoraError {
   }
 }
 
+export class MeteoraDataApiError extends MeteoraError {
+  readonly path: string;
+  readonly status: number | null;
+  readonly responseBody: string | null;
+
+  constructor(args: {
+    path: string;
+    message: string;
+    status?: number | null;
+    responseBody?: string | null;
+    cause?: unknown;
+  }) {
+    const status = args.status ?? null;
+    super(
+      args.message,
+      "DATA_API_ERROR",
+      {
+        path: args.path,
+        status,
+        responseBody: args.responseBody ?? null,
+        cause: safeJsonValue(args.cause),
+      },
+      status === 429 || (status != null && status >= 500),
+    );
+    this.name = "MeteoraDataApiError";
+    this.path = args.path;
+    this.status = status;
+    this.responseBody = args.responseBody ?? null;
+  }
+}
+
 export class MeteoraInfrastructureFundingRequiredError extends MeteoraError {
   readonly quote: MeteoraInfrastructureQuote;
 
@@ -695,6 +735,95 @@ function rowArray(value: unknown): Record<string, unknown>[] {
       ) as Record<string, unknown>[];
   }
   return [];
+}
+
+function recordOrEmpty(value: unknown): Record<string, any> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, any>)
+    : {};
+}
+
+function firstFiniteValue(...values: unknown[]): number | null {
+  for (const value of values) {
+    const parsed = finiteNumber(value);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+
+function timeframeMetric(
+  row: Record<string, any>,
+  timeframe: MeteoraTimeframe,
+  keys: string[],
+): number | null {
+  for (const key of keys) {
+    const direct = row[key];
+    if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+      const fromWindow = firstFiniteValue(
+        direct[timeframe],
+        direct[timeframe.replace("m", "min")],
+      );
+      if (fromWindow != null) return fromWindow;
+    }
+    const flat = firstFiniteValue(
+      row[`${key}_${timeframe}`],
+      row[`${key}${timeframe}`],
+      row[`${timeframe}_${key}`],
+    );
+    if (flat != null) return flat;
+    const directNumber = finiteNumber(direct);
+    if (directNumber != null) return directNumber;
+  }
+  return null;
+}
+
+function discoveryToken(
+  row: Record<string, any>,
+  side: "x" | "y",
+): {
+  mint: string | null;
+  symbol: string | null;
+  name: string | null;
+  decimals: number | null;
+} {
+  const token = recordOrEmpty(
+    row[`token_${side}`] ?? row[`token${side.toUpperCase()}`] ?? row[side],
+  );
+  const mint = recordOrEmpty(token.mint);
+  return {
+    mint:
+      publicKeyString(
+        row[`mint_${side}`] ??
+          row[`token_${side}_mint`] ??
+          token.address ??
+          token.mint_address ??
+          token.mint ??
+          mint.address ??
+          mint.publicKey,
+      ) ?? null,
+    symbol:
+      row[`mint_${side}_symbol`] != null
+        ? String(row[`mint_${side}_symbol`])
+        : token.symbol != null
+          ? String(token.symbol)
+          : mint.symbol != null
+            ? String(mint.symbol)
+            : null,
+    name:
+      row[`mint_${side}_name`] != null
+        ? String(row[`mint_${side}_name`])
+        : token.name != null
+          ? String(token.name)
+          : mint.name != null
+            ? String(mint.name)
+            : null,
+    decimals: firstFiniteValue(
+      row[`mint_${side}_decimals`],
+      row[`token_${side}_decimals`],
+      token.decimals,
+      mint.decimals,
+    ),
+  };
 }
 
 function extractBinId(bin: unknown): number | null {
@@ -1593,6 +1722,228 @@ export class MeteoraDlmmService {
     return pool.getBinIdFromPrice(pricePerLamport, roundDown);
   }
 
+  /**
+   * Canonical, typed pool discovery backed by Meteora's official DLMM Data API.
+   * This method intentionally does not rank or reject pools by trading policy; it
+   * only normalizes identity and rolling market measurements for the requested
+   * window so an autonomous caller can shortlist pools deterministically.
+   */
+  async discoverPoolCandidates(
+    args: MeteoraPoolDiscoveryArgs = {},
+  ): Promise<MeteoraPoolDiscoveryPageV1> {
+    const observedAtMs = Date.now();
+    const timeframe = args.timeframe ?? "5m";
+    const page = Math.max(1, Math.trunc(args.page ?? 1));
+    const pageSize = Math.max(
+      1,
+      Math.min(1000, Math.trunc(args.pageSize ?? 100)),
+    );
+    const raw = (await this.dataApiGet("/pools", {
+      page,
+      page_size: pageSize,
+      query: args.query?.trim() || undefined,
+      sort_by: args.sortBy?.trim() || undefined,
+      filter_by: args.filterBy?.trim() || undefined,
+    })) as any;
+    const rows = Array.isArray(raw)
+      ? raw
+      : Array.isArray(raw?.data)
+        ? raw.data
+        : Array.isArray(raw?.pools)
+          ? raw.pools
+          : [];
+    const pools: MeteoraPoolDiscoveryCandidateV1[] = [];
+    let droppedMalformedRows = 0;
+    const nowSec = Math.floor(observedAtMs / 1000);
+
+    for (const value of rows) {
+      const row = recordOrEmpty(value);
+      const pool = String(
+        row.address ?? row.pool_address ?? row.poolAddress ?? row.pool ?? "",
+      ).trim();
+      if (!pool) {
+        droppedMalformedRows += 1;
+        continue;
+      }
+      const config = recordOrEmpty(row.pool_config ?? row.poolConfig);
+      const tokenX = discoveryToken(row, "x");
+      const tokenY = discoveryToken(row, "y");
+      const createdRaw = firstFiniteValue(
+        row.created_at,
+        row.pool_created_at,
+        row.createdAt,
+      );
+      const createdAtUnixSec =
+        createdRaw == null
+          ? null
+          : createdRaw > 10_000_000_000
+            ? createdRaw / 1000
+            : createdRaw;
+      const tvlUsd = firstFiniteValue(row.tvl, row.liquidity);
+      const activeTvlUsd = firstFiniteValue(row.active_tvl, row.activeTvl);
+      const volumeUsd = timeframeMetric(row, timeframe, [
+        "volume",
+        "trade_volume",
+        "tradeVolume",
+      ]);
+      const feeUsd = timeframeMetric(row, timeframe, [
+        "fees",
+        "fee",
+        "trade_fee",
+        "tradeFee",
+      ]);
+      const feeTvlRatio = timeframeMetric(row, timeframe, [
+        "fee_tvl_ratio",
+        "feeTvlRatio",
+      ]);
+      const feeActiveTvlPct =
+        feeUsd != null && activeTvlUsd != null && activeTvlUsd > 0
+          ? (feeUsd / activeTvlUsd) * 100
+          : null;
+      const volumeActiveTvlPct =
+        volumeUsd != null && activeTvlUsd != null && activeTvlUsd > 0
+          ? (volumeUsd / activeTvlUsd) * 100
+          : null;
+      const priceChangePct = timeframeMetric(row, timeframe, [
+        "price_change_pct",
+        "pool_price_change_pct",
+        "priceChangePct",
+      ]);
+      const swapCount = timeframeMetric(row, timeframe, [
+        "swap_count",
+        "swapCount",
+        "trades",
+      ]);
+      const uniqueTraders = timeframeMetric(row, timeframe, [
+        "unique_traders",
+        "uniqueTraders",
+      ]);
+      const uniqueLps = timeframeMetric(row, timeframe, [
+        "unique_lps",
+        "uniqueLps",
+      ]);
+      const rollingMetrics = [
+        activeTvlUsd,
+        volumeUsd,
+        feeUsd,
+        feeTvlRatio,
+        priceChangePct,
+        swapCount,
+        uniqueTraders,
+        uniqueLps,
+      ];
+
+      pools.push({
+        schema: METEORA_POOL_DISCOVERY_SCHEMA_V1,
+        version: 1,
+        observedAtMs,
+        timeframe,
+        pool,
+        name: row.name == null ? null : String(row.name),
+        tokenX,
+        tokenY,
+        createdAtUnixSec,
+        ageSec:
+          createdAtUnixSec != null
+            ? Math.max(0, nowSec - createdAtUnixSec)
+            : null,
+        currentPriceYPerX: firstFiniteValue(
+          row.current_price,
+          row.currentPrice,
+        ),
+        binStep: firstFiniteValue(
+          config.bin_step,
+          config.binStep,
+          row.bin_step,
+          row.binStep,
+        ),
+        baseFeePct: firstFiniteValue(
+          config.base_fee_pct,
+          config.baseFeePct,
+          row.base_fee_pct,
+          row.baseFeePct,
+          row.base_fee_percentage,
+        ),
+        dynamicFeePct: firstFiniteValue(row.dynamic_fee_pct, row.dynamicFeePct),
+        maxFeePct: firstFiniteValue(
+          config.max_fee_pct,
+          config.maxFeePct,
+          row.max_fee_pct,
+          row.maxFeePct,
+        ),
+        protocolFeePct: firstFiniteValue(
+          config.protocol_fee_pct,
+          config.protocolFeePct,
+          row.protocol_fee_pct,
+          row.protocolFeePct,
+        ),
+        tvlUsd,
+        activeTvlUsd,
+        volumeUsd,
+        feeUsd,
+        feeTvlRatio,
+        feeActiveTvlPct,
+        volumeActiveTvlPct,
+        priceChangePct,
+        swapCount,
+        uniqueTraders,
+        uniqueLps,
+        aprPct: firstFiniteValue(row.apr, row.apr_24h, row.apr24h),
+        apyPct: firstFiniteValue(row.apy, row.apy_24h, row.apy24h),
+        hasFarm:
+          typeof row.has_farm === "boolean"
+            ? row.has_farm
+            : typeof row.hasFarm === "boolean"
+              ? row.hasFarm
+              : null,
+        isBlacklisted:
+          typeof row.is_blacklisted === "boolean"
+            ? row.is_blacklisted
+            : typeof row.isBlacklisted === "boolean"
+              ? row.isBlacklisted
+              : null,
+        quality: {
+          identityComplete: Boolean(pool && tokenX.mint && tokenY.mint),
+          tokenMetadataComplete: Boolean(tokenX.symbol && tokenY.symbol),
+          rollingMetricsPresent: rollingMetrics.filter((x) => x != null).length,
+          rollingMetricsExpected: 8,
+          feeActiveTvlDerived: feeActiveTvlPct != null,
+          volumeActiveTvlDerived: volumeActiveTvlPct != null,
+        },
+        raw: args.includeRaw
+          ? ((safeJsonValue(row) ?? {}) as Record<string, unknown>)
+          : null,
+      });
+    }
+
+    const total = firstFiniteValue(raw?.total, raw?.total_count, raw?.count);
+    const totalPages = firstFiniteValue(
+      raw?.pages,
+      raw?.total_pages,
+      raw?.totalPages,
+    );
+    return {
+      schema: METEORA_POOL_DISCOVERY_SCHEMA_V1,
+      version: 1,
+      observedAtMs,
+      timeframe,
+      page:
+        firstFiniteValue(raw?.page, raw?.current_page, raw?.currentPage) ??
+        page,
+      pageSize: firstFiniteValue(raw?.page_size, raw?.pageSize) ?? pageSize,
+      total,
+      totalPages:
+        totalPages ??
+        (total != null && pageSize > 0 ? Math.ceil(total / pageSize) : null),
+      returned: pools.length,
+      droppedMalformedRows,
+      query: args.query?.trim() || null,
+      sortBy: args.sortBy?.trim() || null,
+      filterBy: args.filterBy?.trim() || null,
+      pools,
+    };
+  }
+
   async listPools(
     args: {
       page?: number;
@@ -1621,12 +1972,11 @@ export class MeteoraDlmmService {
   ): Promise<MeteoraPoolSearchResult[]> {
     const normalized = query.trim();
     if (!normalized) throw new Error("Meteora pool search query is required");
-    const url = new URL(`${this.dataApiBase()}/pools`);
-    url.searchParams.set("query", normalized);
-    const response = await fetch(url);
-    if (!response.ok)
-      throw new Error(`Meteora pool search HTTP ${response.status}`);
-    const body = (await response.json()) as any;
+    const body = (await this.dataApiGet("/pools", {
+      query: normalized,
+      page: 1,
+      page_size: Math.max(1, Math.min(100, Math.trunc(limit))),
+    })) as any;
     const rows = (Array.isArray(body) ? body : (body?.data ?? [])).slice(
       0,
       Math.max(1, Math.min(100, Math.trunc(limit))),
@@ -1659,10 +2009,7 @@ export class MeteoraDlmmService {
 
   async getIndexedPool(poolAddress: string): Promise<Record<string, unknown>> {
     const pool = asPublicKey(poolAddress).toBase58();
-    const response = await fetch(`${this.dataApiBase()}/pools/${pool}`);
-    if (!response.ok)
-      throw new Error(`Meteora indexed pool HTTP ${response.status}`);
-    return (safeJsonValue(await response.json()) ?? {}) as Record<
+    return ((await this.dataApiGet(`/pools/${pool}`)) ?? {}) as Record<
       string,
       unknown
     >;
@@ -1758,9 +2105,29 @@ export class MeteoraDlmmService {
     url.searchParams.set("page_size", "1");
     url.searchParams.set("filter_by", `pool_address=${pool}`);
     url.searchParams.set("timeframe", timeframe);
-    const response = await fetch(url);
-    if (!response.ok)
-      throw new Error(`Meteora pool detail HTTP ${response.status}`);
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await fetch(url);
+    } catch (error) {
+      throw new MeteoraDataApiError({
+        path: "/pool-discovery/pools",
+        message: `Meteora pool discovery detail request failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        cause: error,
+      });
+    }
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new MeteoraDataApiError({
+        path: "/pool-discovery/pools",
+        status: response.status,
+        responseBody: detail ? detail.slice(0, 1000) : null,
+        message: `Meteora pool discovery detail HTTP ${response.status}${
+          detail ? `: ${detail.slice(0, 300)}` : ""
+        }`,
+      });
+    }
     const body = (await response.json()) as any;
     const row = Array.isArray(body?.data) ? body.data[0] : null;
     return row ? (safeJsonValue(row) as Record<string, unknown>) : null;
@@ -1786,12 +2153,28 @@ export class MeteoraDlmmService {
     if (args.filterBy?.trim())
       url.searchParams.set("filter_by", args.filterBy.trim());
 
-    const response = await fetch(url);
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await fetch(url);
+    } catch (error) {
+      throw new MeteoraDataApiError({
+        path: "/pool-discovery/pools",
+        message: `Meteora pool discovery request failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        cause: error,
+      });
+    }
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      throw new Error(
-        `Meteora pool discovery HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`,
-      );
+      throw new MeteoraDataApiError({
+        path: "/pool-discovery/pools",
+        status: response.status,
+        responseBody: detail ? detail.slice(0, 1000) : null,
+        message: `Meteora pool discovery HTTP ${response.status}${
+          detail ? `: ${detail.slice(0, 300)}` : ""
+        }`,
+      });
     }
     const body = (await response.json()) as any;
     const rows = Array.isArray(body?.data) ? body.data : [];
@@ -1815,14 +2198,39 @@ export class MeteoraDlmmService {
       if (value == null) continue;
       url.searchParams.set(key, String(value));
     }
-    const response = await fetch(url);
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await fetch(url);
+    } catch (error) {
+      throw new MeteoraDataApiError({
+        path,
+        message: `Meteora Data API ${path} request failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        cause: error,
+      });
+    }
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      throw new Error(
-        `Meteora Data API ${path} HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`,
-      );
+      throw new MeteoraDataApiError({
+        path,
+        status: response.status,
+        responseBody: detail ? detail.slice(0, 1000) : null,
+        message: `Meteora Data API ${path} HTTP ${response.status}${
+          detail ? `: ${detail.slice(0, 300)}` : ""
+        }`,
+      });
     }
-    return safeJsonValue(await response.json());
+    try {
+      return safeJsonValue(await response.json());
+    } catch (error) {
+      throw new MeteoraDataApiError({
+        path,
+        status: response.status,
+        message: `Meteora Data API ${path} returned invalid JSON`,
+        cause: error,
+      });
+    }
   }
 
   async getPoolOhlcv(
@@ -2392,8 +2800,9 @@ export class MeteoraDlmmService {
     ).length;
 
     return {
-      schema: "meteora-market-features-v1",
+      schema: METEORA_MARKET_FEATURE_SCHEMA_V1,
       semanticsVersion: 1,
+      semanticsHash: METEORA_MARKET_FEATURE_SEMANTICS_HASH_V1,
       semanticsId: "meteora-market-features-v1-20260825",
       observedAtMs: metrics.observedAt,
       pool: metrics.pool,
@@ -2631,15 +3040,12 @@ export class MeteoraDlmmService {
   }): Promise<unknown> {
     const pool = asPublicKey(args.pool).toBase58();
     const wallet = asPublicKey(args.wallet).toBase58();
-    const url = new URL(`${this.dataApiBase()}/positions/${pool}/pnl`);
-    url.searchParams.set("user", wallet);
-    url.searchParams.set("status", args.status ?? "open");
-    url.searchParams.set("page_size", "100");
-    url.searchParams.set("page", "1");
-    const response = await fetch(url);
-    if (!response.ok)
-      throw new Error(`Meteora position PnL HTTP ${response.status}`);
-    const body = (await response.json()) as any;
+    const body = (await this.dataApiGet(`/positions/${pool}/pnl`, {
+      user: wallet,
+      status: args.status ?? "open",
+      page_size: 100,
+      page: 1,
+    })) as any;
     if (!args.position) return safeJsonValue(body);
     const rows = body?.positions ?? body?.data ?? [];
     return safeJsonValue(
@@ -3222,11 +3628,12 @@ export class MeteoraDlmmService {
     const commitment = args.commitment ?? "confirmed";
     const pool = await this.rawPool(args.pool, true);
     const walletAddress = this.resolveWalletAddress(args.wallet);
-    const availableNativeLamports = BigInt(
-      await this.host
-        .connection()
-        .getBalance(asPublicKey(walletAddress), commitment),
-    );
+    const balances = await this.getWalletPoolBalances({
+      wallet: args.wallet,
+      pool: pool.pubkey.toBase58(),
+      commitment,
+    });
+    const availableNativeLamports = BigInt(balances.nativeLamports);
     const nativeReserveLamports =
       args.nativeReserveLamports == null
         ? 0n
@@ -3244,16 +3651,34 @@ export class MeteoraDlmmService {
       let executable = true;
       let errorCode: MeteoraErrorCode | null = null;
       let errorMessage: string | null = null;
+      let requestedAmountXRaw = "0";
+      let requestedAmountYRaw = "0";
+      try {
+        requestedAmountXRaw = toBN(
+          candidate.amountXRaw ?? 0,
+          `${candidate.id}.amountXRaw`,
+        ).toString(10);
+        requestedAmountYRaw = toBN(
+          candidate.amountYRaw ?? 0,
+          `${candidate.id}.amountYRaw`,
+        ).toString(10);
+      } catch (error) {
+        executable = false;
+        errorCode = "INVALID_ARGUMENT";
+        errorMessage = error instanceof Error ? error.message : String(error);
+      }
 
       if (
-        !Number.isInteger(candidate.minBinId) ||
-        !Number.isInteger(candidate.maxBinId) ||
-        candidate.minBinId > candidate.maxBinId
+        executable &&
+        (!Number.isInteger(candidate.minBinId) ||
+          !Number.isInteger(candidate.maxBinId) ||
+          candidate.minBinId > candidate.maxBinId)
       ) {
         executable = false;
         errorCode = "INVALID_ARGUMENT";
         errorMessage = `invalid range ${candidate.minBinId}..${candidate.maxBinId}`;
       } else if (
+        executable &&
         width > STANDARD_POSITION_BINS &&
         (typeof (pool as any).createExtendedEmptyPosition !== "function" ||
           typeof (pool as any).addLiquidityByStrategyChunkable !== "function")
@@ -3261,7 +3686,7 @@ export class MeteoraDlmmService {
         executable = false;
         errorCode = "SDK_INCOMPATIBLE";
         errorMessage = `range width ${width} requires Meteora extended-position support that is unavailable in the installed SDK`;
-      } else {
+      } else if (executable) {
         try {
           infrastructure = await this.quoteInfrastructureForRange(
             pool,
@@ -3291,6 +3716,8 @@ export class MeteoraDlmmService {
       const refundableUpper =
         positionCost == null ? null : positionCost + reallocCost;
 
+      const requiresSharedInfrastructure =
+        BigInt(infrastructure?.nonRefundableInfrastructureLamports ?? "0") > 0n;
       candidates.push({
         id: String(candidate.id),
         strategy,
@@ -3310,6 +3737,12 @@ export class MeteoraDlmmService {
           refundableUpper == null ? null : refundableUpper.toString(),
         nonRefundableInfrastructureLamportsUpperBound:
           infrastructure?.nonRefundableInfrastructureLamports ?? "0",
+        requiresSharedInfrastructure,
+        sharedInfrastructureAuthorized:
+          requiresSharedInfrastructure && executable,
+        safeWithoutSharedInfrastructureFunding: !requiresSharedInfrastructure,
+        requestedAmountXRaw,
+        requestedAmountYRaw,
       });
     }
 
@@ -3324,9 +3757,11 @@ export class MeteoraDlmmService {
           0n,
         )
       : null;
-    // Upper bound because independently quoted candidates can overlap the same
-    // not-yet-initialized shared bin arrays.
-    const nonRefundableUpper = candidates.reduce(
+    // Upper bound because independently quoted executable candidates can overlap
+    // the same not-yet-initialized shared bin arrays. Rejected candidates are
+    // deliberately excluded: default-denied infrastructure must never be budgeted
+    // as though it might be paid.
+    const nonRefundableUpper = executableCandidates.reduce(
       (sum, row) =>
         sum + BigInt(row.nonRefundableInfrastructureLamportsUpperBound),
       0n,
@@ -3336,18 +3771,58 @@ export class MeteoraDlmmService {
         ? null
         : refundableTotal + nonRefundableUpper + nativeReserveLamports;
     const rejectedCandidates = candidates.length - executableCandidates.length;
-    const safeToExecute =
-      rejectedCandidates === 0 &&
-      requiredBeforeNetwork != null &&
-      availableNativeLamports >= requiredBeforeNetwork;
+    const safeToBuild = rejectedCandidates === 0;
+    const requestedPrincipalXRaw = executableCandidates.reduce(
+      (sum, row) => sum + BigInt(row.requestedAmountXRaw),
+      0n,
+    );
+    const requestedPrincipalYRaw = executableCandidates.reduce(
+      (sum, row) => sum + BigInt(row.requestedAmountYRaw),
+      0n,
+    );
+    const requestedWsolPrincipalLamports =
+      balances.tokenX.mint === WSOL_MINT
+        ? requestedPrincipalXRaw
+        : balances.tokenY.mint === WSOL_MINT
+          ? requestedPrincipalYRaw
+          : 0n;
+    const tokenXPrincipalSufficient =
+      balances.tokenX.mint === WSOL_MINT ||
+      BigInt(balances.tokenXRaw) >= requestedPrincipalXRaw;
+    const tokenYPrincipalSufficient =
+      balances.tokenY.mint === WSOL_MINT ||
+      BigInt(balances.tokenYRaw) >= requestedPrincipalYRaw;
+    const requiredNativeIncludingWsol =
+      requiredBeforeNetwork == null
+        ? null
+        : requiredBeforeNetwork + requestedWsolPrincipalLamports;
+    const nativeFundingSufficientBeforeNetworkFee =
+      requiredNativeIncludingWsol == null
+        ? null
+        : availableNativeLamports >= requiredNativeIncludingWsol;
+    const wsolPrincipalSufficient =
+      availableNativeLamports >= requestedWsolPrincipalLamports;
+    const principalFundingSufficient =
+      tokenXPrincipalSufficient &&
+      tokenYPrincipalSufficient &&
+      wsolPrincipalSufficient;
+    const safeToExecuteBeforeNetworkFee =
+      safeToBuild &&
+      principalFundingSufficient &&
+      nativeFundingSufficientBeforeNetworkFee === true;
+    const safeToExecute = safeToExecuteBeforeNetworkFee;
 
     return {
       version: 1,
       observedAt: Date.now(),
       wallet: walletAddress,
       pool: pool.pubkey.toBase58(),
+      safeToBuild,
+      principalFundingSufficient,
+      safeToExecuteBeforeNetworkFee,
       safeToExecute,
       availableNativeLamports: availableNativeLamports.toString(),
+      balances,
       nativeReserveLamports: nativeReserveLamports.toString(),
       candidates,
       total: {
@@ -3362,6 +3837,17 @@ export class MeteoraDlmmService {
           requiredBeforeNetwork == null
             ? null
             : requiredBeforeNetwork.toString(),
+        requestedPrincipalXRaw: requestedPrincipalXRaw.toString(),
+        requestedPrincipalYRaw: requestedPrincipalYRaw.toString(),
+        requestedWsolPrincipalLamports:
+          requestedWsolPrincipalLamports.toString(),
+        requiredNativeLamportsIncludingWsolPrincipalBeforeNetworkFeeUpperBound:
+          requiredNativeIncludingWsol == null
+            ? null
+            : requiredNativeIncludingWsol.toString(),
+        tokenXPrincipalSufficient,
+        tokenYPrincipalSufficient,
+        nativeFundingSufficientBeforeNetworkFee,
       },
     };
   }

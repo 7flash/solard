@@ -1,6 +1,7 @@
 export {
   MeteoraDlmmService,
   MeteoraError,
+  MeteoraDataApiError,
   MeteoraMissingRequiredSignerError,
   MeteoraManagedPositionScope,
   meteoraErrorCode,
@@ -9,6 +10,11 @@ export {
   MeteoraPartialExecutionError,
   MeteoraVerificationError,
 } from "./dlmm.ts";
+export {
+  METEORA_MARKET_FEATURE_SCHEMA_V1,
+  METEORA_MARKET_FEATURE_SEMANTICS_HASH_V1,
+  METEORA_POOL_DISCOVERY_SCHEMA_V1,
+} from "./types.ts";
 export type { MeteoraDlmmHost } from "./dlmm.ts";
 export type {
   MeteoraActiveBinSample,
@@ -57,6 +63,10 @@ export type {
   MeteoraOpenPositionArgs,
   MeteoraPoolCategory,
   MeteoraPoolSearchResult,
+  MeteoraPoolDiscoveryToken,
+  MeteoraPoolDiscoveryCandidateV1,
+  MeteoraPoolDiscoveryArgs,
+  MeteoraPoolDiscoveryPageV1,
   MeteoraPoolState,
   MeteoraPoolToken,
   MeteoraPositionActionArgs,

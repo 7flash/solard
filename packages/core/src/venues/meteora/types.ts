@@ -14,6 +14,13 @@ export type MeteoraTransaction = Transaction | VersionedTransaction;
 export type MeteoraInteger = bigint | number | string;
 export type MeteoraUiAmount = number | string;
 
+export const METEORA_MARKET_FEATURE_SCHEMA_V1 =
+  "meteora-market-features-v1" as const;
+export const METEORA_MARKET_FEATURE_SEMANTICS_HASH_V1 =
+  "sha256:df0cb334157a903fe0632e9e25dc06c6a00e045f1cee0c93d090d95330183c1d" as const;
+export const METEORA_POOL_DISCOVERY_SCHEMA_V1 =
+  "meteora-pool-discovery-v1" as const;
+
 export type MeteoraErrorCode =
   | "INFRASTRUCTURE_FUNDING_REQUIRED"
   | "MISSING_REQUIRED_SIGNER"
@@ -31,6 +38,7 @@ export type MeteoraErrorCode =
   | "INSUFFICIENT_FUNDS"
   | "INVALID_ARGUMENT"
   | "SDK_INCOMPATIBLE"
+  | "DATA_API_ERROR"
   | "UNKNOWN";
 
 export type MeteoraRange = {
@@ -107,6 +115,11 @@ export type MeteoraOpenBatchPreflightCandidate = {
   positionReallocCostLamports: string | null;
   refundablePositionLamportsUpperBound: string | null;
   nonRefundableInfrastructureLamportsUpperBound: string;
+  requiresSharedInfrastructure: boolean;
+  sharedInfrastructureAuthorized: boolean;
+  safeWithoutSharedInfrastructureFunding: boolean;
+  requestedAmountXRaw: string;
+  requestedAmountYRaw: string;
 };
 
 export type MeteoraOpenBatchPreflight = {
@@ -114,8 +127,20 @@ export type MeteoraOpenBatchPreflight = {
   observedAt: number;
   wallet: string;
   pool: string;
+  /** All candidates passed range/SDK/infrastructure policy checks. */
+  safeToBuild: boolean;
+  /** All requested principal can be sourced from the wallet under Solard's current SOL-wrapping behavior. */
+  principalFundingSufficient: boolean;
+  /**
+   * Full preflight except transaction network/priority fees, which are not known
+   * without constructing the transactions. Keep nativeReserveLamports large enough
+   * to absorb those fees.
+   */
+  safeToExecuteBeforeNetworkFee: boolean;
+  /** @deprecated Alias of safeToExecuteBeforeNetworkFee. */
   safeToExecute: boolean;
   availableNativeLamports: string;
+  balances: MeteoraWalletPoolBalances;
   nativeReserveLamports: string;
   candidates: MeteoraOpenBatchPreflightCandidate[];
   total: {
@@ -125,6 +150,19 @@ export type MeteoraOpenBatchPreflight = {
     nonRefundableInfrastructureLamportsUpperBound: string;
     estimatedNetworkFeeLamports: null;
     requiredNativeLamportsBeforeNetworkFeeUpperBound: string | null;
+    requestedPrincipalXRaw: string;
+    requestedPrincipalYRaw: string;
+    /**
+     * Requested WSOL-side principal. Solard currently uses Meteora's default SOL
+     * wrapping path for position opens, so this is conservatively treated as native SOL.
+     */
+    requestedWsolPrincipalLamports: string;
+    /** Recoverable rent + authorized shared infrastructure + reserve + WSOL principal. */
+    requiredNativeLamportsIncludingWsolPrincipalBeforeNetworkFeeUpperBound:
+      string | null;
+    tokenXPrincipalSufficient: boolean;
+    tokenYPrincipalSufficient: boolean;
+    nativeFundingSufficientBeforeNetworkFee: boolean | null;
   };
 };
 
@@ -178,12 +216,14 @@ export type MeteoraPoolWalletSnapshot = {
 };
 
 export type MeteoraMarketFeatureVectorV1 = {
-  schema: "meteora-market-features-v1";
+  schema: typeof METEORA_MARKET_FEATURE_SCHEMA_V1;
   semanticsVersion: 1;
   /**
-   * Stable identity for feature semantics/units. Persist this with learning rows
-   * and do not mix populations whose semanticsId differs.
+   * SHA-256 identity of the canonical field/unit/source semantics manifest.
+   * Persist this with every learning row and never mix populations whose hash differs.
    */
+  semanticsHash: typeof METEORA_MARKET_FEATURE_SEMANTICS_HASH_V1;
+  /** @deprecated Use semanticsHash. Retained for compatibility with the earlier patch. */
   semanticsId: "meteora-market-features-v1-20260825";
   observedAtMs: number;
   pool: string;
@@ -825,6 +865,93 @@ export type MeteoraWalletPositions = {
   wallet: string;
   totalPositions: number;
   positions: MeteoraPositionSnapshot[];
+};
+
+export type MeteoraPoolDiscoveryToken = {
+  mint: string | null;
+  symbol: string | null;
+  name: string | null;
+  decimals: number | null;
+};
+
+export type MeteoraPoolDiscoveryCandidateV1 = {
+  schema: typeof METEORA_POOL_DISCOVERY_SCHEMA_V1;
+  version: 1;
+  observedAtMs: number;
+  timeframe: MeteoraTimeframe;
+  pool: string;
+  name: string | null;
+  tokenX: MeteoraPoolDiscoveryToken;
+  tokenY: MeteoraPoolDiscoveryToken;
+  createdAtUnixSec: number | null;
+  ageSec: number | null;
+  currentPriceYPerX: number | null;
+  binStep: number | null;
+  baseFeePct: number | null;
+  dynamicFeePct: number | null;
+  maxFeePct: number | null;
+  protocolFeePct: number | null;
+  tvlUsd: number | null;
+  activeTvlUsd: number | null;
+  volumeUsd: number | null;
+  feeUsd: number | null;
+  /** Meteora Data API fee_tvl_ratio for the selected rolling window; units preserved as API ratio semantics. */
+  feeTvlRatio: number | null;
+  /** Derived as feeUsd / activeTvlUsd * 100 when both are available. */
+  feeActiveTvlPct: number | null;
+  /** Derived as volumeUsd / activeTvlUsd * 100 when both are available. */
+  volumeActiveTvlPct: number | null;
+  priceChangePct: number | null;
+  swapCount: number | null;
+  uniqueTraders: number | null;
+  uniqueLps: number | null;
+  aprPct: number | null;
+  apyPct: number | null;
+  hasFarm: boolean | null;
+  isBlacklisted: boolean | null;
+  quality: {
+    identityComplete: boolean;
+    tokenMetadataComplete: boolean;
+    rollingMetricsPresent: number;
+    rollingMetricsExpected: 8;
+    feeActiveTvlDerived: boolean;
+    volumeActiveTvlDerived: boolean;
+  };
+  raw: Record<string, unknown> | null;
+};
+
+export type MeteoraPoolDiscoveryArgs = {
+  /** 1-based page number. Default 1. */
+  page?: number;
+  /** Official Data API supports up to 1000 pool rows per page. Default 100. */
+  pageSize?: number;
+  /** Search by pool name, token, mint, or address. */
+  query?: string;
+  /** Meteora Data API sort expression, e.g. `volume_5m:desc`. */
+  sortBy?: string;
+  /** Meteora Data API filter expression. */
+  filterBy?: string;
+  /** Window used to normalize rolling volume/fee/price-change fields. Default 5m. */
+  timeframe?: MeteoraTimeframe;
+  /** Include the complete normalized Data API row. Default false. */
+  includeRaw?: boolean;
+};
+
+export type MeteoraPoolDiscoveryPageV1 = {
+  schema: typeof METEORA_POOL_DISCOVERY_SCHEMA_V1;
+  version: 1;
+  observedAtMs: number;
+  timeframe: MeteoraTimeframe;
+  page: number;
+  pageSize: number;
+  total: number | null;
+  totalPages: number | null;
+  returned: number;
+  droppedMalformedRows: number;
+  query: string | null;
+  sortBy: string | null;
+  filterBy: string | null;
+  pools: MeteoraPoolDiscoveryCandidateV1[];
 };
 
 export type MeteoraPoolSearchResult = {
