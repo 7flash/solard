@@ -1,6 +1,6 @@
 {
   "name": "solard-cli",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Multi-wallet Solana CLI",
   "type": "module",
   "bin": {
@@ -15,7 +15,7 @@
     "bun": ">=1.1.0"
   },
   "dependencies": {
-    "@solard/cli": "0.2.6"
+    "@solard/cli": "0.2.7"
   },
   "license": "MIT"
 }

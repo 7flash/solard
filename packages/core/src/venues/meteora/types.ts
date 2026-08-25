@@ -353,6 +353,93 @@ export type MeteoraPoolMarketMetrics = {
   liquidityDepth: MeteoraLiquidityDepthMetrics;
 };
 
+export type MeteoraWalletAccountingSnapshot = {
+  observedAt: number;
+  nativeLamports: string;
+  tokenXRaw: string;
+  tokenYRaw: string;
+};
+
+export type MeteoraPositionAccountingSnapshot = {
+  observedAt: number;
+  exists: boolean;
+  accountLamports: string;
+  totalXRaw: string;
+  totalYRaw: string;
+  feeXRaw: string;
+  feeYRaw: string;
+};
+
+export type MeteoraExecutionAccounting = {
+  version: 1;
+  complete: boolean;
+  wallet: string;
+  pool: string;
+  position: string | null;
+  tokenXMint: string;
+  tokenYMint: string;
+  before: {
+    wallet: MeteoraWalletAccountingSnapshot;
+    position: MeteoraPositionAccountingSnapshot | null;
+  };
+  after: {
+    wallet: MeteoraWalletAccountingSnapshot | null;
+    position: MeteoraPositionAccountingSnapshot | null;
+  };
+  walletDelta: {
+    /** SPL-token-account delta only. Native SOL is deliberately separate. */
+    tokenXRaw: string | null;
+    /** SPL-token-account delta only. Native SOL is deliberately separate. */
+    tokenYRaw: string | null;
+    nativeLamports: string | null;
+  };
+  liquidity: {
+    /** Requested raw contribution from the prepared open/add-liquidity call. */
+    requestedDepositXRaw: string | null;
+    /** Requested raw contribution from the prepared open/add-liquidity call. */
+    requestedDepositYRaw: string | null;
+    preActionPositionXRaw: string;
+    preActionPositionYRaw: string;
+    postActionPositionXRaw: string | null;
+    postActionPositionYRaw: string | null;
+    /** Observed position inventory change, not inferred from native wallet SOL. */
+    positionIncreaseXRaw: string | null;
+    positionIncreaseYRaw: string | null;
+    positionDecreaseXRaw: string | null;
+    positionDecreaseYRaw: string | null;
+  };
+  positionFees: {
+    preActionUnclaimedXRaw: string | null;
+    preActionUnclaimedYRaw: string | null;
+    postActionUnclaimedXRaw: string | null;
+    postActionUnclaimedYRaw: string | null;
+    counterIncreaseXRaw: string | null;
+    counterIncreaseYRaw: string | null;
+    counterDecreaseXRaw: string | null;
+    counterDecreaseYRaw: string | null;
+  };
+  positionRent: {
+    beforeLamports: string | null;
+    afterLamports: string | null;
+    lockedLamports: string | null;
+    returnedLamports: string | null;
+  };
+  networkFeeLamports: string | null;
+  infrastructure: {
+    /** Quote produced before the transaction. Position-account rent is excluded. */
+    quotedNonRefundableLamports: string;
+    quotedBinArrayLamports: string;
+    quotedBitmapExtensionLamports: string;
+    authorizedMaximumLamports: string | null;
+    explicitlyAuthorized: boolean;
+  } | null;
+  /**
+   * Accounting is observational. In particular, native SOL is never inferred to be
+   * WSOL principal. Warnings explain any post-write RPC gaps or unavailable fee data.
+   */
+  warnings: string[];
+};
+
 export type MeteoraExecutionOptions = {
   /**
    * Must be true for any on-chain write. This is intentionally separate from
@@ -394,6 +481,8 @@ export type MeteoraExecutionResult = {
   pool: string;
   position?: string;
   signatures: string[];
+  /** Present for position-mutating writes prepared/executed by the current SDK. */
+  accounting?: MeteoraExecutionAccounting;
 };
 
 export type MeteoraPoolToken = {

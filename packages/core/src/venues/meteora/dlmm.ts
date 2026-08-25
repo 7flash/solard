@@ -14,6 +14,7 @@ import type {
   MeteoraActiveBinSample,
   MeteoraAddLiquidityArgs,
   MeteoraDiscoverPoolsArgs,
+  MeteoraExecutionAccounting,
   MeteoraExecutionOptions,
   MeteoraExecutionResult,
   MeteoraInteger,
@@ -37,6 +38,7 @@ import type {
   MeteoraPoolSearchResult,
   MeteoraPoolState,
   MeteoraPoolToken,
+  MeteoraPositionAccountingSnapshot,
   MeteoraPositionActionArgs,
   MeteoraPositionSnapshot,
   MeteoraPreparedTransactions,
@@ -47,6 +49,7 @@ import type {
   MeteoraSwapQuote,
   MeteoraTimeframe,
   MeteoraUiAmount,
+  MeteoraWalletAccountingSnapshot,
   MeteoraWalletPositions,
 } from "./types.ts";
 
@@ -335,6 +338,83 @@ function uniqueSigners(signers: Keypair[]): Keypair[] {
   });
 }
 
+/**
+ * Return only the candidate keypairs that this specific transaction actually
+ * requires. Meteora wide/extended position flows are chunked: the position
+ * keypair signs the position-creation transaction, while later liquidity
+ * chunks typically require only the wallet. Passing every prepared signer to
+ * every legacy Transaction.partialSign() causes web3.js to throw
+ * `unknown signer` for those later chunks.
+ */
+function transactionRequiredSignerKeys(
+  transaction: Transaction | VersionedTransaction,
+): PublicKey[] {
+  if (isLegacyTransaction(transaction)) {
+    const message = transaction.compileMessage();
+    return message.accountKeys.slice(0, message.header.numRequiredSignatures);
+  }
+  return transaction.message.staticAccountKeys.slice(
+    0,
+    transaction.message.header.numRequiredSignatures,
+  );
+}
+
+function transactionSigners(
+  transaction: Transaction | VersionedTransaction,
+  candidates: Keypair[],
+): Keypair[] {
+  const required = new Set(
+    transactionRequiredSignerKeys(transaction).map((key) => key.toBase58()),
+  );
+  return candidates.filter((signer) =>
+    required.has(signer.publicKey.toBase58()),
+  );
+}
+
+function nonZeroSignature(value: Uint8Array | null | undefined): boolean {
+  return (
+    !!value && value.length > 0 && Array.from(value).some((byte) => byte !== 0)
+  );
+}
+
+/**
+ * Fail before simulation/send when a required signature is still absent. This
+ * produces a useful Solard error instead of serializing a transaction that is
+ * guaranteed to fail. Pre-signed SDK transactions remain valid: an already
+ * populated signature satisfies the check even if Solard does not own that
+ * keypair.
+ */
+function assertTransactionFullySigned(
+  transaction: Transaction | VersionedTransaction,
+): void {
+  const required = transactionRequiredSignerKeys(transaction);
+  const missing: string[] = [];
+
+  if (isLegacyTransaction(transaction)) {
+    const byKey = new Map(
+      transaction.signatures.map((entry) => [
+        entry.publicKey.toBase58(),
+        entry.signature,
+      ]),
+    );
+    for (const key of required) {
+      if (!nonZeroSignature(byKey.get(key.toBase58())))
+        missing.push(key.toBase58());
+    }
+  } else {
+    for (let index = 0; index < required.length; index += 1) {
+      if (!nonZeroSignature(transaction.signatures[index]))
+        missing.push(required[index]!.toBase58());
+    }
+  }
+
+  if (missing.length) {
+    throw new Error(
+      `Meteora transaction is missing required signer(s): ${missing.join(", ")}`,
+    );
+  }
+}
+
 function safeJsonValue(value: unknown, depth = 0): unknown {
   if (depth > 6) return null;
   if (value == null || typeof value === "boolean" || typeof value === "string")
@@ -370,6 +450,18 @@ export class MeteoraInfrastructureFundingRequiredError extends Error {
     super(message);
     this.name = "MeteoraInfrastructureFundingRequiredError";
     this.quote = quote;
+  }
+}
+
+export class MeteoraPartialExecutionError extends Error {
+  readonly result: MeteoraExecutionResult;
+  readonly cause: unknown;
+
+  constructor(message: string, result: MeteoraExecutionResult, cause: unknown) {
+    super(message);
+    this.name = "MeteoraPartialExecutionError";
+    this.result = result;
+    this.cause = cause;
   }
 }
 
@@ -533,6 +625,40 @@ function mapEntries<T>(
 ): Array<[string, T]> {
   return value instanceof Map ? [...value.entries()] : Object.entries(value);
 }
+
+function signedBigintDelta(after: string, before: string): string {
+  return (BigInt(after) - BigInt(before)).toString();
+}
+
+function positiveBigintDelta(after: string, before: string): string {
+  const delta = BigInt(after) - BigInt(before);
+  return (delta > 0n ? delta : 0n).toString();
+}
+
+function negativeBigintDeltaMagnitude(after: string, before: string): string {
+  const delta = BigInt(before) - BigInt(after);
+  return (delta > 0n ? delta : 0n).toString();
+}
+
+function accountingPositionKind(
+  kind: MeteoraPreparedTransactions["kind"],
+): boolean {
+  return (
+    kind === "open-position" ||
+    kind === "add-liquidity" ||
+    kind === "remove-liquidity" ||
+    kind === "close-position" ||
+    kind === "claim-fees"
+  );
+}
+
+type MeteoraExecutionAccountingBefore = {
+  walletAddress: string;
+  tokenXMint: string;
+  tokenYMint: string;
+  wallet: MeteoraWalletAccountingSnapshot;
+  position: MeteoraPositionAccountingSnapshot;
+};
 
 export class MeteoraDlmmService {
   private readonly pools = new Map<string, Promise<DlmmPool>>();
@@ -3140,6 +3266,317 @@ export class MeteoraDlmmService {
     };
   }
 
+  private async tokenBalanceRaw(
+    owner: PublicKey,
+    mint: string,
+    commitment: Commitment,
+  ): Promise<string> {
+    const response = await this.host
+      .connection()
+      .getParsedTokenAccountsByOwner(
+        owner,
+        { mint: asPublicKey(mint) },
+        { commitment },
+      );
+    let total = 0n;
+    for (const account of response.value) {
+      const amount = (account.account.data as any)?.parsed?.info?.tokenAmount
+        ?.amount;
+      if (typeof amount === "string" && /^\d+$/.test(amount))
+        total += BigInt(amount);
+    }
+    return total.toString();
+  }
+
+  private async walletAccountingSnapshot(
+    owner: PublicKey,
+    tokenXMint: string,
+    tokenYMint: string,
+    commitment: Commitment,
+  ): Promise<MeteoraWalletAccountingSnapshot> {
+    const observedAt = Date.now();
+    const [nativeLamports, tokenXRaw, tokenYRaw] = await Promise.all([
+      this.host.connection().getBalance(owner, commitment),
+      this.tokenBalanceRaw(owner, tokenXMint, commitment),
+      tokenYMint === tokenXMint
+        ? this.tokenBalanceRaw(owner, tokenXMint, commitment)
+        : this.tokenBalanceRaw(owner, tokenYMint, commitment),
+    ]);
+    return {
+      observedAt,
+      nativeLamports: String(nativeLamports),
+      tokenXRaw,
+      tokenYRaw,
+    };
+  }
+
+  private async positionAccountingSnapshot(
+    poolAddress: string,
+    positionAddress: string,
+    commitment: Commitment,
+  ): Promise<MeteoraPositionAccountingSnapshot> {
+    const observedAt = Date.now();
+    const positionKey = asPublicKey(positionAddress);
+    const account = await this.host
+      .connection()
+      .getAccountInfo(positionKey, commitment);
+    if (!account) {
+      return {
+        observedAt,
+        exists: false,
+        accountLamports: "0",
+        totalXRaw: "0",
+        totalYRaw: "0",
+        feeXRaw: "0",
+        feeYRaw: "0",
+      };
+    }
+
+    const pool = await this.rawPool(poolAddress, true);
+    const position = await pool.getPosition(positionKey);
+    const normalized = this.normalizePosition(
+      pool.pubkey.toBase58(),
+      { lbPair: pool.lbPair, tokenX: pool.tokenX, tokenY: pool.tokenY },
+      position,
+    );
+    return {
+      observedAt,
+      exists: true,
+      accountLamports: String(account.lamports),
+      totalXRaw: normalized.totalXRaw,
+      totalYRaw: normalized.totalYRaw,
+      feeXRaw: normalized.feeXRaw,
+      feeYRaw: normalized.feeYRaw,
+    };
+  }
+
+  private async transactionNetworkFees(
+    signatures: string[],
+    commitment: Commitment,
+  ): Promise<{ lamports: string | null; warnings: string[] }> {
+    const warnings: string[] = [];
+    let total = 0n;
+    const readCommitment: Commitment =
+      commitment === "processed" ? "confirmed" : commitment;
+    for (const signature of signatures) {
+      let fee: number | null = null;
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          const tx = await this.host.connection().getTransaction(signature, {
+            commitment: readCommitment as "confirmed" | "finalized",
+            maxSupportedTransactionVersion: 0,
+          });
+          if (tx?.meta?.fee != null) {
+            fee = tx.meta.fee;
+            break;
+          }
+        } catch (error) {
+          lastError = error;
+        }
+        if (attempt < 3)
+          await new Promise((resolve) =>
+            setTimeout(resolve, 400 * (attempt + 1)),
+          );
+      }
+      if (fee == null) {
+        warnings.push(
+          `network-fee-unavailable:${signature}${lastError ? `:${lastError instanceof Error ? lastError.message : String(lastError)}` : ""}`,
+        );
+        return { lamports: null, warnings };
+      }
+      total += BigInt(fee);
+    }
+    return { lamports: total.toString(), warnings };
+  }
+
+  private async captureExecutionAccountingBefore(
+    prepared: MeteoraPreparedTransactions,
+    commitment: Commitment,
+  ): Promise<MeteoraExecutionAccountingBefore> {
+    if (!prepared.position)
+      throw new Error(
+        `Meteora ${prepared.kind} accounting requires an explicit position address`,
+      );
+    const pool = await this.rawPool(prepared.pool, true);
+    const tokenXMint = tokenReserve(pool.tokenX).mint;
+    const tokenYMint = tokenReserve(pool.tokenY).mint;
+    if (!tokenXMint || !tokenYMint)
+      throw new Error("Meteora accounting could not resolve pool token mints");
+    const wallet = this.host.signer(prepared.wallet).publicKey;
+    const [walletSnapshot, positionSnapshot] = await Promise.all([
+      this.walletAccountingSnapshot(wallet, tokenXMint, tokenYMint, commitment),
+      this.positionAccountingSnapshot(
+        prepared.pool,
+        prepared.position,
+        commitment,
+      ),
+    ]);
+    return {
+      walletAddress: wallet.toBase58(),
+      tokenXMint,
+      tokenYMint,
+      wallet: walletSnapshot,
+      position: positionSnapshot,
+    };
+  }
+
+  private async finalizeExecutionAccounting(
+    prepared: MeteoraPreparedTransactions,
+    commitment: Commitment,
+    signatures: string[],
+    before: MeteoraExecutionAccountingBefore,
+  ): Promise<MeteoraExecutionAccounting> {
+    const warnings: string[] = [];
+    const owner = asPublicKey(before.walletAddress);
+    let afterWallet: MeteoraWalletAccountingSnapshot | null = null;
+    let afterPosition: MeteoraPositionAccountingSnapshot | null = null;
+
+    try {
+      afterWallet = await this.walletAccountingSnapshot(
+        owner,
+        before.tokenXMint,
+        before.tokenYMint,
+        commitment,
+      );
+    } catch (error) {
+      warnings.push(
+        `post-wallet-accounting-unavailable:${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      afterPosition = await this.positionAccountingSnapshot(
+        prepared.pool,
+        prepared.position!,
+        commitment,
+      );
+    } catch (error) {
+      warnings.push(
+        `post-position-accounting-unavailable:${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const network = await this.transactionNetworkFees(signatures, commitment);
+    warnings.push(...network.warnings);
+
+    const bpos = before.position;
+    const apos = afterPosition;
+    const positionComparable = apos != null;
+    const walletComparable = afterWallet != null;
+
+    const infrastructure = prepared.infrastructurePreflight
+      ? {
+          quotedNonRefundableLamports:
+            prepared.infrastructurePreflight.quote
+              .nonRefundableInfrastructureLamports,
+          quotedBinArrayLamports:
+            prepared.infrastructurePreflight.quote.binArrayCostLamports,
+          quotedBitmapExtensionLamports:
+            prepared.infrastructurePreflight.quote.bitmapExtensionCostLamports,
+          authorizedMaximumLamports:
+            prepared.infrastructurePreflight.authorization
+              .maxNonRefundableLamports,
+          explicitlyAuthorized:
+            prepared.infrastructurePreflight.authorization.allowBinArrayInit ||
+            prepared.infrastructurePreflight.authorization
+              .allowBitmapExtensionInit,
+        }
+      : null;
+
+    return {
+      version: 1,
+      complete:
+        walletComparable && positionComparable && network.lamports != null,
+      wallet: before.walletAddress,
+      pool: prepared.pool,
+      position: prepared.position ?? null,
+      tokenXMint: before.tokenXMint,
+      tokenYMint: before.tokenYMint,
+      before: {
+        wallet: before.wallet,
+        position: bpos,
+      },
+      after: {
+        wallet: afterWallet,
+        position: afterPosition,
+      },
+      walletDelta: {
+        tokenXRaw: afterWallet
+          ? signedBigintDelta(afterWallet.tokenXRaw, before.wallet.tokenXRaw)
+          : null,
+        tokenYRaw: afterWallet
+          ? signedBigintDelta(afterWallet.tokenYRaw, before.wallet.tokenYRaw)
+          : null,
+        nativeLamports: afterWallet
+          ? signedBigintDelta(
+              afterWallet.nativeLamports,
+              before.wallet.nativeLamports,
+            )
+          : null,
+      },
+      liquidity: {
+        requestedDepositXRaw:
+          prepared.kind === "open-position" || prepared.kind === "add-liquidity"
+            ? integerString(prepared.metadata?.amountXRaw, "0")
+            : null,
+        requestedDepositYRaw:
+          prepared.kind === "open-position" || prepared.kind === "add-liquidity"
+            ? integerString(prepared.metadata?.amountYRaw, "0")
+            : null,
+        preActionPositionXRaw: bpos.totalXRaw,
+        preActionPositionYRaw: bpos.totalYRaw,
+        postActionPositionXRaw: apos?.totalXRaw ?? null,
+        postActionPositionYRaw: apos?.totalYRaw ?? null,
+        positionIncreaseXRaw: positionComparable
+          ? positiveBigintDelta(apos!.totalXRaw, bpos.totalXRaw)
+          : null,
+        positionIncreaseYRaw: positionComparable
+          ? positiveBigintDelta(apos!.totalYRaw, bpos.totalYRaw)
+          : null,
+        positionDecreaseXRaw: positionComparable
+          ? negativeBigintDeltaMagnitude(apos!.totalXRaw, bpos.totalXRaw)
+          : null,
+        positionDecreaseYRaw: positionComparable
+          ? negativeBigintDeltaMagnitude(apos!.totalYRaw, bpos.totalYRaw)
+          : null,
+      },
+      positionFees: {
+        preActionUnclaimedXRaw: bpos.feeXRaw,
+        preActionUnclaimedYRaw: bpos.feeYRaw,
+        postActionUnclaimedXRaw: apos?.feeXRaw ?? null,
+        postActionUnclaimedYRaw: apos?.feeYRaw ?? null,
+        counterIncreaseXRaw: positionComparable
+          ? positiveBigintDelta(apos!.feeXRaw, bpos.feeXRaw)
+          : null,
+        counterIncreaseYRaw: positionComparable
+          ? positiveBigintDelta(apos!.feeYRaw, bpos.feeYRaw)
+          : null,
+        counterDecreaseXRaw: positionComparable
+          ? negativeBigintDeltaMagnitude(apos!.feeXRaw, bpos.feeXRaw)
+          : null,
+        counterDecreaseYRaw: positionComparable
+          ? negativeBigintDeltaMagnitude(apos!.feeYRaw, bpos.feeYRaw)
+          : null,
+      },
+      positionRent: {
+        beforeLamports: bpos.accountLamports,
+        afterLamports: apos?.accountLamports ?? null,
+        lockedLamports: positionComparable
+          ? positiveBigintDelta(apos!.accountLamports, bpos.accountLamports)
+          : null,
+        returnedLamports: positionComparable
+          ? negativeBigintDeltaMagnitude(
+              apos!.accountLamports,
+              bpos.accountLamports,
+            )
+          : null,
+      },
+      networkFeeLamports: network.lamports,
+      infrastructure,
+      warnings,
+    };
+  }
+
   async executePrepared(
     prepared: MeteoraPreparedTransactions,
     options: MeteoraExecutionOptions,
@@ -3172,89 +3609,143 @@ export class MeteoraDlmmService {
     const signers = uniqueSigners([wallet, ...prepared.extraSigners]);
     const commitment: Commitment = options.commitment ?? "confirmed";
     const signatures: string[] = [];
+    // Position-mutating writes are snapshotted before any transaction is sent.
+    // If this pre-write accounting read fails, fail closed: no transaction has landed yet.
+    const accountingBefore = accountingPositionKind(prepared.kind)
+      ? await this.captureExecutionAccountingBefore(prepared, commitment)
+      : null;
 
-    for (const transaction of prepared.transactions) {
-      if (isLegacyTransaction(transaction)) {
-        if (!transaction.feePayer) transaction.feePayer = wallet.publicKey;
-        if (!transaction.recentBlockhash) {
-          transaction.recentBlockhash = (
-            await connection.getLatestBlockhash(commitment)
-          ).blockhash;
+    try {
+      for (const transaction of prepared.transactions) {
+        if (isLegacyTransaction(transaction)) {
+          if (!transaction.feePayer) transaction.feePayer = wallet.publicKey;
+          if (!transaction.recentBlockhash) {
+            transaction.recentBlockhash = (
+              await connection.getLatestBlockhash(commitment)
+            ).blockhash;
+          }
+          const requiredSigners = transactionSigners(transaction, signers);
+          if (requiredSigners.length)
+            transaction.partialSign(...requiredSigners);
+        } else {
+          const requiredSigners = transactionSigners(transaction, signers);
+          if (requiredSigners.length) transaction.sign(requiredSigners);
         }
-        transaction.partialSign(...signers);
-      } else {
-        transaction.sign(signers);
-      }
+        assertTransactionFullySigned(transaction);
 
-      if (options.simulate !== false) {
-        const simulation = isLegacyTransaction(transaction)
-          ? await connection.simulateTransaction(transaction)
-          : await connection.simulateTransaction(transaction, {
-              sigVerify: false,
-            });
-        if (simulation.value.err) {
-          throw new Error(
-            `Meteora ${prepared.kind} simulation failed: ${JSON.stringify(
-              simulation.value.err,
-            )}\n${simulation.value.logs?.join("\n") ?? ""}`,
-          );
-        }
-      }
-
-      const expectedSignature = signedTransactionSignature(transaction);
-      let signature: string;
-      try {
-        signature = await connection.sendRawTransaction(
-          transaction.serialize(),
-          {
-            skipPreflight: options.skipPreflight ?? false,
-            preflightCommitment: commitment,
-            maxRetries: options.maxRetries,
-          },
-        );
-      } catch (error) {
-        if (expectedSignature && transportError(error)) {
-          const landed = await recoverSubmittedSignature(
-            connection,
-            expectedSignature,
-            commitment,
-          );
-          if (landed) {
-            signature = expectedSignature;
-          } else {
+        if (options.simulate !== false) {
+          const simulation = isLegacyTransaction(transaction)
+            ? await connection.simulateTransaction(transaction)
+            : await connection.simulateTransaction(transaction, {
+                sigVerify: false,
+              });
+          if (simulation.value.err) {
             throw new Error(
-              `Meteora ${prepared.kind} send response was lost and transaction ${expectedSignature} could not be confirmed on-chain: ${error instanceof Error ? error.message : String(error)}`,
+              `Meteora ${prepared.kind} simulation failed: ${JSON.stringify(
+                simulation.value.err,
+              )}\n${simulation.value.logs?.join("\n") ?? ""}`,
             );
           }
-        } else {
-          throw error;
         }
-      }
 
-      try {
-        await connection.confirmTransaction(signature, commitment);
-      } catch (error) {
-        if (!transportError(error)) throw error;
-        const landed = await recoverSubmittedSignature(
-          connection,
-          signature,
-          commitment,
-        );
-        if (!landed) {
-          throw new Error(
-            `Meteora ${prepared.kind} transaction ${signature} was submitted but confirmation remained uncertain after a transport error: ${error instanceof Error ? error.message : String(error)}`,
+        const expectedSignature = signedTransactionSignature(transaction);
+        let signature: string;
+        try {
+          signature = await connection.sendRawTransaction(
+            transaction.serialize(),
+            {
+              skipPreflight: options.skipPreflight ?? false,
+              preflightCommitment: commitment,
+              maxRetries: options.maxRetries,
+            },
           );
+        } catch (error) {
+          if (expectedSignature && transportError(error)) {
+            const landed = await recoverSubmittedSignature(
+              connection,
+              expectedSignature,
+              commitment,
+            );
+            if (landed) {
+              signature = expectedSignature;
+            } else {
+              throw new Error(
+                `Meteora ${prepared.kind} send response was lost and transaction ${expectedSignature} could not be confirmed on-chain: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          } else {
+            throw error;
+          }
+        }
+
+        // From here on the signature may have landed and must never be lost from the result.
+        signatures.push(signature);
+        try {
+          const confirmation = await connection.confirmTransaction(
+            signature,
+            commitment,
+          );
+          if (confirmation.value.err) {
+            throw new Error(
+              `Meteora ${prepared.kind} transaction ${signature} failed on-chain: ${JSON.stringify(confirmation.value.err)}`,
+            );
+          }
+        } catch (error) {
+          if (!transportError(error)) throw error;
+          const landed = await recoverSubmittedSignature(
+            connection,
+            signature,
+            commitment,
+          );
+          if (!landed) {
+            throw new Error(
+              `Meteora ${prepared.kind} transaction ${signature} was submitted but confirmation remained uncertain after a transport error: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
       }
-      signatures.push(signature);
+    } catch (error) {
+      this.clearPoolCache(prepared.pool);
+      if (signatures.length > 0) {
+        const accounting = accountingBefore
+          ? await this.finalizeExecutionAccounting(
+              prepared,
+              commitment,
+              signatures,
+              accountingBefore,
+            )
+          : undefined;
+        const result: MeteoraExecutionResult = {
+          kind: prepared.kind,
+          pool: prepared.pool,
+          position: prepared.position,
+          signatures: [...signatures],
+          ...(accounting ? { accounting } : {}),
+        };
+        throw new MeteoraPartialExecutionError(
+          `Meteora ${prepared.kind} partially executed: ${signatures.length}/${prepared.transactions.length} transaction signature(s) were submitted before failure: ${error instanceof Error ? error.message : String(error)}`,
+          result,
+          error,
+        );
+      }
+      throw error;
     }
 
     this.clearPoolCache(prepared.pool);
+    const accounting = accountingBefore
+      ? await this.finalizeExecutionAccounting(
+          prepared,
+          commitment,
+          signatures,
+          accountingBefore,
+        )
+      : undefined;
     return {
       kind: prepared.kind,
       pool: prepared.pool,
       position: prepared.position,
       signatures,
+      ...(accounting ? { accounting } : {}),
     };
   }
 

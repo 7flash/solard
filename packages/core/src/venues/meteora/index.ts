@@ -1,6 +1,7 @@
 export {
   MeteoraDlmmService,
   MeteoraInfrastructureFundingRequiredError,
+  MeteoraPartialExecutionError,
 } from "./dlmm.ts";
 export type { MeteoraDlmmHost } from "./dlmm.ts";
 export type {
@@ -26,6 +27,7 @@ export type {
   MeteoraActiveBin,
   MeteoraAddLiquidityArgs,
   MeteoraDiscoverPoolsArgs,
+  MeteoraExecutionAccounting,
   MeteoraExecutionOptions,
   MeteoraExecutionResult,
   MeteoraInteger,
@@ -44,6 +46,8 @@ export type {
   MeteoraSwapQuote,
   MeteoraTimeframe,
   MeteoraTransaction,
+  MeteoraWalletAccountingSnapshot,
+  MeteoraPositionAccountingSnapshot,
   MeteoraUiAmount,
   MeteoraWalletPositions,
 } from "./types.ts";
