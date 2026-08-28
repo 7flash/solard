@@ -39,8 +39,14 @@ export type MeteoraErrorCode =
   | "INVALID_ARGUMENT"
   | "SDK_INCOMPATIBLE"
   | "DATA_API_ERROR"
+  | "REFERENCE_PRICE_UNAVAILABLE"
+  | "POOL_PRICE_DESYNCHRONIZED"
+  | "POOL_PRICE_SYNC_UNAVAILABLE"
+  | "POOL_PRICE_SYNC_FAILED"
   | "LIMIT_ORDER_UNSUPPORTED"
   | "LIMIT_ORDER_NOT_FOUND"
+  | "LIMIT_ORDER_NOT_FULLY_FILLED"
+  | "LIMIT_ORDER_PROVENANCE_MISMATCH"
   | "UNKNOWN";
 
 export type MeteoraRange = {
@@ -64,6 +70,158 @@ export type MeteoraPairDescriptor = {
    * -1 means increasing bin id decreases base-token price in quote units.
    */
   basePriceBinDirection: 1 | -1;
+};
+
+export type MeteoraReferencePriceSource = "jupiter-swap-v2";
+
+export type MeteoraExecutableReferenceQuoteLeg = {
+  inputMint: string;
+  outputMint: string;
+  inAmountRaw: string;
+  outAmountRaw: string;
+  router: string | null;
+  mode: string | null;
+  priceImpactPct: number | null;
+  routeAmmKeys: string[];
+  routeLabels: string[];
+  targetPoolSeenInRoute: boolean;
+};
+
+export type MeteoraExecutableReferencePrice = {
+  version: 1;
+  source: MeteoraReferencePriceSource;
+  observedAt: number;
+  baseMint: string;
+  quoteMint: string;
+  /** Fixed quote-side notional used for the buy leg. */
+  quoteNotionalRaw: string;
+  /** Base amount returned by the buy leg and re-used as input for the sell leg. */
+  roundTripBaseRaw: string;
+  bidBaseInQuote: number;
+  askBaseInQuote: number;
+  midpointBaseInQuote: number;
+  spreadPct: number | null;
+  independentOfTargetPool: boolean;
+  buyBase: MeteoraExecutableReferenceQuoteLeg;
+  sellBase: MeteoraExecutableReferenceQuoteLeg;
+};
+
+export type MeteoraExecutableReferencePriceArgs = {
+  pool: string;
+  quoteMint: string;
+  /** Executable reference quote size in raw quote-token units. No hidden default is used. */
+  referenceQuoteNotionalRaw: MeteoraInteger;
+  /**
+   * Fail closed when Jupiter cannot produce a route independent of this exact pool.
+   * Defaults to true.
+   */
+  requireIndependentReference?: boolean;
+};
+
+export type MeteoraPoolPriceSanityArgs = MeteoraExecutableReferencePriceArgs & {
+  /** Agent/application policy. Solard never invents this threshold. */
+  maxDeviationPct: number;
+};
+
+export type MeteoraPoolPriceSanity = {
+  version: 1;
+  observedAt: number;
+  pool: string;
+  pair: MeteoraPairDescriptor;
+  poolActiveBin: number;
+  poolPriceYPerX: number;
+  poolBaseInQuote: number;
+  reference: MeteoraExecutableReferencePrice;
+  marketBidBaseInQuote: number;
+  marketAskBaseInQuote: number;
+  marketMidBaseInQuote: number;
+  /** Signed pool-vs-market-mid difference: (pool / mid - 1) * 100. */
+  signedMidDeviationPct: number;
+  absMidDeviationPct: number;
+  /**
+   * Zero while pool price is inside the executable bid/ask band; otherwise the
+   * percentage distance to the nearest executable band edge.
+   */
+  outsideExecutableBandDeviationPct: number;
+  maxDeviationPct: number;
+  synchronized: boolean;
+};
+
+export type MeteoraPoolPriceSyncTargetPolicy = "midpoint" | "nearest-band";
+
+export type MeteoraPoolPriceSyncInfrastructureQuote = {
+  kind: "price-sync";
+  pool: string;
+  targetBinId: number;
+  binArrayCount: 0;
+  binArrayCostLamports: "0";
+  bitmapExtensionCostLamports: string;
+  nonRefundableInfrastructureLamports: string;
+  bitmapExtensionRequired: boolean;
+  bitmapExtensionAddress: string | null;
+  bitmapExtensionInitialized: boolean | null;
+  requiresBinArrayInit: false;
+  requiresBitmapExtensionInit: boolean;
+  requiresNonRefundableInfrastructure: boolean;
+  raw: Record<string, unknown>;
+};
+
+export type MeteoraPoolPriceSyncPreflightArgs = MeteoraPoolPriceSanityArgs & {
+  wallet: WalletRef;
+  targetPolicy?: MeteoraPoolPriceSyncTargetPolicy;
+  infrastructure?: MeteoraInfrastructureFundingPolicy;
+  commitment?: Commitment;
+};
+
+export type MeteoraPoolPriceSyncPreflight = {
+  version: 1;
+  observedAt: number;
+  wallet: string;
+  pool: string;
+  sanity: MeteoraPoolPriceSanity;
+  requiresSync: boolean;
+  targetPolicy: MeteoraPoolPriceSyncTargetPolicy;
+  targetBaseInQuote: number;
+  /** Exact Y-per-X UI price supplied to Meteora syncWithMarketPrice(). */
+  targetPriceYPerX: number;
+  targetBinId: number;
+  canSync: boolean;
+  blockedByLiquidity: boolean;
+  blockedByBinResolution: boolean;
+  infrastructure: MeteoraPoolPriceSyncInfrastructureQuote;
+  sharedInfrastructureAuthorized: boolean;
+  safeWithoutSharedInfrastructureFunding: boolean;
+  transactionCount: number | null;
+  requiredSignerPubkeys: string[];
+  requiredSigners: Array<{
+    pubkey: string;
+    role: "wallet" | "generated-position" | "unknown";
+  }>;
+  missingRequiredSignerPubkeys: string[];
+  estimatedNetworkFeeLamports: string | null;
+  networkFeeEstimateComplete: boolean;
+  safeToExecute: boolean;
+};
+
+export type MeteoraPoolPriceSyncVerification = {
+  kind: "pool-price-synced";
+  ok: boolean;
+  checkedAt: number;
+  attempts: number;
+  pool: string;
+  expected: {
+    targetBinId: number;
+    targetBaseInQuote: number;
+    maxDeviationPct: number;
+    referenceQuoteNotionalRaw: string;
+  };
+  actual: MeteoraPoolPriceSanity | null;
+  checks: {
+    targetBinReached: boolean | null;
+    synchronizedToFreshReference: boolean | null;
+  };
+  errors: string[];
+  warnings: string[];
 };
 
 export type MeteoraWalletPoolBalances = {
@@ -404,12 +562,18 @@ export type MeteoraLimitOrderInfrastructureQuote = {
   binIds: number[];
   minBinId: number;
   maxBinId: number;
+  /** Number of currently missing bin-array accounts touched by these bins. */
   binArrayCount: number | null;
   binArrayCostLamports: string;
   bitmapExtensionCostLamports: string;
   nonRefundableInfrastructureLamports: string;
   /** Recoverable rent for the limit-order account itself. */
   limitOrderRentLamports: string;
+  requiredBinArrays?: MeteoraBinArrayPreflight[];
+  missingBinArrays?: Array<{ index: number; address: string }>;
+  bitmapExtensionRequired?: boolean;
+  bitmapExtensionAddress?: string | null;
+  bitmapExtensionInitialized?: boolean | null;
   requiresBinArrayInit: boolean;
   requiresBitmapExtensionInit: boolean;
   requiresNonRefundableInfrastructure: boolean;
@@ -417,7 +581,9 @@ export type MeteoraLimitOrderInfrastructureQuote = {
 };
 
 export type MeteoraSharedInfrastructureQuote =
-  MeteoraInfrastructureQuote | MeteoraLimitOrderInfrastructureQuote;
+  | MeteoraInfrastructureQuote
+  | MeteoraLimitOrderInfrastructureQuote
+  | MeteoraPoolPriceSyncInfrastructureQuote;
 
 export type MeteoraInfrastructurePreflight = {
   checked: true;
@@ -447,6 +613,61 @@ export type MeteoraCancelLimitOrderArgs = {
   rentReceiver?: string;
 };
 
+export type MeteoraSettleLimitOrderArgs = {
+  wallet: WalletRef;
+  pool: string;
+  limitOrder: string;
+  /** Defaults to the owner wallet. */
+  rentReceiver?: string;
+  /**
+   * When true, refuse to cancel a still-working order. Useful for autonomous
+   * "harvest only when fully filled" maintenance. Defaults to false.
+   */
+  requireFullyFilled?: boolean;
+};
+
+export type MeteoraLimitOrderGeometryPreflightArgs = {
+  pool: string;
+  side: MeteoraLimitOrderSide;
+  binIds: number[];
+  infrastructure?: MeteoraInfrastructureFundingPolicy;
+  commitment?: Commitment;
+};
+
+export type MeteoraLimitOrderGeometryBin = {
+  binId: number;
+  /**
+   * Aggregate opposite-token liquidity observed in the target bin, when the
+   * installed Meteora parser exposes it. This is a conservative collision signal;
+   * it is not claimed to be limit-order-only liquidity.
+   */
+  oppositeSideLiquidityRaw: string | null;
+  raw: Record<string, unknown>;
+};
+
+export type MeteoraLimitOrderGeometryPreflight = {
+  version: 1;
+  observedAt: number;
+  pool: string;
+  side: MeteoraLimitOrderSide;
+  binIds: number[];
+  maxBinsPerOrder: number;
+  quote: MeteoraLimitOrderInfrastructureQuote;
+  requiredBinArrays: MeteoraBinArrayPreflight[];
+  missingBinArrays: Array<{ index: number; address: string }>;
+  bitmapExtensionRequired: boolean;
+  bitmapExtensionAddress: string | null;
+  bitmapExtensionInitialized: boolean | null;
+  sharedInfrastructureAuthorized: boolean;
+  safeWithoutSharedInfrastructureFunding: boolean;
+  /** Read-only target-bin observations; never used as a hidden execution gate. */
+  bins: MeteoraLimitOrderGeometryBin[];
+  oppositeSideLiquidityBinIds: number[];
+  oppositeSideLiquidityKnown: boolean;
+  safeToBuild: boolean;
+  warnings: string[];
+};
+
 export type MeteoraLimitOrderPreflight = {
   version: 1;
   observedAt: number;
@@ -459,6 +680,7 @@ export type MeteoraLimitOrderPreflight = {
   binIds: number[];
   maxBinsPerOrder: number;
   quote: MeteoraLimitOrderInfrastructureQuote;
+  geometry?: MeteoraLimitOrderGeometryPreflight;
   sharedInfrastructureAuthorized: boolean;
   safeWithoutSharedInfrastructureFunding: boolean;
   inputFundingSufficient: boolean;
@@ -470,6 +692,115 @@ export type MeteoraLimitOrderPreflight = {
   warnings: string[];
 };
 
+export type MeteoraLimitOrderBatchOrder = {
+  id: string;
+  side: MeteoraLimitOrderSide;
+  bins: MeteoraLimitOrderBinInput[];
+  infrastructure?: MeteoraInfrastructureFundingPolicy;
+};
+
+export type MeteoraLimitOrderBatchPreflightArgs = {
+  wallet: WalletRef;
+  pool: string;
+  orders: MeteoraLimitOrderBatchOrder[];
+  infrastructure?: MeteoraInfrastructureFundingPolicy;
+  nativeReserveLamports?: MeteoraInteger;
+  commitment?: Commitment;
+};
+
+export type MeteoraLimitOrderBatchPreflightOrder = {
+  id: string;
+  side: MeteoraLimitOrderSide;
+  inputMint: string;
+  totalInputRaw: string;
+  binIds: number[];
+  executable: boolean;
+  errorCode: MeteoraErrorCode | null;
+  errorMessage: string | null;
+  geometry: MeteoraLimitOrderGeometryPreflight | null;
+  transactionCount: number | null;
+  requiredSignerPubkeys: string[];
+  requiredSigners: Array<{
+    pubkey: string;
+    role: "wallet" | "generated-limit-order" | "unknown";
+  }>;
+  missingRequiredSignerPubkeys: string[];
+  estimatedNetworkFeeLamports: string | null;
+  networkFeeEstimateComplete: boolean;
+  limitOrderRentLamports: string | null;
+  nonRefundableInfrastructureLamports: string;
+};
+
+export type MeteoraLimitOrderBatchPreflight = {
+  version: 1;
+  observedAt: number;
+  wallet: string;
+  pool: string;
+  safeToBuild: boolean;
+  inputFundingSufficient: boolean;
+  nativeFundingSufficient: boolean | null;
+  safeToExecute: boolean;
+  balances: MeteoraWalletPoolBalances;
+  nativeReserveLamports: string;
+  orders: MeteoraLimitOrderBatchPreflightOrder[];
+  total: {
+    executableOrders: number;
+    rejectedOrders: number;
+    allOrdersExecutable: boolean;
+    requestedInputXRaw: string;
+    requestedInputYRaw: string;
+    requestedWsolInputLamports: string;
+    limitOrderRentLamports: string | null;
+    nonRefundableInfrastructureLamports: string;
+    estimatedNetworkFeeLamports: string | null;
+    networkFeeEstimateComplete: boolean;
+    requiredNativeLamports: string | null;
+    tokenXFundingSufficient: boolean;
+    tokenYFundingSufficient: boolean;
+  };
+};
+
+export type MeteoraPlaceLimitOrderBatchArgs =
+  MeteoraLimitOrderBatchPreflightArgs & {
+    /**
+     * If a later placement fails, try to cancel already-placed siblings.
+     * Defaults to false so rollback is never a hidden financial side effect.
+     */
+    rollbackOnPartialFailure?: boolean;
+  };
+
+export type MeteoraLimitOrderBatchPlacement = {
+  id: string;
+  side: MeteoraLimitOrderSide;
+  binIds: number[];
+  limitOrder: string | null;
+  result: MeteoraExecutionResult | null;
+  errorCode: MeteoraErrorCode | null;
+  errorMessage: string | null;
+};
+
+export type MeteoraLimitOrderBatchRollback = {
+  id: string;
+  limitOrder: string;
+  ok: boolean;
+  result: MeteoraExecutionResult | null;
+  errorCode: MeteoraErrorCode | null;
+  errorMessage: string | null;
+};
+
+export type MeteoraLimitOrderBatchExecutionResult = {
+  version: 1;
+  wallet: string;
+  pool: string;
+  complete: boolean;
+  partial: boolean;
+  rollbackRequested: boolean;
+  rollbackComplete: boolean | null;
+  preflight: MeteoraLimitOrderBatchPreflight;
+  placements: MeteoraLimitOrderBatchPlacement[];
+  rollbacks: MeteoraLimitOrderBatchRollback[];
+};
+
 export type MeteoraLimitOrderStatus =
   "not-filled" | "partial-filled" | "fulfilled" | "unknown";
 
@@ -477,13 +808,51 @@ export type MeteoraLimitOrderBinSnapshot = {
   binId: number;
   empty: boolean;
   status: MeteoraLimitOrderStatus;
+  /** Original deposited input amount for this bin, when exposed by upstream. */
+  depositedInputRaw: string | null;
+  /** Input still resting/unfilled in this bin, when exposed by upstream. */
+  remainingInputRaw: string | null;
+  /** Input consumed by fills in this bin, when derivable or exposed upstream. */
+  filledInputRaw: string | null;
+  withdrawableXRaw: string | null;
+  withdrawableYRaw: string | null;
+  feeXRaw: string | null;
+  feeYRaw: string | null;
   raw: Record<string, unknown>;
+};
+
+export type MeteoraLimitOrderSettlementSummary = {
+  binCount: number;
+  openBinCount: number;
+  notFilledBinCount: number;
+  partiallyFilledBinCount: number;
+  fulfilledBinCount: number;
+  unknownStatusBinCount: number;
+  minBinId: number | null;
+  maxBinId: number | null;
+  depositedInputRaw: string | null;
+  remainingInputRaw: string | null;
+  filledInputRaw: string | null;
+  fillPct: number | null;
+  filledBinPct: number | null;
+  withdrawableXRaw: string | null;
+  withdrawableYRaw: string | null;
+  feeXRaw: string | null;
+  feeYRaw: string | null;
+  weightedAverageFillBin: number | null;
+  amountsComplete: boolean;
+  fullyFilled: boolean;
+  /** True only when the order account itself no longer exists. */
+  fullySettled: boolean;
 };
 
 export type MeteoraLimitOrderSnapshot = {
   version: 1;
   observedAt: number;
+  /** Pool used to resolve/query this order. */
   pool: string;
+  /** Pool recorded in the limit-order account/parser, when exposed upstream. */
+  accountPool: string | null;
   limitOrder: string;
   exists: boolean;
   owner: string | null;
@@ -492,7 +861,34 @@ export type MeteoraLimitOrderSnapshot = {
   tokenY: MeteoraPoolToken;
   bins: MeteoraLimitOrderBinSnapshot[];
   openBinIds: number[];
+  summary: MeteoraLimitOrderSettlementSummary;
   raw: Record<string, unknown> | null;
+};
+
+export type MeteoraManagedLimitOrderRecord = {
+  version: 1;
+  limitOrder: string;
+  pool: string;
+  owner: string;
+  side: MeteoraLimitOrderSide;
+  createdSignature: string;
+  createdAt: number;
+};
+
+export type MeteoraManagedLimitOrderVerification = {
+  version: 1;
+  checkedAt: number;
+  ok: boolean;
+  record: MeteoraManagedLimitOrderRecord;
+  actual: MeteoraLimitOrderSnapshot | null;
+  checks: {
+    accountExists: boolean;
+    poolMatches: boolean | null;
+    ownerMatches: boolean | null;
+    sideMatches: boolean | null;
+  };
+  errors: string[];
+  warnings: string[];
 };
 
 export type MeteoraLimitOrderVerificationChecks = {
@@ -522,7 +918,9 @@ export type MeteoraLimitOrderVerification = {
 };
 
 export type MeteoraExecutionVerification =
-  MeteoraPositionVerification | MeteoraLimitOrderVerification;
+  | MeteoraPositionVerification
+  | MeteoraLimitOrderVerification
+  | MeteoraPoolPriceSyncVerification;
 
 export type MeteoraOhlcvArgs = {
   timeframe?: MeteoraTimeframe;
@@ -961,7 +1359,8 @@ export type MeteoraPreparedTransactions = {
     | "swap-exact-out"
     | "place-limit-order"
     | "cancel-limit-order"
-    | "close-limit-order";
+    | "close-limit-order"
+    | "sync-pool-price";
   wallet: WalletRef;
   pool: string;
   transactions: MeteoraTransaction[];

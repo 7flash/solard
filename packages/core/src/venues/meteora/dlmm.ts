@@ -35,7 +35,19 @@ import type {
   MeteoraExecutionVerification,
   MeteoraPlaceLimitOrderArgs,
   MeteoraCancelLimitOrderArgs,
+  MeteoraSettleLimitOrderArgs,
   MeteoraLimitOrderPreflight,
+  MeteoraLimitOrderGeometryPreflightArgs,
+  MeteoraLimitOrderGeometryPreflight,
+  MeteoraLimitOrderBatchPreflightArgs,
+  MeteoraLimitOrderBatchPreflight,
+  MeteoraLimitOrderBatchPreflightOrder,
+  MeteoraPlaceLimitOrderBatchArgs,
+  MeteoraLimitOrderBatchExecutionResult,
+  MeteoraLimitOrderBatchPlacement,
+  MeteoraLimitOrderBatchRollback,
+  MeteoraManagedLimitOrderRecord,
+  MeteoraManagedLimitOrderVerification,
   MeteoraLiquidityDepthMetrics,
   MeteoraMicrostructureMetrics,
   MeteoraMoveCapitalAttribution,
@@ -61,6 +73,16 @@ import type {
   MeteoraPoolDiscoveryPageV1,
   MeteoraPoolState,
   MeteoraPairDescriptor,
+  MeteoraExecutableReferencePriceArgs,
+  MeteoraExecutableReferencePrice,
+  MeteoraExecutableReferenceQuoteLeg,
+  MeteoraPoolPriceSanityArgs,
+  MeteoraPoolPriceSanity,
+  MeteoraPoolPriceSyncTargetPolicy,
+  MeteoraPoolPriceSyncInfrastructureQuote,
+  MeteoraPoolPriceSyncPreflightArgs,
+  MeteoraPoolPriceSyncPreflight,
+  MeteoraPoolPriceSyncVerification,
   MeteoraRange,
   MeteoraPoolToken,
   MeteoraPositionAccountingSnapshot,
@@ -121,6 +143,16 @@ let sdkPromise: Promise<DlmmModule> | null = null;
 async function dlmmSdk(): Promise<DlmmModule> {
   if (!sdkPromise) sdkPromise = import("@meteora-ag/dlmm");
   return await sdkPromise;
+}
+
+function environmentValue(name: string): string | undefined {
+  const processLike = (
+    globalThis as unknown as {
+      process?: { env?: Record<string, string | undefined> };
+    }
+  ).process;
+  const value = processLike?.env?.[name];
+  return value == null ? undefined : String(value);
 }
 
 function asPublicKey(value: string | PublicKey): PublicKey {
@@ -534,6 +566,269 @@ function limitOrderBinEmpty(row: Record<string, unknown>): boolean {
   return amount === "0" && status === "unknown";
 }
 
+function firstIntegerStringOrNull(...values: unknown[]): string | null {
+  for (const value of values) {
+    const text = integerString(value, "");
+    if (/^-?\d+$/.test(text)) return text;
+  }
+  return null;
+}
+
+function nullableIntegerSum(values: Array<string | null>): string | null {
+  if (values.some((value) => value == null)) return null;
+  return values.reduce((sum, value) => sum + BigInt(value!), 0n).toString();
+}
+
+function nonNegativeDifferenceOrNull(
+  total: string | null,
+  remaining: string | null,
+): string | null {
+  if (total == null || remaining == null) return null;
+  const delta = BigInt(total) - BigInt(remaining);
+  return (delta > 0n ? delta : 0n).toString();
+}
+
+function ratioPctOrNull(
+  numerator: string | null,
+  denominator: string | null,
+): number | null {
+  if (numerator == null || denominator == null) return null;
+  const den = BigInt(denominator);
+  if (den <= 0n) return null;
+  const num = BigInt(numerator);
+  return Number((num * 1_000_000n) / den) / 10_000;
+}
+
+function normalizeLimitOrderBinAmounts(row: Record<string, unknown>): {
+  depositedInputRaw: string | null;
+  remainingInputRaw: string | null;
+  filledInputRaw: string | null;
+  withdrawableXRaw: string | null;
+  withdrawableYRaw: string | null;
+  feeXRaw: string | null;
+  feeYRaw: string | null;
+} {
+  const depositedInputRaw = firstIntegerStringOrNull(
+    row.depositedInputRaw,
+    row.depositedAmount,
+    row.depositAmount,
+    row.initialAmount,
+    row.originalAmount,
+    row.totalInputAmount,
+    row.total_input_amount,
+  );
+  const remainingInputRaw = firstIntegerStringOrNull(
+    row.remainingInputRaw,
+    row.remainingAmount,
+    row.remaining_amount,
+    row.openOrderAmount,
+    row.open_order_amount,
+    row.unfilledAmount,
+    row.unfilled_amount,
+    row.amount,
+  );
+  const filledInputRaw =
+    firstIntegerStringOrNull(
+      row.filledInputRaw,
+      row.filledAmount,
+      row.filled_amount,
+      row.consumedAmount,
+      row.consumed_amount,
+      row.executedAmount,
+      row.executed_amount,
+    ) ?? nonNegativeDifferenceOrNull(depositedInputRaw, remainingInputRaw);
+  return {
+    depositedInputRaw,
+    remainingInputRaw,
+    filledInputRaw,
+    withdrawableXRaw: firstIntegerStringOrNull(
+      row.withdrawableXRaw,
+      row.withdrawableAmountX,
+      row.withdrawableX,
+      row.amountXWithdrawable,
+      row.claimableX,
+      row.proceedsX,
+    ),
+    withdrawableYRaw: firstIntegerStringOrNull(
+      row.withdrawableYRaw,
+      row.withdrawableAmountY,
+      row.withdrawableY,
+      row.amountYWithdrawable,
+      row.claimableY,
+      row.proceedsY,
+    ),
+    feeXRaw: firstIntegerStringOrNull(
+      row.feeXRaw,
+      row.feeX,
+      row.feeAmountX,
+      row.feesX,
+    ),
+    feeYRaw: firstIntegerStringOrNull(
+      row.feeYRaw,
+      row.feeY,
+      row.feeAmountY,
+      row.feesY,
+    ),
+  };
+}
+
+function limitOrderSettlementSummary(
+  data: Record<string, unknown>,
+  bins: Array<{
+    binId: number;
+    empty: boolean;
+    status: "not-filled" | "partial-filled" | "fulfilled" | "unknown";
+    depositedInputRaw: string | null;
+    remainingInputRaw: string | null;
+    filledInputRaw: string | null;
+    withdrawableXRaw: string | null;
+    withdrawableYRaw: string | null;
+    feeXRaw: string | null;
+    feeYRaw: string | null;
+  }>,
+  exists: boolean,
+): MeteoraLimitOrderSnapshot["summary"] {
+  const binCount = bins.length;
+  const notFilledBinCount = bins.filter(
+    (bin) => bin.status === "not-filled",
+  ).length;
+  const partiallyFilledBinCount = bins.filter(
+    (bin) => bin.status === "partial-filled",
+  ).length;
+  const fulfilledBinCount = bins.filter(
+    (bin) => bin.status === "fulfilled",
+  ).length;
+  const unknownStatusBinCount = bins.filter(
+    (bin) => bin.status === "unknown",
+  ).length;
+  const openBinCount = bins.filter((bin) => !bin.empty).length;
+
+  const depositedInputRaw =
+    nullableIntegerSum(bins.map((bin) => bin.depositedInputRaw)) ??
+    firstIntegerStringOrNull(
+      data.depositedInputRaw,
+      data.totalDepositedAmount,
+      data.depositedAmount,
+      data.totalInputAmount,
+      data.total_input_amount,
+      data.inputAmount,
+    );
+  const remainingInputRaw =
+    nullableIntegerSum(bins.map((bin) => bin.remainingInputRaw)) ??
+    firstIntegerStringOrNull(
+      data.remainingInputRaw,
+      data.totalRemainingAmount,
+      data.remainingAmount,
+      data.openOrderAmount,
+      data.unfilledAmount,
+    );
+  const filledInputRaw =
+    nullableIntegerSum(bins.map((bin) => bin.filledInputRaw)) ??
+    firstIntegerStringOrNull(
+      data.filledInputRaw,
+      data.totalFilledAmount,
+      data.filledAmount,
+      data.consumedAmount,
+      data.executedAmount,
+    ) ??
+    nonNegativeDifferenceOrNull(depositedInputRaw, remainingInputRaw);
+
+  const withdrawableXRaw =
+    nullableIntegerSum(bins.map((bin) => bin.withdrawableXRaw)) ??
+    firstIntegerStringOrNull(
+      data.withdrawableXRaw,
+      data.withdrawableAmountX,
+      data.withdrawableX,
+      data.claimableX,
+      data.proceedsX,
+    );
+  const withdrawableYRaw =
+    nullableIntegerSum(bins.map((bin) => bin.withdrawableYRaw)) ??
+    firstIntegerStringOrNull(
+      data.withdrawableYRaw,
+      data.withdrawableAmountY,
+      data.withdrawableY,
+      data.claimableY,
+      data.proceedsY,
+    );
+  const feeXRaw =
+    nullableIntegerSum(bins.map((bin) => bin.feeXRaw)) ??
+    firstIntegerStringOrNull(
+      data.feeXRaw,
+      data.feeX,
+      data.feeAmountX,
+      data.feesX,
+    );
+  const feeYRaw =
+    nullableIntegerSum(bins.map((bin) => bin.feeYRaw)) ??
+    firstIntegerStringOrNull(
+      data.feeYRaw,
+      data.feeY,
+      data.feeAmountY,
+      data.feesY,
+    );
+
+  let weightedAverageFillBin: number | null = null;
+  if (bins.length && bins.every((bin) => bin.filledInputRaw != null)) {
+    let totalFilled = 0n;
+    let weighted = 0n;
+    for (const bin of bins) {
+      const amount = BigInt(bin.filledInputRaw!);
+      if (amount <= 0n) continue;
+      totalFilled += amount;
+      weighted += BigInt(bin.binId) * amount;
+    }
+    if (totalFilled > 0n) {
+      weightedAverageFillBin =
+        Number((weighted * 1_000_000n) / totalFilled) / 1_000_000;
+    }
+  }
+
+  const amountsComplete =
+    depositedInputRaw != null &&
+    remainingInputRaw != null &&
+    filledInputRaw != null;
+  const amountProofFullyFilled =
+    depositedInputRaw != null &&
+    BigInt(depositedInputRaw) > 0n &&
+    remainingInputRaw === "0" &&
+    filledInputRaw != null &&
+    BigInt(filledInputRaw) >= BigInt(depositedInputRaw);
+  const statusProofFullyFilled =
+    binCount > 0 &&
+    fulfilledBinCount === binCount &&
+    partiallyFilledBinCount === 0 &&
+    notFilledBinCount === 0 &&
+    unknownStatusBinCount === 0;
+
+  return {
+    binCount,
+    openBinCount,
+    notFilledBinCount,
+    partiallyFilledBinCount,
+    fulfilledBinCount,
+    unknownStatusBinCount,
+    minBinId: binCount ? bins[0]!.binId : null,
+    maxBinId: binCount ? bins[bins.length - 1]!.binId : null,
+    depositedInputRaw,
+    remainingInputRaw,
+    filledInputRaw,
+    fillPct: ratioPctOrNull(filledInputRaw, depositedInputRaw),
+    filledBinPct: binCount ? (fulfilledBinCount / binCount) * 100 : null,
+    withdrawableXRaw,
+    withdrawableYRaw,
+    feeXRaw,
+    feeYRaw,
+    weightedAverageFillBin,
+    amountsComplete,
+    fullyFilled:
+      exists &&
+      openBinCount === 0 &&
+      (statusProofFullyFilled || amountProofFullyFilled),
+    fullySettled: !exists,
+  };
+}
+
 export class MeteoraError extends Error {
   readonly code: MeteoraErrorCode;
   readonly details: unknown;
@@ -620,6 +915,22 @@ export class MeteoraPartialExecutionError extends MeteoraError {
   constructor(message: string, result: MeteoraExecutionResult, cause: unknown) {
     super(message, "PARTIAL_EXECUTION", { result }, true);
     this.name = "MeteoraPartialExecutionError";
+    this.result = result;
+    this.cause = cause;
+  }
+}
+
+export class MeteoraLimitOrderBatchExecutionError extends MeteoraError {
+  readonly result: MeteoraLimitOrderBatchExecutionResult;
+  override readonly cause: unknown;
+
+  constructor(
+    message: string,
+    result: MeteoraLimitOrderBatchExecutionResult,
+    cause: unknown,
+  ) {
+    super(message, "PARTIAL_EXECUTION", { result }, true);
+    this.name = "MeteoraLimitOrderBatchExecutionError";
     this.result = result;
     this.cause = cause;
   }
@@ -957,6 +1268,51 @@ function negativeBigintDeltaMagnitude(after: string, before: string): string {
   return (delta > 0n ? delta : 0n).toString();
 }
 
+function uiAmountFromRaw(raw: string, decimals: number): number {
+  if (!Number.isInteger(decimals) || decimals < 0) return Number.NaN;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return Number.NaN;
+  return value / 10 ** decimals;
+}
+
+function quotePerBaseFromRaw(
+  quoteRaw: string,
+  baseRaw: string,
+  quoteDecimals: number,
+  baseDecimals: number,
+): number {
+  const quote = uiAmountFromRaw(quoteRaw, quoteDecimals);
+  const base = uiAmountFromRaw(baseRaw, baseDecimals);
+  return quote > 0 && base > 0 ? quote / base : Number.NaN;
+}
+
+function jupiterRouteMetadata(
+  raw: unknown,
+  targetPool: string,
+): {
+  ammKeys: string[];
+  labels: string[];
+  targetPoolSeen: boolean;
+} {
+  const row = recordOrNull(raw) ?? {};
+  const routePlan = Array.isArray(row.routePlan) ? row.routePlan : [];
+  const ammKeys = new Set<string>();
+  const labels = new Set<string>();
+  for (const step of routePlan) {
+    const stepRow = recordOrNull(step) ?? {};
+    const swapInfo = recordOrNull(stepRow.swapInfo) ?? {};
+    const ammKey = String(swapInfo.ammKey ?? "").trim();
+    const label = String(swapInfo.label ?? "").trim();
+    if (ammKey) ammKeys.add(ammKey);
+    if (label) labels.add(label);
+  }
+  return {
+    ammKeys: [...ammKeys],
+    labels: [...labels],
+    targetPoolSeen: ammKeys.has(targetPool),
+  };
+}
+
 function accountingSupportedKind(
   kind: MeteoraPreparedTransactions["kind"],
 ): boolean {
@@ -970,7 +1326,8 @@ function accountingSupportedKind(
     kind === "swap-exact-out" ||
     kind === "place-limit-order" ||
     kind === "cancel-limit-order" ||
-    kind === "close-limit-order"
+    kind === "close-limit-order" ||
+    kind === "sync-pool-price"
   );
 }
 
@@ -991,6 +1348,9 @@ export class MeteoraDlmmService {
    * or mutate the same wallet inventory between those stages.
    */
   private readonly walletWriteTails = new Map<string, Promise<void>>();
+  /** Serialize keyless Jupiter reference requests to respect the current 0.5 RPS keyless tier. */
+  private jupiterKeylessTail: Promise<void> = Promise.resolve();
+  private lastJupiterKeylessRequestAt = 0;
 
   constructor(private readonly host: MeteoraDlmmHost) {}
 
@@ -1016,6 +1376,32 @@ export class MeteoraDlmmService {
     }
   }
 
+  private async fetchJupiterReference(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    if (environmentValue("JUPITER_API_KEY")?.trim())
+      return await fetch(url, { headers });
+
+    const previous = this.jupiterKeylessTail;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.jupiterKeylessTail = previous.catch(() => {}).then(() => gate);
+    await previous.catch(() => {});
+    try {
+      const elapsed = Date.now() - this.lastJupiterKeylessRequestAt;
+      if (elapsed < 2_100) {
+        await new Promise((resolve) => setTimeout(resolve, 2_100 - elapsed));
+      }
+      this.lastJupiterKeylessRequestAt = Date.now();
+      return await fetch(url, { headers });
+    } finally {
+      release();
+    }
+  }
+
   private dataApiBase(): string {
     return (
       process.env.METEORA_DLMM_DATA_API_URL?.trim() || DEFAULT_DATA_API
@@ -1029,6 +1415,283 @@ export class MeteoraDlmmService {
     ).replace(/\/+$/, "");
   }
 
+  private jupiterSwapApiBase(): string {
+    return (
+      environmentValue("JUPITER_SWAP_API_URL")?.trim() ||
+      "https://api.jup.ag/swap/v2"
+    ).replace(/\/+$/, "");
+  }
+
+  private async jupiterExecutableQuoteLeg(args: {
+    inputMint: string;
+    outputMint: string;
+    amountRaw: string;
+    targetPool: string;
+    excludeMeteoraDlmm?: boolean;
+  }): Promise<MeteoraExecutableReferenceQuoteLeg> {
+    const amount = toBN(args.amountRaw, "reference quote amount").toString(10);
+    if (BigInt(amount) <= 0n) {
+      throw new MeteoraError(
+        "Executable reference quote amount must be positive",
+        "INVALID_ARGUMENT",
+        { amountRaw: amount },
+      );
+    }
+
+    const url = new URL(`${this.jupiterSwapApiBase()}/order`);
+    url.searchParams.set("inputMint", args.inputMint);
+    url.searchParams.set("outputMint", args.outputMint);
+    url.searchParams.set("amount", amount);
+    if (args.excludeMeteoraDlmm) {
+      // Current Jupiter Swap V2 accepts dex labels in excludeDexes. This retry
+      // is used only when the first route depended on the exact target pool.
+      url.searchParams.set("excludeDexes", "Meteora DLMM");
+    }
+
+    const headers: Record<string, string> = { Accept: "application/json" };
+    const apiKey = environmentValue("JUPITER_API_KEY")?.trim();
+    if (apiKey) headers["x-api-key"] = apiKey;
+
+    let response: Response;
+    try {
+      response = await this.fetchJupiterReference(url, headers);
+    } catch (cause) {
+      throw new MeteoraError(
+        `Jupiter executable reference quote request failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        "REFERENCE_PRICE_UNAVAILABLE",
+        {
+          source: "jupiter-swap-v2",
+          inputMint: args.inputMint,
+          outputMint: args.outputMint,
+          amountRaw: amount,
+          cause: cause instanceof Error ? cause.message : String(cause),
+        },
+        true,
+      );
+    }
+
+    const bodyText = await response.text();
+    if (!response.ok) {
+      throw new MeteoraError(
+        `Jupiter executable reference quote failed with HTTP ${response.status}`,
+        "REFERENCE_PRICE_UNAVAILABLE",
+        {
+          source: "jupiter-swap-v2",
+          status: response.status,
+          responseBody: bodyText.slice(0, 4000),
+          inputMint: args.inputMint,
+          outputMint: args.outputMint,
+          amountRaw: amount,
+        },
+        response.status === 429 || response.status >= 500,
+      );
+    }
+
+    let raw: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(bodyText);
+      raw = recordOrNull(parsed) ?? {};
+    } catch (cause) {
+      throw new MeteoraError(
+        "Jupiter executable reference quote returned invalid JSON",
+        "REFERENCE_PRICE_UNAVAILABLE",
+        { responseBody: bodyText.slice(0, 4000) },
+        true,
+      );
+    }
+
+    const inAmountRaw = firstIntegerStringOrNull(raw.inAmount) ?? amount;
+    const outAmountRaw = firstIntegerStringOrNull(raw.outAmount);
+    if (outAmountRaw == null || BigInt(outAmountRaw) <= 0n) {
+      throw new MeteoraError(
+        "Jupiter executable reference quote returned no positive output amount",
+        "REFERENCE_PRICE_UNAVAILABLE",
+        {
+          inputMint: args.inputMint,
+          outputMint: args.outputMint,
+          amountRaw: amount,
+          raw: safeJsonValue(raw),
+        },
+        false,
+      );
+    }
+
+    const route = jupiterRouteMetadata(raw, args.targetPool);
+    return {
+      inputMint: String(raw.inputMint ?? args.inputMint),
+      outputMint: String(raw.outputMint ?? args.outputMint),
+      inAmountRaw,
+      outAmountRaw,
+      router: raw.router == null ? null : String(raw.router),
+      mode: raw.mode == null ? null : String(raw.mode),
+      priceImpactPct:
+        numberOrNull(raw.priceImpactPct) ?? numberOrNull(raw.priceImpact),
+      routeAmmKeys: route.ammKeys,
+      routeLabels: route.labels,
+      targetPoolSeenInRoute: route.targetPoolSeen,
+    };
+  }
+
+  private async executableReferencePriceForPair(
+    pair: MeteoraPairDescriptor,
+    referenceQuoteNotionalRaw: MeteoraInteger,
+    requireIndependentReference = true,
+  ): Promise<MeteoraExecutableReferencePrice> {
+    const quoteDecimals =
+      pair.quoteSide === "x" ? pair.tokenX.decimals : pair.tokenY.decimals;
+    const baseDecimals =
+      pair.baseSide === "x" ? pair.tokenX.decimals : pair.tokenY.decimals;
+    if (
+      quoteDecimals == null ||
+      baseDecimals == null ||
+      !Number.isInteger(quoteDecimals) ||
+      !Number.isInteger(baseDecimals)
+    ) {
+      throw new MeteoraError(
+        "Executable reference price requires known base/quote token decimals",
+        "SDK_INCOMPATIBLE",
+        {
+          pool: pair.pool,
+          baseMint: pair.baseMint,
+          quoteMint: pair.quoteMint,
+          baseDecimals,
+          quoteDecimals,
+        },
+      );
+    }
+
+    const quoteNotionalRaw = toBN(
+      referenceQuoteNotionalRaw,
+      "referenceQuoteNotionalRaw",
+    ).toString(10);
+    if (BigInt(quoteNotionalRaw) <= 0n) {
+      throw new MeteoraError(
+        "referenceQuoteNotionalRaw must be positive",
+        "INVALID_ARGUMENT",
+        { referenceQuoteNotionalRaw: quoteNotionalRaw },
+      );
+    }
+
+    let buyBase = await this.jupiterExecutableQuoteLeg({
+      inputMint: pair.quoteMint,
+      outputMint: pair.baseMint,
+      amountRaw: quoteNotionalRaw,
+      targetPool: pair.pool,
+    });
+    if (requireIndependentReference && buyBase.targetPoolSeenInRoute) {
+      buyBase = await this.jupiterExecutableQuoteLeg({
+        inputMint: pair.quoteMint,
+        outputMint: pair.baseMint,
+        amountRaw: quoteNotionalRaw,
+        targetPool: pair.pool,
+        excludeMeteoraDlmm: true,
+      });
+    }
+
+    const roundTripBaseRaw = buyBase.outAmountRaw;
+    let sellBase = await this.jupiterExecutableQuoteLeg({
+      inputMint: pair.baseMint,
+      outputMint: pair.quoteMint,
+      amountRaw: roundTripBaseRaw,
+      targetPool: pair.pool,
+    });
+    if (requireIndependentReference && sellBase.targetPoolSeenInRoute) {
+      sellBase = await this.jupiterExecutableQuoteLeg({
+        inputMint: pair.baseMint,
+        outputMint: pair.quoteMint,
+        amountRaw: roundTripBaseRaw,
+        targetPool: pair.pool,
+        excludeMeteoraDlmm: true,
+      });
+    }
+
+    const independentOfTargetPool =
+      !buyBase.targetPoolSeenInRoute && !sellBase.targetPoolSeenInRoute;
+    if (requireIndependentReference && !independentOfTargetPool) {
+      throw new MeteoraError(
+        `Executable reference quote for ${pair.baseMint}/${pair.quoteMint} depends on target pool ${pair.pool}; refusing circular pool-price validation`,
+        "REFERENCE_PRICE_UNAVAILABLE",
+        {
+          pool: pair.pool,
+          buyRouteAmmKeys: buyBase.routeAmmKeys,
+          sellRouteAmmKeys: sellBase.routeAmmKeys,
+        },
+        false,
+      );
+    }
+
+    const askBaseInQuote = quotePerBaseFromRaw(
+      buyBase.inAmountRaw,
+      buyBase.outAmountRaw,
+      quoteDecimals,
+      baseDecimals,
+    );
+    const bidBaseInQuote = quotePerBaseFromRaw(
+      sellBase.outAmountRaw,
+      sellBase.inAmountRaw,
+      quoteDecimals,
+      baseDecimals,
+    );
+    if (
+      !(askBaseInQuote > 0) ||
+      !(bidBaseInQuote > 0) ||
+      !Number.isFinite(askBaseInQuote) ||
+      !Number.isFinite(bidBaseInQuote)
+    ) {
+      throw new MeteoraError(
+        "Executable reference quote produced an invalid base/quote price",
+        "REFERENCE_PRICE_UNAVAILABLE",
+        {
+          pool: pair.pool,
+          askBaseInQuote,
+          bidBaseInQuote,
+          buyBase,
+          sellBase,
+        },
+        false,
+      );
+    }
+
+    // Quotes are sequential and can race a moving market. A crossed executable
+    // band is not a trustworthy sync reference; fail closed rather than normalize it.
+    if (bidBaseInQuote > askBaseInQuote) {
+      throw new MeteoraError(
+        "Executable reference bid exceeded ask across sequential Jupiter quotes; refusing stale/crossed reference",
+        "REFERENCE_PRICE_UNAVAILABLE",
+        {
+          pool: pair.pool,
+          bidBaseInQuote,
+          askBaseInQuote,
+          buyBase,
+          sellBase,
+        },
+        true,
+      );
+    }
+
+    const midpointBaseInQuote = (bidBaseInQuote + askBaseInQuote) / 2;
+    const spreadPct =
+      midpointBaseInQuote > 0
+        ? ((askBaseInQuote - bidBaseInQuote) / midpointBaseInQuote) * 100
+        : null;
+    return {
+      version: 1,
+      source: "jupiter-swap-v2",
+      observedAt: Date.now(),
+      baseMint: pair.baseMint,
+      quoteMint: pair.quoteMint,
+      quoteNotionalRaw,
+      roundTripBaseRaw,
+      bidBaseInQuote,
+      askBaseInQuote,
+      midpointBaseInQuote,
+      spreadPct,
+      independentOfTargetPool,
+      buyBase,
+      sellBase,
+    };
+  }
+
   resolveWalletAddress(wallet: WalletRef): string {
     const publicAddress = this.host.walletAddress?.(wallet);
     if (publicAddress) return asPublicKey(publicAddress).toBase58();
@@ -1040,6 +1703,39 @@ export class MeteoraDlmmService {
     pool: string;
   }): MeteoraManagedPositionScope {
     return new MeteoraManagedPositionScope(this, args.wallet, args.pool);
+  }
+
+  managedLimitOrderRecordFromPlacement(args: {
+    wallet: WalletRef;
+    pool: string;
+    side: MeteoraLimitOrderSide;
+    result: MeteoraExecutionResult;
+    createdAt?: number;
+  }): MeteoraManagedLimitOrderRecord {
+    if (args.result.kind !== "place-limit-order") {
+      throw new MeteoraError(
+        `Managed limit-order provenance requires a place-limit-order execution result, received ${args.result.kind}`,
+        "INVALID_ARGUMENT",
+      );
+    }
+    const limitOrder = args.result.limitOrder;
+    const createdSignature = args.result.signatures[0];
+    if (!limitOrder || !createdSignature) {
+      throw new MeteoraError(
+        "Managed limit-order provenance requires a verified placement address and submitted signature",
+        "INVALID_ARGUMENT",
+        { result: safeJsonValue(args.result) },
+      );
+    }
+    return {
+      version: 1,
+      limitOrder: asPublicKey(limitOrder).toBase58(),
+      pool: asPublicKey(args.pool).toBase58(),
+      owner: this.resolveWalletAddress(args.wallet),
+      side: args.side,
+      createdSignature,
+      createdAt: Math.trunc(args.createdAt ?? Date.now()),
+    };
   }
 
   /** Describe X/Y orientation relative to an explicit quote mint. */
@@ -1202,6 +1898,662 @@ export class MeteoraDlmmService {
     return pair.baseSide === "x"
       ? { baseRaw: x, quoteRaw: y }
       : { baseRaw: y, quoteRaw: x };
+  }
+
+  async getExecutableReferencePrice(
+    args: MeteoraExecutableReferencePriceArgs,
+  ): Promise<MeteoraExecutableReferencePrice> {
+    const pair = await this.describePair(args.pool, {
+      quoteMint: args.quoteMint,
+    });
+    return await this.executableReferencePriceForPair(
+      pair,
+      args.referenceQuoteNotionalRaw,
+      args.requireIndependentReference ?? true,
+    );
+  }
+
+  async getPoolPriceSanity(
+    args: MeteoraPoolPriceSanityArgs,
+  ): Promise<MeteoraPoolPriceSanity> {
+    if (!Number.isFinite(args.maxDeviationPct) || args.maxDeviationPct < 0) {
+      throw new MeteoraError(
+        "maxDeviationPct must be a finite non-negative number",
+        "INVALID_ARGUMENT",
+        { maxDeviationPct: args.maxDeviationPct },
+      );
+    }
+
+    const pair = await this.describePair(args.pool, {
+      quoteMint: args.quoteMint,
+    });
+    const reference = await this.executableReferencePriceForPair(
+      pair,
+      args.referenceQuoteNotionalRaw,
+      args.requireIndependentReference ?? true,
+    );
+    // Read the pool after the executable quote so comparison does not use a stale
+    // active bin captured before the external reference request.
+    const active = await this.getActiveBin(pair.pool, true);
+    const poolPriceYPerX = Number(active.price);
+    const poolBaseInQuote = this.priceBaseInQuote(poolPriceYPerX, pair);
+    const bid = reference.bidBaseInQuote;
+    const ask = reference.askBaseInQuote;
+    const mid = reference.midpointBaseInQuote;
+    const signedMidDeviationPct = (poolBaseInQuote / mid - 1) * 100;
+    const outsideExecutableBandDeviationPct =
+      poolBaseInQuote < bid
+        ? ((bid - poolBaseInQuote) / bid) * 100
+        : poolBaseInQuote > ask
+          ? ((poolBaseInQuote - ask) / ask) * 100
+          : 0;
+    return {
+      version: 1,
+      observedAt: Date.now(),
+      pool: pair.pool,
+      pair,
+      poolActiveBin: active.binId,
+      poolPriceYPerX,
+      poolBaseInQuote,
+      reference,
+      marketBidBaseInQuote: bid,
+      marketAskBaseInQuote: ask,
+      marketMidBaseInQuote: mid,
+      signedMidDeviationPct,
+      absMidDeviationPct: Math.abs(signedMidDeviationPct),
+      outsideExecutableBandDeviationPct,
+      maxDeviationPct: args.maxDeviationPct,
+      synchronized: outsideExecutableBandDeviationPct <= args.maxDeviationPct,
+    };
+  }
+
+  assertPoolPriceSane(sanity: MeteoraPoolPriceSanity): MeteoraPoolPriceSanity {
+    if (!sanity.synchronized) {
+      throw new MeteoraError(
+        `Meteora pool ${sanity.pool} is outside the executable market-price tolerance: pool=${sanity.poolBaseInQuote}, bid=${sanity.marketBidBaseInQuote}, ask=${sanity.marketAskBaseInQuote}, outsideBandDeviation=${sanity.outsideExecutableBandDeviationPct}% > max=${sanity.maxDeviationPct}%`,
+        "POOL_PRICE_DESYNCHRONIZED",
+        { sanity: safeJsonValue(sanity) },
+        false,
+      );
+    }
+    return sanity;
+  }
+
+  private async priceSyncInfrastructureQuote(
+    pool: DlmmPool,
+    targetBinId: number,
+    commitment: Commitment,
+  ): Promise<MeteoraPoolPriceSyncInfrastructureQuote> {
+    const sdk = (await dlmmSdk()) as unknown as Record<string, any>;
+    const binIdToBinArrayIndex = sdk.binIdToBinArrayIndex;
+    const deriveBinArrayBitmapExtension = sdk.deriveBinArrayBitmapExtension;
+    const isOverflowDefaultBinArrayBitmap = sdk.isOverflowDefaultBinArrayBitmap;
+    const programId = (pool as any)?.program?.programId as
+      PublicKey | undefined;
+    if (
+      typeof binIdToBinArrayIndex !== "function" ||
+      typeof isOverflowDefaultBinArrayBitmap !== "function" ||
+      !programId
+    ) {
+      throw new MeteoraError(
+        "Meteora price-sync preflight incompatible: required bitmap helpers are unavailable",
+        "SDK_INCOMPATIBLE",
+        { pool: pool.pubkey.toBase58(), targetBinId },
+      );
+    }
+    const targetBinArrayIndex = binIdToBinArrayIndex(new BN(targetBinId));
+    const bitmapExtensionRequired = Boolean(
+      isOverflowDefaultBinArrayBitmap(targetBinArrayIndex),
+    );
+    let bitmapExtensionAddress: string | null = null;
+    let bitmapExtensionInitialized: boolean | null = null;
+    if (bitmapExtensionRequired) {
+      if (typeof deriveBinArrayBitmapExtension !== "function") {
+        throw new MeteoraError(
+          "Meteora price-sync preflight incompatible: bitmap-extension derivation helper is unavailable",
+          "SDK_INCOMPATIBLE",
+          { pool: pool.pubkey.toBase58(), targetBinId },
+        );
+      }
+      const [bitmap] = deriveBinArrayBitmapExtension(
+        pool.pubkey,
+        programId,
+      ) as [PublicKey, number];
+      bitmapExtensionAddress = bitmap.toBase58();
+      bitmapExtensionInitialized =
+        (await this.host.connection().getAccountInfo(bitmap, commitment)) !=
+        null;
+    }
+    const requiresBitmapExtensionInit =
+      bitmapExtensionRequired && bitmapExtensionInitialized === false;
+    const bitmapFeeLamports = sdkRentConstantLamports(
+      sdk,
+      "BIN_ARRAY_BITMAP_FEE_BN",
+      "BIN_ARRAY_BITMAP_FEE",
+    );
+    if (requiresBitmapExtensionInit && bitmapFeeLamports == null) {
+      throw new MeteoraError(
+        "Meteora price-sync preflight incompatible: bitmap-extension rent constant is unavailable",
+        "SDK_INCOMPATIBLE",
+        { pool: pool.pubkey.toBase58(), targetBinId },
+      );
+    }
+    const bitmapExtensionCostLamports = requiresBitmapExtensionInit
+      ? bitmapFeeLamports!
+      : 0n;
+    return {
+      kind: "price-sync",
+      pool: pool.pubkey.toBase58(),
+      targetBinId,
+      binArrayCount: 0,
+      binArrayCostLamports: "0",
+      bitmapExtensionCostLamports: bitmapExtensionCostLamports.toString(),
+      nonRefundableInfrastructureLamports:
+        bitmapExtensionCostLamports.toString(),
+      bitmapExtensionRequired,
+      bitmapExtensionAddress,
+      bitmapExtensionInitialized,
+      requiresBinArrayInit: false,
+      requiresBitmapExtensionInit,
+      requiresNonRefundableInfrastructure: bitmapExtensionCostLamports > 0n,
+      raw: {
+        targetBinArrayIndex: targetBinArrayIndex.toString(),
+      },
+    };
+  }
+
+  private targetPriceYPerXFromBaseQuote(
+    pair: MeteoraPairDescriptor,
+    baseInQuote: number,
+  ): number {
+    if (!(baseInQuote > 0) || !Number.isFinite(baseInQuote)) {
+      throw new MeteoraError(
+        "Price-sync target base/quote price must be positive",
+        "INVALID_ARGUMENT",
+        { baseInQuote },
+      );
+    }
+    return pair.quoteSide === "y" ? baseInQuote : 1 / baseInQuote;
+  }
+
+  private async targetBinIdForPrice(
+    pool: DlmmPool,
+    targetPriceYPerX: number,
+  ): Promise<number> {
+    const sdk = (await dlmmSdk()) as any;
+    const DLMM = sdk.default;
+    if (
+      typeof DLMM?.getPricePerLamport !== "function" ||
+      typeof (pool as any).getBinIdFromPrice !== "function"
+    ) {
+      throw new MeteoraError(
+        "Installed @meteora-ag/dlmm lacks price-to-bin helpers required for pool-price synchronization",
+        "SDK_INCOMPATIBLE",
+        { pool: pool.pubkey.toBase58() },
+      );
+    }
+    const xDecimals = numberOrNull((pool as any)?.tokenX?.mint?.decimals);
+    const yDecimals = numberOrNull((pool as any)?.tokenY?.mint?.decimals);
+    if (xDecimals == null || yDecimals == null) {
+      throw new MeteoraError(
+        "Meteora pool token decimals are unavailable for price synchronization",
+        "SDK_INCOMPATIBLE",
+        { pool: pool.pubkey.toBase58() },
+      );
+    }
+    const perLamport = Number(
+      DLMM.getPricePerLamport(xDecimals, yDecimals, targetPriceYPerX),
+    );
+    const targetBinId = Number(
+      (pool as any).getBinIdFromPrice(perLamport, false),
+    );
+    if (!Number.isInteger(targetBinId)) {
+      throw new MeteoraError(
+        "Meteora price-to-bin conversion returned an invalid target bin",
+        "SDK_INCOMPATIBLE",
+        { targetPriceYPerX, perLamport, targetBinId },
+      );
+    }
+    return targetBinId;
+  }
+
+  private poolPriceSyncBuilderError(
+    error: unknown,
+    context: Record<string, unknown>,
+  ): MeteoraError {
+    if (error instanceof MeteoraError) return error;
+    const message = error instanceof Error ? error.message : String(error);
+    const lower = message.toLowerCase();
+    const unavailable =
+      (lower.includes("sync") &&
+        (lower.includes("liquidity") ||
+          lower.includes("cross") ||
+          lower.includes("unable") ||
+          lower.includes("cannot"))) ||
+      lower.includes("can sync with market price");
+    return new MeteoraError(
+      `Meteora pool-price sync builder failed: ${message}`,
+      unavailable ? "POOL_PRICE_SYNC_UNAVAILABLE" : "POOL_PRICE_SYNC_FAILED",
+      { ...context, upstreamMessage: message },
+      false,
+    );
+  }
+
+  async preflightPoolPriceSync(
+    args: MeteoraPoolPriceSyncPreflightArgs,
+  ): Promise<MeteoraPoolPriceSyncPreflight> {
+    const commitment = args.commitment ?? "confirmed";
+    const targetPolicy: MeteoraPoolPriceSyncTargetPolicy =
+      args.targetPolicy ?? "midpoint";
+    const sanity = await this.getPoolPriceSanity(args);
+    const pool = await this.rawPool(sanity.pool, false);
+    for (const method of ["canSyncWithMarketPrice", "syncWithMarketPrice"]) {
+      if (typeof (pool as any)[method] !== "function") {
+        throw new MeteoraError(
+          `Installed @meteora-ag/dlmm is missing ${method}() required for verified pool-price synchronization`,
+          "SDK_INCOMPATIBLE",
+          { pool: sanity.pool, method },
+        );
+      }
+    }
+
+    const requiresSync = !sanity.synchronized;
+    let targetBaseInQuote = sanity.poolBaseInQuote;
+    if (requiresSync) {
+      if (targetPolicy === "midpoint") {
+        targetBaseInQuote = sanity.marketMidBaseInQuote;
+      } else if (sanity.poolBaseInQuote < sanity.marketBidBaseInQuote) {
+        targetBaseInQuote = sanity.marketBidBaseInQuote;
+      } else if (sanity.poolBaseInQuote > sanity.marketAskBaseInQuote) {
+        targetBaseInQuote = sanity.marketAskBaseInQuote;
+      } else {
+        targetBaseInQuote = sanity.marketMidBaseInQuote;
+      }
+    }
+    const targetPriceYPerX = this.targetPriceYPerXFromBaseQuote(
+      sanity.pair,
+      targetBaseInQuote,
+    );
+    const targetBinId = requiresSync
+      ? await this.targetBinIdForPrice(pool, targetPriceYPerX)
+      : sanity.poolActiveBin;
+    const blockedByBinResolution =
+      requiresSync && targetBinId === sanity.poolActiveBin;
+    const upstreamCanSync = requiresSync
+      ? Boolean(
+          (pool as any).canSyncWithMarketPrice(
+            targetPriceYPerX,
+            sanity.poolActiveBin,
+          ),
+        )
+      : true;
+    const canSync =
+      !requiresSync || (!blockedByBinResolution && upstreamCanSync);
+    const blockedByLiquidity =
+      requiresSync && !blockedByBinResolution && !upstreamCanSync;
+    const infrastructure = requiresSync
+      ? await this.priceSyncInfrastructureQuote(pool, targetBinId, commitment)
+      : {
+          kind: "price-sync" as const,
+          pool: sanity.pool,
+          targetBinId,
+          binArrayCount: 0 as const,
+          binArrayCostLamports: "0" as const,
+          bitmapExtensionCostLamports: "0",
+          nonRefundableInfrastructureLamports: "0",
+          bitmapExtensionRequired: false,
+          bitmapExtensionAddress: null,
+          bitmapExtensionInitialized: null,
+          requiresBinArrayInit: false as const,
+          requiresBitmapExtensionInit: false,
+          requiresNonRefundableInfrastructure: false,
+          raw: {},
+        };
+    const safeWithoutSharedInfrastructureFunding =
+      !infrastructure.requiresNonRefundableInfrastructure;
+    const sharedInfrastructureAuthorized =
+      infrastructure.requiresNonRefundableInfrastructure
+        ? this.infrastructurePolicyAuthorized(
+            infrastructure,
+            args.infrastructure,
+          )
+        : false;
+
+    let transactionCount: number | null = requiresSync ? null : 0;
+    let requiredSignerPubkeys: string[] = [];
+    let requiredSigners: Array<{
+      pubkey: string;
+      role: "wallet" | "generated-position" | "unknown";
+    }> = [];
+    let missingRequiredSignerPubkeys: string[] = [];
+    let estimatedNetworkFeeLamports: string | null = requiresSync ? null : "0";
+    let networkFeeEstimateComplete = !requiresSync;
+
+    if (
+      requiresSync &&
+      canSync &&
+      (safeWithoutSharedInfrastructureFunding || sharedInfrastructureAuthorized)
+    ) {
+      let tx: Transaction;
+      try {
+        tx = await (pool as any).syncWithMarketPrice(
+          targetPriceYPerX,
+          this.host.signer(args.wallet).publicKey,
+        );
+      } catch (error) {
+        throw this.poolPriceSyncBuilderError(error, {
+          phase: "preflight-unsigned-build",
+          pool: sanity.pool,
+          targetBinId,
+          targetPriceYPerX,
+        });
+      }
+      const prepared: MeteoraPreparedTransactions = {
+        kind: "sync-pool-price",
+        wallet: args.wallet,
+        pool: sanity.pool,
+        transactions: [tx],
+        extraSigners: [],
+        infrastructurePreflight: this.infrastructurePreflight(
+          infrastructure,
+          args.infrastructure,
+        ),
+        metadata: {
+          targetBinId,
+          targetBaseInQuote,
+          targetPriceYPerX,
+          quoteMint: sanity.pair.quoteMint,
+          referenceQuoteNotionalRaw: sanity.reference.quoteNotionalRaw,
+          maxDeviationPct: args.maxDeviationPct,
+          requireIndependentReference: args.requireIndependentReference ?? true,
+        },
+      };
+      const inspected = await this.inspectPreparedTransactionsForPreflight(
+        prepared,
+        commitment,
+      );
+      transactionCount = inspected.transactionCount;
+      requiredSignerPubkeys = inspected.requiredSignerPubkeys;
+      requiredSigners = inspected.requiredSigners;
+      missingRequiredSignerPubkeys = inspected.missingRequiredSignerPubkeys;
+      estimatedNetworkFeeLamports = inspected.estimatedNetworkFeeLamports;
+      networkFeeEstimateComplete = inspected.networkFeeEstimateComplete;
+    }
+
+    return {
+      version: 1,
+      observedAt: Date.now(),
+      wallet: this.resolveWalletAddress(args.wallet),
+      pool: sanity.pool,
+      sanity,
+      requiresSync,
+      targetPolicy,
+      targetBaseInQuote,
+      targetPriceYPerX,
+      targetBinId,
+      canSync,
+      blockedByLiquidity,
+      blockedByBinResolution,
+      infrastructure,
+      sharedInfrastructureAuthorized,
+      safeWithoutSharedInfrastructureFunding,
+      transactionCount,
+      requiredSignerPubkeys,
+      requiredSigners,
+      missingRequiredSignerPubkeys,
+      estimatedNetworkFeeLamports,
+      networkFeeEstimateComplete,
+      safeToExecute:
+        !requiresSync ||
+        (canSync &&
+          (safeWithoutSharedInfrastructureFunding ||
+            sharedInfrastructureAuthorized) &&
+          missingRequiredSignerPubkeys.length === 0 &&
+          networkFeeEstimateComplete),
+    };
+  }
+
+  async buildSyncPoolPrice(
+    args: MeteoraPoolPriceSyncPreflightArgs,
+    preflight?: MeteoraPoolPriceSyncPreflight,
+  ): Promise<MeteoraPreparedTransactions> {
+    const proof = preflight ?? (await this.preflightPoolPriceSync(args));
+    if (!proof.requiresSync) {
+      throw new MeteoraError(
+        `Meteora pool ${proof.pool} is already within the configured executable market-price tolerance`,
+        "INVALID_ARGUMENT",
+        { preflight: safeJsonValue(proof) },
+      );
+    }
+    if (!proof.canSync) {
+      throw new MeteoraError(
+        proof.blockedByBinResolution
+          ? `Meteora pool ${proof.pool} is outside the requested tolerance but the external target maps to the already-active bin ${proof.targetBinId}; go_to_a_bin cannot improve price within one bin`
+          : `Meteora pool ${proof.pool} cannot sync to target bin ${proof.targetBinId} without crossing existing liquidity`,
+        "POOL_PRICE_SYNC_UNAVAILABLE",
+        { preflight: safeJsonValue(proof) },
+      );
+    }
+    this.assertInfrastructurePolicy(proof.infrastructure, args.infrastructure);
+    if (!proof.networkFeeEstimateComplete) {
+      throw new MeteoraError(
+        "Meteora pool-price sync refused because current network fee could not be estimated during preflight",
+        "POOL_PRICE_SYNC_UNAVAILABLE",
+        { preflight: safeJsonValue(proof) },
+        true,
+      );
+    }
+    if (proof.missingRequiredSignerPubkeys.length) {
+      throw new MeteoraMissingRequiredSignerError(
+        proof.missingRequiredSignerPubkeys,
+      );
+    }
+
+    // Refresh immediately before construction. Upstream syncWithMarketPrice()
+    // re-checks canSyncWithMarketPrice() against the current active bin.
+    const pool = await this.rawPool(proof.pool, true);
+    let tx: Transaction;
+    try {
+      tx = await (pool as any).syncWithMarketPrice(
+        proof.targetPriceYPerX,
+        this.host.signer(args.wallet).publicKey,
+      );
+    } catch (error) {
+      throw this.poolPriceSyncBuilderError(error, {
+        phase: "final-build",
+        pool: proof.pool,
+        targetBinId: proof.targetBinId,
+        targetPriceYPerX: proof.targetPriceYPerX,
+      });
+    }
+    return {
+      kind: "sync-pool-price",
+      wallet: args.wallet,
+      pool: proof.pool,
+      transactions: [tx],
+      extraSigners: [],
+      infrastructurePreflight: this.infrastructurePreflight(
+        proof.infrastructure,
+        args.infrastructure,
+      ),
+      metadata: {
+        targetBinId: proof.targetBinId,
+        targetBaseInQuote: proof.targetBaseInQuote,
+        targetPriceYPerX: proof.targetPriceYPerX,
+        quoteMint: proof.sanity.pair.quoteMint,
+        referenceQuoteNotionalRaw: proof.sanity.reference.quoteNotionalRaw,
+        maxDeviationPct: proof.sanity.maxDeviationPct,
+        requireIndependentReference: args.requireIndependentReference ?? true,
+      },
+    };
+  }
+
+  async verifyPoolPriceSync(
+    preflight: MeteoraPoolPriceSyncPreflight,
+    options: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraPoolPriceSyncVerification> {
+    const attempts = Math.max(
+      1,
+      Math.min(5, Math.trunc(options.attempts ?? 2)),
+    );
+    const retryDelayMs = Math.max(
+      0,
+      Math.min(5_000, Math.trunc(options.retryDelayMs ?? 750)),
+    );
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    let actual: MeteoraPoolPriceSanity | null = null;
+    let targetBinReached: boolean | null = null;
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        actual = await this.getPoolPriceSanity({
+          pool: preflight.pool,
+          quoteMint: preflight.sanity.pair.quoteMint,
+          referenceQuoteNotionalRaw:
+            preflight.sanity.reference.quoteNotionalRaw,
+          maxDeviationPct: preflight.sanity.maxDeviationPct,
+          requireIndependentReference:
+            preflight.sanity.reference.independentOfTargetPool,
+        });
+        targetBinReached = actual.poolActiveBin === preflight.targetBinId;
+        if (!targetBinReached) {
+          warnings.push(
+            `post-sync-active-bin-moved:expected=${preflight.targetBinId}:actual=${actual.poolActiveBin}`,
+          );
+        }
+        if (actual.synchronized) {
+          return {
+            kind: "pool-price-synced",
+            ok: true,
+            checkedAt: Date.now(),
+            attempts: attempt,
+            pool: preflight.pool,
+            expected: {
+              targetBinId: preflight.targetBinId,
+              targetBaseInQuote: preflight.targetBaseInQuote,
+              maxDeviationPct: preflight.sanity.maxDeviationPct,
+              referenceQuoteNotionalRaw:
+                preflight.sanity.reference.quoteNotionalRaw,
+            },
+            actual,
+            checks: {
+              targetBinReached,
+              synchronizedToFreshReference: true,
+            },
+            errors: [],
+            warnings,
+          };
+        }
+        errors.push(
+          `pool-remains-desynchronized:outside-band=${actual.outsideExecutableBandDeviationPct}%:max=${actual.maxDeviationPct}%`,
+        );
+      } catch (error) {
+        errors.push(
+          `post-sync-sanity-read-failed:${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (attempt < attempts && retryDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
+
+    return {
+      kind: "pool-price-synced",
+      ok: false,
+      checkedAt: Date.now(),
+      attempts,
+      pool: preflight.pool,
+      expected: {
+        targetBinId: preflight.targetBinId,
+        targetBaseInQuote: preflight.targetBaseInQuote,
+        maxDeviationPct: preflight.sanity.maxDeviationPct,
+        referenceQuoteNotionalRaw: preflight.sanity.reference.quoteNotionalRaw,
+      },
+      actual,
+      checks: {
+        targetBinReached,
+        synchronizedToFreshReference: actual?.synchronized ?? null,
+      },
+      errors,
+      warnings,
+    };
+  }
+
+  async syncPoolPriceVerified(
+    args: MeteoraPoolPriceSyncPreflightArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.withWalletWriteLock(args.wallet, async () => {
+      const preflight = await this.preflightPoolPriceSync(args);
+      if (!preflight.requiresSync) {
+        const verification = await this.verifyPoolPriceSync(preflight, {
+          attempts: 1,
+          retryDelayMs: 0,
+          ...verificationOptions,
+        });
+        if (!verification.ok) {
+          const result: MeteoraExecutionResult = {
+            kind: "sync-pool-price",
+            pool: preflight.pool,
+            signatures: [],
+            verification,
+          };
+          throw new MeteoraVerificationError(
+            `Meteora pool ${preflight.pool} was initially within tolerance but failed fresh price-sanity verification`,
+            result,
+          );
+        }
+        return {
+          kind: "sync-pool-price",
+          pool: preflight.pool,
+          signatures: [],
+          verification,
+        };
+      }
+      if (!preflight.canSync) {
+        throw new MeteoraError(
+          preflight.blockedByBinResolution
+            ? `Meteora pool ${preflight.pool} is desynchronized at a tolerance finer than the current bin resolution; synchronization cannot move within the same active bin`
+            : `Meteora pool ${preflight.pool} is desynchronized but cannot be moved to the external reference without crossing existing liquidity`,
+          "POOL_PRICE_SYNC_UNAVAILABLE",
+          { preflight: safeJsonValue(preflight) },
+        );
+      }
+      if (!preflight.safeToExecute) {
+        this.assertInfrastructurePolicy(
+          preflight.infrastructure,
+          args.infrastructure,
+        );
+        if (preflight.missingRequiredSignerPubkeys.length) {
+          throw new MeteoraMissingRequiredSignerError(
+            preflight.missingRequiredSignerPubkeys,
+          );
+        }
+        throw new MeteoraError(
+          "Meteora pool-price sync preflight is not safe to execute",
+          "POOL_PRICE_SYNC_UNAVAILABLE",
+          { preflight: safeJsonValue(preflight) },
+          !preflight.networkFeeEstimateComplete,
+        );
+      }
+
+      const prepared = await this.buildSyncPoolPrice(args, preflight);
+      const executed = await this.executePreparedUnlocked(prepared, options);
+      const verification = await this.verifyPoolPriceSync(
+        preflight,
+        verificationOptions,
+      );
+      const result = { ...executed, verification };
+      if (!verification.ok) {
+        throw new MeteoraVerificationError(
+          `Meteora pool-price sync transaction confirmed but fresh executable-market verification failed`,
+          result,
+        );
+      }
+      return result;
+    });
   }
 
   clearPoolCache(pool?: string): void {
@@ -4317,7 +5669,9 @@ export class MeteoraDlmmService {
       const subject =
         quote.kind === "limit-order"
           ? `limit-order bins ${quote.binIds.join(",")}`
-          : `liquidity range ${quote.minBinId}..${quote.maxBinId}`;
+          : quote.kind === "price-sync"
+            ? `pool-price sync to bin ${quote.targetBinId}`
+            : `liquidity range ${quote.minBinId}..${quote.maxBinId}`;
       throw new MeteoraInfrastructureFundingRequiredError(
         `Meteora build refused: ${subject} requires caller-funded shared infrastructure (${reasons.join(
           ", ",
@@ -4459,6 +5813,42 @@ export class MeteoraDlmmService {
     return { binIds, amounts, totalInputRaw: total.toString() };
   }
 
+  private validateLimitOrderBinIds(
+    binIds: number[],
+    maximum: number,
+  ): number[] {
+    if (
+      !Array.isArray(binIds) ||
+      binIds.length < 1 ||
+      binIds.length > maximum
+    ) {
+      throw new MeteoraError(
+        `Limit-order geometry must contain between 1 and ${maximum} bins`,
+        "INVALID_ARGUMENT",
+        { count: Array.isArray(binIds) ? binIds.length : null, maximum },
+      );
+    }
+    const normalized = [...binIds];
+    for (let index = 0; index < normalized.length; index += 1) {
+      const binId = normalized[index]!;
+      if (!Number.isInteger(binId)) {
+        throw new MeteoraError(
+          `Limit-order binIds must be integers (index ${index})`,
+          "INVALID_ARGUMENT",
+          { index, binId },
+        );
+      }
+      if (index > 0 && binId <= normalized[index - 1]!) {
+        throw new MeteoraError(
+          "Limit-order binIds must be strictly increasing; Solard never reorders geometry implicitly",
+          "INVALID_ARGUMENT",
+          { binIds: normalized },
+        );
+      }
+    }
+    return normalized;
+  }
+
   private normalizeLimitOrderSnapshot(
     pool: DlmmPool,
     parsed: unknown,
@@ -4476,6 +5866,11 @@ export class MeteoraDlmmService {
       publicKeyString(data.user) ??
       publicKeyString(data.creator) ??
       null;
+    const accountPool =
+      publicKeyString(data.lbPair) ??
+      publicKeyString(data.pool) ??
+      publicKeyString(data.lb_pair) ??
+      null;
     const ask = boolOrNull(data.isAskSide ?? data.askSide ?? data.is_ask_side);
     const side: MeteoraLimitOrderSide | null =
       ask == null ? null : ask ? "ask" : "bid";
@@ -4490,10 +5885,12 @@ export class MeteoraDlmmService {
         const binId = limitOrderBinId(entry);
         if (binId == null) return null;
         const empty = limitOrderBinEmpty(entry);
+        const amounts = normalizeLimitOrderBinAmounts(entry);
         return {
           binId,
           empty,
           status: normalizeLimitOrderStatus(entry.status),
+          ...amounts,
           raw: (safeJsonValue(entry) ?? {}) as Record<string, unknown>,
         };
       })
@@ -4503,6 +5900,7 @@ export class MeteoraDlmmService {
       version: 1,
       observedAt: Date.now(),
       pool: pool.pubkey.toBase58(),
+      accountPool,
       limitOrder: address,
       exists,
       owner,
@@ -4511,6 +5909,7 @@ export class MeteoraDlmmService {
       tokenY: tokenReserve(pool.tokenY),
       bins,
       openBinIds: bins.filter((bin) => !bin.empty).map((bin) => bin.binId),
+      summary: limitOrderSettlementSummary(data, bins, exists),
       raw: exists
         ? ((safeJsonValue(parsed) ?? {}) as Record<string, unknown>)
         : null,
@@ -4529,18 +5928,8 @@ export class MeteoraDlmmService {
       .getAccountInfo(pubkey, "confirmed");
     if (!account) {
       return {
-        version: 1,
-        observedAt: Date.now(),
-        pool: pool.pubkey.toBase58(),
+        ...this.normalizeLimitOrderSnapshot(pool, null, false),
         limitOrder: pubkey.toBase58(),
-        exists: false,
-        owner: null,
-        side: null,
-        tokenX: tokenReserve(pool.tokenX),
-        tokenY: tokenReserve(pool.tokenY),
-        bins: [],
-        openBinIds: [],
-        raw: null,
       };
     }
     try {
@@ -4574,53 +5963,212 @@ export class MeteoraDlmmService {
     );
   }
 
+  async verifyManagedLimitOrder(
+    record: MeteoraManagedLimitOrderRecord,
+  ): Promise<MeteoraManagedLimitOrderVerification> {
+    const normalizedRecord: MeteoraManagedLimitOrderRecord = {
+      version: 1,
+      limitOrder: asPublicKey(record.limitOrder).toBase58(),
+      pool: asPublicKey(record.pool).toBase58(),
+      owner: asPublicKey(record.owner).toBase58(),
+      side: record.side,
+      createdSignature: String(record.createdSignature ?? ""),
+      createdAt: Number(record.createdAt),
+    };
+    const actual = await this.getLimitOrder(
+      normalizedRecord.pool,
+      normalizedRecord.limitOrder,
+    );
+    const accountExists = actual.exists;
+    const poolMatches = !accountExists
+      ? null
+      : actual.accountPool == null
+        ? null
+        : actual.accountPool === normalizedRecord.pool;
+    const ownerMatches = !accountExists
+      ? null
+      : actual.owner == null
+        ? null
+        : actual.owner === normalizedRecord.owner;
+    const sideMatches = !accountExists
+      ? null
+      : actual.side == null
+        ? null
+        : actual.side === normalizedRecord.side;
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    if (!accountExists) errors.push("managed-limit-order-account-missing");
+    if (poolMatches === false) errors.push("managed-limit-order-pool-mismatch");
+    if (ownerMatches === false)
+      errors.push("managed-limit-order-owner-mismatch");
+    if (sideMatches === false) errors.push("managed-limit-order-side-mismatch");
+    if (accountExists && poolMatches == null)
+      warnings.push(
+        "managed-limit-order-account-pool-not-exposed-by-installed-sdk-parser",
+      );
+    if (accountExists && ownerMatches == null)
+      warnings.push(
+        "managed-limit-order-owner-not-exposed-by-installed-sdk-parser",
+      );
+    if (accountExists && sideMatches == null)
+      warnings.push(
+        "managed-limit-order-side-not-exposed-by-installed-sdk-parser",
+      );
+    return {
+      version: 1,
+      checkedAt: Date.now(),
+      ok:
+        accountExists &&
+        poolMatches !== false &&
+        ownerMatches !== false &&
+        sideMatches !== false,
+      record: normalizedRecord,
+      actual,
+      checks: {
+        accountExists,
+        poolMatches,
+        ownerMatches,
+        sideMatches,
+      },
+      errors,
+      warnings,
+    };
+  }
+
   private async quoteLimitOrderInfrastructure(
     pool: DlmmPool,
     binIds: number[],
+    commitment: Commitment = "confirmed",
   ): Promise<MeteoraLimitOrderInfrastructureQuote> {
     const raw = await (pool as any).quoteCreateLimitOrder({
       bins: binIds.map((id) => ({ id })),
       relativeBin: undefined,
     });
-    const binArrayCount = numberOrNull(raw?.binArraysCount);
-    // Current upstream quoteCreateLimitOrder() returns all four cost fields in SOL:
-    // limitOrderCost is rent/1e9, while binArrayCost and bitmapExtensionCost are
-    // count * SOL-denominated constants. Normalize every cost at the Solard boundary.
-    const binArrayCostLamports = meteoraQuotedSolCostToLamports(
-      raw?.binArrayCost,
-    );
-    const bitmapExtensionCostLamports = meteoraQuotedSolCostToLamports(
-      raw?.bitmapExtensionCost,
-    );
+
+    // quoteCreateLimitOrder is still useful for dynamic limit-order account rent,
+    // but Solard independently proves shared infrastructure from account existence.
     const limitOrderRentLamports = meteoraQuotedSolCostToLamports(
       raw?.limitOrderCost,
     );
-    if (
-      binArrayCostLamports == null ||
-      bitmapExtensionCostLamports == null ||
-      limitOrderRentLamports == null
-    ) {
+    if (limitOrderRentLamports == null) {
       throw new MeteoraError(
-        "Meteora quoteCreateLimitOrder returned an invalid cost schema",
+        "Meteora quoteCreateLimitOrder returned an invalid limit-order rent schema",
         "SDK_INCOMPATIBLE",
         { raw: safeJsonValue(raw) },
       );
     }
+
+    const sdk = (await dlmmSdk()) as unknown as Record<string, any>;
+    const binIdToBinArrayIndex = sdk.binIdToBinArrayIndex;
+    const deriveBinArray = sdk.deriveBinArray;
+    const deriveBinArrayBitmapExtension = sdk.deriveBinArrayBitmapExtension;
+    const isOverflowDefaultBinArrayBitmap = sdk.isOverflowDefaultBinArrayBitmap;
+    const programId = (pool as any)?.program?.programId as
+      PublicKey | undefined;
+    if (
+      typeof binIdToBinArrayIndex !== "function" ||
+      typeof deriveBinArray !== "function" ||
+      typeof isOverflowDefaultBinArrayBitmap !== "function" ||
+      !programId
+    ) {
+      throw new MeteoraError(
+        "Meteora limit-order infrastructure preflight incompatible: required bin-array coverage helpers are unavailable.",
+        "SDK_INCOMPATIBLE",
+      );
+    }
+
+    const indexes = [
+      ...new Set(
+        binIds.map((binId) =>
+          Number(binIdToBinArrayIndex(new BN(binId)).toString()),
+        ),
+      ),
+    ].sort((a, b) => a - b);
+    const keys = indexes.map((index) => {
+      const [key] = deriveBinArray(pool.pubkey, new BN(index), programId) as [
+        PublicKey,
+        number,
+      ];
+      return key;
+    });
+    const infos = keys.length
+      ? await this.host.connection().getMultipleAccountsInfo(keys, commitment)
+      : [];
+    const requiredBinArrays = indexes.map((index, i) => ({
+      index,
+      address: keys[i]!.toBase58(),
+      initialized: infos[i] != null,
+    }));
+    const missingBinArrays = requiredBinArrays
+      .filter((entry) => !entry.initialized)
+      .map(({ index, address }) => ({ index, address }));
+
+    const bitmapExtensionRequired = indexes.some((index) =>
+      Boolean(isOverflowDefaultBinArrayBitmap(new BN(index))),
+    );
+    let bitmapExtensionAddress: string | null = null;
+    let bitmapExtensionInitialized: boolean | null = null;
+    if (bitmapExtensionRequired) {
+      if (typeof deriveBinArrayBitmapExtension !== "function") {
+        throw new MeteoraError(
+          "Meteora limit-order infrastructure preflight incompatible: bitmap-extension derivation helper is unavailable.",
+          "SDK_INCOMPATIBLE",
+        );
+      }
+      const [bitmapKey] = deriveBinArrayBitmapExtension(
+        pool.pubkey,
+        programId,
+      ) as [PublicKey, number];
+      bitmapExtensionAddress = bitmapKey.toBase58();
+      bitmapExtensionInitialized =
+        (await this.host.connection().getAccountInfo(bitmapKey, commitment)) !=
+        null;
+    }
+
+    const binArrayFeeLamports = sdkRentConstantLamports(
+      sdk,
+      "BIN_ARRAY_FEE_BN",
+      "BIN_ARRAY_FEE",
+    );
+    const bitmapFeeLamports = sdkRentConstantLamports(
+      sdk,
+      "BIN_ARRAY_BITMAP_FEE_BN",
+      "BIN_ARRAY_BITMAP_FEE",
+    );
+    if (binArrayFeeLamports == null || bitmapFeeLamports == null) {
+      throw new MeteoraError(
+        "Meteora limit-order infrastructure preflight incompatible: bin-array rent constants are unavailable.",
+        "SDK_INCOMPATIBLE",
+      );
+    }
+
+    const binArrayCostLamports =
+      BigInt(missingBinArrays.length) * binArrayFeeLamports;
+    const requiresBitmapExtensionInit =
+      bitmapExtensionRequired && bitmapExtensionInitialized === false;
+    const bitmapExtensionCostLamports = requiresBitmapExtensionInit
+      ? bitmapFeeLamports
+      : 0n;
     const nonRefundable = binArrayCostLamports + bitmapExtensionCostLamports;
+
     return {
       kind: "limit-order",
       pool: pool.pubkey.toBase58(),
       binIds: [...binIds],
       minBinId: Math.min(...binIds),
       maxBinId: Math.max(...binIds),
-      binArrayCount,
+      binArrayCount: missingBinArrays.length,
       binArrayCostLamports: binArrayCostLamports.toString(),
       bitmapExtensionCostLamports: bitmapExtensionCostLamports.toString(),
       nonRefundableInfrastructureLamports: nonRefundable.toString(),
       limitOrderRentLamports: limitOrderRentLamports.toString(),
-      requiresBinArrayInit:
-        binArrayCostLamports > 0n || (binArrayCount ?? 0) > 0,
-      requiresBitmapExtensionInit: bitmapExtensionCostLamports > 0n,
+      requiredBinArrays,
+      missingBinArrays,
+      bitmapExtensionRequired,
+      bitmapExtensionAddress,
+      bitmapExtensionInitialized,
+      requiresBinArrayInit: missingBinArrays.length > 0,
+      requiresBitmapExtensionInit,
       requiresNonRefundableInfrastructure: nonRefundable > 0n,
       raw: (safeJsonValue(raw) ?? {}) as Record<string, unknown>,
     };
@@ -4638,6 +6186,114 @@ export class MeteoraDlmmService {
         return false;
       throw error;
     }
+  }
+
+  async preflightLimitOrderGeometry(
+    args: MeteoraLimitOrderGeometryPreflightArgs,
+  ): Promise<MeteoraLimitOrderGeometryPreflight> {
+    const commitment = args.commitment ?? "confirmed";
+    const pool = await this.rawPool(args.pool, true);
+    await this.assertLimitOrderSupported(pool);
+    const maximum = await this.maxBinsPerLimitOrder();
+    const binIds = this.validateLimitOrderBinIds(args.binIds, maximum);
+    const quote = await this.quoteLimitOrderInfrastructure(
+      pool,
+      binIds,
+      commitment,
+    );
+    const sharedInfrastructureAuthorized =
+      quote.requiresNonRefundableInfrastructure
+        ? this.infrastructurePolicyAuthorized(quote, args.infrastructure)
+        : false;
+    const safeWithoutSharedInfrastructureFunding =
+      !quote.requiresNonRefundableInfrastructure;
+
+    const warnings: string[] = [];
+    let observedRows: unknown[] = [];
+    try {
+      const range = await (pool as any).getBinsBetweenLowerAndUpperBound(
+        Math.min(...binIds),
+        Math.max(...binIds),
+      );
+      observedRows = Array.isArray(range?.bins) ? range.bins : [];
+    } catch (error) {
+      warnings.push(
+        `Target-bin liquidity read unavailable:${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const byId = new Map<number, Record<string, unknown>>();
+    for (const raw of observedRows) {
+      const row = recordOrNull(raw);
+      if (!row) continue;
+      const binId = limitOrderBinId(row);
+      if (binId != null) byId.set(binId, row);
+    }
+
+    let oppositeKnown = observedRows.length > 0;
+    const bins = binIds.map((binId) => {
+      const row = byId.get(binId) ?? {};
+      const amountX = firstIntegerStringOrNull(
+        row.amountX,
+        row.xAmount,
+        row.amount_x,
+      );
+      const amountY = firstIntegerStringOrNull(
+        row.amountY,
+        row.yAmount,
+        row.amount_y,
+      );
+      const oppositeSideLiquidityRaw = args.side === "ask" ? amountY : amountX;
+      if (oppositeSideLiquidityRaw == null) oppositeKnown = false;
+      return {
+        binId,
+        oppositeSideLiquidityRaw,
+        raw: (safeJsonValue(row) ?? {}) as Record<string, unknown>,
+      };
+    });
+    const oppositeSideLiquidityBinIds = bins
+      .filter(
+        (bin) =>
+          bin.oppositeSideLiquidityRaw != null &&
+          BigInt(bin.oppositeSideLiquidityRaw) > 0n,
+      )
+      .map((bin) => bin.binId);
+
+    if (oppositeSideLiquidityBinIds.length) {
+      warnings.push(
+        `Target bins ${oppositeSideLiquidityBinIds.join(",")} contain aggregate opposite-token liquidity. ` +
+          "Meteora recommends inspecting opposite-side liquidity before limit-order placement; " +
+          "Solard reports this conservatively and does not claim it is limit-order-only liquidity.",
+      );
+    }
+    if (!oppositeKnown) {
+      warnings.push(
+        "Installed Meteora bin parser did not expose X/Y liquidity for every target bin; opposite-side liquidity collision status is incomplete.",
+      );
+    }
+
+    return {
+      version: 1,
+      observedAt: Date.now(),
+      pool: pool.pubkey.toBase58(),
+      side: args.side,
+      binIds,
+      maxBinsPerOrder: maximum,
+      quote,
+      requiredBinArrays: quote.requiredBinArrays ?? [],
+      missingBinArrays: quote.missingBinArrays ?? [],
+      bitmapExtensionRequired: quote.bitmapExtensionRequired ?? false,
+      bitmapExtensionAddress: quote.bitmapExtensionAddress ?? null,
+      bitmapExtensionInitialized: quote.bitmapExtensionInitialized ?? null,
+      sharedInfrastructureAuthorized,
+      safeWithoutSharedInfrastructureFunding,
+      bins,
+      oppositeSideLiquidityBinIds,
+      oppositeSideLiquidityKnown: oppositeKnown,
+      safeToBuild:
+        safeWithoutSharedInfrastructureFunding ||
+        sharedInfrastructureAuthorized,
+      warnings,
+    };
   }
 
   async preflightLimitOrder(
@@ -4658,38 +6314,32 @@ export class MeteoraDlmmService {
     });
     const inputBalanceRaw =
       args.side === "ask" ? balances.tokenXRaw : balances.tokenYRaw;
-    const quote = await this.quoteLimitOrderInfrastructure(
-      pool,
-      validated.binIds,
-    );
-    const sharedInfrastructureAuthorized = this.infrastructurePolicyAuthorized(
-      quote,
-      args.infrastructure,
-    );
+    const geometry = await this.preflightLimitOrderGeometry({
+      pool: pool.pubkey.toBase58(),
+      side: args.side,
+      binIds: validated.binIds,
+      infrastructure: args.infrastructure,
+      commitment: "confirmed",
+    });
+    const quote = geometry.quote;
+    const sharedInfrastructureAuthorized =
+      geometry.sharedInfrastructureAuthorized;
     const inputIsNative = inputMint === WSOL_MINT;
     const requiredInput = BigInt(validated.totalInputRaw);
     const availableNative = BigInt(balances.nativeLamports);
     const sharedCost = BigInt(quote.nonRefundableInfrastructureLamports);
     const rent = BigInt(quote.limitOrderRentLamports);
+    const fundedSharedCost = sharedInfrastructureAuthorized ? sharedCost : 0n;
     const requiredNative =
-      rent + sharedCost + (inputIsNative ? requiredInput : 0n);
+      rent + fundedSharedCost + (inputIsNative ? requiredInput : 0n);
     const inputFundingSufficient = inputIsNative
-      ? availableNative >=
-        requiredInput +
-          rent +
-          (sharedInfrastructureAuthorized ? sharedCost : 0n)
+      ? availableNative >= requiredInput + rent + fundedSharedCost
       : BigInt(inputBalanceRaw) >= requiredInput;
     const nativeFundingSufficient =
       availableNative >=
-      rent +
-        (sharedInfrastructureAuthorized ? sharedCost : 0n) +
-        (inputIsNative ? requiredInput : 0n);
-    const safeWithoutSharedInfrastructureFunding =
-      !quote.requiresNonRefundableInfrastructure;
+      rent + fundedSharedCost + (inputIsNative ? requiredInput : 0n);
     const executable =
-      sharedInfrastructureAuthorized &&
-      inputFundingSufficient &&
-      nativeFundingSufficient;
+      geometry.safeToBuild && inputFundingSufficient && nativeFundingSufficient;
     return {
       version: 1,
       observedAt: Date.now(),
@@ -4702,19 +6352,291 @@ export class MeteoraDlmmService {
       binIds: validated.binIds,
       maxBinsPerOrder: maximum,
       quote,
+      geometry,
       sharedInfrastructureAuthorized,
-      safeWithoutSharedInfrastructureFunding,
+      safeWithoutSharedInfrastructureFunding:
+        geometry.safeWithoutSharedInfrastructureFunding,
       inputFundingSufficient,
       availableNativeLamports: availableNative.toString(),
       requiredNativeLamportsBeforeNetworkFee: requiredNative.toString(),
       executable,
       safeToExecuteBeforeNetworkFee: executable,
       estimatedNetworkFeeLamports: null,
-      warnings: inputIsNative
-        ? [
-            "Input is WSOL/native mint; current Meteora path wraps native SOL, so native funding includes the full order input.",
-          ]
-        : [],
+      warnings: [
+        ...geometry.warnings,
+        ...(inputIsNative
+          ? [
+              "Input is WSOL/native mint; current Meteora path wraps native SOL, so native funding includes the full order input.",
+            ]
+          : []),
+      ],
+    };
+  }
+
+  async preflightLimitOrderBatch(
+    args: MeteoraLimitOrderBatchPreflightArgs,
+  ): Promise<MeteoraLimitOrderBatchPreflight> {
+    const commitment = args.commitment ?? "confirmed";
+    if (!Array.isArray(args.orders) || args.orders.length === 0) {
+      throw new MeteoraError(
+        "preflightLimitOrderBatch requires at least one order",
+        "INVALID_ARGUMENT",
+      );
+    }
+    const seenIds = new Set<string>();
+    for (const order of args.orders) {
+      const id = String(order.id ?? "").trim();
+      if (!id) {
+        throw new MeteoraError(
+          "preflightLimitOrderBatch order ids must be non-empty",
+          "INVALID_ARGUMENT",
+        );
+      }
+      if (seenIds.has(id)) {
+        throw new MeteoraError(
+          `preflightLimitOrderBatch order id must be unique: ${id}`,
+          "INVALID_ARGUMENT",
+        );
+      }
+      seenIds.add(id);
+    }
+
+    const pool = await this.rawPool(args.pool, true);
+    await this.assertLimitOrderSupported(pool);
+    const poolAddress = pool.pubkey.toBase58();
+    const walletAddress = this.resolveWalletAddress(args.wallet);
+    const balances = await this.getWalletPoolBalances({
+      wallet: args.wallet,
+      pool: poolAddress,
+      commitment,
+    });
+    const nativeReserveLamports =
+      args.nativeReserveLamports == null
+        ? 0n
+        : BigInt(
+            toBN(args.nativeReserveLamports, "nativeReserveLamports").toString(
+              10,
+            ),
+          );
+    const maximum = await this.maxBinsPerLimitOrder();
+
+    const orders: MeteoraLimitOrderBatchPreflightOrder[] = [];
+    for (const requested of args.orders) {
+      const id = String(requested.id).trim();
+      let inputMint = "";
+      let totalInputRaw = "0";
+      let binIds: number[] = [];
+      let geometry: MeteoraLimitOrderGeometryPreflight | null = null;
+      let executable = true;
+      let errorCode: MeteoraErrorCode | null = null;
+      let errorMessage: string | null = null;
+      let transactionCount: number | null = null;
+      let requiredSignerPubkeys: string[] = [];
+      let requiredSigners: Array<{
+        pubkey: string;
+        role: "wallet" | "generated-limit-order" | "unknown";
+      }> = [];
+      let missingRequiredSignerPubkeys: string[] = [];
+      let estimatedNetworkFeeLamports: string | null = null;
+      let networkFeeEstimateComplete = false;
+      let limitOrderRentLamports: string | null = null;
+      let nonRefundableInfrastructureLamports = "0";
+
+      try {
+        const validated = this.validateLimitOrderBins(requested.bins, maximum);
+        binIds = validated.binIds;
+        totalInputRaw = validated.totalInputRaw;
+        inputMint =
+          requested.side === "ask"
+            ? balances.tokenX.mint
+            : balances.tokenY.mint;
+
+        geometry = await this.preflightLimitOrderGeometry({
+          pool: poolAddress,
+          side: requested.side,
+          binIds,
+          infrastructure: requested.infrastructure ?? args.infrastructure,
+          commitment,
+        });
+        limitOrderRentLamports = geometry.quote.limitOrderRentLamports;
+        nonRefundableInfrastructureLamports =
+          geometry.quote.nonRefundableInfrastructureLamports;
+
+        // Autonomous/multi-order preflight is stricter than the low-level builder:
+        // persistent shared pool infrastructure is never considered safe even when
+        // an operator policy could explicitly authorize it.
+        if (!geometry.safeWithoutSharedInfrastructureFunding) {
+          executable = false;
+          errorCode = "INFRASTRUCTURE_FUNDING_REQUIRED";
+          errorMessage =
+            `limit-order batch member ${id} requires persistent Meteora infrastructure: ` +
+            `${nonRefundableInfrastructureLamports} lamports`;
+        }
+
+        if (executable) {
+          // Unsigned builder only. No signer is invoked and nothing is sent.
+          const prepared = await this.buildPlaceLimitOrder({
+            wallet: args.wallet,
+            pool: poolAddress,
+            side: requested.side,
+            bins: requested.bins,
+          });
+          const inspected = await this.inspectPreparedTransactionsForPreflight(
+            prepared,
+            commitment,
+          );
+          transactionCount = inspected.transactionCount;
+          requiredSignerPubkeys = inspected.requiredSignerPubkeys;
+          requiredSigners = inspected.requiredSigners.map((signer) => ({
+            pubkey: signer.pubkey,
+            role:
+              signer.role === "generated-position"
+                ? "generated-limit-order"
+                : signer.role,
+          }));
+          missingRequiredSignerPubkeys = inspected.missingRequiredSignerPubkeys;
+          estimatedNetworkFeeLamports = inspected.estimatedNetworkFeeLamports;
+          networkFeeEstimateComplete = inspected.networkFeeEstimateComplete;
+          if (missingRequiredSignerPubkeys.length) {
+            executable = false;
+            errorCode = "MISSING_REQUIRED_SIGNER";
+            errorMessage =
+              `limit-order batch member ${id} requires unavailable signer(s): ` +
+              missingRequiredSignerPubkeys.join(", ");
+          }
+        }
+      } catch (error) {
+        executable = false;
+        errorCode = error instanceof MeteoraError ? error.code : "UNKNOWN";
+        errorMessage = error instanceof Error ? error.message : String(error);
+      }
+
+      orders.push({
+        id,
+        side: requested.side,
+        inputMint,
+        totalInputRaw,
+        binIds,
+        executable,
+        errorCode,
+        errorMessage,
+        geometry,
+        transactionCount,
+        requiredSignerPubkeys,
+        requiredSigners,
+        missingRequiredSignerPubkeys,
+        estimatedNetworkFeeLamports,
+        networkFeeEstimateComplete,
+        limitOrderRentLamports,
+        nonRefundableInfrastructureLamports,
+      });
+    }
+
+    const executableOrders = orders.filter((order) => order.executable);
+    const rejectedOrders = orders.length - executableOrders.length;
+    const allOrdersExecutable = rejectedOrders === 0;
+
+    const requestedInputXRaw = executableOrders
+      .filter((order) => order.side === "ask")
+      .reduce((sum, order) => sum + BigInt(order.totalInputRaw), 0n);
+    const requestedInputYRaw = executableOrders
+      .filter((order) => order.side === "bid")
+      .reduce((sum, order) => sum + BigInt(order.totalInputRaw), 0n);
+
+    const allRentKnown = executableOrders.every(
+      (order) => order.limitOrderRentLamports != null,
+    );
+    const limitOrderRentLamports = allRentKnown
+      ? executableOrders.reduce(
+          (sum, order) => sum + BigInt(order.limitOrderRentLamports ?? "0"),
+          0n,
+        )
+      : null;
+
+    const nonRefundableInfrastructureLamports = orders.reduce(
+      (sum, order) => sum + BigInt(order.nonRefundableInfrastructureLamports),
+      0n,
+    );
+    const networkFeeEstimateComplete = executableOrders.every(
+      (order) => order.networkFeeEstimateComplete,
+    );
+    const estimatedNetworkFeeLamports = networkFeeEstimateComplete
+      ? executableOrders.reduce(
+          (sum, order) =>
+            sum + BigInt(order.estimatedNetworkFeeLamports ?? "0"),
+          0n,
+        )
+      : null;
+
+    const tokenXFundingSufficient =
+      balances.tokenX.mint === WSOL_MINT ||
+      BigInt(balances.tokenXRaw) >= requestedInputXRaw;
+    const tokenYFundingSufficient =
+      balances.tokenY.mint === WSOL_MINT ||
+      BigInt(balances.tokenYRaw) >= requestedInputYRaw;
+    const requestedWsolInputLamports =
+      balances.tokenX.mint === WSOL_MINT
+        ? requestedInputXRaw
+        : balances.tokenY.mint === WSOL_MINT
+          ? requestedInputYRaw
+          : 0n;
+    const requiredNativeLamports =
+      limitOrderRentLamports == null || estimatedNetworkFeeLamports == null
+        ? null
+        : limitOrderRentLamports +
+          estimatedNetworkFeeLamports +
+          nativeReserveLamports +
+          requestedWsolInputLamports;
+    const nativeFundingSufficient =
+      requiredNativeLamports == null
+        ? null
+        : BigInt(balances.nativeLamports) >= requiredNativeLamports;
+    const inputFundingSufficient =
+      tokenXFundingSufficient &&
+      tokenYFundingSufficient &&
+      nativeFundingSufficient === true;
+    const safeToBuild =
+      allOrdersExecutable && nonRefundableInfrastructureLamports === 0n;
+    const safeToExecute =
+      safeToBuild && networkFeeEstimateComplete && inputFundingSufficient;
+
+    return {
+      version: 1,
+      observedAt: Date.now(),
+      wallet: walletAddress,
+      pool: poolAddress,
+      safeToBuild,
+      inputFundingSufficient,
+      nativeFundingSufficient,
+      safeToExecute,
+      balances,
+      nativeReserveLamports: nativeReserveLamports.toString(),
+      orders,
+      total: {
+        executableOrders: executableOrders.length,
+        rejectedOrders,
+        allOrdersExecutable,
+        requestedInputXRaw: requestedInputXRaw.toString(),
+        requestedInputYRaw: requestedInputYRaw.toString(),
+        requestedWsolInputLamports: requestedWsolInputLamports.toString(),
+        limitOrderRentLamports:
+          limitOrderRentLamports == null
+            ? null
+            : limitOrderRentLamports.toString(),
+        nonRefundableInfrastructureLamports:
+          nonRefundableInfrastructureLamports.toString(),
+        estimatedNetworkFeeLamports:
+          estimatedNetworkFeeLamports == null
+            ? null
+            : estimatedNetworkFeeLamports.toString(),
+        networkFeeEstimateComplete,
+        requiredNativeLamports:
+          requiredNativeLamports == null
+            ? null
+            : requiredNativeLamports.toString(),
+        tokenXFundingSufficient,
+        tokenYFundingSufficient,
+      },
     };
   }
 
@@ -6373,6 +8295,109 @@ export class MeteoraDlmmService {
     prepared: MeteoraPreparedTransactions,
     options: MeteoraPositionVerificationOptions = {},
   ): Promise<MeteoraExecutionVerification> {
+    if (prepared.kind === "sync-pool-price") {
+      const quoteMint = String(prepared.metadata?.quoteMint ?? "");
+      const referenceQuoteNotionalRaw = firstIntegerStringOrNull(
+        prepared.metadata?.referenceQuoteNotionalRaw,
+      );
+      const maxDeviationPct = numberOrNull(prepared.metadata?.maxDeviationPct);
+      const targetBinId = numberOrNull(prepared.metadata?.targetBinId);
+      const targetBaseInQuote = numberOrNull(
+        prepared.metadata?.targetBaseInQuote,
+      );
+      if (
+        !quoteMint ||
+        referenceQuoteNotionalRaw == null ||
+        maxDeviationPct == null ||
+        targetBinId == null ||
+        targetBaseInQuote == null
+      ) {
+        throw new MeteoraError(
+          "Prepared pool-price sync lacks verification metadata",
+          "SDK_INCOMPATIBLE",
+          { metadata: safeJsonValue(prepared.metadata) },
+        );
+      }
+      const policy = this.verificationAttempts({
+        attempts: Math.min(2, options.attempts ?? 2),
+        retryDelayMs: options.retryDelayMs ?? 750,
+        commitment: options.commitment,
+      });
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      let actual: MeteoraPoolPriceSanity | null = null;
+      let targetBinReached: boolean | null = null;
+      for (let attempt = 1; attempt <= policy.attempts; attempt += 1) {
+        try {
+          actual = await this.getPoolPriceSanity({
+            pool: prepared.pool,
+            quoteMint,
+            referenceQuoteNotionalRaw,
+            maxDeviationPct,
+            requireIndependentReference:
+              prepared.metadata?.requireIndependentReference !== false,
+          });
+          targetBinReached = actual.poolActiveBin === targetBinId;
+          if (!targetBinReached) {
+            warnings.push(
+              `post-sync-active-bin-moved:expected=${targetBinId}:actual=${actual.poolActiveBin}`,
+            );
+          }
+          if (actual.synchronized) {
+            return {
+              kind: "pool-price-synced",
+              ok: true,
+              checkedAt: Date.now(),
+              attempts: attempt,
+              pool: prepared.pool,
+              expected: {
+                targetBinId,
+                targetBaseInQuote,
+                maxDeviationPct,
+                referenceQuoteNotionalRaw,
+              },
+              actual,
+              checks: {
+                targetBinReached,
+                synchronizedToFreshReference: true,
+              },
+              errors: [],
+              warnings,
+            };
+          }
+          errors.push(
+            `pool-remains-desynchronized:outside-band=${actual.outsideExecutableBandDeviationPct}%:max=${actual.maxDeviationPct}%`,
+          );
+        } catch (error) {
+          errors.push(
+            `post-sync-sanity-read-failed:${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        if (attempt < policy.attempts) {
+          await this.verificationDelay(policy.retryDelayMs);
+        }
+      }
+      return {
+        kind: "pool-price-synced",
+        ok: false,
+        checkedAt: Date.now(),
+        attempts: policy.attempts,
+        pool: prepared.pool,
+        expected: {
+          targetBinId,
+          targetBaseInQuote,
+          maxDeviationPct,
+          referenceQuoteNotionalRaw,
+        },
+        actual,
+        checks: {
+          targetBinReached,
+          synchronizedToFreshReference: actual?.synchronized ?? null,
+        },
+        errors,
+        warnings,
+      };
+    }
     if (prepared.limitOrder) {
       if (prepared.kind === "place-limit-order") {
         const binIds = Array.isArray(prepared.metadata?.binIds)
@@ -6476,53 +8501,83 @@ export class MeteoraDlmmService {
             verificationOptions,
           );
         } catch (verifyError) {
-          verification = prepared.limitOrder
-            ? {
-                kind:
-                  prepared.kind === "place-limit-order"
-                    ? "limit-order-placed"
-                    : "limit-order-cancelled",
-                ok: false,
-                checkedAt: Date.now(),
-                attempts: 0,
-                pool: prepared.pool,
-                limitOrder: prepared.limitOrder,
-                expected: { owner: null, binIds: [], closed: null },
-                actual: null,
-                checks: {
-                  accountExists: null,
-                  accountClosed: null,
-                  ownerMatches: null,
-                  binsMatch: null,
-                  requestedBinsCancelled: null,
-                },
-                errors: [
-                  `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
-                ],
-                warnings: [],
-              }
-            : {
-                kind: prepared.position ? "position-present" : "not-applicable",
-                ok: false,
-                checkedAt: Date.now(),
-                attempts: 0,
-                pool: prepared.pool,
-                position: prepared.position ?? null,
-                expected: { owner: null, minBinId: null, maxBinId: null },
-                actual: null,
-                checks: {
-                  accountExists: null,
-                  accountClosed: null,
-                  poolMatches: null,
-                  ownerMatches: null,
-                  rangeMatches: null,
-                  absentFromWalletPool: null,
-                },
-                errors: [
-                  `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
-                ],
-                warnings: [],
-              };
+          if (prepared.kind === "sync-pool-price") {
+            verification = {
+              kind: "pool-price-synced",
+              ok: false,
+              checkedAt: Date.now(),
+              attempts: 0,
+              pool: prepared.pool,
+              expected: {
+                targetBinId: numberOrNull(prepared.metadata?.targetBinId) ?? 0,
+                targetBaseInQuote:
+                  numberOrNull(prepared.metadata?.targetBaseInQuote) ?? 0,
+                maxDeviationPct:
+                  numberOrNull(prepared.metadata?.maxDeviationPct) ?? 0,
+                referenceQuoteNotionalRaw:
+                  firstIntegerStringOrNull(
+                    prepared.metadata?.referenceQuoteNotionalRaw,
+                  ) ?? "0",
+              },
+              actual: null,
+              checks: {
+                targetBinReached: null,
+                synchronizedToFreshReference: null,
+              },
+              errors: [
+                `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
+              ],
+              warnings: [],
+            };
+          } else if (prepared.limitOrder) {
+            verification = {
+              kind:
+                prepared.kind === "place-limit-order"
+                  ? "limit-order-placed"
+                  : "limit-order-cancelled",
+              ok: false,
+              checkedAt: Date.now(),
+              attempts: 0,
+              pool: prepared.pool,
+              limitOrder: prepared.limitOrder,
+              expected: { owner: null, binIds: [], closed: null },
+              actual: null,
+              checks: {
+                accountExists: null,
+                accountClosed: null,
+                ownerMatches: null,
+                binsMatch: null,
+                requestedBinsCancelled: null,
+              },
+              errors: [
+                `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
+              ],
+              warnings: [],
+            };
+          } else {
+            verification = {
+              kind: prepared.position ? "position-present" : "not-applicable",
+              ok: false,
+              checkedAt: Date.now(),
+              attempts: 0,
+              pool: prepared.pool,
+              position: prepared.position ?? null,
+              expected: { owner: null, minBinId: null, maxBinId: null },
+              actual: null,
+              checks: {
+                accountExists: null,
+                accountClosed: null,
+                poolMatches: null,
+                ownerMatches: null,
+                rangeMatches: null,
+                absentFromWalletPool: null,
+              },
+              errors: [
+                `verification-after-partial-execution-failed:${verifyError instanceof Error ? verifyError.message : String(verifyError)}`,
+              ],
+              warnings: [],
+            };
+          }
         }
         const enriched = { ...error.result, verification };
         throw new MeteoraPartialExecutionError(
@@ -6543,7 +8598,8 @@ export class MeteoraDlmmService {
     if (
       prepared.kind === "open-position" ||
       prepared.kind === "add-liquidity" ||
-      prepared.kind === "place-limit-order"
+      prepared.kind === "place-limit-order" ||
+      prepared.kind === "sync-pool-price"
     ) {
       const preflight = prepared.infrastructurePreflight;
       if (!preflight?.checked) {
@@ -6981,6 +9037,307 @@ export class MeteoraDlmmService {
         options,
         verificationOptions,
       );
+    });
+  }
+
+  private async settleLimitOrderUnlocked(
+    args: MeteoraSettleLimitOrderArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions,
+  ): Promise<MeteoraExecutionResult> {
+    const snapshot = await this.getLimitOrder(args.pool, args.limitOrder);
+    if (!snapshot.exists) {
+      throw new MeteoraError(
+        `Meteora limit order ${args.limitOrder} was not found`,
+        "LIMIT_ORDER_NOT_FOUND",
+        { pool: args.pool, limitOrder: args.limitOrder },
+      );
+    }
+    if (args.requireFullyFilled === true && !snapshot.summary.fullyFilled) {
+      throw new MeteoraError(
+        `Meteora limit order ${args.limitOrder} is still working; refusing settlement because requireFullyFilled=true`,
+        "LIMIT_ORDER_NOT_FULLY_FILLED",
+        {
+          pool: args.pool,
+          limitOrder: args.limitOrder,
+          summary: snapshot.summary,
+        },
+      );
+    }
+    const prepared = await this.buildCancelLimitOrder({
+      wallet: args.wallet,
+      pool: args.pool,
+      limitOrder: args.limitOrder,
+      rentReceiver: args.rentReceiver,
+    });
+    return await this.executePreparedAndVerifyUnlocked(
+      prepared,
+      options,
+      verificationOptions,
+    );
+  }
+
+  async settleLimitOrderVerified(
+    args: MeteoraSettleLimitOrderArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.withWalletWriteLock(
+      args.wallet,
+      async () =>
+        await this.settleLimitOrderUnlocked(args, options, verificationOptions),
+    );
+  }
+
+  async settleManagedLimitOrderVerified(
+    args: {
+      wallet: WalletRef;
+      record: MeteoraManagedLimitOrderRecord;
+      rentReceiver?: string;
+      requireFullyFilled?: boolean;
+    },
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraExecutionResult> {
+    return await this.withWalletWriteLock(args.wallet, async () => {
+      const walletAddress = this.resolveWalletAddress(args.wallet);
+      if (asPublicKey(args.record.owner).toBase58() !== walletAddress) {
+        throw new MeteoraError(
+          `Managed limit-order record owner ${args.record.owner} does not match execution wallet ${walletAddress}`,
+          "LIMIT_ORDER_PROVENANCE_MISMATCH",
+          { record: args.record, wallet: walletAddress },
+        );
+      }
+      const provenance = await this.verifyManagedLimitOrder(args.record);
+      if (!provenance.ok) {
+        throw new MeteoraError(
+          `Managed limit-order provenance verification failed for ${args.record.limitOrder}: ${provenance.errors.join("; ")}`,
+          "LIMIT_ORDER_PROVENANCE_MISMATCH",
+          { provenance },
+        );
+      }
+      return await this.settleLimitOrderUnlocked(
+        {
+          wallet: args.wallet,
+          pool: args.record.pool,
+          limitOrder: args.record.limitOrder,
+          rentReceiver: args.rentReceiver,
+          requireFullyFilled: args.requireFullyFilled,
+        },
+        options,
+        verificationOptions,
+      );
+    });
+  }
+
+  async placeLimitOrderBatchVerified(
+    args: MeteoraPlaceLimitOrderBatchArgs,
+    options: MeteoraExecutionOptions,
+    verificationOptions: MeteoraPositionVerificationOptions = {},
+  ): Promise<MeteoraLimitOrderBatchExecutionResult> {
+    return await this.withWalletWriteLock(args.wallet, async () => {
+      const preflight = await this.preflightLimitOrderBatch(args);
+      if (!preflight.safeToBuild) {
+        const infrastructure = BigInt(
+          preflight.total.nonRefundableInfrastructureLamports,
+        );
+        throw new MeteoraError(
+          infrastructure > 0n
+            ? `Meteora limit-order batch refused because at least one member requires persistent shared infrastructure`
+            : `Meteora limit-order batch refused because one or more members are not safely buildable`,
+          infrastructure > 0n
+            ? "INFRASTRUCTURE_FUNDING_REQUIRED"
+            : "INVALID_ARGUMENT",
+          { preflight },
+        );
+      }
+      if (!preflight.safeToExecute) {
+        throw new MeteoraError(
+          "Meteora limit-order batch is safely buildable but aggregate wallet funding/network-fee requirements are not satisfied",
+          "INSUFFICIENT_FUNDS",
+          { preflight },
+        );
+      }
+
+      // Build every real order before sending the first transaction. This catches
+      // deterministic builder/signature problems before a bracket can become
+      // accidentally one-sided. No transactions are signed or sent in this phase.
+      const prepared = [];
+      for (const order of args.orders) {
+        prepared.push({
+          id: String(order.id),
+          side: order.side,
+          binIds: order.bins.map((bin) => bin.binId),
+          prepared: await this.buildPlaceLimitOrder({
+            wallet: args.wallet,
+            pool: args.pool,
+            side: order.side,
+            bins: order.bins,
+          }),
+        });
+      }
+
+      const placements: MeteoraLimitOrderBatchPlacement[] = [];
+      const rollbacks: MeteoraLimitOrderBatchRollback[] = [];
+      const landedLimitOrders = (): Array<{ id: string; limitOrder: string }> =>
+        placements
+          .filter(
+            (placement) =>
+              placement.limitOrder != null &&
+              (placement.result?.signatures.length ?? 0) > 0,
+          )
+          .map((placement) => ({
+            id: placement.id,
+            limitOrder: placement.limitOrder!,
+          }));
+
+      for (let index = 0; index < prepared.length; index += 1) {
+        const row = prepared[index]!;
+        try {
+          const result = await this.executePreparedAndVerifyUnlocked(
+            row.prepared,
+            options,
+            verificationOptions,
+          );
+          placements.push({
+            id: row.id,
+            side: row.side,
+            binIds: row.binIds,
+            limitOrder: result.limitOrder ?? row.prepared.limitOrder ?? null,
+            result,
+            errorCode: null,
+            errorMessage: null,
+          });
+        } catch (cause) {
+          const evidence =
+            cause instanceof MeteoraPartialExecutionError ||
+            cause instanceof MeteoraVerificationError
+              ? cause.result
+              : null;
+          placements.push({
+            id: row.id,
+            side: row.side,
+            binIds: row.binIds,
+            limitOrder: evidence?.limitOrder ?? row.prepared.limitOrder ?? null,
+            result: evidence,
+            errorCode: cause instanceof MeteoraError ? cause.code : "UNKNOWN",
+            errorMessage:
+              cause instanceof Error ? cause.message : String(cause),
+          });
+          for (
+            let pending = index + 1;
+            pending < prepared.length;
+            pending += 1
+          ) {
+            const skipped = prepared[pending]!;
+            placements.push({
+              id: skipped.id,
+              side: skipped.side,
+              binIds: skipped.binIds,
+              limitOrder: skipped.prepared.limitOrder ?? null,
+              result: null,
+              errorCode: null,
+              errorMessage: "not-attempted-after-prior-batch-failure",
+            });
+          }
+
+          const landed = landedLimitOrders();
+          let rollbackComplete: boolean | null = null;
+          if (args.rollbackOnPartialFailure === true && landed.length) {
+            rollbackComplete = true;
+            for (const placed of [...landed].reverse()) {
+              try {
+                const snapshot = await this.getLimitOrder(
+                  args.pool,
+                  placed.limitOrder,
+                );
+                if (!snapshot.exists) {
+                  rollbacks.push({
+                    id: placed.id,
+                    limitOrder: placed.limitOrder,
+                    ok: true,
+                    result: null,
+                    errorCode: null,
+                    errorMessage: null,
+                  });
+                  continue;
+                }
+                const rollbackPrepared = await this.buildCancelLimitOrder({
+                  wallet: args.wallet,
+                  pool: args.pool,
+                  limitOrder: placed.limitOrder,
+                });
+                const rollbackResult =
+                  await this.executePreparedAndVerifyUnlocked(
+                    rollbackPrepared,
+                    options,
+                    verificationOptions,
+                  );
+                rollbacks.push({
+                  id: placed.id,
+                  limitOrder: placed.limitOrder,
+                  ok: true,
+                  result: rollbackResult,
+                  errorCode: null,
+                  errorMessage: null,
+                });
+              } catch (rollbackError) {
+                rollbackComplete = false;
+                rollbacks.push({
+                  id: placed.id,
+                  limitOrder: placed.limitOrder,
+                  ok: false,
+                  result:
+                    rollbackError instanceof MeteoraPartialExecutionError ||
+                    rollbackError instanceof MeteoraVerificationError
+                      ? rollbackError.result
+                      : null,
+                  errorCode:
+                    rollbackError instanceof MeteoraError
+                      ? rollbackError.code
+                      : "UNKNOWN",
+                  errorMessage:
+                    rollbackError instanceof Error
+                      ? rollbackError.message
+                      : String(rollbackError),
+                });
+              }
+            }
+          }
+
+          const result: MeteoraLimitOrderBatchExecutionResult = {
+            version: 1,
+            wallet: this.resolveWalletAddress(args.wallet),
+            pool: asPublicKey(args.pool).toBase58(),
+            complete: false,
+            partial: landed.length > 0,
+            rollbackRequested: args.rollbackOnPartialFailure === true,
+            rollbackComplete,
+            preflight,
+            placements,
+            rollbacks,
+          };
+          if (!result.partial) throw cause;
+          throw new MeteoraLimitOrderBatchExecutionError(
+            `Meteora limit-order batch partially executed: ${landed.length}/${args.orders.length} order account(s) have submitted signatures`,
+            result,
+            cause,
+          );
+        }
+      }
+
+      return {
+        version: 1,
+        wallet: this.resolveWalletAddress(args.wallet),
+        pool: asPublicKey(args.pool).toBase58(),
+        complete: true,
+        partial: false,
+        rollbackRequested: args.rollbackOnPartialFailure === true,
+        rollbackComplete: null,
+        preflight,
+        placements,
+        rollbacks,
+      };
     });
   }
 
