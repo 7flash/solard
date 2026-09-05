@@ -1,4 +1,5 @@
 import { db, type TerminalToken, type TokenTrade } from "../db.ts";
+import { getTokenHistoryCoverage } from "../chain/token-history.ts";
 import {
   normalizeAthDipProfitStrategy,
   simulateAthDipProfitStrategy,
@@ -16,6 +17,9 @@ export type TokenBacktestCoverage = {
   creationGapMs: number | null;
   status: "likely-from-creation" | "partial" | "unknown";
   toleranceMs: number;
+  provenFromCreation?: boolean;
+  backfillComplete?: boolean;
+  creationSignature?: string | null;
 };
 
 export type TokenBacktestTape = {
@@ -55,6 +59,25 @@ function canonicalPriceSol(row: TokenTrade): number | null {
   return null;
 }
 
+function historyOrder(row: TokenTrade): { order: number; instruction: number } {
+  try {
+    const raw = JSON.parse(row.rawJson) as {
+      historyOrder?: unknown;
+      instructionIndex?: unknown;
+    };
+    return {
+      order: Number.isFinite(Number(raw.historyOrder))
+        ? Number(raw.historyOrder)
+        : 0,
+      instruction: Number.isFinite(Number(raw.instructionIndex))
+        ? Number(raw.instructionIndex)
+        : 0,
+    };
+  } catch {
+    return { order: 0, instruction: 0 };
+  }
+}
+
 export function loadTokenBacktestTape(
   mintInput: string,
   options: {
@@ -76,16 +99,25 @@ export function loadTokenBacktestTape(
     Math.trunc(options.coverageToleranceMs ?? 60_000),
   );
 
-  const rows = db.tokenTradesV2
-    .select()
-    .where({ mint })
-    .orderBy("tradedAtMs", "asc")
-    .all() as TokenTrade[];
+  const rows = (
+    db.tokenHistoryTradesV1.select().where({ mint }).all() as TokenTrade[]
+  ).sort((left, right) => {
+    const l = historyOrder(left);
+    const r = historyOrder(right);
+    return (
+      left.tradedAtMs - right.tradedAtMs ||
+      left.slot - right.slot ||
+      l.order - r.order ||
+      l.instruction - r.instruction ||
+      left.eventKey.localeCompare(right.eventKey)
+    );
+  });
   const token =
     (db.terminalTokensLive
       .select()
       .where({ mint })
       .get() as TerminalToken | null) ?? null;
+  const historicalCoverage = getTokenHistoryCoverage(mint);
 
   let skippedDropped = 0;
   let skippedNoPrice = 0;
@@ -122,23 +154,21 @@ export function loadTokenBacktestTape(
     });
   }
 
-  const firstRecordedTradeAtMs = rows.length
-    ? Math.min(...rows.map((row) => row.tradedAtMs))
-    : null;
-  const lastRecordedTradeAtMs = rows.length
-    ? Math.max(...rows.map((row) => row.tradedAtMs))
-    : null;
-  const tokenCreatedAtMs = positive(token?.createdAtMs);
+  const firstRecordedTradeAtMs = rows[0]?.tradedAtMs ?? null;
+  const lastRecordedTradeAtMs = rows.at(-1)?.tradedAtMs ?? null;
+  const tokenCreatedAtMs = historicalCoverage?.creationAtMs ?? null;
   const creationGapMs =
     tokenCreatedAtMs != null && firstRecordedTradeAtMs != null
       ? Math.max(0, firstRecordedTradeAtMs - tokenCreatedAtMs)
       : null;
+  const provenFromCreation = historicalCoverage?.fromCreation === true;
+  const backfillComplete = historicalCoverage?.complete === true;
   const status: TokenBacktestCoverage["status"] =
-    tokenCreatedAtMs == null || firstRecordedTradeAtMs == null
-      ? "unknown"
-      : creationGapMs! <= toleranceMs
-        ? "likely-from-creation"
-        : "partial";
+    provenFromCreation && backfillComplete
+      ? "likely-from-creation"
+      : rows.length > 0 || historicalCoverage != null
+        ? "partial"
+        : "unknown";
 
   return {
     mint,
@@ -155,6 +185,9 @@ export function loadTokenBacktestTape(
       creationGapMs,
       status,
       toleranceMs,
+      provenFromCreation,
+      backfillComplete,
+      creationSignature: historicalCoverage?.creationSignature ?? null,
     },
     events,
   };
@@ -188,19 +221,17 @@ export function backtestTokenTrades(
   const tape = loadTokenBacktestTape(mint, options);
   if (tape.events.length < 2) {
     throw new Error(
-      `Backtest requires at least two usable historical price events for ${tape.mint}; found ${tape.events.length}. Backfill tokenTradesV2 first.`,
+      `Backtest requires at least two usable durable historical price events for ${tape.mint}; found ${tape.events.length}. Run: slrd token backfill ${tape.mint}`,
     );
   }
-  if (
-    options.requireFromCreation &&
-    tape.coverage.status !== "likely-from-creation"
-  ) {
-    const detail =
-      tape.coverage.status === "partial"
-        ? `first stored trade is ${tape.coverage.creationGapMs}ms after token.createdAtMs`
-        : "token creation coverage cannot be proven from the local database";
+  if (options.requireFromCreation && !tape.coverage.provenFromCreation) {
     throw new Error(
-      `Full-history backtest refused for ${tape.mint}: ${detail}. Run/verify the historical backfill or omit --require-from-start.`,
+      `Full-history backtest refused for ${tape.mint}: creation coverage is not proven. Run/verify: slrd token backfill ${tape.mint}`,
+    );
+  }
+  if (options.requireFromCreation && !tape.coverage.backfillComplete) {
+    throw new Error(
+      `Full-history backtest refused for ${tape.mint}: the last backfill had missing/truncated history. Re-run the backfill without --max-signatures and fix archival RPC gaps.`,
     );
   }
   return {
