@@ -14,6 +14,11 @@ export type PumpSwapMarketMeta = {
   poolQuoteAta: PublicKey;
   protocolFeeRecipient: PublicKey;
   coinCreator: PublicKey;
+  /** Raw quote-token vault amount from the pool ATA. */
+  rawQuoteReserve: bigint;
+  /** Signed PumpSwap pool extension. */
+  virtualQuoteReserves: bigint;
+  /** Effective reserves used for pricing: rawQuoteReserve + virtualQuoteReserves. */
   reserves: { virtualBase: bigint; virtualQuote: bigint };
   extraBuyAccounts?: AccountMeta[];
   extraSellAccounts?: AccountMeta[];

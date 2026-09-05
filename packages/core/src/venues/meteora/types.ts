@@ -109,8 +109,13 @@ export type MeteoraExecutableReferencePrice = {
 export type MeteoraExecutableReferencePriceArgs = {
   pool: string;
   quoteMint: string;
-  /** Executable reference quote size in raw quote-token units. No hidden default is used. */
-  referenceQuoteNotionalRaw: MeteoraInteger;
+  /**
+   * Optional executable reference quote size in raw quote-token units.
+   * When omitted, Solard uses 0.01 quote-token UI units (or one raw unit
+   * when the mint has fewer than two decimals). The resolved raw notional is
+   * always returned in the typed reference receipt.
+   */
+  referenceQuoteNotionalRaw?: MeteoraInteger;
   /**
    * Fail closed when Jupiter cannot produce a route independent of this exact pool.
    * Defaults to true.
@@ -119,8 +124,13 @@ export type MeteoraExecutableReferencePriceArgs = {
 };
 
 export type MeteoraPoolPriceSanityArgs = MeteoraExecutableReferencePriceArgs & {
-  /** Agent/application policy. Solard never invents this threshold. */
-  maxDeviationPct: number;
+  /**
+   * Optional application tolerance for the standalone sanity helper.
+   * Defaults to 0, meaning the pool must lie inside the fresh executable bid/ask band.
+   * Pool-price-sync preflight itself reports deviationBps so agent policy can choose
+   * its own threshold without feeding a market price into the SDK.
+   */
+  maxDeviationPct?: number;
 };
 
 export type MeteoraPoolPriceSanity = {
@@ -174,33 +184,70 @@ export type MeteoraPoolPriceSyncPreflightArgs = MeteoraPoolPriceSanityArgs & {
 };
 
 export type MeteoraPoolPriceSyncPreflight = {
-  version: 1;
+  version: 2;
   observedAt: number;
   wallet: string;
   pool: string;
+
+  /** Canonical sync contract used by autonomous callers. */
+  activeBinBefore: number;
+  targetBin: number;
+  poolPriceBaseInQuote: number;
+  marketPriceBaseInQuote: number;
+  /** Absolute pool-vs-executable-mid deviation in basis points. */
+  deviationBps: number;
+  /** Distance outside the executable bid/ask band in basis points. */
+  outsideExecutableBandDeviationBps: number;
+  canSync: boolean;
+  transactionCount: number;
+  estimatedNetworkFeeLamports: bigint;
+  networkFeeEstimateComplete: boolean;
+  requiredSigners: Array<{ pubkey: string; role: "wallet" }>;
+  missingRequiredSignerPubkeys: string[];
+  /** go_to_a_bin does not create recoverable user-owned position/order state. */
+  recoverableRentLamports: bigint;
+  /** Persistent bitmap/bin infrastructure only; autonomous callers reject nonzero. */
+  persistentInfrastructureLamports: bigint;
+  safeToExecute: boolean;
+
+  /** Full typed reference/safety evidence retained for forensic callers. */
   sanity: MeteoraPoolPriceSanity;
   requiresSync: boolean;
   targetPolicy: MeteoraPoolPriceSyncTargetPolicy;
   targetBaseInQuote: number;
   /** Exact Y-per-X UI price supplied to Meteora syncWithMarketPrice(). */
   targetPriceYPerX: number;
+  /** @deprecated Use targetBin. */
   targetBinId: number;
-  canSync: boolean;
   blockedByLiquidity: boolean;
   blockedByBinResolution: boolean;
   infrastructure: MeteoraPoolPriceSyncInfrastructureQuote;
   sharedInfrastructureAuthorized: boolean;
   safeWithoutSharedInfrastructureFunding: boolean;
-  transactionCount: number | null;
+  /** @deprecated Use requiredSigners / missingRequiredSignerPubkeys. */
   requiredSignerPubkeys: string[];
-  requiredSigners: Array<{
-    pubkey: string;
-    role: "wallet" | "generated-position" | "unknown";
-  }>;
-  missingRequiredSignerPubkeys: string[];
-  estimatedNetworkFeeLamports: string | null;
-  networkFeeEstimateComplete: boolean;
-  safeToExecute: boolean;
+};
+
+export type MeteoraPoolPriceSyncVerifiedResult = {
+  version: 1;
+  pool: string;
+  signature: string;
+  activeBinBefore: number;
+  activeBinAfter: number;
+  targetBin: number;
+  poolPriceBefore: number;
+  poolPriceAfter: number;
+  /** Executable external midpoint converted to the exact Y/X target used by Meteora. */
+  marketPriceUsed: number;
+  deviationBeforeBps: number;
+  deviationAfterBps: number;
+  estimatedNetworkFeeLamports: bigint;
+  actualNetworkFeeLamports: bigint;
+  verified: true;
+  /** Full evidence for logging/recovery without forcing callers into generic result shapes. */
+  preflight: MeteoraPoolPriceSyncPreflight;
+  execution: MeteoraExecutionResult;
+  verification: MeteoraPoolPriceSyncVerification;
 };
 
 export type MeteoraPoolPriceSyncVerification = {
@@ -224,17 +271,27 @@ export type MeteoraPoolPriceSyncVerification = {
   warnings: string[];
 };
 
+export type MeteoraWalletPoolTokenBalance = MeteoraPoolToken & {
+  /** Aggregate wallet SPL balance for this mint across all owned token accounts. */
+  rawTotal: string;
+  accountCount: number;
+};
+
 export type MeteoraWalletPoolBalances = {
   version: 1;
   observedAt: number;
   wallet: string;
   pool: string;
   nativeLamports: string;
-  tokenX: MeteoraPoolToken;
-  tokenY: MeteoraPoolToken;
+  tokenX: MeteoraWalletPoolTokenBalance;
+  tokenY: MeteoraWalletPoolTokenBalance;
+  /** @deprecated Use tokenX.rawTotal. */
   tokenXRaw: string;
+  /** @deprecated Use tokenY.rawTotal. */
   tokenYRaw: string;
+  /** @deprecated Use tokenX.accountCount. */
   tokenXAccountCount: number;
+  /** @deprecated Use tokenY.accountCount. */
   tokenYAccountCount: number;
 };
 
@@ -449,6 +506,8 @@ export type MeteoraMarketFeatureVectorV1 = {
   slot: number | null;
   activeBin: number;
   priceYPerX: number;
+  /** Pool bin step in basis points. Geometry metadata; not part of the learned-feature semantics hash. */
+  binStep: number | null;
   activeTvlUsd: number | null;
   feeActiveTvlPct: number | null;
   volumeActiveTvlPct: number | null;
@@ -1563,6 +1622,9 @@ export type MeteoraPoolDiscoveryPageV1 = {
   query: string | null;
   sortBy: string | null;
   filterBy: string | null;
+  /** Canonical selector contract. */
+  candidates: MeteoraPoolDiscoveryCandidateV1[];
+  /** @deprecated Use candidates. Retained for backward compatibility. */
   pools: MeteoraPoolDiscoveryCandidateV1[];
 };
 

@@ -29,9 +29,17 @@ export type PumpPool = {
   coinCreator: PublicKey;
   isMayhemMode: boolean;
   isCashbackCoin: boolean;
+  /** PumpSwap 2026 pool extension; signed i128 at byte offset 245. */
+  virtualQuoteReserves: bigint;
 };
 function readU64(data: Buffer, offset: number): bigint {
   return data.length >= offset + 8 ? data.readBigUInt64LE(offset) : 0n;
+}
+function readI128(data: Buffer, offset: number): bigint {
+  if (data.length < offset + 16) return 0n;
+  const low = data.readBigUInt64LE(offset);
+  const high = data.readBigInt64LE(offset + 8);
+  return (high << 64n) + low;
 }
 function readKey(data: Buffer, offset: number): PublicKey {
   return new PublicKey(data.subarray(offset, offset + 32));
@@ -94,6 +102,8 @@ export function decodePool(address: PublicKey, data: Buffer): PumpPool {
     coinCreator: readKey(data, 211),
     isMayhemMode: data[243] === 1,
     isCashbackCoin: data[244] === 1,
+    // Appended in the 2026 PumpSwap pool layout. Older accounts decode as 0.
+    virtualQuoteReserves: readI128(data, 245),
   };
 }
 export async function fetchCurve(

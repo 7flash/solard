@@ -1,0 +1,106 @@
+# PumpTV runtime config. bgrun reads this file from the repo root and flattens
+# TOML sections into environment variables.
+
+[fal]
+key = ""
+
+# jsx-ai owns runtime selection and authentication.
+# bgrun flattens these to JSX_AI_RUNTIME / JSX_AI_MODEL.
+[jsx_ai]
+runtime = "codex"
+model = "gpt-5.6"
+
+[pumptv]
+db_path = ".data/pumptv.sqlite"
+room = "main"
+admin_token = ""
+resolution = "480P"
+
+# Episode 1 opening premise. This is generated without a viewer proposal. Keep
+# it broad enough that later community ideas are not trapped in a fixed setting.
+opening_prompt = "Begin in absolute emptiness: a silent black void with no stars, no objects, no characters, and no readable text. A single faint point of light appears, then expands like the first instant of a newborn universe. Matter, color, depth, and motion emerge from nothing as the world begins to exist. Cinematic, mysterious, physically grounded, no logos."
+
+min_generation_interval_ms = 0
+lease_ttl_ms = 30000
+web_heartbeat_ttl_ms = 6000
+# Web-side worker health: a live PID with no DB heartbeat is restarted after
+# this TTL (with a separate startup grace so boot is not mistaken for a hang).
+worker_heartbeat_ttl_ms = 8000
+worker_start_grace_ms = 12000
+timeline_window = 96
+idle_poll_ms = 500
+error_backoff_ms = 2000
+
+# Next-episode decision policy. The first independent participant gets 20s.
+# The first challenger starts a fresh 20s ballot. Ordinary ballot votes never
+# change the clock; only repeat-winner support can unlock its longer hold early.
+# A genuinely new late candidate only gets enough grace to be votable.
+solo_decision_ms = 20000
+# The winner of the immediately previous episode cannot chain another solo
+# episode after only 20s. Their next solo idea uses this longer fallback. Two
+# independent connected-wallet supports make it due immediately; any second
+# independent proposal instead opens a fresh full voting window.
+repeat_winner_solo_ms = 60000
+repeat_winner_support_votes = 2
+voting_window_ms = 20000
+voting_new_idea_grace_ms = 10000
+
+# Latency hiding. A speculative render never closes voting or mutates canon; it
+# is promoted only if the exact proposal/text actually wins. Solo rounds can
+# prewarm immediately for the full 20s head start. In already-contested rounds,
+# begin at most one speculative render when the ballot is near closing.
+prewarm_enabled = 1
+prewarm_solo_immediate = 1
+prewarm_voting_lead_ms = 12000
+prewarm_lease_ttl_ms = 30000
+
+# Browser state transport uses long polling. Only meaningful changes trigger a
+# full measured state query; idle requests return after the timeout.
+long_poll_check_ms = 400
+long_poll_timeout_ms = 25000
+viewer_ttl_ms = 45000
+
+# Optional legacy/Pump.fun Solana token mint. MetaMask web voting does not use it.
+token_mint = ""
+
+# Web participation identity/moderation. Enable trusted proxy headers only when
+# the app is actually behind a proxy you control (e.g. Cloudflare/nginx).
+moderation_db_path = ".data/pumptv-moderation.sqlite"
+moderation_secret = ""
+trust_proxy_headers = 0
+proposal_ip_cooldown_ms = 8000
+vote_ip_cooldown_ms = 2500
+
+# Optional Pump.fun live-chat ingestion. Leave blank when the web proposal board
+# is the only input source; disabled chat is not treated as an error.
+pumpfun_mint = ""
+pumpfun_prefix = "!next"
+pumpfun_vote_prefix = "!vote"
+vote_window_ms = 15000
+max_proposals_per_round = 40
+pumpfun_lease_ttl_ms = 30000
+pumpfun_lease_poll_ms = 1000
+pumpfun_max_prompt_length = 500
+pumpfun_user_cooldown_ms = 0
+solana_rpc_url = "https://api.mainnet-beta.solana.com"
+wallet_score_cache_ms = 20000
+
+# Web participation uses MetaMask / EVM wallet identity. Robinhood Chain is an
+# EVM L2 whose native currency is ETH. Mainnet is chain 4663; use 46630 + the
+# testnet RPC while validating payouts before enabling real rewards.
+robinhood_chain_id = 4663
+robinhood_rpc_url = "https://rpc.mainnet.chain.robinhood.com"
+robinhood_explorer_url = "https://robinhoodchain.blockscout.com"
+
+# Each winning idea with a connected MetaMask wallet receives USDG directly.
+# Robinhood Chain mainnet canonical USDG. Outside mainnet, set the token address
+# explicitly for that network rather than reusing this address.
+winner_reward_usdg = 1.00
+reward_token_address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+reward_sending_stale_ms = 180000
+# The payout signing key does NOT belong in the web config. Put
+# PUMPTV_REWARD_PRIVATE_KEY in .worker.toml only; see .worker.example.toml.
+
+# PumpTV forces measure-fn output on in src/server/observability.ts.
+[measure]
+timestamps = 1

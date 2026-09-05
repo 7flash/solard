@@ -82,6 +82,7 @@ import type {
   MeteoraPoolPriceSyncInfrastructureQuote,
   MeteoraPoolPriceSyncPreflightArgs,
   MeteoraPoolPriceSyncPreflight,
+  MeteoraPoolPriceSyncVerifiedResult,
   MeteoraPoolPriceSyncVerification,
   MeteoraRange,
   MeteoraPoolToken,
@@ -1532,9 +1533,32 @@ export class MeteoraDlmmService {
     };
   }
 
+  private defaultReferenceQuoteNotionalRaw(
+    pair: MeteoraPairDescriptor,
+  ): string {
+    const quoteDecimals =
+      pair.quoteSide === "x" ? pair.tokenX.decimals : pair.tokenY.decimals;
+    if (
+      quoteDecimals == null ||
+      !Number.isInteger(quoteDecimals) ||
+      quoteDecimals < 0
+    ) {
+      throw new MeteoraError(
+        "Executable reference price requires known quote-token decimals",
+        "SDK_INCOMPATIBLE",
+        { pool: pair.pool, quoteMint: pair.quoteMint, quoteDecimals },
+      );
+    }
+    // Canonical reference notional: 0.01 quote-token UI units, with a one-raw-unit
+    // floor for low-decimal assets. The resolved raw amount is returned in the
+    // reference receipt so callers never need to guess what was priced.
+    const exponent = Math.max(0, quoteDecimals - 2);
+    return (10n ** BigInt(exponent)).toString();
+  }
+
   private async executableReferencePriceForPair(
     pair: MeteoraPairDescriptor,
-    referenceQuoteNotionalRaw: MeteoraInteger,
+    referenceQuoteNotionalRaw?: MeteoraInteger,
     requireIndependentReference = true,
   ): Promise<MeteoraExecutableReferencePrice> {
     const quoteDecimals =
@@ -1561,7 +1585,7 @@ export class MeteoraDlmmService {
     }
 
     const quoteNotionalRaw = toBN(
-      referenceQuoteNotionalRaw,
+      referenceQuoteNotionalRaw ?? this.defaultReferenceQuoteNotionalRaw(pair),
       "referenceQuoteNotionalRaw",
     ).toString(10);
     if (BigInt(quoteNotionalRaw) <= 0n) {
@@ -1916,11 +1940,12 @@ export class MeteoraDlmmService {
   async getPoolPriceSanity(
     args: MeteoraPoolPriceSanityArgs,
   ): Promise<MeteoraPoolPriceSanity> {
-    if (!Number.isFinite(args.maxDeviationPct) || args.maxDeviationPct < 0) {
+    const maxDeviationPct = args.maxDeviationPct ?? 0;
+    if (!Number.isFinite(maxDeviationPct) || maxDeviationPct < 0) {
       throw new MeteoraError(
         "maxDeviationPct must be a finite non-negative number",
         "INVALID_ARGUMENT",
-        { maxDeviationPct: args.maxDeviationPct },
+        { maxDeviationPct },
       );
     }
 
@@ -1962,8 +1987,8 @@ export class MeteoraDlmmService {
       signedMidDeviationPct,
       absMidDeviationPct: Math.abs(signedMidDeviationPct),
       outsideExecutableBandDeviationPct,
-      maxDeviationPct: args.maxDeviationPct,
-      synchronized: outsideExecutableBandDeviationPct <= args.maxDeviationPct,
+      maxDeviationPct,
+      synchronized: outsideExecutableBandDeviationPct <= maxDeviationPct,
     };
   }
 
@@ -2145,7 +2170,14 @@ export class MeteoraDlmmService {
     const commitment = args.commitment ?? "confirmed";
     const targetPolicy: MeteoraPoolPriceSyncTargetPolicy =
       args.targetPolicy ?? "midpoint";
-    const sanity = await this.getPoolPriceSanity(args);
+    // No caller-supplied market price is accepted. Solard obtains an independent
+    // executable reference itself. maxDeviationPct defaults to zero here so
+    // `requiresSync` means "outside the current executable bid/ask band"; callers
+    // are free to apply a wider policy to the returned deviationBps.
+    const sanity = await this.getPoolPriceSanity({
+      ...args,
+      maxDeviationPct: args.maxDeviationPct ?? 0,
+    });
     const pool = await this.rawPool(sanity.pool, false);
     for (const method of ["canSyncWithMarketPrice", "syncWithMarketPrice"]) {
       if (typeof (pool as any)[method] !== "function") {
@@ -2219,14 +2251,13 @@ export class MeteoraDlmmService {
           )
         : false;
 
-    let transactionCount: number | null = requiresSync ? null : 0;
+    // Upstream syncWithMarketPrice() returns one legacy Transaction when a bin move is required.
+    // Keep this informative even when default-deny infrastructure prevents unsigned construction.
+    let transactionCount = requiresSync ? 1 : 0;
     let requiredSignerPubkeys: string[] = [];
-    let requiredSigners: Array<{
-      pubkey: string;
-      role: "wallet" | "generated-position" | "unknown";
-    }> = [];
+    let requiredSigners: Array<{ pubkey: string; role: "wallet" }> = [];
     let missingRequiredSignerPubkeys: string[] = [];
-    let estimatedNetworkFeeLamports: string | null = requiresSync ? null : "0";
+    let estimatedNetworkFeeLamports = 0n;
     let networkFeeEstimateComplete = !requiresSync;
 
     if (
@@ -2264,7 +2295,7 @@ export class MeteoraDlmmService {
           targetPriceYPerX,
           quoteMint: sanity.pair.quoteMint,
           referenceQuoteNotionalRaw: sanity.reference.quoteNotionalRaw,
-          maxDeviationPct: args.maxDeviationPct,
+          maxDeviationPct: sanity.maxDeviationPct,
           requireIndependentReference: args.requireIndependentReference ?? true,
         },
       };
@@ -2274,42 +2305,82 @@ export class MeteoraDlmmService {
       );
       transactionCount = inspected.transactionCount;
       requiredSignerPubkeys = inspected.requiredSignerPubkeys;
-      requiredSigners = inspected.requiredSigners;
-      missingRequiredSignerPubkeys = inspected.missingRequiredSignerPubkeys;
-      estimatedNetworkFeeLamports = inspected.estimatedNetworkFeeLamports;
-      networkFeeEstimateComplete = inspected.networkFeeEstimateComplete;
+      const walletAddress = this.resolveWalletAddress(args.wallet);
+      requiredSigners = requiredSignerPubkeys
+        .filter((pubkey) => pubkey === walletAddress)
+        .map((pubkey) => ({ pubkey, role: "wallet" as const }));
+      const unexpectedSignerPubkeys = requiredSignerPubkeys.filter(
+        (pubkey) => pubkey !== walletAddress,
+      );
+      missingRequiredSignerPubkeys = [
+        ...new Set([
+          ...inspected.missingRequiredSignerPubkeys,
+          ...unexpectedSignerPubkeys,
+        ]),
+      ];
+      if (inspected.estimatedNetworkFeeLamports != null) {
+        estimatedNetworkFeeLamports = BigInt(
+          inspected.estimatedNetworkFeeLamports,
+        );
+      }
+      networkFeeEstimateComplete =
+        inspected.networkFeeEstimateComplete &&
+        inspected.estimatedNetworkFeeLamports != null;
     }
 
+    const persistentInfrastructureLamports = BigInt(
+      infrastructure.nonRefundableInfrastructureLamports,
+    );
+    const deviationBps = Math.max(
+      0,
+      Math.round(sanity.absMidDeviationPct * 100),
+    );
+    const outsideExecutableBandDeviationBps = Math.max(
+      0,
+      Math.round(sanity.outsideExecutableBandDeviationPct * 100),
+    );
+    const safeToExecute =
+      !requiresSync ||
+      (canSync &&
+        (safeWithoutSharedInfrastructureFunding ||
+          sharedInfrastructureAuthorized) &&
+        missingRequiredSignerPubkeys.length === 0 &&
+        networkFeeEstimateComplete);
+
     return {
-      version: 1,
+      version: 2,
       observedAt: Date.now(),
       wallet: this.resolveWalletAddress(args.wallet),
       pool: sanity.pool,
+
+      activeBinBefore: sanity.poolActiveBin,
+      targetBin: targetBinId,
+      poolPriceBaseInQuote: sanity.poolBaseInQuote,
+      marketPriceBaseInQuote: sanity.marketMidBaseInQuote,
+      deviationBps,
+      outsideExecutableBandDeviationBps,
+      canSync,
+      transactionCount,
+      estimatedNetworkFeeLamports,
+      networkFeeEstimateComplete,
+      requiredSigners,
+      missingRequiredSignerPubkeys,
+      recoverableRentLamports: 0n,
+      persistentInfrastructureLamports,
+      safeToExecute,
+
       sanity,
       requiresSync,
       targetPolicy,
       targetBaseInQuote,
       targetPriceYPerX,
       targetBinId,
-      canSync,
       blockedByLiquidity,
       blockedByBinResolution,
       infrastructure,
       sharedInfrastructureAuthorized,
       safeWithoutSharedInfrastructureFunding,
-      transactionCount,
       requiredSignerPubkeys,
-      requiredSigners,
-      missingRequiredSignerPubkeys,
-      estimatedNetworkFeeLamports,
-      networkFeeEstimateComplete,
-      safeToExecute:
-        !requiresSync ||
-        (canSync &&
-          (safeWithoutSharedInfrastructureFunding ||
-            sharedInfrastructureAuthorized) &&
-          missingRequiredSignerPubkeys.length === 0 &&
-          networkFeeEstimateComplete),
     };
   }
 
@@ -2484,33 +2555,15 @@ export class MeteoraDlmmService {
     args: MeteoraPoolPriceSyncPreflightArgs,
     options: MeteoraExecutionOptions,
     verificationOptions: MeteoraPositionVerificationOptions = {},
-  ): Promise<MeteoraExecutionResult> {
+  ): Promise<MeteoraPoolPriceSyncVerifiedResult> {
     return await this.withWalletWriteLock(args.wallet, async () => {
       const preflight = await this.preflightPoolPriceSync(args);
       if (!preflight.requiresSync) {
-        const verification = await this.verifyPoolPriceSync(preflight, {
-          attempts: 1,
-          retryDelayMs: 0,
-          ...verificationOptions,
-        });
-        if (!verification.ok) {
-          const result: MeteoraExecutionResult = {
-            kind: "sync-pool-price",
-            pool: preflight.pool,
-            signatures: [],
-            verification,
-          };
-          throw new MeteoraVerificationError(
-            `Meteora pool ${preflight.pool} was initially within tolerance but failed fresh price-sanity verification`,
-            result,
-          );
-        }
-        return {
-          kind: "sync-pool-price",
-          pool: preflight.pool,
-          signatures: [],
-          verification,
-        };
+        throw new MeteoraError(
+          `Meteora pool ${preflight.pool} is already inside the fresh executable market band; no pool-price sync transaction is required`,
+          "INVALID_ARGUMENT",
+          { preflight: safeJsonValue(preflight) },
+        );
       }
       if (!preflight.canSync) {
         throw new MeteoraError(
@@ -2545,14 +2598,61 @@ export class MeteoraDlmmService {
         preflight,
         verificationOptions,
       );
-      const result = { ...executed, verification };
-      if (!verification.ok) {
+      const genericResult: MeteoraExecutionResult = {
+        ...executed,
+        verification,
+      };
+      if (!verification.ok || verification.actual == null) {
         throw new MeteoraVerificationError(
           `Meteora pool-price sync transaction confirmed but fresh executable-market verification failed`,
-          result,
+          genericResult,
         );
       }
-      return result;
+      if (executed.signatures.length !== 1 || !executed.signatures[0]) {
+        throw new MeteoraVerificationError(
+          `Meteora pool-price sync expected exactly one confirmed transaction signature, received ${executed.signatures.length}`,
+          genericResult,
+        );
+      }
+
+      let actualNetworkFeeRaw = executed.accounting?.networkFeeLamports ?? null;
+      if (actualNetworkFeeRaw == null) {
+        const fees = await this.transactionNetworkFees(
+          executed.signatures,
+          options.commitment ?? "confirmed",
+        );
+        actualNetworkFeeRaw = fees.lamports;
+      }
+      if (actualNetworkFeeRaw == null) {
+        throw new MeteoraVerificationError(
+          `Meteora pool-price sync was verified on-chain but the actual transaction fee could not be read for the typed sync receipt`,
+          genericResult,
+        );
+      }
+
+      const actual = verification.actual;
+      return {
+        version: 1,
+        pool: preflight.pool,
+        signature: executed.signatures[0],
+        activeBinBefore: preflight.activeBinBefore,
+        activeBinAfter: actual.poolActiveBin,
+        targetBin: preflight.targetBin,
+        poolPriceBefore: preflight.poolPriceBaseInQuote,
+        poolPriceAfter: actual.poolBaseInQuote,
+        marketPriceUsed: preflight.marketPriceBaseInQuote,
+        deviationBeforeBps: preflight.deviationBps,
+        deviationAfterBps: Math.max(
+          0,
+          Math.round(actual.absMidDeviationPct * 100),
+        ),
+        estimatedNetworkFeeLamports: preflight.estimatedNetworkFeeLamports,
+        actualNetworkFeeLamports: BigInt(actualNetworkFeeRaw),
+        verified: true,
+        preflight,
+        execution: genericResult,
+        verification,
+      };
     });
   }
 
@@ -3412,6 +3512,7 @@ export class MeteoraDlmmService {
       query: args.query?.trim() || null,
       sortBy: args.sortBy?.trim() || null,
       filterBy: args.filterBy?.trim() || null,
+      candidates: pools,
       pools,
     };
   }
@@ -4281,6 +4382,7 @@ export class MeteoraDlmmService {
       slot: metrics.activeBinSample.slot,
       activeBin: metrics.activeBinSample.binId,
       priceYPerX: metrics.activeBinSample.priceYPerX,
+      binStep: metrics.state.binStep ?? null,
       ...vectorCore,
       quality: {
         candleCount: metrics.candleRegime.candleCount,
@@ -7393,8 +7495,16 @@ export class MeteoraDlmmService {
       wallet: owner.toBase58(),
       pool: pool.pubkey.toBase58(),
       nativeLamports: String(nativeLamports),
-      tokenX,
-      tokenY,
+      tokenX: {
+        ...tokenX,
+        rawTotal: x.raw,
+        accountCount: x.accountCount,
+      },
+      tokenY: {
+        ...tokenY,
+        rawTotal: y.raw,
+        accountCount: y.accountCount,
+      },
       tokenXRaw: x.raw,
       tokenYRaw: y.raw,
       tokenXAccountCount: x.accountCount,

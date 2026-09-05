@@ -1,35 +1,33 @@
 {
-  "name": "solard-monorepo",
+  "name": "pumptv",
+  "version": "0.33.0",
   "private": true,
-  "workspaces": [
-    "packages/*"
-  ],
+  "type": "module",
   "scripts": {
-    "build": "bun run --filter '*' build",
-    "typecheck": "bun run --filter '*' typecheck",
-    "test": "bun run --filter '*' test",
-    "cli": "bun run packages/cli/bin/solard.ts",
-    "pub:bump": "bun run scripts/release-version.mjs patch",
-    "pub:verify": "bun run scripts/verify-release.mjs",
-    "pub:lock": "bun install --lockfile-only",
-    "pub:core": "cd packages/core && bun publish --access public --no-git-checks",
-    "pub:sdk": "cd packages/sdk && bun publish --access public --no-git-checks",
-    "pub:cli": "cd packages/cli && bun publish --access public --no-git-checks",
-    "pub:solard-cli": "cd packages/solard-cli && bun publish --access public --no-git-checks",
-    "pub:publish": "bun run pub:core && bun run pub:sdk && bun run pub:cli && bun run pub:solard-cli",
-    "pub:current": "bun run pub:lock && bun run pub:verify && bun run pub:publish",
-    "pub": "bun run pub:bump && bun run pub:lock && bun run pub:verify && bun run pub:publish",
-    "pub:checked": "bun run typecheck && bun run test && bun run pub:bump && bun run pub:lock && bun run pub:verify && bun run pub:publish"
-  },
-  "devDependencies": {
-    "@openai/codex-sdk": "^0.147.0",
-    "@types/bun": "latest",
-    "@types/node": "^22.15.0",
-    "typescript": "^5.8.3"
+    "dev": "bgrun inline -- tradjs serve 3000",
+    "start": "bgrun inline -- tradjs serve 3000",
+    "web": "tradjs serve 3000",
+    "worker": "bun src/worker.ts",
+    "build": "tradjs build",
+    "reset": "bun src/cli/reset.ts",
+    "control": "bun src/cli/control.ts",
+    "test": "bun test"
   },
   "dependencies": {
-    "@meteora-ag/dlmm": "^1.9.14",
-    "bn.js": "^5.2.5",
-    "measure-fn": "5.2.0"
+    "@fal-ai/client": "^1.6.2",
+    "measure-fn": "^5.2.0",
+    "sqlite-zod-orm": "^3.33.0",
+    "tradjs": "^4.3.0",
+    "ws": "^8.18.0",
+    "jsx-ai": "latest",
+    "bgrun": "^3.14.0",
+    "@openai/codex-sdk": "latest",
+    "@metamask/connect-evm": "^2.1.1",
+    "viem": "^2.56.3"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.0",
+    "@types/ws": "^8.18.0"
   }
 }

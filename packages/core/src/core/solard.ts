@@ -146,6 +146,21 @@ export type SolardOptions = {
   launchpads?: TokenLaunchpadPlugin[];
   senders?: SolardSender[];
 };
+
+function isPumpSwap6040SimulationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.includes("Simulation failed")) return false;
+  if (message.includes("BuySlippageBelowMinBaseAmountOut")) return true;
+  const mentionsPumpSwap = message.includes(
+    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+  );
+  return (
+    mentionsPumpSwap &&
+    (message.includes("Error Number: 6040") ||
+      /["']?Custom["']?\s*[:=]\s*6040/.test(message))
+  );
+}
+
 export class Solard implements ComposerHost {
   readonly db: SolardDatabase;
   readonly wallets: WalletRepo;
@@ -1080,14 +1095,25 @@ export class Solard implements ComposerHost {
       skipPreflight?: boolean;
     } = {},
   ) {
-    return await this.tx(wallet)
-      .buy(token, amount, options)
-      .send({
-        via: options.via ?? "rpc",
-        kind: "buy",
-        skipSimulation: options.skipSimulation,
-        skipPreflight: options.skipPreflight,
-      });
+    const execute = async () =>
+      await this.tx(wallet)
+        .buy(token, amount, options)
+        .send({
+          via: options.via ?? "rpc",
+          kind: "buy",
+          skipSimulation: options.skipSimulation,
+          skipPreflight: options.skipPreflight,
+        });
+
+    try {
+      return await execute();
+    } catch (error) {
+      // 6040 is raised by preflight before broadcast. Rebuild exactly once so
+      // PumpSwap gets a fresh pool/fee quote, preserving the same slippage.
+      if (options.skipSimulation || !isPumpSwap6040SimulationError(error))
+        throw error;
+      return await execute();
+    }
   }
   async buyMany(
     token: TokenRef,

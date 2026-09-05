@@ -1,0 +1,46 @@
+# PumpTV generation/reward worker secrets and worker-only overrides.
+# Copy to .worker.toml. This file is intentionally separate from .config.toml
+# so the web server never needs the payout private key.
+
+[fal]
+key = ""
+
+[jsx_ai]
+runtime = "codex"
+model = "gpt-5.6"
+
+[pumptv]
+# Keep these identical to the web config.
+db_path = ".data/pumptv.sqlite"
+room = "main"
+
+# Worker-side override for the generated opening episode. Keep this identical to
+# .config.toml when the worker is launched with an independent environment.
+opening_prompt = "Begin in absolute emptiness: a silent black void with no stars, no objects, no characters, and no readable text. A single faint point of light appears, then expands like the first instant of a newborn universe. Matter, color, depth, and motion emerge from nothing as the world begins to exist. Cinematic, mysterious, physically grounded, no logos."
+
+# Keep arbitration defaults aligned with the web process. The web control-plane
+# arbiter and worker may both reconcile a due deadline; the DB transaction makes
+# that race safe and guarantees exactly one winner/directive.
+solo_decision_ms = 20000
+repeat_winner_solo_ms = 60000
+repeat_winner_support_votes = 2
+voting_window_ms = 20000
+voting_new_idea_grace_ms = 10000
+
+# Robinhood Chain payout network. Testnet: chain_id=46630 and testnet RPC.
+robinhood_chain_id = 4663
+robinhood_rpc_url = "https://rpc.mainnet.chain.robinhood.com"
+robinhood_explorer_url = "https://robinhoodchain.blockscout.com"
+
+# USDG winner rewards. Robinhood Chain mainnet canonical USDG address.
+winner_reward_usdg = 1.00
+reward_token_address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+reward_sending_stale_ms = 180000
+
+# Dedicated hot-wallet key used only by the reward worker. Never commit a real
+# key and do not place it in .config.toml. Fund it with USDG for rewards and a
+# small amount of ETH for Robinhood Chain gas.
+reward_private_key = ""
+
+[measure]
+timestamps = 1

@@ -1,6 +1,6 @@
 {
   "name": "@solard/core",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "description": "Core Solana wallet, transaction and trading engine for Solard.",
   "type": "module",
   "main": "./src/index.ts",

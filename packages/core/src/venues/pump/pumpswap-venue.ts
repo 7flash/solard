@@ -1,5 +1,12 @@
+import { Buffer } from "buffer";
+import BN from "bn.js";
+import { OnlinePumpAmmSdk, PUMP_AMM_SDK } from "@pump-fun/pump-swap-sdk";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
-import { PublicKey, type AccountMeta } from "@solana/web3.js";
+import {
+  PublicKey,
+  type AccountMeta,
+  type TransactionInstruction,
+} from "@solana/web3.js";
 import { sameAsset, type RawAmount } from "../../core/amounts.ts";
 import type {
   BuiltInstructions,
@@ -9,26 +16,17 @@ import type {
   VenueContext,
   VenueMarket,
 } from "../venue-plugin.ts";
+import { ammUserVolumeAccumulatorPda, ata, pumpSwapPoolPda } from "./pda.ts";
 import {
-  ammGlobalConfigPda,
-  ammUserVolumeAccumulatorPda,
-  ata,
-  pumpSwapPoolPda,
-} from "./pda.ts";
-import {
-  buildPumpSwapBuyExactQuoteIn,
-  buildPumpSwapSell,
-} from "./pumpswap-instructions.ts";
-import {
-  quoteBuyConstantProduct,
-  quoteSellConstantProduct,
-  spotPriceQuotePerToken,
-} from "./quote.ts";
-import { WRAPPED_SOL_MINT } from "./constants.ts";
+  AMM_BUY_EXACT_QUOTE_IN_D8,
+  AMM_SELL_D8,
+  PUMP_AMM_PROGRAM_ID,
+  WRAPPED_SOL_MINT,
+} from "./constants.ts";
+import { spotPriceQuotePerToken } from "./quote.ts";
 import { resolvePumpSwapProtocolFeeRecipient, tokenMeta } from "./routing.ts";
 import { defaultTokenProgram, fetchCurve, fetchPool } from "./state.ts";
 import {
-  configuredTotalFeeBps,
   extraAccounts,
   poolQuoteAsset,
   tokenAccountAmount,
@@ -45,12 +43,6 @@ function cashbackRemainingAccounts(
 ): { buy?: AccountMeta[]; sell?: AccountMeta[] } {
   if (!isCashbackCoin) return {};
 
-  // Pump's current cashback layout is chain-derived, not metadata-derived:
-  // - PumpSwap buy remaining_accounts[0] = WSOL ATA owned by the AMM
-  //   UserVolumeAccumulator PDA.
-  // - PumpSwap sell remaining_accounts[0] = the same WSOL ATA and
-  //   remaining_accounts[1] = the AMM UserVolumeAccumulator PDA itself.
-  // The program initializes the cashback ATA on buy when needed.
   const accumulator = ammUserVolumeAccumulatorPda(user);
   const cashbackWsolAta = ata(
     WRAPPED_SOL_MINT,
@@ -62,6 +54,129 @@ function cashbackRemainingAccounts(
     buy: [writable(cashbackWsolAta)],
     sell: [writable(cashbackWsolAta), writable(accumulator)],
   };
+}
+
+function sdkSlippagePercent(slippageBps: number): number {
+  if (
+    !Number.isInteger(slippageBps) ||
+    slippageBps < 0 ||
+    slippageBps >= 10_000
+  ) {
+    throw new Error(`Invalid slippage bps: ${slippageBps}`);
+  }
+  // Pump's SDK takes percentage points: 1 = 1%, while Solard uses bps.
+  return slippageBps / 100;
+}
+
+function readU64(data: Buffer | Uint8Array, offset: number): bigint {
+  const bytes = Buffer.from(data);
+  if (bytes.length < offset + 8)
+    throw new Error("PumpSwap instruction data is truncated");
+  return bytes.readBigUInt64LE(offset);
+}
+
+function pumpTradeInstruction(
+  instructions: TransactionInstruction[],
+  discriminator: Buffer,
+  label: string,
+): TransactionInstruction {
+  const instruction = instructions.find((candidate) => {
+    if (!candidate.programId.equals(PUMP_AMM_PROGRAM_ID)) return false;
+    if (candidate.data.length < 24) return false;
+    return Buffer.from(candidate.data.subarray(0, 8)).equals(discriminator);
+  });
+  if (!instruction)
+    throw new Error(`PumpSwap SDK did not build ${label} instruction`);
+  return instruction;
+}
+
+function expectedFromMinimum(
+  minimumOutputRaw: bigint,
+  slippageBps: number,
+): bigint {
+  const keptBps = 10_000 - slippageBps;
+  if (keptBps <= 0) return minimumOutputRaw;
+  const denominator = BigInt(keptBps);
+  return (minimumOutputRaw * 10_000n + denominator - 1n) / denominator;
+}
+
+async function freshSdkBuy(
+  ctx: VenueContext,
+  market: VenueMarket,
+  inputRaw: bigint,
+  slippageBps: number,
+): Promise<{
+  instructions: TransactionInstruction[];
+  minimumOutputRaw: bigint;
+  expectedOutputRaw: bigint;
+}> {
+  const m = market.metadata as PumpSwapMarketMeta;
+  const online = new OnlinePumpAmmSdk(ctx.connection);
+  const swapState = await online.swapSolanaState(m.pool, ctx.user);
+  const instructions = await PUMP_AMM_SDK.buyQuoteInput(
+    swapState,
+    new BN(inputRaw.toString()),
+    sdkSlippagePercent(slippageBps),
+  );
+  const trade = pumpTradeInstruction(
+    instructions,
+    AMM_BUY_EXACT_QUOTE_IN_D8,
+    "BuyExactQuoteIn",
+  );
+  const spendableQuoteInRaw = readU64(trade.data, 8);
+  const minimumOutputRaw = readU64(trade.data, 16);
+  if (spendableQuoteInRaw !== inputRaw) {
+    throw new Error(
+      `PumpSwap SDK changed spendable quote input: requested=${inputRaw} built=${spendableQuoteInRaw}`,
+    );
+  }
+  if (minimumOutputRaw <= 0n)
+    throw new Error("PumpSwap SDK buy quote resolves to zero output");
+  return {
+    instructions,
+    minimumOutputRaw,
+    expectedOutputRaw: expectedFromMinimum(minimumOutputRaw, slippageBps),
+  };
+}
+
+async function freshSdkSell(
+  ctx: VenueContext,
+  market: VenueMarket,
+  inputRaw: bigint,
+  slippageBps: number,
+): Promise<{
+  instructions: TransactionInstruction[];
+  minimumOutputRaw: bigint;
+  expectedOutputRaw: bigint;
+}> {
+  const m = market.metadata as PumpSwapMarketMeta;
+  const online = new OnlinePumpAmmSdk(ctx.connection);
+  const swapState = await online.swapSolanaState(m.pool, ctx.user);
+  const instructions = await PUMP_AMM_SDK.sellBaseInput(
+    swapState,
+    new BN(inputRaw.toString()),
+    sdkSlippagePercent(slippageBps),
+  );
+  const trade = pumpTradeInstruction(instructions, AMM_SELL_D8, "Sell");
+  const baseInRaw = readU64(trade.data, 8);
+  const minimumOutputRaw = readU64(trade.data, 16);
+  if (baseInRaw !== inputRaw) {
+    throw new Error(
+      `PumpSwap SDK changed sell input: requested=${inputRaw} built=${baseInRaw}`,
+    );
+  }
+  if (minimumOutputRaw <= 0n)
+    throw new Error("PumpSwap SDK sell quote resolves to zero output");
+  return {
+    instructions,
+    minimumOutputRaw,
+    expectedOutputRaw: expectedFromMinimum(minimumOutputRaw, slippageBps),
+  };
+}
+
+function quoteSlippageBps(quote: QuoteResult): number {
+  const value = quote.meta?.slippageBps;
+  return typeof value === "number" && Number.isInteger(value) ? value : 1_500;
 }
 
 /** Canonical PumpSwap AMM only. It is a separate swappable venue plugin from the launch curve. */
@@ -86,7 +201,7 @@ export class PumpSwapVenue implements TradeVenuePlugin {
       state.quoteMint,
     );
     const baseTokenProgram = defaultTokenProgram(ctx.token);
-    const [baseReserve, quoteReserve] = await Promise.all([
+    const [baseReserve, rawQuoteReserve] = await Promise.all([
       tokenAccountAmount(
         ctx.connection,
         state.baseTokenAccount,
@@ -98,6 +213,12 @@ export class PumpSwapVenue implements TradeVenuePlugin {
         quoteAsset.tokenProgram,
       ),
     ]);
+    const effectiveQuoteReserve = rawQuoteReserve + state.virtualQuoteReserves;
+    if (baseReserve <= 0n || effectiveQuoteReserve <= 0n) {
+      throw new Error(
+        `Invalid PumpSwap reserves for ${pool.toBase58()}: base=${baseReserve} rawQuote=${rawQuoteReserve} virtualQuote=${state.virtualQuoteReserves}`,
+      );
+    }
     const meta = tokenMeta(ctx.token);
     const protocolFeeRecipient = await resolvePumpSwapProtocolFeeRecipient(
       ctx.connection,
@@ -124,10 +245,14 @@ export class PumpSwapVenue implements TradeVenuePlugin {
         poolQuoteAta: state.quoteTokenAccount,
         protocolFeeRecipient,
         coinCreator: state.coinCreator,
-        reserves: { virtualBase: baseReserve, virtualQuote: quoteReserve },
-        // Current on-chain cashback state is authoritative. Keep the metadata
-        // fallback only for older pool layouts / cached tokens that predate the
-        // is_cashback_coin field.
+        rawQuoteReserve,
+        virtualQuoteReserves: state.virtualQuoteReserves,
+        reserves: {
+          virtualBase: baseReserve,
+          virtualQuote: effectiveQuoteReserve,
+        },
+        // Retained for Solard metadata/debugging. Live PumpSwap trade instructions
+        // below are built by the official SDK from freshly fetched chain state.
         extraBuyAccounts:
           cashback.buy ?? extraAccounts(meta.ammCashbackBuyAccounts),
         extraSellAccounts:
@@ -144,20 +269,22 @@ export class PumpSwapVenue implements TradeVenuePlugin {
   ): Promise<QuoteResult> {
     if (!sameAsset(market.quoteAsset, amount.asset))
       throw new Error("Buy amount asset does not match PumpSwap quote asset");
-    const reserves = (market.metadata as PumpSwapMarketMeta).reserves;
-    const quote = quoteBuyConstantProduct(
-      amount,
-      reserves,
-      slippageBps,
-      configuredTotalFeeBps(ctx.token),
-    );
+
+    // Authoritative quote/build math comes from Pump's current SDK, including
+    // fee_config and Pool.virtual_quote_reserves. This intentionally replaces
+    // Solard's historical fixed-fee constant-product approximation for PumpSwap.
+    const fresh = await freshSdkBuy(ctx, market, amount.raw, slippageBps);
     return {
       venue: this.id,
       quoteAsset: market.quoteAsset,
-      ...quote,
+      inputRaw: amount.raw,
+      expectedOutputRaw: fresh.expectedOutputRaw,
+      minimumOutputRaw: fresh.minimumOutputRaw,
       meta: {
         protectionBasis: "program-base-output",
-        note: "PumpSwap enforces min_base_amount_out inside the swap instruction. Token-2022 recipient transfer-fee inspection is intentionally not part of buy construction.",
+        quoteSource: "@pump-fun/pump-swap-sdk",
+        slippageBps,
+        note: "PumpSwap SDK quote uses current pool/fee configuration and the buy_exact_quote_in minimum output.",
       },
     };
   }
@@ -168,19 +295,17 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     amountRaw: bigint,
     slippageBps: number,
   ): Promise<QuoteResult> {
-    const reserves = (market.metadata as PumpSwapMarketMeta).reserves;
-    const value = quoteSellConstantProduct(
-      amountRaw,
-      reserves,
-      slippageBps,
-      configuredTotalFeeBps(ctx.token),
-    );
+    const fresh = await freshSdkSell(ctx, market, amountRaw, slippageBps);
     return {
       venue: this.id,
       quoteAsset: market.quoteAsset,
       inputRaw: amountRaw,
-      expectedOutputRaw: value.expectedOutputRaw,
-      minimumOutputRaw: value.minimumOutputRaw,
+      expectedOutputRaw: fresh.expectedOutputRaw,
+      minimumOutputRaw: fresh.minimumOutputRaw,
+      meta: {
+        quoteSource: "@pump-fun/pump-swap-sdk",
+        slippageBps,
+      },
     };
   }
 
@@ -206,28 +331,23 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     market: VenueMarket,
     quote: QuoteResult,
   ): Promise<BuiltInstructions> {
-    const m = market.metadata as PumpSwapMarketMeta;
+    // Re-fetch immediately before transaction construction. If the pool moved
+    // after quoteBuy(), this replaces the stale minimum instead of carrying it
+    // into simulation and tripping PumpSwap 6040.
+    const slippageBps = quoteSlippageBps(quote);
+    const fresh = await freshSdkBuy(ctx, market, quote.inputRaw, slippageBps);
+    quote.expectedOutputRaw = fresh.expectedOutputRaw;
+    quote.minimumOutputRaw = fresh.minimumOutputRaw;
+    quote.meta = {
+      ...(quote.meta ?? {}),
+      refreshedAtBuild: true,
+    };
     return {
       venue: this.id,
       quoteAsset: market.quoteAsset,
-      instructions: buildPumpSwapBuyExactQuoteIn({
-        pool: m.pool,
-        globalConfig: ammGlobalConfigPda(),
-        baseMint: market.mint,
-        quote: market.quoteAsset,
-        baseTokenProgram: market.baseTokenProgram,
-        poolBaseAta: m.poolBaseAta,
-        poolQuoteAta: m.poolQuoteAta,
-        protocolFeeRecipient: m.protocolFeeRecipient,
-        coinCreator: m.coinCreator,
-        user: ctx.user,
-        cashbackRemainingAccounts: m.extraBuyAccounts,
-        spendableQuoteInRaw: quote.inputRaw,
-        minBaseOutRaw: quote.minimumOutputRaw,
-        trackVolume: true,
-      }),
-      minOutputRaw: quote.minimumOutputRaw,
-      expectedOutputRaw: quote.expectedOutputRaw,
+      instructions: fresh.instructions,
+      minOutputRaw: fresh.minimumOutputRaw,
+      expectedOutputRaw: fresh.expectedOutputRaw,
       meta: quote.meta,
     };
   }
@@ -237,27 +357,21 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     market: VenueMarket,
     quote: QuoteResult,
   ): Promise<BuiltInstructions> {
-    const m = market.metadata as PumpSwapMarketMeta;
+    const slippageBps = quoteSlippageBps(quote);
+    const fresh = await freshSdkSell(ctx, market, quote.inputRaw, slippageBps);
+    quote.expectedOutputRaw = fresh.expectedOutputRaw;
+    quote.minimumOutputRaw = fresh.minimumOutputRaw;
+    quote.meta = {
+      ...(quote.meta ?? {}),
+      refreshedAtBuild: true,
+    };
     return {
       venue: this.id,
       quoteAsset: market.quoteAsset,
-      instructions: buildPumpSwapSell({
-        pool: m.pool,
-        globalConfig: ammGlobalConfigPda(),
-        baseMint: market.mint,
-        quote: market.quoteAsset,
-        baseTokenProgram: market.baseTokenProgram,
-        poolBaseAta: m.poolBaseAta,
-        poolQuoteAta: m.poolQuoteAta,
-        protocolFeeRecipient: m.protocolFeeRecipient,
-        coinCreator: m.coinCreator,
-        user: ctx.user,
-        cashbackRemainingAccounts: m.extraSellAccounts,
-        baseInRaw: quote.inputRaw,
-        minQuoteOutRaw: quote.minimumOutputRaw,
-      }),
-      minOutputRaw: quote.minimumOutputRaw,
-      expectedOutputRaw: quote.expectedOutputRaw,
+      instructions: fresh.instructions,
+      minOutputRaw: fresh.minimumOutputRaw,
+      expectedOutputRaw: fresh.expectedOutputRaw,
+      meta: quote.meta,
     };
   }
 }
