@@ -1,33 +1,46 @@
 {
-  "name": "pumptv",
-  "version": "0.33.0",
-  "private": true,
+  "name": "winflow",
+  "version": "0.6.10",
+  "description": "Bun CLI for applying project patches, Git review workflows, project scans, and smart ZIP extraction.",
   "type": "module",
+  "bin": {
+    "winflow": "./src/cli.mjs"
+  },
   "scripts": {
-    "dev": "bgrun inline -- tradjs serve 3000",
-    "start": "bgrun inline -- tradjs serve 3000",
-    "web": "tradjs serve 3000",
-    "worker": "bun src/worker.ts",
-    "build": "tradjs build",
-    "reset": "bun src/cli/reset.ts",
-    "control": "bun src/cli/control.ts",
-    "test": "bun test"
+    "start": "bun ./src/cli.mjs",
+    "test": "bun test/run.mjs",
+    "scan": "bun ./src/cli.mjs scan",
+    "review": "bun ./src/cli.mjs review",
+    "unzip": "bun ./src/cli.mjs unzip",
+    "build:linux-x64": "bun build --compile --target=bun-linux-x64 ./src/cli.mjs --outfile dist/winflow-linux-x64",
+    "build:linux-arm64": "bun build --compile --target=bun-linux-arm64 ./src/cli.mjs --outfile dist/winflow-linux-arm64",
+    "build:windows-x64": "bun build --compile --target=bun-windows-x64 ./src/cli.mjs --outfile dist/winflow-windows-x64.exe",
+    "build:windows-arm64": "bun build --compile --target=bun-windows-arm64 ./src/cli.mjs --outfile dist/winflow-windows-arm64.exe",
+    "build:macos-x64": "bun build --compile --target=bun-darwin-x64 ./src/cli.mjs --outfile dist/winflow-macos-x64",
+    "build:macos-arm64": "bun build --compile --target=bun-darwin-arm64 ./src/cli.mjs --outfile dist/winflow-macos-arm64",
+    "build": "bun run build:linux-x64 && bun run build:linux-arm64 && bun run build:windows-x64 && bun run build:windows-arm64 && bun run build:macos-x64 && bun run build:macos-arm64",
+    "apply": "bun ./src/cli.mjs apply",
+    "squash": "bun ./src/cli.mjs squash"
   },
-  "dependencies": {
-    "@fal-ai/client": "^1.6.2",
-    "measure-fn": "^5.2.0",
-    "sqlite-zod-orm": "^3.33.0",
-    "tradjs": "^4.3.0",
-    "ws": "^8.18.0",
-    "jsx-ai": "latest",
-    "bgrun": "^3.14.0",
-    "@openai/codex-sdk": "latest",
-    "@metamask/connect-evm": "^2.1.1",
-    "viem": "^2.56.3"
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
   },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5.9.0",
-    "@types/ws": "^8.18.0"
-  }
+  "keywords": [
+    "bun",
+    "cli",
+    "git",
+    "diff",
+    "scan",
+    "tree",
+    "zip",
+    "helix",
+    "developer-tools"
+  ],
+  "license": "MIT"
 }
