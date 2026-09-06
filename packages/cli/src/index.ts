@@ -334,6 +334,7 @@ Meteora DLMM
   slrd meteora positions --wallet <wallet|address>
   slrd meteora open <pool> --wallet <wallet> --sol 0.1 --bins 40 [--strategy spot] [--live]
   slrd meteora move <position> --wallet <wallet> [--bins 10] [--live]
+  slrd meteora lp-5m [<pool>] --wallet <wallet> [--loop] [--live]
   slrd meteora migrate <position> --wallet <wallet> --to-pool <pool> [--bins 10] [--live]
   slrd meteora add|remove|claim|close <position> --wallet <wallet> [--live]
   slrd meteora close-all <pool> --wallet <wallet> [--live]

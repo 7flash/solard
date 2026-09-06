@@ -1517,6 +1517,513 @@ function closeAllHuman(result: AnyRow): string {
   return lines.join("\n") + "\n";
 }
 
+const FIVE_MINUTES_MS = 5 * 60_000;
+const FIVE_MINUTES_SECONDS = 5 * 60;
+
+type CandleLpInventory = "x-only" | "y-only" | "mixed" | "empty";
+
+type CandleLpPoolTarget = {
+  pool: string;
+  candleTimestamp: number;
+  candleLow: number;
+  candleHigh: number;
+  candleClose: number;
+  candleVolume: number;
+  activeBin: number;
+  candleMinBinId: number;
+  candleMaxBinId: number;
+  breakoutBins: number;
+};
+
+type CandleLpPositionPlan = {
+  position: string;
+  pool: string;
+  inventory: CandleLpInventory;
+  activeBin: number;
+  currentMinBinId: number | null;
+  currentMaxBinId: number | null;
+  targetMinBinId: number | null;
+  targetMaxBinId: number | null;
+  shiftBins: number | null;
+  candleTimestamp: number | null;
+  candleLow: number | null;
+  candleHigh: number | null;
+  candleClose: number | null;
+  candleVolume: number | null;
+  breakoutBins: number | null;
+  action: "keep" | "move" | "skip" | "failed" | "moved";
+  reason: string;
+  result?: unknown;
+};
+
+function rawBigInt(value: unknown): bigint {
+  try {
+    return BigInt(String(value ?? "0"));
+  } catch {
+    return 0n;
+  }
+}
+
+function integerOrNull(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function candleLpInfrastructure(flags: Flags): AnyRow | undefined {
+  const max = flag(flags, "max-infra-lamports");
+  if (
+    !flags.has("allow-bin-array-init") &&
+    !flags.has("allow-bitmap-extension-init") &&
+    !max
+  ) {
+    return undefined;
+  }
+  return {
+    allowBinArrayInit: flags.has("allow-bin-array-init"),
+    allowBitmapExtensionInit: flags.has("allow-bitmap-extension-init"),
+    ...(max ? { maxNonRefundableLamports: max } : {}),
+  };
+}
+
+function candleLpInventory(position: AnyRow): CandleLpInventory {
+  const x = rawBigInt(position.totalXRaw) + rawBigInt(position.feeXRaw);
+  const y = rawBigInt(position.totalYRaw) + rawBigInt(position.feeYRaw);
+  if (x > 0n && y > 0n) return "mixed";
+  if (x > 0n) return "x-only";
+  if (y > 0n) return "y-only";
+  return "empty";
+}
+
+function candleLpFundableRange(args: {
+  minBinId: number;
+  maxBinId: number;
+  activeBin: number;
+  minTotalBins: number;
+  inventory: CandleLpInventory;
+}): { minBinId: number; maxBinId: number } | null {
+  let minBinId = Math.min(args.minBinId, args.activeBin);
+  let maxBinId = Math.max(args.maxBinId, args.activeBin);
+  let width = maxBinId - minBinId + 1;
+  width = Math.max(width, args.minTotalBins);
+
+  // A source position that has become one-sided cannot safely be reopened over
+  // both sides of the active bin without a swap. Keep the candle-derived width,
+  // but place it on the fundable side. Source-only moves intentionally never swap.
+  if (args.inventory === "x-only") {
+    return {
+      minBinId: args.activeBin,
+      maxBinId: args.activeBin + width - 1,
+    };
+  }
+  if (args.inventory === "y-only") {
+    return {
+      minBinId: args.activeBin - width + 1,
+      maxBinId: args.activeBin,
+    };
+  }
+  if (args.inventory === "empty") return null;
+
+  const missing = Math.max(0, args.minTotalBins - (maxBinId - minBinId + 1));
+  if (missing > 0) {
+    const below = Math.floor(missing / 2);
+    minBinId -= below;
+    maxBinId += missing - below;
+  }
+  return { minBinId, maxBinId };
+}
+
+async function previousClosedFiveMinuteTarget(
+  slrd: Solard,
+  pool: string,
+  flags: Flags,
+): Promise<CandleLpPoolTarget> {
+  const nowSeconds = Math.floor(Date.now() / 1_000);
+  const currentBucketStart =
+    Math.floor(nowSeconds / FIVE_MINUTES_SECONDS) * FIVE_MINUTES_SECONDS;
+  const startTime = currentBucketStart - FIVE_MINUTES_SECONDS * 4;
+  const endTime = currentBucketStart - 1;
+  const paddingBins = Math.max(0, integerFlag(flags, "padding-bins", 1)!);
+  const maxBreakoutBins = Math.max(
+    0,
+    integerFlag(flags, "max-breakout-bins", 50)!,
+  );
+
+  const [ohlcv, active] = await Promise.all([
+    slrd.meteora.getPoolOhlcv(pool, {
+      timeframe: "5m",
+      startTime,
+      endTime,
+    }),
+    slrd.meteora.getActiveBin(pool, true),
+  ]);
+  const candle = [...ohlcv.candles]
+    .filter((row) => row.timestamp < currentBucketStart)
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .at(-1);
+  if (!candle) {
+    throw new Error(
+      `No fully closed 5m Meteora candle is available for pool ${pool}`,
+    );
+  }
+
+  let [candleMinBinId, candleMaxBinId] = await Promise.all([
+    slrd.meteora.getBinIdFromPrice(pool, candle.low, true),
+    slrd.meteora.getBinIdFromPrice(pool, candle.high, false),
+  ]);
+  if (candleMinBinId > candleMaxBinId) {
+    [candleMinBinId, candleMaxBinId] = [candleMaxBinId, candleMinBinId];
+  }
+  candleMinBinId -= paddingBins;
+  candleMaxBinId += paddingBins;
+
+  const activeBin = Number(active.binId);
+  if (!Number.isInteger(activeBin)) {
+    throw new Error(`Meteora returned an invalid active bin for pool ${pool}`);
+  }
+  const breakoutBins =
+    activeBin < candleMinBinId
+      ? candleMinBinId - activeBin
+      : activeBin > candleMaxBinId
+        ? activeBin - candleMaxBinId
+        : 0;
+  if (breakoutBins > maxBreakoutBins) {
+    throw new Error(
+      `Active bin is ${breakoutBins} bins outside the previous 5m candle; max-breakout-bins=${maxBreakoutBins}`,
+    );
+  }
+
+  return {
+    pool,
+    candleTimestamp: candle.timestamp,
+    candleLow: candle.low,
+    candleHigh: candle.high,
+    candleClose: candle.close,
+    candleVolume: candle.volume,
+    activeBin,
+    candleMinBinId,
+    candleMaxBinId,
+    breakoutBins,
+  };
+}
+
+function candleLpPlanForPosition(
+  position: AnyRow,
+  target: CandleLpPoolTarget,
+  flags: Flags,
+): CandleLpPositionPlan {
+  const currentMinBinId = integerOrNull(position.lowerBin);
+  const currentMaxBinId = integerOrNull(position.upperBin);
+  const inventory = candleLpInventory(position);
+  const base = {
+    position: String(position.position ?? ""),
+    pool: target.pool,
+    inventory,
+    activeBin: target.activeBin,
+    currentMinBinId,
+    currentMaxBinId,
+    candleTimestamp: target.candleTimestamp,
+    candleLow: target.candleLow,
+    candleHigh: target.candleHigh,
+    candleClose: target.candleClose,
+    candleVolume: target.candleVolume,
+    breakoutBins: target.breakoutBins,
+  };
+
+  if (!base.position) {
+    return {
+      ...base,
+      targetMinBinId: null,
+      targetMaxBinId: null,
+      shiftBins: null,
+      action: "skip",
+      reason: "position address missing",
+    };
+  }
+  if (currentMinBinId == null || currentMaxBinId == null) {
+    return {
+      ...base,
+      targetMinBinId: null,
+      targetMaxBinId: null,
+      shiftBins: null,
+      action: "skip",
+      reason: "current position range unavailable",
+    };
+  }
+
+  const minTotalBins = Math.max(2, positiveIntegerFlag(flags, "min-bins", 35)!);
+  const range = candleLpFundableRange({
+    minBinId: target.candleMinBinId,
+    maxBinId: target.candleMaxBinId,
+    activeBin: target.activeBin,
+    minTotalBins,
+    inventory,
+  });
+  if (!range) {
+    return {
+      ...base,
+      targetMinBinId: null,
+      targetMaxBinId: null,
+      shiftBins: null,
+      action: "skip",
+      reason: "source position has no attributable X/Y inventory",
+    };
+  }
+
+  const shiftBins = Math.max(
+    Math.abs(range.minBinId - currentMinBinId),
+    Math.abs(range.maxBinId - currentMaxBinId),
+  );
+  const minShiftBins = Math.max(0, integerFlag(flags, "min-shift-bins", 5)!);
+  if (!flags.has("force") && shiftBins < minShiftBins) {
+    return {
+      ...base,
+      targetMinBinId: range.minBinId,
+      targetMaxBinId: range.maxBinId,
+      shiftBins,
+      action: "keep",
+      reason: `target moved only ${shiftBins} bins (< ${minShiftBins})`,
+    };
+  }
+
+  return {
+    ...base,
+    targetMinBinId: range.minBinId,
+    targetMaxBinId: range.maxBinId,
+    shiftBins,
+    action: "move",
+    reason:
+      inventory === "mixed"
+        ? "retarget to previous closed 5m candle low-high range"
+        : `retarget with ${inventory} source-only inventory on the fundable side`,
+  };
+}
+
+function candleLpHuman(result: AnyRow): string {
+  const plans = Array.isArray(result.plans) ? result.plans : [];
+  const lines = [
+    `METEORA 5M CANDLE LP  ${result.live ? "LIVE" : "PREVIEW"}`,
+    `Wallet: ${result.wallet}`,
+    result.pool
+      ? `Pool filter: ${result.pool}`
+      : "Pool filter: all open positions",
+    "",
+    "ACTION  POSITION      ACTIVE  CURRENT RANGE       TARGET RANGE        SHIFT  INV      REASON",
+  ];
+  if (!plans.length) {
+    lines.push(
+      "-       -             -       -                   -                   -      -        no open positions",
+    );
+  }
+  for (const row of plans) {
+    const current =
+      row.currentMinBinId == null || row.currentMaxBinId == null
+        ? "-"
+        : `${row.currentMinBinId}..${row.currentMaxBinId}`;
+    const target =
+      row.targetMinBinId == null || row.targetMaxBinId == null
+        ? "-"
+        : `${row.targetMinBinId}..${row.targetMaxBinId}`;
+    lines.push(
+      `${String(row.action).toUpperCase().padEnd(7)} ` +
+        `${String(row.position).slice(0, 12).padEnd(13)} ` +
+        `${String(row.activeBin ?? "-").padEnd(7)} ` +
+        `${current.padEnd(19)} ${target.padEnd(19)} ` +
+        `${String(row.shiftBins ?? "-").padEnd(6)} ${String(row.inventory ?? "-").padEnd(8)} ${row.reason}`,
+    );
+    if (row.action === "moved" && row.result) {
+      const moved = row.result as AnyRow;
+      lines.push(
+        `        -> ${String(moved.targetPosition ?? "new position")}  close=${(moved.close?.signatures ?? []).join(",")}  open=${(moved.open?.signatures ?? []).join(",")}`,
+      );
+    }
+  }
+  if (!result.live) {
+    lines.push(
+      "",
+      "Preview only. Add --live to move positions. Add --loop to repeat just after every 5m candle closes.",
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+async function runCandleLpCycle(
+  slrd: Solard,
+  values: string[],
+  flags: Flags,
+): Promise<AnyRow> {
+  const walletRef = requiredFlag(flags, "wallet");
+  const wallet = publicWalletAddress(slrd, walletRef);
+  const poolFilter = values[1] ?? flag(flags, "pool") ?? null;
+  const portfolio = await slrd.meteora.getWalletPositions(wallet);
+  const positions = portfolio.positions.filter(
+    (row: AnyRow) => !poolFilter || String(row.pool) === poolFilter,
+  );
+  const targetByPool = new Map<string, CandleLpPoolTarget | Error>();
+  const positionById = new Map<string, AnyRow>(
+    positions.map((row: AnyRow) => [String(row.position ?? ""), row]),
+  );
+  const plans: CandleLpPositionPlan[] = [];
+
+  for (const position of positions) {
+    const pool = String((position as AnyRow).pool ?? "");
+    if (!pool) continue;
+    let target = targetByPool.get(pool);
+    if (!target) {
+      try {
+        target = await previousClosedFiveMinuteTarget(slrd, pool, flags);
+      } catch (error: any) {
+        target = error instanceof Error ? error : new Error(String(error));
+      }
+      targetByPool.set(pool, target);
+    }
+    if (target instanceof Error) {
+      plans.push({
+        position: String((position as AnyRow).position ?? ""),
+        pool,
+        inventory: candleLpInventory(position as AnyRow),
+        activeBin: Number((position as AnyRow).activeBin ?? 0),
+        currentMinBinId: integerOrNull((position as AnyRow).lowerBin),
+        currentMaxBinId: integerOrNull((position as AnyRow).upperBin),
+        targetMinBinId: null,
+        targetMaxBinId: null,
+        shiftBins: null,
+        candleTimestamp: null,
+        candleLow: null,
+        candleHigh: null,
+        candleClose: null,
+        candleVolume: null,
+        breakoutBins: null,
+        action: "skip",
+        reason: target.message,
+      });
+      continue;
+    }
+    plans.push(candleLpPlanForPosition(position as AnyRow, target, flags));
+  }
+
+  const live = flags.has("live");
+  let hadFailure = false;
+  if (live) {
+    for (const plan of plans) {
+      if (plan.action !== "move") continue;
+      try {
+        const source = positionById.get(plan.position);
+        if (!source) throw new Error("source position disappeared before move");
+        const amountXRaw =
+          rawBigInt(source.totalXRaw) + rawBigInt(source.feeXRaw);
+        const amountYRaw =
+          rawBigInt(source.totalYRaw) + rawBigInt(source.feeYRaw);
+        const infrastructure = candleLpInfrastructure(flags);
+        const moveStrategy = strategy(flags);
+        const slippageBps = integerFlag(flags, "slippage-bps", 100);
+
+        // Build a replacement once before closing anything. This catches invalid
+        // candle ranges and default-denied shared infrastructure requirements
+        // while the source position is still intact. The source-only move below
+        // rebuilds with the exact inventory actually recovered by the close.
+        await slrd.meteora.buildOpenPosition({
+          wallet: walletRef,
+          pool: plan.pool,
+          strategy: moveStrategy,
+          amountXRaw: amountXRaw.toString(),
+          amountYRaw: amountYRaw.toString(),
+          minBinId: plan.targetMinBinId!,
+          maxBinId: plan.targetMaxBinId!,
+          slippageBps,
+          ...(infrastructure ? { infrastructure } : {}),
+        });
+
+        const result = await slrd.meteora.movePositionFromSource(
+          {
+            wallet: walletRef,
+            pool: plan.pool,
+            position: plan.position,
+            strategy: moveStrategy,
+            minBinId: plan.targetMinBinId!,
+            maxBinId: plan.targetMaxBinId!,
+            slippageBps,
+            ...(infrastructure ? { infrastructure } : {}),
+          },
+          {
+            live: true,
+            simulate: !flags.has("skip-simulation"),
+            skipPreflight: flags.has("skip-preflight"),
+            commitment: (flag(flags, "commitment") as any) ?? "confirmed",
+            maxRetries: integerFlag(flags, "max-retries"),
+          },
+        );
+        plan.action = "moved";
+        plan.reason = "moved to previous closed 5m candle range";
+        plan.result = result;
+      } catch (error: any) {
+        hadFailure = true;
+        plan.action = "failed";
+        plan.reason = String(error?.message ?? error);
+        if (!flags.has("continue-on-error")) break;
+      }
+    }
+  }
+
+  return {
+    version: 1,
+    strategy: "previous-closed-5m-candle-range",
+    at: Date.now(),
+    live,
+    wallet,
+    pool: poolFilter,
+    positions: positions.length,
+    hadFailure,
+    plans,
+  };
+}
+
+function nextFiveMinuteRunAt(settleMs: number): number {
+  const now = Date.now();
+  const nextBoundary =
+    (Math.floor(now / FIVE_MINUTES_MS) + 1) * FIVE_MINUTES_MS;
+  return nextBoundary + settleMs;
+}
+
+async function runCandleLpCommand(args: {
+  slrd: Solard;
+  values: string[];
+  flags: Flags;
+  emit: Emit;
+}): Promise<void> {
+  const settleMs = Math.max(
+    0,
+    Math.min(60_000, integerFlag(args.flags, "settle-ms", 5_000)!),
+  );
+  const loop = args.flags.has("loop");
+
+  while (true) {
+    const result = await runCandleLpCycle(args.slrd, args.values, args.flags);
+    args.emit(
+      args.flags.has("json") ? json(result) + "\n" : candleLpHuman(result),
+    );
+    if (!loop) return;
+    if (
+      result.live &&
+      result.hadFailure &&
+      !args.flags.has("continue-on-error")
+    ) {
+      throw new Error(
+        "5m LP loop stopped after a live move failure; inspect the failed position before restarting",
+      );
+    }
+    const nextAt = nextFiveMinuteRunAt(settleMs);
+    if (!args.flags.has("json")) {
+      args.emit(
+        `Next 5m rebalance check: ${new Date(nextAt).toISOString()} (Ctrl+C to stop)\n`,
+      );
+    }
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.max(250, nextAt - Date.now())),
+    );
+  }
+}
+
 export async function handleMeteoraCommand(args: {
   slrd: Solard;
   values: string[];
@@ -1550,6 +2057,7 @@ export async function handleMeteoraCommand(args: {
         `  slrd meteora close <position> --wallet <wallet> [--pool <pool>] [--live]\n` +
         `  slrd meteora close-all <pool> --wallet <wallet> [--live]\n` +
         `  slrd meteora move <position> --wallet <wallet> [--pool <pool>] [--bins N] [--haircut-bps 100] [--live]\n` +
+        `  slrd meteora lp-5m [<pool>] --wallet <wallet> [--loop] [--live] [--padding-bins 1] [--min-shift-bins 5] [--settle-ms 5000]\n` +
         `  slrd meteora migrate <position> --wallet <wallet> --to-pool <pool> [--from-pool <source-pool>] [--bins N] [--haircut-bps 100] [--live]\n` +
         `  slrd meteora claim <position> --wallet <wallet> [--kind fees|rewards|all] [--pool <pool>] [--live]\n` +
         `  slrd meteora claim-all <pool> --wallet <wallet> [--kind fees|rewards|all] [--live]\n` +
@@ -2192,6 +2700,15 @@ export async function handleMeteoraCommand(args: {
     }
     const result = await migratePosition(slrd, position, flags);
     emit(flags.has("json") ? json(result) + "\n" : migrationHuman(result));
+    return;
+  }
+
+  if (
+    action === "lp-5m" ||
+    action === "candle-lp" ||
+    action === "rebalance-5m"
+  ) {
+    await runCandleLpCommand({ slrd, values, flags, emit });
     return;
   }
 
