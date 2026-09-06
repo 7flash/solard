@@ -114,7 +114,7 @@ function humanReport(result: TokenAthDipProfitBacktestResult): string {
     "SLRD BACKTEST",
     `Mint: ${result.mint}`,
     `Strategy: ${result.strategy.name ?? result.strategy.kind}`,
-    `Tape: ${result.tape.events} usable events (${result.input.sourceRows} stored rows)`,
+    `Tape: ${result.tape.events} usable events (${result.input.sourceRows} ${result.input.source} rows)`,
     `Period: ${result.tape.firstAtMs ? new Date(result.tape.firstAtMs).toISOString() : "n/a"} -> ${result.tape.lastAtMs ? new Date(result.tape.lastAtMs).toISOString() : "n/a"}`,
     `Coverage: ${coverageLine}`,
     "",
@@ -159,6 +159,7 @@ export async function runBacktestCommand(args: {
       60_000,
     ),
     requireFromCreation: args.flags.has("require-from-start"),
+    source: args.flags.has("exact-trades") ? "trades" : "candles-1s",
   });
 
   const out = flag(args.flags, "out");

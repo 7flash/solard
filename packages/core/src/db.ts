@@ -115,6 +115,28 @@ export const TokenTradeSchema = z.object({
   updatedAtMs: z.coerce.number(),
 });
 
+export const TokenHistoryCandle1sSchema = z.object({
+  candleKey: z.string(),
+  mint: z.string(),
+  bucketAtMs: z.coerce.number(),
+  openPriceSol: z.coerce.number(),
+  highPriceSol: z.coerce.number(),
+  lowPriceSol: z.coerce.number(),
+  closePriceSol: z.coerce.number(),
+  volumeSol: z.coerce.number().default(0),
+  volumeToken: z.coerce.number().default(0),
+  buyVolumeSol: z.coerce.number().default(0),
+  sellVolumeSol: z.coerce.number().default(0),
+  buys: z.coerce.number().default(0),
+  sells: z.coerce.number().default(0),
+  trades: z.coerce.number().default(0),
+  firstSignature: z.string(),
+  lastSignature: z.string(),
+  firstSlot: z.coerce.number().default(0),
+  lastSlot: z.coerce.number().default(0),
+  updatedAtMs: z.coerce.number(),
+});
+
 export const WatchedWalletSchema = z.object({
   address: z.string(),
   label: z.string().nullable().default(null),
@@ -504,6 +526,9 @@ export const TokenPriceWindowsSchema = z.object({
 export type TerminalToken = z.infer<typeof TerminalTokenSchema>;
 
 export type TokenTrade = z.infer<typeof TokenTradeSchema>;
+export type TokenHistoryCandle1sRow = z.infer<
+  typeof TokenHistoryCandle1sSchema
+>;
 
 export type WatchedWallet = z.infer<typeof WatchedWalletSchema>;
 export type WalletTransaction = z.infer<typeof WalletTransactionSchema>;
@@ -769,6 +794,8 @@ export const db = await openDatabaseWithRetry(
       {
         terminalTokensLive: TerminalTokenSchema,
         tokenTradesV2: TokenTradeSchema,
+        tokenHistoryTradesV1: TokenTradeSchema,
+        tokenHistoryCandles1sV1: TokenHistoryCandle1sSchema,
         watchedWalletsV1: WatchedWalletSchema,
         walletTransactionsV1: WalletTransactionSchema,
         walletSwapsV1: WalletSwapSchema,
@@ -795,6 +822,8 @@ export const db = await openDatabaseWithRetry(
         unique: {
           terminalTokensLive: [["mint"]],
           tokenTradesV2: [["eventKey"]],
+          tokenHistoryTradesV1: [["eventKey"]],
+          tokenHistoryCandles1sV1: [["candleKey"]],
           watchedWalletsV1: [["address"]],
           walletTransactionsV1: [["walletTxKey"]],
           walletSwapsV1: [["eventKey"]],
@@ -835,6 +864,24 @@ export const db = await openDatabaseWithRetry(
             ["mint", "marketCapUsd"],
             ["owner", "tradedAtMs"],
             ["signature", "mint"],
+          ],
+
+          // Durable research/backtest tape. Terminal prune/reset deliberately never touches this table.
+          tokenHistoryTradesV1: [
+            ["mint", "tradedAtMs"],
+            ["tradedAtMs"],
+            ["source", "tradedAtMs"],
+            ["signature"],
+            ["eventKey"],
+            ["owner", "tradedAtMs"],
+            ["signature", "mint"],
+          ],
+
+          // Sparse one-second research tape derived from durable exact trades.
+          tokenHistoryCandles1sV1: [
+            ["mint", "bucketAtMs"],
+            ["bucketAtMs"],
+            ["mint", "lastSlot"],
           ],
 
           watchedWalletsV1: [["enabled", "updatedAtMs"], ["lastBackfillAtMs"]],

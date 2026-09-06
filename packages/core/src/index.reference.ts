@@ -14,49 +14,26 @@ export type {
 export { getSolardRpcStats, resetSolardRpcStats } from "./chain/connection.ts";
 export {
   analyzeTokenHistory,
-  analyzeTokenHistoryForensics,
-  analyzeTokenHistoryForensicsFromStore,
-  analyzeTokenHistoryForensicsWithRepository,
-  analyzeTokenHistoryTrades,
-  analyzeTokenHistoryWithRepository,
   backfillTokenHistory,
-  countTokenHistoryTrades,
   findPumpHistoryCreateMarker,
   getTokenHistoryCoverage,
   loadTokenHistoryTrades,
-  loadTokenHistoryCandles1s,
-  buildSparseTokenHistoryCandles1s,
   parsePumpHistoryTransaction,
-  runTokenHistoryBackfill,
-  TokenHistoryError,
 } from "./chain/token-history.ts";
 export type {
   AddressHistoryCoverage,
   BackfillTokenHistoryOptions,
-  NormalizedTokenHistoryRpcOptions,
   TokenHistoryAnalysis,
-  TokenHistoryFirstBuyer,
-  TokenHistoryForensics,
-  TokenHistoryForensicsOptions,
-  TokenHistoryOwnedEntry,
-  TokenHistoryOwnerPnl,
-  TokenHistoryPeriodSummary,
-  TokenHistoryBackfillDependencies,
   TokenHistoryBackfillProgress,
-  TokenHistoryCandle1s,
-  TokenHistoryClock,
-  TokenHistoryCommitment,
-  TokenHistoryConfidence,
   TokenHistoryCoverage,
+  TokenHistoryCommitment,
   TokenHistoryRaw,
-  TokenHistoryRepository,
-  TokenHistoryRpc,
-  TokenHistoryErrorCode,
   TokenHistoryScanKind,
   TokenHistorySide,
   TokenHistoryTrade,
   TokenHistoryVenue,
 } from "./chain/token-history.ts";
+
 export type { SolardRpcStats } from "./chain/connection.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
 export type { SolardOptions } from "./core/solard.ts";
@@ -297,11 +274,7 @@ export type {
 
 export {
   backtestTokenTrades,
-  backtestTokenTradesWithDependencies,
-  buildTokenBacktestTape,
   loadTokenBacktestTape,
-  loadTokenBacktestTapeWithDependencies,
-  BacktestError,
 } from "./backtest/token-backtest.ts";
 export {
   normalizeAthDipProfitStrategy,
@@ -318,8 +291,6 @@ export type {
 } from "./backtest/strategy-sim.ts";
 export type {
   TokenBacktestCoverage,
-  TokenBacktestDependencies,
-  TokenBacktestRunOptions,
   TokenBacktestTape,
   TokenBacktestTapeOptions,
   TokenAthDipProfitBacktestResult,

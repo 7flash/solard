@@ -202,10 +202,22 @@ function txWalletTokenBalances(
   return out;
 }
 
+function formatRawLocal(value: bigint, decimals: number): string {
+  const unit = 10n ** BigInt(Math.max(0, decimals));
+  const whole = value / unit;
+  const fraction = value % unit;
+  if (decimals <= 0 || fraction === 0n) return whole.toString();
+  const fractionText = fraction
+    .toString()
+    .padStart(decimals, "0")
+    .replace(/0+$/, "");
+  return `${whole.toString()}.${fractionText}`;
+}
+
 function formatSignedRaw(value: bigint, decimals: number): string {
   const sign = value > 0n ? "+" : value < 0n ? "-" : "";
   const abs = value < 0n ? -value : value;
-  return `${sign}${formatRaw(abs, decimals)}`;
+  return `${sign}${formatRawLocal(abs, decimals)}`;
 }
 function formatDurationMs(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "0ms";
@@ -316,6 +328,10 @@ External contacts (public addresses only; never signing wallets or group members
   slrd token <token_ca> [name] [--metadata-json <json>]
   slrd token set <token|ca> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>]
   slrd token refresh <token|ca>
+  slrd token backfill <ca> [--replace] [--confirmed] [--batch-size 100] [--rpc-concurrency 3] [--max-signatures N] [--json]
+                                                        Durable exact trades + sparse 1s candle materialization from creation
+  slrd token trades <ca> [--from-start] [--min-sol N] [--owner <wallet>] [--side buy|sell] [--limit N] [--json]
+  slrd token analyze <ca> [--top N] [--json]
   slrd tokens
 
 Vanity mints
@@ -341,6 +357,10 @@ Prices
   slrd price <token|ca>                              Sample current venue price
   slrd price average <token|ca> --period 15m         Average stored samples in a period
   slrd price watch <token|ca...> [--interval 1s] [--period 1m]
+
+Backtesting
+  slrd backtest <mint> --dip-pct 20 --profit-pct 40 --buy-sol 0.1 [--capital-sol 5] [--require-from-start] [--exact-trades] [--ledger] [--json]
+                                                        Replays sparse 1s candles by default; --exact-trades uses durable market fills
 
 Transfers and consolidation
   slrd transfer <contact|wallet|address> --wallet <source-wallet> --sol <amount> [--simulate-only]
@@ -628,6 +648,11 @@ async function main() {
   if (command === "buy" && flags.has("spam")) {
     const { runPumpSpamBuyFromArgs } = await import("./pump/spam-buy-cli.ts");
     await runPumpSpamBuyFromArgs(rest);
+    return;
+  }
+  if (command === "backtest") {
+    const { runBacktestCommand } = await import("./backtest-command.ts");
+    await runBacktestCommand({ values, flags, emit });
     return;
   }
   if (command === "scripts") {
@@ -1532,7 +1557,31 @@ async function main() {
       emit(json({ ...header, receipt, token }) + "\n");
       return;
     }
-    if (command === "token" && values[0] !== "set" && values[0] !== "refresh") {
+    if (
+      command === "token" &&
+      (values[0] === "backfill" ||
+        values[0] === "trades" ||
+        values[0] === "analyze")
+    ) {
+      const { runTokenHistoryCommand } =
+        await import("./token-history-command.ts");
+      await runTokenHistoryCommand({
+        slrd,
+        action: values[0]!,
+        values: values.slice(1),
+        flags,
+        emit,
+      });
+      return;
+    }
+    if (
+      command === "token" &&
+      values[0] !== "set" &&
+      values[0] !== "refresh" &&
+      values[0] !== "backfill" &&
+      values[0] !== "trades" &&
+      values[0] !== "analyze"
+    ) {
       const [mint, name] = values;
       if (!mint) throw new Error("Usage: slrd token <token_ca> [name]");
       const metadata = flags.get("metadata-json");

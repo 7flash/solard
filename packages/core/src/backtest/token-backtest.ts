@@ -1,202 +1,104 @@
-import { db, type TerminalToken, type TokenTrade } from "../db.ts";
-import { getTokenHistoryCoverage } from "../chain/token-history.ts";
+import { measure } from "../core/log.ts";
+import { measuredSync } from "../core/measured.ts";
+import {
+  defaultTokenHistoryRepository,
+  type TokenHistoryRepository,
+} from "../chain/token-history/repository.ts";
 import {
   normalizeAthDipProfitStrategy,
   simulateAthDipProfitStrategy,
   type AthDipProfitBacktestResult,
   type AthDipProfitStrategy,
-  type BacktestTapeEvent,
 } from "./strategy-sim.ts";
+import { BacktestError } from "./errors.ts";
+import {
+  buildTokenBacktestTape,
+  buildTokenBacktestTapeFromCandles,
+  type TokenBacktestCoverage,
+  type TokenBacktestTape,
+  type TokenBacktestTapeOptions,
+} from "./tape.ts";
 
 export * from "./strategy-sim.ts";
+export { BacktestError } from "./errors.ts";
+export {
+  buildTokenBacktestTape,
+  buildTokenBacktestTapeFromCandles,
+} from "./tape.ts";
+export type {
+  TokenBacktestCoverage,
+  TokenBacktestTape,
+  TokenBacktestTapeOptions,
+} from "./tape.ts";
 
-export type TokenBacktestCoverage = {
-  tokenCreatedAtMs: number | null;
-  firstRecordedTradeAtMs: number | null;
-  lastRecordedTradeAtMs: number | null;
-  creationGapMs: number | null;
-  status: "likely-from-creation" | "partial" | "unknown";
-  toleranceMs: number;
-  provenFromCreation?: boolean;
-  backfillComplete?: boolean;
-  creationSignature?: string | null;
+const m = measure("backtest");
+
+export type TokenBacktestDependencies = {
+  repository: TokenHistoryRepository;
 };
 
-export type TokenBacktestTape = {
-  mint: string;
-  sourceRows: number;
-  usableRows: number;
-  skippedDropped: number;
-  skippedNoPrice: number;
-  confidence: {
-    processed: number;
-    confirmed: number;
-    finalized: number;
-  };
-  token: TerminalToken | null;
-  coverage: TokenBacktestCoverage;
-  events: BacktestTapeEvent[];
+const defaults: TokenBacktestDependencies = {
+  repository: defaultTokenHistoryRepository,
 };
 
-function positive(value: unknown): number | null {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
+export type TokenBacktestRunOptions = TokenBacktestTapeOptions & {
+  startingSol?: number;
+  requireFromCreation?: boolean;
+};
 
-function canonicalPriceSol(row: TokenTrade): number | null {
-  const explicit = positive(row.priceSol);
-  if (explicit != null) return explicit;
-  const tokenDelta = Math.abs(Number(row.tokenDeltaUi));
-  const solDelta = Math.abs(Number(row.solDeltaUi));
-  if (
-    Number.isFinite(tokenDelta) &&
-    tokenDelta > 0 &&
-    Number.isFinite(solDelta) &&
-    solDelta > 0
-  ) {
-    return solDelta / tokenDelta;
-  }
-  return null;
-}
-
-function historyOrder(row: TokenTrade): { order: number; instruction: number } {
-  try {
-    const raw = JSON.parse(row.rawJson) as {
-      historyOrder?: unknown;
-      instructionIndex?: unknown;
-    };
-    return {
-      order: Number.isFinite(Number(raw.historyOrder))
-        ? Number(raw.historyOrder)
-        : 0,
-      instruction: Number.isFinite(Number(raw.instructionIndex))
-        ? Number(raw.instructionIndex)
-        : 0,
-    };
-  } catch {
-    return { order: 0, instruction: 0 };
-  }
+export function loadTokenBacktestTapeWithDependencies(
+  deps: TokenBacktestDependencies,
+  mintInput: string,
+  options: TokenBacktestTapeOptions = {},
+): TokenBacktestTape {
+  const mint = mintInput.trim();
+  return measuredSync(
+    m,
+    "build tape",
+    () => {
+      const historicalCoverage = deps.repository.getCoverage(mint);
+      const requestedSource = options.source ?? "candles-1s";
+      if (requestedSource === "candles-1s") {
+        const candles = deps.repository.loadCandles1s(mint);
+        if (candles.length > 0) {
+          return buildTokenBacktestTapeFromCandles({
+            mint,
+            candles,
+            historicalCoverage,
+            options,
+          });
+        }
+      }
+      return buildTokenBacktestTape({
+        mint,
+        rows: deps.repository.loadTrades(mint),
+        historicalCoverage,
+        options,
+      });
+    },
+    (tape) => ({
+      mint: tape.mint.slice(0, 8),
+      source: tape.source,
+      sourceRows: tape.sourceRows,
+      usableRows: tape.usableRows,
+      skippedNoPrice: tape.skippedNoPrice,
+      coverage: tape.coverage.status,
+    }),
+  );
 }
 
 export function loadTokenBacktestTape(
   mintInput: string,
-  options: {
-    fromMs?: number;
-    toMs?: number;
-    includeProcessed?: boolean;
-    coverageToleranceMs?: number;
-  } = {},
+  options: TokenBacktestTapeOptions = {},
 ): TokenBacktestTape {
-  const mint = mintInput.trim();
-  if (!mint) throw new Error("Token mint is required for backtest");
-  const fromMs = Math.max(0, Number(options.fromMs ?? 0) || 0);
-  const toMsRaw = Number(options.toMs ?? Number.POSITIVE_INFINITY);
-  const toMs = Number.isFinite(toMsRaw)
-    ? Math.max(0, toMsRaw)
-    : Number.POSITIVE_INFINITY;
-  const toleranceMs = Math.max(
-    0,
-    Math.trunc(options.coverageToleranceMs ?? 60_000),
-  );
-
-  const rows = (
-    db.tokenHistoryTradesV1.select().where({ mint }).all() as TokenTrade[]
-  ).sort((left, right) => {
-    const l = historyOrder(left);
-    const r = historyOrder(right);
-    return (
-      left.tradedAtMs - right.tradedAtMs ||
-      left.slot - right.slot ||
-      l.order - r.order ||
-      l.instruction - r.instruction ||
-      left.eventKey.localeCompare(right.eventKey)
-    );
-  });
-  const token =
-    (db.terminalTokensLive
-      .select()
-      .where({ mint })
-      .get() as TerminalToken | null) ?? null;
-  const historicalCoverage = getTokenHistoryCoverage(mint);
-
-  let skippedDropped = 0;
-  let skippedNoPrice = 0;
-  const confidence = { processed: 0, confirmed: 0, finalized: 0 };
-  const events: BacktestTapeEvent[] = [];
-
-  for (const row of rows) {
-    if (row.tradedAtMs < fromMs || row.tradedAtMs > toMs) continue;
-    if (row.confidence === "dropped") {
-      skippedDropped += 1;
-      continue;
-    }
-    if (row.confidence === "processed" && options.includeProcessed === false) {
-      continue;
-    }
-    if (row.confidence === "processed") confidence.processed += 1;
-    else if (row.confidence === "confirmed") confidence.confirmed += 1;
-    else if (row.confidence === "finalized") confidence.finalized += 1;
-
-    const priceSol = canonicalPriceSol(row);
-    if (priceSol == null) {
-      skippedNoPrice += 1;
-      continue;
-    }
-    events.push({
-      id: row.eventKey,
-      signature: row.signature,
-      slot: row.slot,
-      tradedAtMs: row.tradedAtMs,
-      priceSol,
-      marketCapUsd: positive(row.marketCapUsd),
-      source: row.source,
-      confidence: row.confidence,
-    });
-  }
-
-  const firstRecordedTradeAtMs = rows[0]?.tradedAtMs ?? null;
-  const lastRecordedTradeAtMs = rows.at(-1)?.tradedAtMs ?? null;
-  const tokenCreatedAtMs = historicalCoverage?.creationAtMs ?? null;
-  const creationGapMs =
-    tokenCreatedAtMs != null && firstRecordedTradeAtMs != null
-      ? Math.max(0, firstRecordedTradeAtMs - tokenCreatedAtMs)
-      : null;
-  const provenFromCreation = historicalCoverage?.fromCreation === true;
-  const backfillComplete = historicalCoverage?.complete === true;
-  const status: TokenBacktestCoverage["status"] =
-    provenFromCreation && backfillComplete
-      ? "likely-from-creation"
-      : rows.length > 0 || historicalCoverage != null
-        ? "partial"
-        : "unknown";
-
-  return {
-    mint,
-    sourceRows: rows.length,
-    usableRows: events.length,
-    skippedDropped,
-    skippedNoPrice,
-    confidence,
-    token,
-    coverage: {
-      tokenCreatedAtMs,
-      firstRecordedTradeAtMs,
-      lastRecordedTradeAtMs,
-      creationGapMs,
-      status,
-      toleranceMs,
-      provenFromCreation,
-      backfillComplete,
-      creationSignature: historicalCoverage?.creationSignature ?? null,
-    },
-    events,
-  };
+  return loadTokenBacktestTapeWithDependencies(defaults, mintInput, options);
 }
 
 export type TokenAthDipProfitBacktestResult = AthDipProfitBacktestResult & {
   mint: string;
   coverage: TokenBacktestCoverage;
   input: {
+    source: TokenBacktestTape["source"];
     sourceRows: number;
     usableRows: number;
     skippedDropped: number;
@@ -205,47 +107,75 @@ export type TokenAthDipProfitBacktestResult = AthDipProfitBacktestResult & {
   };
 };
 
-export function backtestTokenTrades(
+export function backtestTokenTradesWithDependencies(
+  deps: TokenBacktestDependencies,
   mint: string,
   inputStrategy: AthDipProfitStrategy,
-  options: {
-    startingSol?: number;
-    fromMs?: number;
-    toMs?: number;
-    includeProcessed?: boolean;
-    coverageToleranceMs?: number;
-    requireFromCreation?: boolean;
-  } = {},
+  options: TokenBacktestRunOptions = {},
 ): TokenAthDipProfitBacktestResult {
   const strategy = normalizeAthDipProfitStrategy(inputStrategy);
-  const tape = loadTokenBacktestTape(mint, options);
+  const tape = loadTokenBacktestTapeWithDependencies(deps, mint, options);
   if (tape.events.length < 2) {
-    throw new Error(
+    throw new BacktestError(
+      "INSUFFICIENT_HISTORY",
       `Backtest requires at least two usable durable historical price events for ${tape.mint}; found ${tape.events.length}. Run: slrd token backfill ${tape.mint}`,
+      { mint: tape.mint, events: tape.events.length },
     );
   }
-  if (options.requireFromCreation && !tape.coverage.provenFromCreation) {
-    throw new Error(
-      `Full-history backtest refused for ${tape.mint}: creation coverage is not proven. Run/verify: slrd token backfill ${tape.mint}`,
+  if (
+    options.requireFromCreation &&
+    (!tape.coverage.provenFromCreation || !tape.coverage.backfillComplete)
+  ) {
+    throw new BacktestError(
+      "INCOMPLETE_HISTORY",
+      `Full-history backtest refused for ${tape.mint}: durable creation coverage is incomplete. Re-run the archival backfill and resolve RPC/parser gaps.`,
+      {
+        mint: tape.mint,
+        provenFromCreation: tape.coverage.provenFromCreation,
+        backfillComplete: tape.coverage.backfillComplete,
+      },
     );
   }
-  if (options.requireFromCreation && !tape.coverage.backfillComplete) {
-    throw new Error(
-      `Full-history backtest refused for ${tape.mint}: the last backfill had missing/truncated history. Re-run the backfill without --max-signatures and fix archival RPC gaps.`,
-    );
-  }
+
+  const simulated = measuredSync(
+    m,
+    "simulate strategy",
+    () =>
+      simulateAthDipProfitStrategy(tape.events, strategy, {
+        startingSol: options.startingSol,
+      }),
+    (result) => ({
+      events: tape.events.length,
+      buys: result.summary.buys,
+      sells: result.summary.sells,
+      returnPct: result.summary.returnPct,
+      maxDrawdownPct: result.summary.maxDrawdownPct,
+    }),
+  );
   return {
     mint: tape.mint,
     coverage: tape.coverage,
     input: {
+      source: tape.source,
       sourceRows: tape.sourceRows,
       usableRows: tape.usableRows,
       skippedDropped: tape.skippedDropped,
       skippedNoPrice: tape.skippedNoPrice,
       confidence: tape.confidence,
     },
-    ...simulateAthDipProfitStrategy(tape.events, strategy, {
-      startingSol: options.startingSol,
-    }),
+    ...simulated,
   };
+}
+
+export function backtestTokenTrades(
+  mint: string,
+  inputStrategy: AthDipProfitStrategy,
+  options: TokenBacktestRunOptions = {},
+): TokenAthDipProfitBacktestResult {
+  return backtestTokenTradesWithDependencies(
+    defaults,
+    mint,
+    inputStrategy,
+    options,
+  );
 }

@@ -103,15 +103,26 @@ async function acquireRpcSlot(maxRps: number): Promise<void> {
   }
 }
 
+export type SolardRpcFetchOptions = {
+  /** Disable transport-level 429 retries when the caller owns retry/backoff. */
+  retry429?: boolean;
+};
+
 /**
- * Globally rate-limited and quiet web3.js transport.
+ * Process-wide JSON-RPC transport shared by web3.js and explicit RPC clients.
  *
- * Retries re-enter acquireRpcSlot(), so a 429 retry never bypasses the process
- * RPS ceiling.
+ * All callers pass through the same start-rate gate and stats. A subsystem that
+ * needs an observable/adaptive retry policy can set retry429=false so there is
+ * exactly one retry loop instead of stacking retries here and at the caller.
  */
-function controlledRpcFetch(): FetchFn {
+export async function solardRpcFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  options: SolardRpcFetchOptions = {},
+): Promise<Response> {
   const maxRps = envInt("SLRD_RPC_MAX_RPS", 5, 1);
-  const maxRetries = envInt("SLRD_RPC_429_RETRIES", 6, 0);
+  const maxRetries =
+    options.retry429 === false ? 0 : envInt("SLRD_RPC_429_RETRIES", 6, 0);
   const baseDelayMs = envInt("SLRD_RPC_429_BASE_DELAY_MS", 500, 1);
   const maxDelayMs = envInt("SLRD_RPC_429_MAX_DELAY_MS", 8_000, 1);
   const debug =
@@ -119,38 +130,39 @@ function controlledRpcFetch(): FetchFn {
     process.env.SLRD_RPC_RETRY_LOG === "true";
 
   rpcStats.maxRps = maxRps;
+  let attempt = 0;
 
-  return (async (input, init) => {
-    let attempt = 0;
+  while (true) {
+    await acquireRpcSlot(maxRps);
+    const response = await globalThis.fetch(input, init);
+    rpcStats.responses += 1;
 
-    while (true) {
-      await acquireRpcSlot(maxRps);
-      const response = await globalThis.fetch(input as RequestInfo | URL, init);
-      rpcStats.responses += 1;
+    if (response.status === 429) rpcStats.rateLimited429 += 1;
 
-      if (response.status === 429) {
-        rpcStats.rateLimited429 += 1;
-      }
-
-      if (response.status !== 429 || attempt >= maxRetries) {
-        if (!response.ok) rpcStats.finalHttpErrors += 1;
-        return response;
-      }
-
-      rpcStats.retries429 += 1;
-      const exponential = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
-      const delayMs = retryAfterMs(response, exponential);
-
-      if (debug) {
-        process.stderr.write(
-          `[slrd:rpc] 429 retry ${attempt + 1}/${maxRetries} after ${delayMs}ms\n`,
-        );
-      }
-
-      attempt += 1;
-      await sleep(delayMs);
+    if (response.status !== 429 || attempt >= maxRetries) {
+      if (!response.ok) rpcStats.finalHttpErrors += 1;
+      return response;
     }
-  }) as FetchFn;
+
+    rpcStats.retries429 += 1;
+    const exponential = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+    const delayMs = retryAfterMs(response, exponential);
+
+    if (debug) {
+      process.stderr.write(
+        `[slrd:rpc] 429 retry ${attempt + 1}/${maxRetries} after ${delayMs}ms\n`,
+      );
+    }
+
+    attempt += 1;
+    await sleep(delayMs);
+  }
+}
+
+/** web3.js fetch adapter using the standard Solard retry policy. */
+function controlledRpcFetch(): FetchFn {
+  return ((input, init) =>
+    solardRpcFetch(input as RequestInfo | URL, init)) as FetchFn;
 }
 
 export class SolardConnection {

@@ -1,6 +1,7 @@
 import type { Solard } from "@solard/sdk";
 import {
   analyzeTokenHistory,
+  analyzeTokenHistoryForensicsFromStore,
   backfillTokenHistory,
   getTokenHistoryCoverage,
   loadTokenHistoryTrades,
@@ -80,6 +81,22 @@ function fmtDate(ms: number | null): string {
   return ms == null ? "-" : new Date(ms).toISOString();
 }
 
+function fmtDelta(ms: number | null): string {
+  if (ms == null) return "-";
+  const sign = ms < 0 ? "-" : "+";
+  const value = Math.abs(ms);
+  if (value < 1_000) return `${sign}${value}ms`;
+  if (value < 60_000)
+    return `${sign}${(value / 1_000).toFixed(value % 1_000 === 0 ? 0 : 3)}s`;
+  if (value < 3_600_000) return `${sign}${(value / 60_000).toFixed(2)}m`;
+  return `${sign}${(value / 3_600_000).toFixed(2)}h`;
+}
+
+function signedSol(value: number): string {
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}${fmtNumber(Math.abs(value))}`;
+}
+
 function coverageText(
   coverage: ReturnType<typeof getTokenHistoryCoverage>,
 ): string {
@@ -127,7 +144,8 @@ async function runBackfill(args: {
     commitment: args.flags.has("confirmed") ? "confirmed" : "finalized",
     pageSize: numberFlag(args.flags, "page-size", 1_000),
     transactionBatchSize: numberFlag(args.flags, "batch-size", 25),
-    rpcTimeoutMs: numberFlag(args.flags, "rpc-timeout-ms", 30_000),
+    transactionConcurrency: numberFlag(args.flags, "rpc-concurrency", 1),
+    rpcTimeoutMs: numberFlag(args.flags, "rpc-timeout-ms", 20_000),
     rpcRetries: numberFlag(args.flags, "rpc-retries", 2),
     retryDelayMs: numberFlag(args.flags, "retry-delay-ms", 750),
     maxSignaturesPerAddress: numberFlag(args.flags, "max-signatures", 0),
@@ -140,9 +158,36 @@ async function runBackfill(args: {
           );
         }
       } else if (row.phase === "transactions") {
-        if (row.completed === 0 || row.completed % 250 === 0) {
+        if (
+          row.completed === row.total ||
+          row.completed <= row.batchSize ||
+          row.completed % 500 === 0
+        ) {
+          progress(`TX     ${row.completed}/${row.total}`);
+        }
+      } else if (row.phase === "retry") {
+        progress(
+          `RETRY  ${row.operation}${row.kind ? `:${row.kind}` : ""} ` +
+            `${row.attempt}/${row.maxAttempts}  ${row.error}`,
+        );
+      } else if (row.phase === "rpc-error") {
+        progress(
+          `RPCERR ${row.operation}${row.kind ? `:${row.kind}` : ""} ` +
+            `failed=${row.failedItems}  ${row.error}`,
+        );
+      } else if (row.phase === "throttle") {
+        progress(
+          `THROT  ${row.reason} wait=${row.waitMs}ms ` +
+            `batch=${row.batchSize}->${row.nextBatchSize}`,
+        );
+      } else if (row.phase === "parse") {
+        if (
+          row.completed === row.total ||
+          row.completed === 1 ||
+          row.completed % 1_000 === 0
+        ) {
           progress(
-            `TX     ${Math.min(row.completed + row.batchSize, row.total)}/${row.total}`,
+            `PARSE  ${row.completed}/${row.total} trades=${row.trades} ambiguous=${row.ambiguous}`,
           );
         }
       } else if (row.phase === "store") {
@@ -151,6 +196,8 @@ async function runBackfill(args: {
             `STORE  ${row.completed}/${row.total} inserted=${row.inserted} updated=${row.updated}`,
           );
         }
+      } else if (row.phase === "candles") {
+        progress(`1S     trades=${row.trades} sparse-candles=${row.candles}`);
       }
     },
   });
@@ -172,6 +219,7 @@ async function runBackfill(args: {
       `Missing tx:        ${result.missingTransactions}`,
       `Failed tx lookups: ${result.failedTransactions}`,
       `Stored trades:     ${result.storedTrades}`,
+      `Sparse 1s candles: ${result.storedCandles1s}`,
       `Inserted/updated:  ${result.insertedTrades}/${result.updatedTrades}`,
       `Ambiguous skipped: ${result.skippedAmbiguous}`,
       "",
@@ -253,6 +301,28 @@ function ownerSummaryLine(
   );
 }
 
+function pnlLine(
+  row: ReturnType<
+    typeof analyzeTokenHistoryForensicsFromStore
+  >["ownedPnl"][number],
+  names: Map<string, string>,
+): string {
+  const status = row.costBasisComplete ? "" : "  BASIS?";
+  const roi =
+    row.roiPct == null
+      ? "-"
+      : `${row.roiPct >= 0 ? "+" : ""}${row.roiPct.toFixed(1)}%`;
+  return (
+    `${ownerLabel(row.owner, names).padEnd(14)} ` +
+    `real=${signedSol(row.realizedPnlSol).padStart(10)}  ` +
+    `unreal=${signedSol(row.unrealizedPnlSol).padStart(10)}  ` +
+    `total=${signedSol(row.totalPnlSol).padStart(10)}  ` +
+    `costs=${fmtNumber(row.recordedExecutionCostsSol).padStart(9)}  ` +
+    `net=${signedSol(row.netPnlAfterRecordedCostsSol).padStart(10)} SOL  ` +
+    `roi=${roi}${status}`
+  );
+}
+
 function runAnalyze(args: {
   slrd: Solard;
   mint: string;
@@ -261,14 +331,23 @@ function runAnalyze(args: {
 }): void {
   const names = aliases(args.slrd);
   const owned = [...names.keys()];
-  const analysis = analyzeTokenHistory(args.mint, { ownedWallets: owned });
-  const trades = loadTokenHistoryTrades(args.mint);
   const top = Math.max(
     1,
     Math.min(100, Math.trunc(numberFlag(args.flags, "top", 10) ?? 10)),
   );
+  const first = Math.max(
+    1,
+    Math.min(100, Math.trunc(numberFlag(args.flags, "first", 20) ?? 20)),
+  );
+  const analysis = analyzeTokenHistory(args.mint, { ownedWallets: owned });
+  const forensics = analyzeTokenHistoryForensicsFromStore(args.mint, {
+    ownedWallets: owned,
+    firstBuyerLimit: first,
+    topLimit: top,
+  });
+  const trades = loadTokenHistoryTrades(args.mint);
   if (args.flags.has("json")) {
-    args.emit(`${json(analysis)}\n`);
+    args.emit(`${json({ analysis, forensics })}\n`);
     return;
   }
 
@@ -276,11 +355,6 @@ function runAnalyze(args: {
     .filter((row) => row.buySol > 0)
     .sort((a, b) => b.buySol - a.buySol)
     .slice(0, top);
-  const topSellers = [...analysis.owners]
-    .filter((row) => row.sellSol > 0)
-    .sort((a, b) => b.sellSol - a.sellSol)
-    .slice(0, top);
-  const ours = analysis.owners.filter((row) => names.has(row.owner));
   const largest = [...trades]
     .sort((a, b) => Math.abs(b.solDeltaUi) - Math.abs(a.solDeltaUi))
     .slice(0, top);
@@ -305,24 +379,102 @@ function runAnalyze(args: {
       `ATL price:        ${analysis.atlPriceSol == null ? "-" : fmtNumber(analysis.atlPriceSol, 9)} SOL/token`,
       `ATH mcap:         ${analysis.athMarketCapSol == null ? "-" : `${fmtNumber(analysis.athMarketCapSol)} SOL`}`,
       `ATL mcap:         ${analysis.atlMarketCapSol == null ? "-" : `${fmtNumber(analysis.atlMarketCapSol)} SOL`}`,
-      `First external:   ${analysis.firstExternalBuyer ? `${ownerLabel(analysis.firstExternalBuyer.owner, names)} ${fmtDate(analysis.firstExternalBuyer.tradedAtMs)} ${fmtNumber(analysis.firstExternalBuyer.solDeltaUi)} SOL` : "-"}`,
+      `Mark price:       ${forensics.markPriceSol == null ? "-" : `${fmtNumber(forensics.markPriceSol, 9)} SOL/token`}`,
     ].join("\n") + "\n",
   );
 
-  if (ours.length) {
-    args.emit("\nOUR STORED WALLETS\n");
-    for (const row of ours) args.emit(`${ownerSummaryLine(row, names)}\n`);
-  }
-  args.emit("\nTOP BUYERS\n");
-  for (const row of topBuyers) args.emit(`${ownerSummaryLine(row, names)}\n`);
-  args.emit("\nTOP SELLERS\n");
-  for (const row of topSellers) args.emit(`${ownerSummaryLine(row, names)}\n`);
-  args.emit("\nEARLIEST TRADES\n");
-  trades
-    .slice(0, top)
-    .forEach((row, index) =>
-      args.emit(`${tradeLine(row, index + 1, names)}\n`),
+  args.emit("\nFIRST BUYERS / ON-CHAIN ORDER\n");
+  args.emit(
+    " rank  uniq  who             ours   createΔ   firstΔ  slotΔ       SOL  slot\n",
+  );
+  for (const row of forensics.firstBuyers) {
+    args.emit(
+      `${String(row.buyRank).padStart(5)}  ` +
+        `${String(row.uniqueBuyerRank).padStart(4)}  ` +
+        `${ownerLabel(row.trade.owner, names).padEnd(15)} ` +
+        `${(row.owned ? "YES" : "-").padEnd(5)} ` +
+        `${fmtDelta(row.creationDeltaMs).padStart(9)} ` +
+        `${fmtDelta(row.firstBuyDeltaMs).padStart(8)} ` +
+        `${String(row.slotDeltaFromFirstBuy ?? "-").padStart(6)}  ` +
+        `${fmtNumber(Math.abs(row.trade.solDeltaUi)).padStart(8)}  ` +
+        `${row.trade.slot}\n`,
     );
+  }
+
+  args.emit("\nOUR FIRST BUY / SNIPE POSITION\n");
+  if (!forensics.ownedEntries.length) {
+    args.emit("No stored wallet has a recorded buy in this tape.\n");
+  } else {
+    for (const row of forensics.ownedEntries) {
+      args.emit(
+        `${ownerLabel(row.owner, names).padEnd(14)} ` +
+          `rank=${row.buyRank} unique=${row.uniqueBuyerRank ?? "-"}  ` +
+          `createΔ=${fmtDelta(row.creationDeltaMs)} firstΔ=${fmtDelta(row.firstBuyDeltaMs)} ` +
+          `slotΔ=${row.slotDeltaFromFirstBuy ?? "-"}  ` +
+          `external-ahead=${row.externalBuysAhead}/${row.externalUniqueBuyersAhead} ` +
+          `(${fmtNumber(row.externalBuySolAhead)} SOL)  ` +
+          `same-sec-ahead=${row.sameTimestampBuysAhead} same-slot-ahead=${row.sameSlotBuysAhead}\n`,
+      );
+    }
+    args.emit(
+      "Note: blockTime is second-resolution. Same-second ordering is reliable from history order, but not millisecond latency.\n",
+    );
+  }
+
+  args.emit("\nOUR P/L TOTAL\n");
+  args.emit(
+    `wallets=${forensics.ownedTotal.wallets}  ` +
+      `buy=${fmtNumber(forensics.ownedTotal.buySol)}  sell=${fmtNumber(forensics.ownedTotal.sellSol)}  ` +
+      `realized=${signedSol(forensics.ownedTotal.realizedPnlSol)}  ` +
+      `unrealized=${signedSol(forensics.ownedTotal.unrealizedPnlSol)}  ` +
+      `total=${signedSol(forensics.ownedTotal.totalPnlSol)}  ` +
+      `recorded-costs=${fmtNumber(forensics.ownedTotal.recordedExecutionCostsSol)}  ` +
+      `net=${signedSol(forensics.ownedTotal.netPnlAfterRecordedCostsSol)} SOL\n`,
+  );
+  if (forensics.ownedTotal.incompleteWallets) {
+    args.emit(
+      `WARNING: ${forensics.ownedTotal.incompleteWallets} stored wallet(s) have incomplete on-chain buy cost basis; their sells may include transferred-in tokens.\n`,
+    );
+  }
+
+  args.emit("\nOUR P/L BY WALLET (FIFO)\n");
+  if (!forensics.ownedPnl.length) args.emit("-\n");
+  for (const row of forensics.ownedPnl) args.emit(`${pnlLine(row, names)}\n`);
+
+  args.emit("\nTOP REALIZED WINNERS (complete recorded buy basis)\n");
+  for (const row of forensics.topRealizedWinners)
+    args.emit(`${pnlLine(row, names)}\n`);
+
+  args.emit(
+    "\nTOP MARKED WINNERS (realized + remaining inventory @ last exact price)\n",
+  );
+  for (const row of forensics.topTotalWinners)
+    args.emit(`${pnlLine(row, names)}\n`);
+
+  args.emit("\nTOP MARKED LOSERS\n");
+  for (const row of forensics.topTotalLosers)
+    args.emit(`${pnlLine(row, names)}\n`);
+
+  args.emit("\nOUR REALIZED P/L BY PERIOD FROM CREATION\n");
+  args.emit(
+    " period     mkt-buy  mkt-sell   our-buy  our-sell  realized    costs      net\n",
+  );
+  for (const row of forensics.periods) {
+    if (row.trades === 0 && row.ownedTrades === 0) continue;
+    args.emit(
+      `${row.label.padEnd(10)} ` +
+        `${fmtNumber(row.buySol).padStart(8)} ` +
+        `${fmtNumber(row.sellSol).padStart(9)} ` +
+        `${fmtNumber(row.ownedBuySol).padStart(9)} ` +
+        `${fmtNumber(row.ownedSellSol).padStart(9)} ` +
+        `${signedSol(row.ownedRealizedPnlSol).padStart(9)} ` +
+        `${fmtNumber(row.ownedRecordedExecutionCostsSol).padStart(8)} ` +
+        `${signedSol(row.ownedNetRealizedAfterRecordedCostsSol).padStart(9)}\n`,
+    );
+  }
+
+  args.emit("\nTOP BUYERS BY SOL\n");
+  for (const row of topBuyers) args.emit(`${ownerSummaryLine(row, names)}\n`);
   args.emit("\nLARGEST TRADES\n");
   largest.forEach((row, index) =>
     args.emit(`${tradeLine(row, index + 1, names)}\n`),
@@ -344,7 +496,7 @@ export async function runTokenHistoryCommand(args: {
           ? "[--replace] [--confirmed] [--json]"
           : args.action === "trades"
             ? "[--from-start] [--min-sol N] [--owner wallet] [--json]"
-            : "[--top N] [--json]"
+            : "[--top N] [--first N] [--json]"
       }`,
     );
   }
