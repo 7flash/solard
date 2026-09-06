@@ -23,6 +23,7 @@ import {
 } from "@solard/sdk";
 
 import { handleMeteoraCommand } from "./meteora-commands.ts";
+import { handleRaydiumCommand } from "./raydium-commands.ts";
 import { resolveDestinationRef } from "./refs.ts";
 
 function emit(value: string): void {
@@ -310,7 +311,7 @@ Diagnostics
   --measure-stream  Restore raw live measure-fn output for low-level debugging
 
 Trading
-  slrd swap --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui> --wallet <wallet> [--live]  Jupiter exact-input any -> any; quote-only unless --live
+  slrd swap --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui> --wallet <wallet> [--venue raydium] [--live]  Jupiter by default; native Raydium with --venue raydium
   slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]                              Compatibility: SOL -> token
   slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
@@ -323,6 +324,15 @@ Scripts (strategies stay outside the kernel)
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
+
+Raydium
+  slrd raydium quote --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui>
+  slrd raydium swap --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui> --wallet <wallet> [--live]
+  slrd raydium launchlab configs [--quote <SOL|token|mint>]
+  slrd raydium launchlab launch --wallet <wallet> --name <name> --symbol <symbol> --uri <metadata-uri> [--quote SOL|mint] [--buy <ui>] [--live]
+  slrd raydium launchlab buy|sell <mint> --wallet <wallet> [--quote SOL|mint] --amount <ui> [--live]
+  slrd raydium cpmm create --wallet <wallet> --mint-a <token|mint> --mint-b <token|mint> --amount-a <ui> --amount-b <ui> [--live]
+  slrd raydium help                              Full Raydium command reference
 
 Meteora DLMM
   slrd meteora discover --timeframe 30m --sort fee-active-tvl --limit 20
@@ -670,6 +680,11 @@ async function main() {
   try {
     if (command === "meteora") {
       await handleMeteoraCommand({ slrd, values, flags, emit });
+      return;
+    }
+
+    if (command === "raydium") {
+      await handleRaydiumCommand({ slrd, values, flags, emit });
       return;
     }
 

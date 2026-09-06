@@ -3,6 +3,7 @@ import {
   executeJupiterSwap,
   formatRaw,
   quoteJupiterSwap,
+  RaydiumService,
   resolveTradeAsset,
   sol,
   tokenAmount,
@@ -43,6 +44,28 @@ export type JupiterSwapLiveCommandResult = {
 
 export type JupiterSwapCommandResult =
   JupiterSwapQuoteCommandResult | JupiterSwapLiveCommandResult;
+
+export type RaydiumSwapCommandResult =
+  | {
+      mode: "quote";
+      route: "raydium";
+      wallet: string;
+      input: JupiterCliAsset & { amountUi: string; amountRaw: bigint };
+      output: JupiterCliAsset & {
+        expectedOutputUi: string;
+        minimumOutputUi: string;
+      };
+      quote: Awaited<ReturnType<RaydiumService["quoteExactIn"]>>;
+      hint: string;
+    }
+  | {
+      mode: "live";
+      route: "raydium";
+      wallet: string;
+      input: JupiterCliAsset & { amountUi: string; amountRaw: bigint };
+      output: JupiterCliAsset;
+      result: Awaited<ReturnType<RaydiumService["executePrepared"]>>;
+    };
 
 type RunJupiterSwapCommandArgs = {
   slrd: Solard;
@@ -124,7 +147,9 @@ export async function runJupiterSwapCommand({
   slrd,
   values,
   flags,
-}: RunJupiterSwapCommandArgs): Promise<JupiterSwapCommandResult> {
+}: RunJupiterSwapCommandArgs): Promise<
+  JupiterSwapCommandResult | RaydiumSwapCommandResult
+> {
   const request = parseJupiterSwapCliRequest(values, flags);
 
   const [input, output] = await Promise.all([
@@ -138,6 +163,66 @@ export async function runJupiterSwapCommand({
   }
 
   const amountRaw = jupiterCliAmountRaw(input, request.amountUi);
+
+  const raydiumRequested =
+    flags.has("raydium") ||
+    (flags.get("venue") ?? "").toLowerCase() === "raydium";
+  if (raydiumRequested) {
+    const raydium = new RaydiumService(slrd);
+    const slippageBps = (() => {
+      const value = flags.get("slippage-bps");
+      if (!value || value === "true") return 100;
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed))
+        throw new Error("--slippage-bps must be an integer");
+      return parsed;
+    })();
+    if (!request.live) {
+      const quote = await raydium.quoteExactIn({
+        inputMint: input.mint,
+        outputMint: output.mint,
+        amountRaw,
+        slippageBps,
+      });
+      return {
+        mode: "quote",
+        route: "raydium",
+        wallet: request.wallet,
+        input: { ...input, amountUi: request.amountUi, amountRaw },
+        output: {
+          ...output,
+          expectedOutputUi: formatRaw(quote.outputRaw, output.decimals),
+          minimumOutputUi: formatRaw(quote.minOutputRaw, output.decimals),
+        },
+        quote,
+        hint: "Re-run with --live and SOLARD_ENABLE_LIVE_TRADES=1 to execute this Raydium swap.",
+      };
+    }
+    const prepared = await raydium.buildSwapExactIn({
+      wallet: request.wallet,
+      inputMint: input.mint,
+      outputMint: output.mint,
+      amountRaw,
+      slippageBps,
+      computeUnitPriceMicroLamports:
+        flags.get("priority-micro-lamports") === "true"
+          ? undefined
+          : flags.get("priority-micro-lamports"),
+    });
+    const result = await raydium.executePrepared(prepared, {
+      live: true,
+      simulate: !flags.has("skip-simulation"),
+      skipPreflight: flags.has("skip-preflight"),
+    });
+    return {
+      mode: "live",
+      route: "raydium",
+      wallet: request.wallet,
+      input: { ...input, amountUi: request.amountUi, amountRaw },
+      output,
+      result,
+    };
+  }
 
   if (!request.live) {
     const quote = await quoteJupiterSwap({

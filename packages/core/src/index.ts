@@ -256,6 +256,17 @@ export type {
 export * as pump from "./venues/pump/pump-instructions.ts";
 export * as pumpswap from "./venues/pump/pumpswap-instructions.ts";
 
+export { RaydiumService } from "./venues/raydium/index.ts";
+export type {
+  RaydiumExecutionOptions,
+  RaydiumExecutionResult,
+  RaydiumHost,
+  RaydiumLaunchConfig,
+  RaydiumPreparedTransactions,
+  RaydiumSwapQuote,
+  RaydiumTransaction,
+} from "./venues/raydium/index.ts";
+
 export { MeteoraDlmmService } from "./venues/meteora/index.ts";
 export type {
   MeteoraDlmmHost,
