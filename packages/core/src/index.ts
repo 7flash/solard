@@ -173,6 +173,29 @@ export type {
 } from "./chain/liquidation.ts";
 
 export {
+  executeRegistryMeteoraLiquidation,
+  planRegistryMeteoraLiquidation,
+} from "./chain/meteora-liquidation.ts";
+export type {
+  RegistryMeteoraLiquidationOptions,
+  RegistryMeteoraLiquidationPlan,
+  RegistryMeteoraLiquidationResult,
+  RegistryMeteoraPosition,
+} from "./chain/meteora-liquidation.ts";
+
+export {
+  executeRegistryProgramBuffers,
+  planRegistryProgramBuffers,
+  simulateRegistryProgramBuffers,
+} from "./chain/program-buffers.ts";
+export type {
+  RegistryProgramBuffer,
+  RegistryProgramBufferOptions,
+  RegistryProgramBufferPlan,
+  RegistryProgramBufferResult,
+} from "./chain/program-buffers.ts";
+
+export {
   CANONICAL_USDC_MINT,
   NATIVE_SOL_MINT,
   nativePumpTradeAvailable,

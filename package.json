@@ -42,5 +42,8 @@
     "helix",
     "developer-tools"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@raydium-io/raydium-sdk-v2": "^0.2.63-alpha"
+  }
 }

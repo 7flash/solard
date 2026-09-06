@@ -3,12 +3,14 @@ import {
   addExternalContact,
   configureSolardMeasure,
   createSolardMeasureCollector,
+  executeRegistryProgramBuffers,
   executeRegistrySolSweep,
   executeRegistryTokenLiquidation,
   findExternalContact,
   getSolardRpcStats,
   listExternalContacts,
   loadWalletAssetPortfolio,
+  planRegistryProgramBuffers,
   planRegistrySolSweep,
   planRegistryTokenLiquidation,
   removeExternalContact,
@@ -16,6 +18,7 @@ import {
   resolveTokenMintForPolicy,
   runScript,
   listScripts,
+  simulateRegistryProgramBuffers,
   simulateRegistrySolSweep,
   simulateRegistryTokenLiquidation,
   wrappedSolAta,
@@ -206,6 +209,23 @@ function formatPrice(value: number | null | undefined): string {
     : value.toExponential(6);
 }
 
+function envEnabled(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+function requireLiveWriteGate(label: string): void {
+  const enabled =
+    envEnabled("SOLARD_ENABLE_LIVE_TRADES") ||
+    envEnabled("SOLWAL_ENABLE_LIVE_TRADES") ||
+    envEnabled("SLRD_ENABLE_LIVE_TRADES");
+  if (!enabled) {
+    throw new Error(
+      `${label} live execution requires SOLARD_ENABLE_LIVE_TRADES=1`,
+    );
+  }
+}
+
 function csv(value: string | undefined): string[] {
   return (value ?? "")
     .split(",")
@@ -300,6 +320,10 @@ Token liquidation
   slrd liquidate tokens --except <token|mint> [--wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--simulate | --live]
                                                         Sell supported tokens except protected mint(s); unwrap WSOL; close unprotected zero-balance token accounts and reclaim rent
 
+Cleanup
+  slrd cleanup program-buffers [--wallets <a,b,...>] [--simulate | --live] [--json]
+                                                        Find upgradeable-loader buffers controlled by stored wallets and reclaim their rent
+
 RPC
   All Solard JSON-RPC traffic is globally rate-limited to 5 req/s by default.
   Override only when your provider allows it: SLRD_RPC_MAX_RPS=<n>
@@ -324,6 +348,7 @@ Scripts (strategies stay outside the kernel)
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
+  slrd run examples/meteora-liquidity-agent.ts --pool <pool> --wallet <wallet> [--sol 0.1] [--loop] [--live]
 
 Raydium
   slrd raydium quote --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui>
@@ -342,12 +367,14 @@ Meteora DLMM
   slrd meteora pool <pool> [--timeframe 30m]
   slrd meteora candles <pool> [--timeframe 5m]
   slrd meteora positions --wallet <wallet|address>
+  slrd meteora positions --all-wallets
   slrd meteora open <pool> --wallet <wallet> --sol 0.1 --bins 40 [--strategy spot] [--live]
   slrd meteora move <position> --wallet <wallet> [--bins 10] [--live]
-  slrd meteora lp-5m [<pool>] --wallet <wallet> [--loop] [--live]
   slrd meteora migrate <position> --wallet <wallet> --to-pool <pool> [--bins 10] [--live]
   slrd meteora add|remove|claim|close <position> --wallet <wallet> [--live]
   slrd meteora close-all <pool> --wallet <wallet> [--live]
+  slrd meteora close-all --wallet <wallet> --all-pools [--live]
+  slrd meteora close-all --all-wallets --all-pools [--live]
   slrd meteora quote <pool> (--in-x N|--in-y N|--out-x N|--out-y N)
   slrd meteora swap <pool> --wallet <wallet> (--in-x N|--in-y N|--out-x N|--out-y N) [--live]
   slrd meteora help                              Full Meteora command reference
@@ -1594,6 +1621,74 @@ async function main() {
       );
       return;
     }
+    if (
+      command === "cleanup" &&
+      ["program-buffers", "buffers"].includes(values[0] ?? "")
+    ) {
+      if (flags.has("simulate") && flags.has("live")) {
+        throw new Error("Use either --simulate or --live, not both");
+      }
+      const walletRefs = csv(flags.get("wallets"));
+      const options = {
+        walletRefs: walletRefs.length ? walletRefs : undefined,
+        delayMs: Math.max(0, Math.trunc(int(flags, "delay-ms", 100) ?? 100)),
+      };
+      const plan = await planRegistryProgramBuffers(slrd, options);
+      if (flags.has("json") && !flags.has("simulate") && !flags.has("live")) {
+        emit(json(plan) + "\n");
+        return;
+      }
+
+      const mode = flags.has("live")
+        ? "LIVE"
+        : flags.has("simulate")
+          ? "SIMULATE"
+          : "PLAN";
+      if (!flags.has("json")) {
+        emit(
+          `PROGRAM BUFFERS ${mode}\n` +
+            `Wallets scanned: ${plan.walletsScanned}\n` +
+            `Buffers: ${plan.buffers.length}\n` +
+            `Reclaimable: ${formatRaw(plan.reclaimableLamports, 9)} SOL\n`,
+        );
+        if (plan.buffers.length) {
+          emit("\nWALLET            RECLAIM SOL       BUFFER\n");
+          for (const row of plan.buffers) {
+            emit(
+              `${row.walletName.slice(0, 16).padEnd(17)} ` +
+                `${formatRaw(row.lamports, 9).padStart(15)}  ${row.buffer}\n`,
+            );
+          }
+        }
+        for (const row of plan.scanErrors) {
+          emit(`SCAN FAIL @${row.walletName}: ${row.error}\n`);
+        }
+      }
+
+      if (!flags.has("simulate") && !flags.has("live")) {
+        if (!flags.has("json")) {
+          emit(`\n${OWL} plan only. Use --simulate, then --live.\n`);
+        }
+        return;
+      }
+
+      if (flags.has("live")) requireLiveWriteGate("Program-buffer cleanup");
+      const results = flags.has("simulate")
+        ? await simulateRegistryProgramBuffers(slrd, plan, options)
+        : await executeRegistryProgramBuffers(slrd, plan, options);
+      if (flags.has("json")) {
+        emit(json({ mode: mode.toLowerCase(), plan, results }) + "\n");
+        return;
+      }
+      const failed = results.filter((row) => Boolean(row.error)).length;
+      const ok = results.length - failed;
+      emit(`\nDONE     ok=${ok}  failed=${failed}\n`);
+      for (const row of results.filter((item) => item.error)) {
+        emit(`FAIL     ${row.buffer.buffer}  ${row.error}\n`);
+      }
+      return;
+    }
+
     if (command === "liquidate" && (values[0] ?? "tokens") === "tokens") {
       const except = csv(flags.get("except"));
       if (except.length === 0) {
