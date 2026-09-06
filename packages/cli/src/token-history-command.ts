@@ -143,8 +143,8 @@ async function runBackfill(args: {
   const result = await backfillTokenHistory(args.slrd.connection(), args.mint, {
     commitment: args.flags.has("confirmed") ? "confirmed" : "finalized",
     pageSize: numberFlag(args.flags, "page-size", 1_000),
-    transactionBatchSize: numberFlag(args.flags, "batch-size", 25),
-    transactionConcurrency: numberFlag(args.flags, "rpc-concurrency", 1),
+    transactionBatchSize: numberFlag(args.flags, "batch-size", 100),
+    transactionConcurrency: numberFlag(args.flags, "rpc-concurrency", 3),
     rpcTimeoutMs: numberFlag(args.flags, "rpc-timeout-ms", 20_000),
     rpcRetries: numberFlag(args.flags, "rpc-retries", 2),
     retryDelayMs: numberFlag(args.flags, "retry-delay-ms", 750),

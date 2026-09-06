@@ -41,9 +41,16 @@ export type MeteoraAutopilotRiskConfig = {
 
 export type MeteoraAutopilotStrategyConfig = {
   strategy: Exclude<MeteoraStrategy, "curve">;
+  /** Fixed range is the legacy behavior. previous-5m-candle retargets open LPs to the last fully closed 5m candle. */
+  rangePolicy: "fixed" | "previous-5m-candle";
   minTotalBins: number;
   defaultBinsBelow: number;
   defaultBinsAbove: number;
+  candlePaddingBins: number;
+  /** Ignore tiny candle-to-candle target changes to avoid needless close/reopen churn. */
+  minRangeShiftBins: number;
+  /** Skip a candle rebalance when the active bin has broken too far beyond the previous candle. */
+  maxBreakoutBins: number;
   slippageBps: number;
 };
 

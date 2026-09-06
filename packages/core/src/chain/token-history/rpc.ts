@@ -41,6 +41,26 @@ type TransactionBatchResult = {
   rateLimited: boolean;
 };
 
+type AddressHistoryFullRow = ParsedTransactionWithMeta & {
+  transactionIndex?: number;
+};
+
+type AddressHistoryFullResult = {
+  data?: AddressHistoryFullRow[];
+  paginationToken?: string | null;
+};
+
+type AddressHistoryWindow = {
+  address: string;
+  signatures: Set<string>;
+  minSlot: number;
+  maxSlot: number;
+};
+
+class HistoryUnsupportedMethodError extends Error {
+  readonly name = "HistoryUnsupportedMethodError";
+}
+
 class HistoryRateLimitError extends Error {
   readonly name = "HistoryRateLimitError";
   constructor(
@@ -230,6 +250,8 @@ function mergeBatchResults(
 
 export class SolanaTokenHistoryRpc implements TokenHistoryRpc {
   private transactionCooldownUntilMs = 0;
+  private addressHistoryFastPath: "unknown" | "supported" | "unsupported" =
+    "unknown";
 
   constructor(private readonly connection: Connection) {}
 
@@ -579,6 +601,330 @@ export class SolanaTokenHistoryRpc implements TokenHistoryRpc {
     );
   }
 
+  private transactionSignature(tx: ParsedTransactionWithMeta): string | null {
+    const signature = (tx.transaction as any)?.signatures?.[0];
+    return typeof signature === "string" && signature ? signature : null;
+  }
+
+  private addressHistoryWindows(
+    signatures: readonly TokenHistoryScanSignature[],
+  ): AddressHistoryWindow[] {
+    const byAddress = new Map<string, TokenHistoryScanSignature[]>();
+    for (const row of signatures) {
+      const rows = byAddress.get(row.scanAddress) ?? [];
+      rows.push(row);
+      byAddress.set(row.scanAddress, rows);
+    }
+
+    // Keep each full-history cursor reasonably small so --rpc-concurrency can
+    // parallelize a very hot address. Windows intentionally overlap one slot at
+    // boundaries; results are deduplicated by signature, which avoids dropping
+    // transactions when many entries share the same slot.
+    const targetPerWindow = 5_000;
+    const windows: AddressHistoryWindow[] = [];
+    for (const [address, rawRows] of byAddress) {
+      const rows = [...rawRows].sort(
+        (left, right) =>
+          left.slot - right.slot ||
+          left.localChronologicalOrder - right.localChronologicalOrder,
+      );
+      let start = 0;
+      while (start < rows.length) {
+        let end = Math.min(rows.length, start + targetPerWindow);
+        if (end < rows.length) {
+          const boundarySlot = rows[end - 1]!.slot;
+          while (end < rows.length && rows[end]!.slot === boundarySlot)
+            end += 1;
+        }
+        const slice = rows.slice(start, end);
+        windows.push({
+          address,
+          signatures: new Set(slice.map((row) => row.signature)),
+          minSlot: slice[0]!.slot,
+          maxSlot: slice.at(-1)!.slot,
+        });
+        start = end;
+      }
+    }
+    return windows;
+  }
+
+  private async addressHistoryFullPage(args: {
+    window: AddressHistoryWindow;
+    paginationToken?: string | null;
+    options: NormalizedTokenHistoryRpcOptions;
+  }): Promise<AddressHistoryFullResult> {
+    const { window, paginationToken, options } = args;
+    return await measured(
+      m,
+      "transactions address page",
+      async () => {
+        await this.waitForTransactionCooldown();
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(),
+          options.rpcTimeoutMs,
+        );
+        try {
+          const response = await solardRpcFetch(
+            this.connection.rpcEndpoint,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "getTransactionsForAddress",
+                params: [
+                  window.address,
+                  {
+                    transactionDetails: "full",
+                    sortOrder: "asc",
+                    commitment: options.commitment,
+                    // Helius currently caps full transaction pages at 100.
+                    limit: 100,
+                    encoding: "jsonParsed",
+                    maxSupportedTransactionVersion: 0,
+                    filters: {
+                      status: "succeeded",
+                      slot: { gte: window.minSlot, lte: window.maxSlot },
+                    },
+                    ...(paginationToken ? { paginationToken } : {}),
+                  },
+                ],
+              }),
+              signal: controller.signal,
+            },
+            { retry429: false },
+          );
+
+          if (response.status === 429) {
+            const waitMs = retryAfterMs(response, options.retryDelayMs);
+            throw new HistoryRateLimitError(
+              "429 Too Many Requests from getTransactionsForAddress",
+              waitMs,
+            );
+          }
+
+          const payload = (await response.json().catch(() => null)) as {
+            result?: AddressHistoryFullResult | null;
+            error?: JsonRpcError;
+          } | null;
+          const rpcError = payload?.error;
+          const unsupportedMessage = rpcError?.message ?? "";
+          if (
+            rpcError?.code === -32601 ||
+            /method not found|unsupported|not available|not enabled|upgrade.*plan/i.test(
+              unsupportedMessage,
+            )
+          ) {
+            throw new HistoryUnsupportedMethodError(
+              unsupportedMessage || "getTransactionsForAddress is unsupported",
+            );
+          }
+          if (!response.ok) {
+            // Some providers reject unknown/private RPC methods at the HTTP
+            // layer instead of returning JSON-RPC -32601. Treat 400/403/404 as
+            // an unavailable fast path and preserve the standard fallback.
+            if ([400, 403, 404].includes(response.status)) {
+              throw new HistoryUnsupportedMethodError(
+                `getTransactionsForAddress unavailable (HTTP ${response.status})`,
+              );
+            }
+            throw new HistoryHttpError(
+              `getTransactionsForAddress HTTP ${response.status}: ${response.statusText}`,
+              response.status,
+            );
+          }
+
+          if (rpcError) {
+            if (
+              rpcError.code === -32601 ||
+              /method not found|unsupported/i.test(rpcError.message ?? "")
+            ) {
+              throw new HistoryUnsupportedMethodError(
+                rpcError.message ?? "getTransactionsForAddress is unsupported",
+              );
+            }
+            if (rpcErrorLooksRateLimited(rpcError)) {
+              throw new HistoryRateLimitError(
+                rpcError.message ?? "getTransactionsForAddress rate limited",
+                options.retryDelayMs,
+              );
+            }
+            throw new Error(
+              `getTransactionsForAddress RPC ${rpcError.code ?? "error"}: ${rpcError.message ?? "unknown error"}`,
+            );
+          }
+          return payload?.result ?? {};
+        } catch (error) {
+          if ((error as { name?: unknown })?.name === "AbortError") {
+            throw new TokenHistoryError(
+              "RPC_TIMEOUT",
+              `getTransactionsForAddress timed out after ${options.rpcTimeoutMs}ms`,
+              {
+                stage: "transactions",
+                recoverable: true,
+                context: {
+                  address: window.address,
+                  minSlot: window.minSlot,
+                  maxSlot: window.maxSlot,
+                },
+                cause: error,
+              },
+            );
+          }
+          throw error;
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+      (result) => ({
+        address: window.address.slice(0, 8),
+        requested: window.signatures.size,
+        returned: result.data?.length ?? 0,
+        paginated: paginationToken != null,
+      }),
+    );
+  }
+
+  private async fetchAddressHistoryWindow(
+    window: AddressHistoryWindow,
+    options: NormalizedTokenHistoryRpcOptions,
+  ): Promise<Map<string, ParsedTransactionWithMeta>> {
+    const found = new Map<string, ParsedTransactionWithMeta>();
+    let paginationToken: string | null | undefined;
+    do {
+      let result: AddressHistoryFullResult | null = null;
+      let lastError: unknown;
+      const maxAttempts = options.rpcRetries + 1;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          result = await this.addressHistoryFullPage({
+            window,
+            paginationToken,
+            options,
+          });
+          break;
+        } catch (error) {
+          if (error instanceof HistoryUnsupportedMethodError) throw error;
+          lastError = error;
+          const rateLimited = errorLooksRateLimited(error);
+          const floorMs =
+            error instanceof HistoryRateLimitError ? error.retryAfterMs : 0;
+          const waitMs = backoffMs(options, attempt, floorMs);
+          if (rateLimited) this.noteRateLimit(waitMs);
+          if (attempt >= maxAttempts) break;
+          options.onProgress?.({
+            phase: "retry",
+            operation: "transactions",
+            attempt,
+            maxAttempts,
+            error: messageOf(error),
+          });
+          await measuredBackoff({
+            operation: "transactions",
+            waitMs,
+            reason: rateLimited ? "rate-limit" : "rpc-error",
+          });
+        }
+      }
+      if (!result) {
+        throw tokenHistoryError(lastError, {
+          code: "RPC_FAILED",
+          message: `getTransactionsForAddress failed after ${maxAttempts} attempt(s)`,
+          stage: "transactions",
+          recoverable: true,
+          context: {
+            address: window.address,
+            minSlot: window.minSlot,
+            maxSlot: window.maxSlot,
+          },
+        });
+      }
+
+      for (const tx of result.data ?? []) {
+        const signature = this.transactionSignature(tx);
+        if (signature && window.signatures.has(signature))
+          found.set(signature, tx);
+      }
+      paginationToken = result.paginationToken;
+      if (!result.data?.length) break;
+      if (found.size >= window.signatures.size) break;
+    } while (paginationToken);
+
+    return found;
+  }
+
+  private async fetchTransactionsViaAddressHistory(
+    signatures: readonly TokenHistoryScanSignature[],
+    options: NormalizedTokenHistoryRpcOptions,
+  ): Promise<TokenHistoryTransactionFetchResult | null> {
+    if (
+      this.addressHistoryFastPath === "unsupported" ||
+      signatures.length === 0
+    )
+      return null;
+
+    const windows = this.addressHistoryWindows(signatures);
+    const bySignature = new Map<string, ParsedTransactionWithMeta>();
+    let nextWindow = 0;
+    let completed = 0;
+    let unsupported = false;
+    let fatal: unknown = null;
+
+    const worker = async (): Promise<void> => {
+      while (!unsupported && !fatal) {
+        const index = nextWindow++;
+        const window = windows[index];
+        if (!window) return;
+        try {
+          const found = await this.fetchAddressHistoryWindow(window, options);
+          for (const [signature, tx] of found) bySignature.set(signature, tx);
+          completed += found.size;
+          options.onProgress?.({
+            phase: "transactions",
+            completed: Math.min(completed, signatures.length),
+            total: signatures.length,
+            batchSize: window.signatures.size,
+          });
+        } catch (error) {
+          if (error instanceof HistoryUnsupportedMethodError) {
+            unsupported = true;
+            return;
+          }
+          fatal = error;
+          return;
+        }
+      }
+    };
+
+    await Promise.all(
+      Array.from(
+        {
+          length: Math.min(
+            options.transactionConcurrency,
+            Math.max(1, windows.length),
+          ),
+        },
+        () => worker(),
+      ),
+    );
+
+    if (unsupported) {
+      this.addressHistoryFastPath = "unsupported";
+      return null;
+    }
+    if (fatal) throw fatal;
+    this.addressHistoryFastPath = "supported";
+
+    let missingTransactions = 0;
+    for (const row of signatures) {
+      if (!bySignature.has(row.signature)) missingTransactions += 1;
+    }
+    return { bySignature, missingTransactions, failedTransactions: 0 };
+  }
+
   async fetchTransactions(
     signatures: readonly TokenHistoryScanSignature[],
     options: NormalizedTokenHistoryRpcOptions,
@@ -587,20 +933,36 @@ export class SolanaTokenHistoryRpc implements TokenHistoryRpc {
       m,
       "transactions pipeline",
       async () => {
-        const bySignature = new Map<string, ParsedTransactionWithMeta>();
+        const fast = await this.fetchTransactionsViaAddressHistory(
+          signatures,
+          options,
+        );
+        const bySignature = new Map<string, ParsedTransactionWithMeta>(
+          fast?.bySignature ?? [],
+        );
+        const remaining = fast
+          ? signatures.filter((row) => !bySignature.has(row.signature))
+          : [...signatures];
+        if (remaining.length === 0) {
+          return { bySignature, missingTransactions: 0, failedTransactions: 0 };
+        }
+
+        // The fast address-history path is best-effort. Any rows it did not
+        // return are repaired through the generic batched getTransaction path,
+        // so provider quirks or archival gaps cannot silently lose history.
         let missingTransactions = 0;
         let failedTransactions = 0;
-        let completed = 0;
+        let completed = signatures.length - remaining.length;
         let serializeAfterRateLimit = false;
 
         const batches: TokenHistoryScanSignature[][] = [];
         for (
           let offset = 0;
-          offset < signatures.length;
+          offset < remaining.length;
           offset += options.transactionBatchSize
         ) {
           batches.push(
-            signatures.slice(offset, offset + options.transactionBatchSize),
+            remaining.slice(offset, offset + options.transactionBatchSize),
           );
         }
 

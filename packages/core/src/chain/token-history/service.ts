@@ -48,11 +48,11 @@ export function normalizeTokenHistoryRpcOptions(
     pageSize: Math.max(1, Math.min(1_000, Math.trunc(input.pageSize ?? 1_000))),
     transactionBatchSize: Math.max(
       1,
-      Math.min(100, Math.trunc(input.transactionBatchSize ?? 25)),
+      Math.min(100, Math.trunc(input.transactionBatchSize ?? 100)),
     ),
     transactionConcurrency: Math.max(
       1,
-      Math.min(5, Math.trunc(input.transactionConcurrency ?? 1)),
+      Math.min(5, Math.trunc(input.transactionConcurrency ?? 3)),
     ),
     rpcTimeoutMs: Math.max(1_000, Math.trunc(input.rpcTimeoutMs ?? 20_000)),
     rpcRetries: Math.max(0, Math.min(10, Math.trunc(input.rpcRetries ?? 2))),

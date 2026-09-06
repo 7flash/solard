@@ -64,9 +64,13 @@ export const DEFAULT_METEORA_AUTOPILOT_CONFIG: MeteoraAutopilotConfig = {
   },
   strategy: {
     strategy: "bid_ask",
+    rangePolicy: "previous-5m-candle",
     minTotalBins: 35,
     defaultBinsBelow: 50,
     defaultBinsAbove: 0,
+    candlePaddingBins: 1,
+    minRangeShiftBins: 5,
+    maxBreakoutBins: 50,
     slippageBps: 300,
   },
   management: {
@@ -273,11 +277,16 @@ function validateConfig(config: MeteoraAutopilotConfig): void {
   const st = config.strategy;
   if (st.strategy !== "spot" && st.strategy !== "bid_ask")
     throw new Error("strategy.strategy must be spot or bid_ask for autopilot");
+  if (st.rangePolicy !== "fixed" && st.rangePolicy !== "previous-5m-candle")
+    throw new Error("strategy.rangePolicy must be fixed or previous-5m-candle");
   assertInteger("strategy.minTotalBins", st.minTotalBins, 2);
   assertInteger("strategy.defaultBinsBelow", st.defaultBinsBelow, 0);
   assertInteger("strategy.defaultBinsAbove", st.defaultBinsAbove, 0);
   if (st.defaultBinsBelow + st.defaultBinsAbove < st.minTotalBins)
     throw new Error("strategy default range is smaller than minTotalBins");
+  assertInteger("strategy.candlePaddingBins", st.candlePaddingBins, 0, 10_000);
+  assertInteger("strategy.minRangeShiftBins", st.minRangeShiftBins, 0, 10_000);
+  assertInteger("strategy.maxBreakoutBins", st.maxBreakoutBins, 0, 100_000);
   assertInteger("strategy.slippageBps", st.slippageBps, 0, 10_000);
 
   const m = config.management;
@@ -781,6 +790,84 @@ export class MeteoraAutopilot {
     return { candidates, rejected, totalDiscovered: discovered.total };
   }
 
+  private async previousClosedCandleRange(pool: string): Promise<{
+    candleTimestamp: number;
+    candleLow: number;
+    candleHigh: number;
+    candleClose: number;
+    activeBin: number;
+    minBinId: number;
+    maxBinId: number;
+    breakoutBins: number;
+  } | null> {
+    const config = this.config();
+    if (config.strategy.rangePolicy !== "previous-5m-candle") return null;
+
+    const candleSeconds = 5 * 60;
+    const nowSeconds = Math.floor(Date.now() / 1_000);
+    const currentBucketStart =
+      Math.floor(nowSeconds / candleSeconds) * candleSeconds;
+    const startTime = currentBucketStart - candleSeconds * 4;
+    const endTime = currentBucketStart - 1;
+
+    const [ohlcv, active] = await Promise.all([
+      this.service.getPoolOhlcv(pool, {
+        timeframe: "5m",
+        startTime,
+        endTime,
+      }),
+      this.service.getActiveBin(pool, true),
+    ]);
+    const candle = [...ohlcv.candles]
+      .filter((row) => row.timestamp < currentBucketStart)
+      .sort((left, right) => left.timestamp - right.timestamp)
+      .at(-1);
+    if (!candle) return null;
+
+    let [minBinId, maxBinId] = await Promise.all([
+      this.service.getBinIdFromPrice(pool, candle.low, true),
+      this.service.getBinIdFromPrice(pool, candle.high, false),
+    ]);
+    minBinId -= config.strategy.candlePaddingBins;
+    maxBinId += config.strategy.candlePaddingBins;
+
+    const activeBin = active.binId;
+    const breakoutBins =
+      activeBin < minBinId
+        ? minBinId - activeBin
+        : activeBin > maxBinId
+          ? activeBin - maxBinId
+          : 0;
+    if (breakoutBins > config.strategy.maxBreakoutBins) return null;
+
+    // The replacement must contain the current active bin. A small breakout is
+    // absorbed into the new range; a large breakout was rejected above.
+    minBinId = Math.min(minBinId, activeBin);
+    maxBinId = Math.max(maxBinId, activeBin);
+
+    const width = maxBinId - minBinId + 1;
+    if (width < config.strategy.minTotalBins) {
+      let missing = config.strategy.minTotalBins - width;
+      const below = Math.floor(missing / 2);
+      const above = missing - below;
+      minBinId -= below;
+      maxBinId += above;
+      missing = config.strategy.minTotalBins - (maxBinId - minBinId + 1);
+      if (missing > 0) maxBinId += missing;
+    }
+
+    return {
+      candleTimestamp: candle.timestamp,
+      candleLow: candle.low,
+      candleHigh: candle.high,
+      candleClose: candle.close,
+      activeBin,
+      minBinId,
+      maxBinId,
+      breakoutBins,
+    };
+  }
+
   private syncTrackedPositions(
     state: MeteoraAutopilotState,
     positions: MeteoraPositionSnapshot[],
@@ -827,7 +914,7 @@ export class MeteoraAutopilot {
 
     for (const position of walletPositions.positions) {
       const tracked = state.positions[position.position]!;
-      const [pnlRaw, healthRaw] = await Promise.all([
+      const [pnlRaw, healthRaw, candleTarget] = await Promise.all([
         this.service
           .getPositionPnl({
             pool: position.pool,
@@ -839,6 +926,7 @@ export class MeteoraAutopilot {
         this.service
           .getPoolDetail(position.pool, config.management.healthTimeframe)
           .catch(() => null),
+        this.previousClosedCandleRange(position.pool).catch(() => null),
       ]);
       const pnl = extractPnl(pnlRaw);
       const health = extractHealth(healthRaw);
@@ -846,6 +934,15 @@ export class MeteoraAutopilot {
         tracked.outOfRangeSince == null
           ? 0
           : Math.max(0, Math.floor((now - tracked.outOfRangeSince) / 60_000));
+      const rangeShiftBins =
+        candleTarget != null &&
+        position.lowerBin != null &&
+        position.upperBin != null
+          ? Math.max(
+              Math.abs(candleTarget.minBinId - position.lowerBin),
+              Math.abs(candleTarget.maxBinId - position.upperBin),
+            )
+          : null;
       const metrics = {
         inRange: position.inRange,
         minutesOutOfRange: minutesOut,
@@ -854,6 +951,15 @@ export class MeteoraAutopilot {
         feesUsd: pnl.feesUsd,
         tvl: health.tvl,
         volume: health.volume,
+        candleTimestamp: candleTarget?.candleTimestamp ?? null,
+        candleLow: candleTarget?.candleLow ?? null,
+        candleHigh: candleTarget?.candleHigh ?? null,
+        candleClose: candleTarget?.candleClose ?? null,
+        activeBin: candleTarget?.activeBin ?? position.activeBin,
+        targetMinBinId: candleTarget?.minBinId ?? null,
+        targetMaxBinId: candleTarget?.maxBinId ?? null,
+        breakoutBins: candleTarget?.breakoutBins ?? null,
+        rangeShiftBins,
       };
 
       let wanted: MeteoraAutopilotPlannedAction | null = null;
@@ -910,6 +1016,23 @@ export class MeteoraAutopilot {
           position: position.position,
           reason: `pool volume ${health.volume} below health floor ${config.management.minHealthVolume}`,
           priority: 85,
+          metrics,
+          note: tracked.instruction,
+        };
+      } else if (
+        candleTarget != null &&
+        rangeShiftBins != null &&
+        rangeShiftBins >= config.strategy.minRangeShiftBins
+      ) {
+        const canAutoRebalance = config.management.allowAutoRebalance;
+        wanted = {
+          kind: canAutoRebalance ? "rebalance" : "review",
+          pool: position.pool,
+          position: position.position,
+          reason: canAutoRebalance
+            ? `previous closed 5m candle moved target range by ${rangeShiftBins} bins`
+            : `previous closed 5m candle moved target range by ${rangeShiftBins} bins; automatic rebalance is disabled`,
+          priority: 82,
           metrics,
           note: tracked.instruction,
         };
@@ -1109,6 +1232,36 @@ export class MeteoraAutopilot {
         "Automatic rebalance is disabled; set management.allowAutoRebalance=true to enable it",
       );
     if (!action.position) throw new Error("Rebalance action requires position");
+
+    const targetMinBinId =
+      typeof action.metrics?.targetMinBinId === "number"
+        ? Math.trunc(action.metrics.targetMinBinId)
+        : null;
+    const targetMaxBinId =
+      typeof action.metrics?.targetMaxBinId === "number"
+        ? Math.trunc(action.metrics.targetMaxBinId)
+        : null;
+    if (targetMinBinId != null && targetMaxBinId != null) {
+      if (targetMinBinId > targetMaxBinId)
+        throw new Error("Candle rebalance target range is inverted");
+      const moved = await this.service.movePositionFromSource(
+        {
+          wallet: this.wallet,
+          pool: action.pool,
+          position: action.position,
+          strategy: config.strategy.strategy,
+          minBinId: targetMinBinId,
+          maxBinId: targetMaxBinId,
+          slippageBps: config.strategy.slippageBps,
+        },
+        options,
+      );
+      return {
+        signatures: [...moved.close.signatures, ...moved.open.signatures],
+        position: moved.targetPosition,
+      };
+    }
+
     const position = await this.service.getPosition(
       action.pool,
       action.position,
