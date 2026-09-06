@@ -8,6 +8,10 @@ import type {
   WalletRow,
 } from "../db/schema.ts";
 import type { SimulationResult, SubmittedPlan } from "../tx/types.ts";
+import type {
+  JupiterSwapExecuteResult,
+  JupiterSwapQuote,
+} from "../chain/jupiter-swap-types.ts";
 
 export function short(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -98,5 +102,54 @@ export function submittedPlanLog(result: SubmittedPlan) {
     executionId: result.executionId,
     bytes: result.plan.serializedSize,
     actions: result.plan.draft.actions.length,
+  };
+}
+export function jupiterQuoteLog(result: JupiterSwapQuote) {
+  return {
+    inputMint: short(result.inputMint),
+    outputMint: short(result.outputMint),
+    amountRaw: result.amountRaw.toString(),
+    outAmountRaw: result.outAmountRaw.toString(),
+    router: result.router,
+    feeBps: result.feeBps,
+    feeMint: short(result.feeMint),
+  };
+}
+
+export function jupiterExecuteLog(result: JupiterSwapExecuteResult) {
+  return {
+    status: result.status,
+    code: result.code,
+    signature: short(result.signature),
+    inputAmount: result.inputAmountResult ?? result.totalInputAmount ?? null,
+    outputAmount: result.outputAmountResult ?? result.totalOutputAmount ?? null,
+    error: result.error ?? null,
+  };
+}
+
+export function tradeAssetLog(result: {
+  kind: "sol" | "token";
+  symbol: string | null;
+  decimals: number;
+  tokenProgram: string | null;
+}) {
+  return {
+    kind: result.kind,
+    symbol: result.symbol,
+    decimals: result.decimals,
+    tokenProgram: short(result.tokenProgram),
+  };
+}
+
+export function tradeRouteResolutionLog(result: {
+  route: "native" | "jupiter";
+  asset: { kind: "sol" | "token" };
+  token: { venueHint: string | null } | null;
+}) {
+  return {
+    route: result.route,
+    assetKind: result.asset.kind,
+    registered: result.token !== null,
+    venue: result.token?.venueHint ?? null,
   };
 }

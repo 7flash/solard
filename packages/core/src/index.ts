@@ -1,8 +1,11 @@
 export {
   configureSolardMeasure,
+  createSolardMeasure,
   createSolardMeasureCollector,
   measure,
+  compactId,
   shortKey,
+  summarizeError,
 } from "./core/log.ts";
 export type {
   SolardMeasureCollector,
@@ -144,6 +147,8 @@ export { TokenRepo } from "./db/token-repo.ts";
 export { PriceRepo } from "./db/price-repo.ts";
 export { openDatabase, closeDatabase, resolveDbPath } from "./db/database.ts";
 export {
+  executeJupiterSwap,
+  quoteJupiterSwap,
   executeJupiterTokenToSol,
   quoteJupiterTokenToSol,
 } from "./chain/jupiter-swap.ts";
@@ -166,6 +171,22 @@ export type {
   RegistryTokenLiquidationProgress,
   RegistryTokenLiquidationResult,
 } from "./chain/liquidation.ts";
+
+export {
+  CANONICAL_USDC_MINT,
+  NATIVE_SOL_MINT,
+  nativePumpTradeAvailable,
+  resolveTradeAsset,
+  resolveTradeRoute,
+  selectTradeRoute,
+} from "./trading/trade-router.ts";
+export type {
+  TradeAsset,
+  TradeRoute,
+  TradeRouteResolution,
+  VenuePreference,
+} from "./trading/trade-router.ts";
+
 export { loadWalletAssetPortfolio } from "./chain/portfolio.ts";
 export type {
   WalletAssetPortfolio,
@@ -197,6 +218,7 @@ export type {
 } from "./chain/registry-sweep.ts";
 export type { PriceWindow } from "./db/price-repo.ts";
 export { listOwnedTokenAccounts } from "./chain/state.ts";
+export { readMint } from "./chain/state.ts";
 export type { OwnedTokenAccount } from "./chain/state.ts";
 export {
   sol,
@@ -259,17 +281,19 @@ export type {
   MeteoraTimeframe,
   MeteoraTransaction,
   MeteoraUiAmount,
+  MeteoraWalletNativeBalance,
   MeteoraWalletPositions,
+  MeteoraWalletTokenBalance,
 } from "./venues/meteora/index.ts";
 
 export { GmgnReadService } from "./data/gmgn.ts";
 export type { GmgnChain, GmgnQuery, GmgnQueryValue } from "./data/gmgn.ts";
 
 export { SolardAgent } from "./runtime/agent.ts";
-export { MeteoraAgentFacade } from "./runtime/meteora-agent.ts";
 export { GmgnAgentFacade } from "./runtime/gmgn-agent.ts";
 export { GMGN_AGENT_TOOL_NAMES, gmgnAgentTools } from "./runtime/gmgn-tools.ts";
 export type { GmgnAgentToolName } from "./runtime/gmgn-tools.ts";
+export { MeteoraAgentFacade } from "./runtime/meteora-agent.ts";
 export type { MeteoraAgentActionRecord } from "./runtime/meteora-agent.ts";
 export {
   METEORA_AGENT_TOOL_NAMES,
@@ -279,6 +303,69 @@ export type {
   MeteoraAgentToolName,
   SolardFunctionTool,
 } from "./runtime/meteora-tools.ts";
+export {
+  DEFAULT_METEORA_AUTOPILOT_CONFIG,
+  MeteoraAutopilot,
+  WRAPPED_SOL_MINT,
+  scoreMeteoraCandidate,
+} from "./runtime/meteora-autopilot.ts";
+export {
+  METEORA_AUTOPILOT_TOOL_NAMES,
+  meteoraAutopilotTools,
+} from "./runtime/meteora-autopilot-tools.ts";
+export type { MeteoraAutopilotToolName } from "./runtime/meteora-autopilot-tools.ts";
+export type {
+  MeteoraAutopilotActionKind,
+  MeteoraAutopilotBlacklistEntry,
+  MeteoraAutopilotCandidate,
+  MeteoraAutopilotConfig,
+  MeteoraAutopilotCyclePlan,
+  MeteoraAutopilotCycleResult,
+  MeteoraAutopilotCycleReview,
+  MeteoraAutopilotDecision,
+  MeteoraAutopilotLesson,
+  MeteoraAutopilotManagementConfig,
+  MeteoraAutopilotPlannedAction,
+  MeteoraAutopilotPoolMemory,
+  MeteoraAutopilotRiskConfig,
+  MeteoraAutopilotRole,
+  MeteoraAutopilotScreeningConfig,
+  MeteoraAutopilotState,
+  MeteoraAutopilotStrategyConfig,
+  MeteoraAutopilotTrackedPosition,
+} from "./runtime/meteora-autopilot-types.ts";
+export { MeteoraIntelligence } from "./runtime/meteora-intelligence.ts";
+export { OpenAiCompatibleMeteoraDecisionModel } from "./runtime/meteora-decision-model.ts";
+export type { MeteoraDecisionModel } from "./runtime/meteora-decision-model.ts";
+export {
+  METEORA_INTELLIGENCE_TOOL_NAMES,
+  meteoraIntelligenceTools,
+} from "./runtime/meteora-intelligence-tools.ts";
+export type { MeteoraIntelligenceToolName } from "./runtime/meteora-intelligence-tools.ts";
+export type {
+  MeteoraCandidateIntelligence,
+  MeteoraHolder,
+  MeteoraHolderReport,
+  MeteoraIndicatorConfirmation,
+  MeteoraIndicatorPreset,
+  MeteoraIndicatorSignal,
+  MeteoraIntelligenceConfig,
+  MeteoraIntelligenceDecisionInput,
+  MeteoraIntelligenceDecisionRecord,
+  MeteoraIntelligenceState,
+  MeteoraModelCycleDecision,
+  MeteoraModelDeploymentDecision,
+  MeteoraModelManagementDecision,
+  MeteoraNarrative,
+  MeteoraSmartWallet,
+  MeteoraSmartWalletCategory,
+  MeteoraSmartWalletExposure,
+  MeteoraSmartWalletType,
+  MeteoraStrategyDefinition,
+  MeteoraTokenAudit,
+  MeteoraTokenInfo,
+  MeteoraTopLperStudy,
+} from "./runtime/meteora-intelligence-types.ts";
 export { SolardWatcher } from "./runtime/watcher.ts";
 export type { SolardWatchEvents } from "./runtime/watcher.ts";
 

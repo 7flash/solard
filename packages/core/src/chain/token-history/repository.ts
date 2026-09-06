@@ -1,4 +1,4 @@
-import { measure } from "../../core/log.ts";
+import { createSolardMeasure } from "../../core/log.ts";
 import { measuredSync } from "../../core/measured.ts";
 import {
   db,
@@ -16,7 +16,7 @@ import type {
   TokenHistoryTrade,
 } from "./types.ts";
 
-const m = measure("history:db");
+const m = createSolardMeasure("history:db");
 const HISTORY_STATUS_PREFIX = "token-history:";
 const PERSIST_BATCH_SIZE = 250;
 

@@ -1,4 +1,4 @@
-import { measure } from "../../core/log.ts";
+import { createSolardMeasure } from "../../core/log.ts";
 import { measuredSync } from "../../core/measured.ts";
 import { analyzeTokenHistoryTrades } from "./analysis.ts";
 import {
@@ -7,7 +7,7 @@ import {
 } from "./repository.ts";
 import type { TokenHistoryAnalysis } from "./types.ts";
 
-const m = measure("history:analysis");
+const m = createSolardMeasure("history:analysis");
 
 export function analyzeTokenHistoryWithRepository(
   repository: TokenHistoryRepository,

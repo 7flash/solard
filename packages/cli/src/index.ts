@@ -23,6 +23,7 @@ import {
 } from "@solard/sdk";
 
 import { handleMeteoraCommand } from "./meteora-commands.ts";
+import { resolveDestinationRef } from "./refs.ts";
 
 function emit(value: string): void {
   process.stdout.write(value);
@@ -32,35 +33,6 @@ const OWL = "🦉";
 const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
 const CANONICAL_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
-async function quoteJupiterSwap(
-  args: Record<string, unknown>,
-): Promise<unknown> {
-  const sdk = (await import("@solard/sdk")) as Record<string, unknown>;
-  const fn = sdk.quoteJupiterSwap;
-  if (typeof fn !== "function") {
-    throw new Error(
-      "@solard/sdk does not export quoteJupiterSwap required by `slrd swap`.",
-    );
-  }
-  return await (fn as (input: Record<string, unknown>) => Promise<unknown>)(
-    args,
-  );
-}
-
-async function executeJupiterSwap(
-  args: Record<string, unknown>,
-): Promise<unknown> {
-  const sdk = (await import("@solard/sdk")) as Record<string, unknown>;
-  const fn = sdk.executeJupiterSwap;
-  if (typeof fn !== "function") {
-    throw new Error(
-      "@solard/sdk does not export executeJupiterSwap required by `slrd swap`.",
-    );
-  }
-  return await (fn as (input: Record<string, unknown>) => Promise<unknown>)(
-    args,
-  );
-}
 type Flags = Map<string, string>;
 function args(input: string[]): { values: string[]; flags: Flags } {
   const values: string[] = [],
@@ -262,51 +234,6 @@ function targetWallets(
     group,
   };
 }
-function resolveDestinationRef(
-  slrd: { resolveWallet(ref: string): { address: { toBase58(): string } } },
-  value: string,
-): {
-  input: string;
-  address: string;
-  contactName?: string;
-  walletName?: string;
-} {
-  const input = value.trim();
-  const contact = findExternalContact(input);
-
-  let walletAddress: string | null = null;
-  try {
-    walletAddress = slrd.resolveWallet(input).address.toBase58();
-  } catch {
-    walletAddress = null;
-  }
-
-  if (contact && walletAddress && contact.address !== walletAddress) {
-    throw new Error(
-      `Ambiguous destination ${input}: external contact @${contact.name} points to ${contact.address}, ` +
-        `but a stored signing wallet resolves to ${walletAddress}. Rename one of them.`,
-    );
-  }
-
-  if (contact) {
-    return {
-      input,
-      address: contact.address,
-      contactName: contact.name,
-    };
-  }
-
-  if (walletAddress) {
-    return {
-      input,
-      address: walletAddress,
-      walletName: input.replace(/^@/, ""),
-    };
-  }
-
-  return { input, address: input };
-}
-
 function help(): string {
   return `${OWL} slrd — multi-wallet Solana CLI + SDK for traders and AI agents
 
@@ -364,6 +291,7 @@ Backtesting
 
 Transfers and consolidation
   slrd transfer <contact|wallet|address> --wallet <source-wallet> --sol <amount> [--simulate-only]
+  slrd transfer <contact|wallet|address> --wallet <source-wallet> --token <USDC|mint> --amount <ui> [--simulate-only]
   slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]
                                                         Without --wallets, sweep considers all stored signing wallets
 
@@ -382,11 +310,12 @@ Diagnostics
   --measure-stream  Restore raw live measure-fn output for low-level debugging
 
 Trading
-  slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]   Quote or execute SOL -> token through Jupiter
-  slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
+  slrd swap --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui> --wallet <wallet> [--live]  Jupiter exact-input any -> any; quote-only unless --live
+  slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]                              Compatibility: SOL -> token
+  slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
-  slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
+  slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--continue-on-error] [--simulate-only]
   slrd claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
 
@@ -744,63 +673,9 @@ async function main() {
     }
 
     if (command === "swap") {
-      const outputRef = values[0]?.trim();
-      if (!outputRef) {
-        throw new Error(
-          "Usage: slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]",
-        );
-      }
-
-      const wallet = need(flags, "wallet");
-      const amountSol = need(flags, "sol");
-      const amountRaw = sol(amountSol).raw;
-      if (amountRaw <= 0n) throw new Error("--sol must be greater than zero");
-
-      const normalizedOutput = outputRef.replace(/^\$/, "").trim();
-      const outputMint =
-        normalizedOutput.toUpperCase() === "USDC"
-          ? CANONICAL_USDC_MINT
-          : resolveTokenMintForPolicy(slrd, normalizedOutput);
-
-      if (outputMint === NATIVE_SOL_MINT) {
-        throw new Error("Swap output is SOL; choose a different token mint.");
-      }
-
-      if (!flags.has("live")) {
-        const quote = await quoteJupiterSwap({
-          inputMint: NATIVE_SOL_MINT,
-          outputMint,
-          amountRaw,
-        });
-        emit(
-          json({
-            mode: "quote",
-            wallet,
-            input: { symbol: "SOL", mint: NATIVE_SOL_MINT, amountSol },
-            output: { ref: outputRef, mint: outputMint },
-            quote,
-            hint: "Re-run with --live to execute this swap.",
-          }) + "\n",
-        );
-        return;
-      }
-
-      const signer = slrd.signer(wallet);
-      const result = await executeJupiterSwap({
-        inputMint: NATIVE_SOL_MINT,
-        outputMint,
-        amountRaw,
-        signer,
-      });
-      emit(
-        json({
-          mode: "live",
-          wallet,
-          input: { symbol: "SOL", mint: NATIVE_SOL_MINT, amountSol },
-          output: { ref: outputRef, mint: outputMint },
-          result,
-        }) + "\n",
-      );
+      const { runJupiterSwapCommand } =
+        await import("./commands/jupiter-swap.ts");
+      emit(json(await runJupiterSwapCommand({ slrd, values, flags })) + "\n");
       return;
     }
     if (command === "contact" || command === "contacts") {
@@ -2095,156 +1970,19 @@ async function main() {
     }
 
     if (command === "transfer" || command === "send-sol") {
-      const recipientInput = values[0] === "sol" ? values[1] : values[0];
-      if (!recipientInput) {
-        throw new Error(
-          "Usage: slrd transfer <contact|wallet|address> --wallet <wallet> --sol <amount> [--sender rpc|helius|jito] [--simulate-only]",
-        );
-      }
-
-      const recipient = resolveDestinationRef(slrd, recipientInput);
-      const wallet = need(flags, "wallet");
-      const amount = need(flags, "sol");
-      const via = flags.get("sender") ?? "rpc";
-
-      const cuLimit = Number(flags.get("cu-limit") ?? "10000");
-      const priorityMicroLamports = Number(
-        flags.get("priority-micro-lamports") ?? "0",
-      );
-      if (!Number.isInteger(cuLimit) || cuLimit <= 0)
-        throw new Error("--cu-limit must be a positive integer");
-      if (
-        !Number.isInteger(priorityMicroLamports) ||
-        priorityMicroLamports < 0
-      ) {
-        throw new Error(
-          "--priority-micro-lamports must be a non-negative integer",
-        );
-      }
-
-      const composer = slrd
-        .tx(wallet)
-        .transferSol(recipient.address, sol(amount))
-        .priorityFee({
-          cuLimit,
-          microLamports: priorityMicroLamports,
-        });
-
-      if (flags.has("simulate-only")) {
-        const plan = await composer.build();
-        const result = await slrd.simulatePlan(plan);
-        emit(
-          json({
-            mode: "simulation",
-            wallet,
-            recipient,
-            sol: amount,
-            result,
-          }) + "\n",
-        );
-        return;
-      }
-
-      const receipt = await composer.send({
-        via,
-        kind: "transfer-sol",
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-      });
-      emit(
-        json({
-          ...receipt,
-          recipient,
-        }) + "\n",
-      );
+      const { runTransferCommand } = await import("./commands/transfer.ts");
+      emit(json(await runTransferCommand({ slrd, values, flags })) + "\n");
       return;
     }
 
     if (command === "buy") {
-      const token = values[0];
-      if (!token)
-        throw new Error(
-          "Usage: slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) --sol <amount>",
-        );
-      const amount = flags.get("sol");
-      if (!amount) throw new Error("Buy requires explicit --sol <amount>");
-      const targets = targetWallets(
-        slrd,
-        flags,
-        "Usage: slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) --sol <amount>.",
-      );
-      const options = {
-        slippageBps: int(flags, "slippage-bps", 1500),
-        via: flags.get("sender") ?? "rpc",
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-      };
-      if (flags.has("simulate-only")) {
-        const plans =
-          targets.refs.length === 1
-            ? [
-                await slrd
-                  .tx(targets.refs[0]!)
-                  .buy(token, sol(amount), options)
-                  .build(),
-              ]
-            : await slrd
-                .composeMany(targets.refs)
-                .buy(token, sol(amount), options)
-                .build();
-        const results = await Promise.all(
-          plans.map((plan) => slrd.simulatePlan(plan)),
-        );
-        emit(json({ mode: "simulation", target: targets, results }) + "\n");
-        return;
-      }
-      const receipts =
-        targets.refs.length === 1
-          ? await slrd.buy(token, targets.refs[0]!, sol(amount), options)
-          : await slrd.buyMany(token, targets.refs, sol(amount), options);
-      emit(json(receipts) + "\n");
+      const { runSmartBuyCommand } = await import("./commands/buy.ts");
+      emit(json(await runSmartBuyCommand({ slrd, values, flags })) + "\n");
       return;
     }
     if (command === "sell") {
-      const token = values[0];
-      if (!token)
-        throw new Error(
-          "Usage: slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>)",
-        );
-      const targets = targetWallets(
-        slrd,
-        flags,
-        "Usage: slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>).",
-      );
-      const sellOptions = {
-        bps: int(flags, "bps", 10000),
-        slippageBps: int(flags, "slippage-bps", 1500),
-        via: flags.get("sender") ?? "rpc",
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-      };
-      if (flags.has("simulate-only")) {
-        const plans =
-          targets.refs.length === 1
-            ? [await slrd.tx(targets.refs[0]!).sell(token, sellOptions).build()]
-            : await slrd
-                .composeMany(targets.refs)
-                .sell(token, sellOptions)
-                .build();
-        const results = await Promise.all(
-          plans.map((plan) => slrd.simulatePlan(plan)),
-        );
-        emit(json({ mode: "simulation", target: targets, results }) + "\n");
-        return;
-      }
-      const receipts =
-        targets.refs.length === 1
-          ? await slrd.sell(token, targets.refs[0]!, sellOptions)
-          : await slrd.sellMany(token, targets.refs, sellOptions);
-      emit(json(receipts) + "\n");
+      const { runSmartSellCommand } = await import("./commands/sell.ts");
+      emit(json(await runSmartSellCommand({ slrd, values, flags })) + "\n");
       return;
     }
     if (

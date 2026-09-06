@@ -5,7 +5,7 @@ import {
   type ParsedTransactionWithMeta,
 } from "@solana/web3.js";
 
-import { measure } from "../../core/log.ts";
+import { createSolardMeasure } from "../../core/log.ts";
 import { solardRpcFetch } from "../connection.ts";
 import { measured } from "../../core/measured.ts";
 import { TokenHistoryError, tokenHistoryError } from "./errors.ts";
@@ -17,7 +17,7 @@ import type {
   TokenHistoryTransactionFetchResult,
 } from "./types.ts";
 
-const m = measure("history:rpc");
+const m = createSolardMeasure("history:rpc");
 const MIN_SPLIT_BATCH = 5;
 const MAX_BACKOFF_MS = 15_000;
 

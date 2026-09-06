@@ -1,7 +1,7 @@
 import { NATIVE_MINT } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 
-import { measure } from "../../core/log.ts";
+import { createSolardMeasure } from "../../core/log.ts";
 import { measured, measuredSync } from "../../core/measured.ts";
 import { TokenHistoryError } from "./errors.ts";
 import { buildSparseTokenHistoryCandles1s } from "./candles.ts";
@@ -19,7 +19,7 @@ import type {
   TokenHistoryTrade,
 } from "./types.ts";
 
-const m = measure("history");
+const m = createSolardMeasure("history");
 
 export type TokenHistoryMintInfo = {
   decimals: number;

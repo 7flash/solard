@@ -1,8 +1,25 @@
-import { configure, createMeasure } from "measure-fn";
+import {
+  configure,
+  createMeasure,
+  measure as globalMeasure,
+  measureSync as globalMeasureSync,
+  safeStringify,
+  summarizeForMeasure,
+} from "measure-fn";
 
-// Library default is quiet. Applications can opt into raw streaming, inject a
-// custom telemetry logger, or use the built-in aggregate collector below.
-configure({ silent: true });
+import {
+  SOLARD_MEASURE_SENSITIVE_KEY_PATTERN,
+  solardMeasureRuntimeOptions,
+  type SolardMeasureRuntimeOptions,
+} from "./measure-policy.ts";
+
+// Library default is quiet. Applications decide when/how measurements are
+// emitted. The redaction policy is still installed immediately so an app that
+// later enables output cannot accidentally start from an unsafe default.
+configure({
+  silent: true,
+  sensitiveKeyPattern: SOLARD_MEASURE_SENSITIVE_KEY_PATTERN,
+});
 
 export type SolardMeasureEvent = {
   type: "start" | "success" | "error" | "annotation" | string;
@@ -17,11 +34,8 @@ export type SolardMeasureEvent = {
   maxResultLength?: number;
 };
 
-export type SolardMeasureOptions = {
-  silent?: boolean;
+export type SolardMeasureOptions = Partial<SolardMeasureRuntimeOptions> & {
   logger?: ((event: SolardMeasureEvent) => void) | null;
-  timestamps?: boolean;
-  maxResultLength?: number;
 };
 
 export type SolardMeasureLabelSummary = {
@@ -50,19 +64,19 @@ export type SolardMeasureCollector = {
 };
 
 /**
- * Configure measure-fn globally for Solard.
+ * Configure measure-fn globally for a Solard application.
  *
- * `logger` is the clean integration point:
- * - logger: customTelemetry => measurements are emitted there
- * - logger: () => {}       => measurements run, events are discarded
- * - silent: true           => measure-fn does not emit logger events at all
- *
- * The setting is live and applies to already-created scoped measures.
+ * Runtime defaults come from the SOLARD_MEASURE_* environment variables in one
+ * place (`measure-policy.ts`). Explicit options always win. This function is
+ * intentionally reconfigurable because the CLI installs its aggregate logger
+ * after parsing flags such as --measure-stream.
  */
 export function configureSolardMeasure(
   options: SolardMeasureOptions = {},
 ): void {
+  const defaults = solardMeasureRuntimeOptions();
   configure({
+    ...defaults,
     ...options,
     logger: options.logger === undefined ? undefined : options.logger,
   });
@@ -150,10 +164,106 @@ export function createSolardMeasureCollector(): SolardMeasureCollector {
   };
 }
 
-export function measure(scope: string) {
-  return createMeasure(`slrd:${scope}`, { maxResultLength: 1600 });
+/** Preferred scoped measurement constructor for new Solard code. */
+export function createSolardMeasure(scope: string) {
+  const normalized = scope.trim();
+  if (!normalized) throw new Error("Solard measure scope is required");
+  return createMeasure(`slrd:${normalized}`, { maxResultLength: 1600 });
+}
+
+/** @deprecated Prefer createSolardMeasure(scope). */
+export const measure = createSolardMeasure;
+
+// Explicit names for measure-fn's process-global helpers. `measure` is already
+// the long-standing Solard scope factory above, so exposing the raw helpers
+// under unambiguous names prevents accidental imports of the wrong API.
+export {
+  createMeasure,
+  globalMeasure as rawMeasure,
+  globalMeasureSync as rawMeasureSync,
+  safeStringify,
+  summarizeForMeasure,
+};
+
+export const apiMeasure = createMeasure("solard:api");
+export const dbMeasure = createMeasure("solard:db");
+export const workerMeasure = createMeasure("solard:worker");
+export const processMeasure = createMeasure("solard:process");
+export const indexerMeasure = createMeasure("solard:indexer");
+
+export const DB_RETRY = {
+  attempts: 5,
+  delay: 20,
+  backoff: 2,
+} as const;
+
+export function compactId(value: string, head = 6, tail = 4): string {
+  if (value.length <= head + tail + 1) return value;
+  return `${value.slice(0, head)}…${value.slice(-tail)}`;
 }
 
 export function shortKey(value: string): string {
   return value.length <= 14 ? value : `${value.slice(0, 6)}…${value.slice(-6)}`;
+}
+
+type ErrorWithSqliteFields = Error & {
+  code?: unknown;
+  errno?: unknown;
+  byteOffset?: unknown;
+};
+
+function stackLines(error: Error, limit = 10): string[] {
+  return String(error.stack ?? `${error.name}: ${error.message}`)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, Math.max(1, limit));
+}
+
+function firstApplicationFrame(stack: readonly string[]): string | undefined {
+  return stack.find(
+    (line, index) =>
+      index > 0 &&
+      !line.includes("node_modules/measure-fn") &&
+      !line.includes("node:internal") &&
+      !line.includes("bun:sqlite"),
+  );
+}
+
+function summarizeCause(cause: unknown, depth: number): unknown {
+  if (cause == null) return undefined;
+
+  if (cause instanceof Error && depth < 2) {
+    return summarizeErrorInternal(cause, depth + 1);
+  }
+
+  return cause instanceof Error
+    ? { name: cause.name, message: cause.message }
+    : cause;
+}
+
+function summarizeErrorInternal(
+  error: unknown,
+  depth: number,
+): Record<string, unknown> {
+  if (error instanceof Error) {
+    const sqlite = error as ErrorWithSqliteFields;
+    const stack = stackLines(error);
+    return {
+      name: error.name,
+      message: error.message,
+      code: sqlite.code,
+      errno: sqlite.errno,
+      byteOffset: sqlite.byteOffset,
+      location: firstApplicationFrame(stack),
+      stack,
+      cause: summarizeCause(error.cause, depth),
+    };
+  }
+
+  return { message: String(error) };
+}
+
+export function summarizeError(error: unknown): Record<string, unknown> {
+  return summarizeErrorInternal(error, 0);
 }

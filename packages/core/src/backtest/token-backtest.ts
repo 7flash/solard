@@ -1,4 +1,4 @@
-import { measure } from "../core/log.ts";
+import { createSolardMeasure } from "../core/log.ts";
 import { measuredSync } from "../core/measured.ts";
 import {
   defaultTokenHistoryRepository,
@@ -31,7 +31,7 @@ export type {
   TokenBacktestTapeOptions,
 } from "./tape.ts";
 
-const m = measure("backtest");
+const m = createSolardMeasure("backtest");
 
 export type TokenBacktestDependencies = {
   repository: TokenHistoryRepository;
