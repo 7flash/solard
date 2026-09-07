@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import {
   createTraderSolard,
+  type MeteoraPoolSearchResult,
   type MeteoraPositionSnapshot,
   type MeteoraStrategy,
   type Solard,
@@ -26,10 +27,19 @@ type Target = {
   breakoutBins: number;
 };
 
-type AgentState = {
+type RuntimeState = {
   managedPosition: string | null;
-  bootstrapConsumed: boolean;
-  everManagedPosition: boolean;
+  bootstrapUsed: boolean;
+};
+
+type ResolvedPool = {
+  pool: string;
+  source: "pool" | "token";
+  token: string | null;
+  tokenX: string | null;
+  tokenY: string | null;
+  tvl: number | null;
+  volume24h: number | null;
 };
 
 function parseArgs(argv: string[]): Flags {
@@ -92,6 +102,11 @@ function raw(value: unknown): bigint {
   }
 }
 
+function finite(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function inventoryFromPosition(position: MeteoraPositionSnapshot): Inventory {
   const x = raw(position.totalXRaw) + raw(position.feeXRaw);
   const y = raw(position.totalYRaw) + raw(position.feeYRaw);
@@ -112,8 +127,8 @@ function fundableRange(args: {
   let maxBinId = Math.max(args.maxBinId, args.activeBin);
   const desiredWidth = Math.max(args.minTotalBins, maxBinId - minBinId + 1);
 
-  // A one-sided source cannot fund both sides of the active bin without a swap.
-  // Preserve the candle-derived width, but place it entirely on the fundable side.
+  // A one-sided source cannot fund both sides of active without a swap. Preserve
+  // the candle-derived width, but place the position entirely on its fundable side.
   if (args.inventory === "x-only") {
     return {
       minBinId: args.activeBin,
@@ -149,6 +164,106 @@ function infrastructure(flags: Flags): Record<string, unknown> | undefined {
     allowBitmapExtensionInit: flags.has("allow-bitmap-extension-init"),
     ...(max ? { maxNonRefundableLamports: max } : {}),
   };
+}
+
+function exactTokenPool(row: MeteoraPoolSearchResult, token: string): boolean {
+  return row.tokenX?.mint === token || row.tokenY?.mint === token;
+}
+
+function otherMint(row: MeteoraPoolSearchResult, token: string): string | null {
+  if (row.tokenX?.mint === token) return row.tokenY?.mint ?? null;
+  if (row.tokenY?.mint === token) return row.tokenX?.mint ?? null;
+  return null;
+}
+
+async function resolveTokenPool(
+  slrd: Solard,
+  token: string,
+  flags: Flags,
+): Promise<ResolvedPool> {
+  const quote = flag(flags, "quote");
+  const needsWsol = Boolean(flag(flags, "sol"));
+  const found = await slrd.meteora.searchPools(token, 100);
+  let candidates = found.filter((row) => exactTokenPool(row, token));
+
+  if (quote) {
+    candidates = candidates.filter((row) => otherMint(row, token) === quote);
+  }
+  if (needsWsol) {
+    candidates = candidates.filter((row) => otherMint(row, token) === WSOL);
+  }
+
+  if (!candidates.length) {
+    const requirement = needsWsol
+      ? " with WSOL as the quote side (--sol bootstrap requires a WSOL pool)"
+      : quote
+        ? ` paired with ${quote}`
+        : "";
+    throw new Error(
+      `No Meteora DLMM pool was found for token ${token}${requirement}. ` +
+        `Pass an actual DLMM address with --pool, or inspect: slrd meteora token-pools ${token}`,
+    );
+  }
+
+  candidates.sort((left, right) => {
+    const byTvl = (finite(right.tvl) ?? -1) - (finite(left.tvl) ?? -1);
+    if (byTvl !== 0) return byTvl;
+    return (finite(right.volume24h) ?? -1) - (finite(left.volume24h) ?? -1);
+  });
+
+  const selected = candidates[0]!;
+  // Verify the indexed result is actually decodable as a current DLMM account
+  // before the strategy reaches candle/bin calculations.
+  const state = await slrd.meteora.getPoolState(selected.pool, true);
+  process.stdout.write(
+    `RESOLVE  token=${token}  pool=${selected.pool}  ` +
+      `pair=${state.tokenX.mint}/${state.tokenY.mint}  ` +
+      `matches=${candidates.length}  selected=highest-tvl\n`,
+  );
+  return {
+    pool: selected.pool,
+    source: "token",
+    token,
+    tokenX: state.tokenX.mint,
+    tokenY: state.tokenY.mint,
+    tvl: finite(selected.tvl),
+    volume24h: finite(selected.volume24h),
+  };
+}
+
+async function resolvePool(slrd: Solard, flags: Flags): Promise<ResolvedPool> {
+  const token = flag(flags, "token");
+  const poolOrToken = flag(flags, "pool");
+  if (!token && !poolOrToken) {
+    throw new Error("Pass --pool <dlmm-pool> or --token <mint>");
+  }
+  if (token && poolOrToken) {
+    throw new Error("Use either --pool or --token, not both");
+  }
+  if (token) return await resolveTokenPool(slrd, token, flags);
+
+  const ref = poolOrToken!;
+  try {
+    const state = await slrd.meteora.getPoolState(ref, true);
+    return {
+      pool: state.pool,
+      source: "pool",
+      token: null,
+      tokenX: state.tokenX.mint,
+      tokenY: state.tokenY.mint,
+      tvl: null,
+      volume24h: null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/invalid account discriminator|account discriminator/i.test(message)) {
+      throw error;
+    }
+    process.stdout.write(
+      `POOL REF  ${ref} is not a DLMM pool account; trying it as a token mint.\n`,
+    );
+    return await resolveTokenPool(slrd, ref, flags);
+  }
 }
 
 async function previousClosedFiveMinuteTarget(
@@ -208,6 +323,12 @@ async function previousClosedFiveMinuteTarget(
     );
   }
 
+  process.stdout.write(
+    `CANDLE  ${new Date(candle.timestamp * 1_000).toISOString()}  ` +
+      `low=${candle.low} high=${candle.high} close=${candle.close}  ` +
+      `bins=${candleMinBinId}..${candleMaxBinId} active=${activeBin}\n`,
+  );
+
   return {
     pool,
     candleTimestamp: candle.timestamp,
@@ -228,8 +349,9 @@ async function bootstrapIfNeeded(args: {
   walletRef: string;
   pool: string;
   target: Target;
+  state: RuntimeState;
 }): Promise<string | null> {
-  const { slrd, flags, walletRef, pool, target } = args;
+  const { slrd, flags, walletRef, pool, target, state } = args;
   let amountX = uiPositive(
     flag(flags, "amount-x") ?? flag(flags, "x"),
     "--amount-x",
@@ -245,10 +367,16 @@ async function bootstrapIfNeeded(args: {
     );
   }
 
+  if (state.bootstrapUsed) {
+    throw new Error(
+      "This process already used its bootstrap allocation and the managed position is gone. Refusing to inject fresh principal again.",
+    );
+  }
+
   if (sol) {
-    const state = await slrd.meteora.getPoolState(pool, true);
-    if (state.tokenX.mint === WSOL) amountX = sol;
-    else if (state.tokenY.mint === WSOL) amountY = sol;
+    const poolState = await slrd.meteora.getPoolState(pool, true);
+    if (poolState.tokenX.mint === WSOL) amountX = sol;
+    else if (poolState.tokenY.mint === WSOL) amountY = sol;
     else {
       throw new Error(
         "--sol bootstrap requires a WSOL pool; use --amount-x and/or --amount-y for other pairs",
@@ -258,8 +386,8 @@ async function bootstrapIfNeeded(args: {
 
   if (!amountX && !amountY) {
     process.stdout.write(
-      "NO POSITION  This strategy has nothing to manage yet. " +
-        "Pass --sol <amount> for a WSOL pool, or --amount-x/--amount-y, to bootstrap it.\n",
+      "NO POSITION  No on-chain position exists for this wallet/pool. " +
+        "Pass --sol <amount> for a WSOL pair, or --amount-x/--amount-y, to bootstrap.\n",
     );
     return null;
   }
@@ -275,6 +403,10 @@ async function bootstrapIfNeeded(args: {
   });
   if (!range) throw new Error("Bootstrap inventory is empty");
 
+  // Default policy deliberately means "existing bin infrastructure only". If
+  // required bin arrays/bitmap extension do not exist, buildOpenPosition fails
+  // closed unless the caller explicitly opts in with the infrastructure flags.
+  const infra = infrastructure(flags);
   const prepared = await slrd.meteora.buildOpenPosition({
     wallet: walletRef,
     pool,
@@ -284,16 +416,20 @@ async function bootstrapIfNeeded(args: {
     minBinId: range.minBinId,
     maxBinId: range.maxBinId,
     slippageBps: integer(flags, "slippage-bps", 100),
-    ...(infrastructure(flags) ? { infrastructure: infrastructure(flags) } : {}),
+    ...(infra ? { infrastructure: infra } : {}),
   });
 
+  const infraQuote = prepared.infrastructurePreflight?.quote;
   process.stdout.write(
     `${flags.has("live") ? "OPEN" : "WOULD OPEN"}  ` +
       `${prepared.position ?? "new-position"}  range=${range.minBinId}..${range.maxBinId}  ` +
-      `active=${target.activeBin}  candle=${target.candleLow}..${target.candleHigh}\n`,
+      `active=${target.activeBin}  existingInfra=${
+        infraQuote ? !infraQuote.requiresNonRefundableInfrastructure : "unknown"
+      }\n`,
   );
 
   if (!flags.has("live")) return prepared.position ?? null;
+  state.bootstrapUsed = true;
   const result = await slrd.meteora.executePreparedAndVerify(
     prepared,
     {
@@ -308,74 +444,101 @@ async function bootstrapIfNeeded(args: {
   return prepared.position ?? result.position ?? null;
 }
 
-async function runCycle(
-  slrd: Solard,
-  flags: Flags,
-  state: AgentState,
-): Promise<void> {
-  const walletRef = required(flags, "wallet");
-  const pool = required(flags, "pool");
-  const wallet = slrd.resolveWallet(walletRef).address.toBase58();
-  const target = await previousClosedFiveMinuteTarget(slrd, pool, flags);
-  let positions = await slrd.meteora.getPoolPositions(pool, wallet);
-  const requestedPosition =
-    state.managedPosition ?? flag(flags, "position") ?? null;
+async function reconcilePosition(args: {
+  slrd: Solard;
+  flags: Flags;
+  state: RuntimeState;
+  pool: string;
+  wallet: string;
+}): Promise<MeteoraPositionSnapshot | null> {
+  const { slrd, flags, state, pool, wallet } = args;
+  const positions = await slrd.meteora.getPoolPositions(pool, wallet);
+  const explicit = flag(flags, "position");
 
-  if (requestedPosition) {
-    positions = positions.filter((row) => row.position === requestedPosition);
-    if (!positions.length && state.everManagedPosition) {
+  if (explicit) {
+    const selected = positions.find((row) => row.position === explicit) ?? null;
+    if (!selected) {
       throw new Error(
-        `Managed position ${requestedPosition} disappeared. Refusing to inject fresh bootstrap capital automatically.`,
+        `--position ${explicit} is not currently open for wallet ${wallet} in pool ${pool}`,
       );
     }
-    if (!positions.length && flag(flags, "position")) {
-      throw new Error(
-        `Position ${requestedPosition} is not an open position for ${wallet} in pool ${pool}`,
-      );
+    if (state.managedPosition !== explicit) {
+      process.stdout.write(`RECONCILE  explicit position=${explicit}\n`);
+      state.managedPosition = explicit;
     }
+    return selected;
   }
 
-  if (!positions.length) {
-    const hasBootstrapFunding = Boolean(
-      flag(flags, "sol") ||
-      flag(flags, "amount-x") ||
-      flag(flags, "x") ||
-      flag(flags, "amount-y") ||
-      flag(flags, "y"),
-    );
-    if (state.bootstrapConsumed || state.everManagedPosition) {
-      throw new Error(
-        "No managed position is currently open. Refusing to bootstrap fresh capital again in the same agent process.",
+  if (state.managedPosition) {
+    const selected =
+      positions.find((row) => row.position === state.managedPosition) ?? null;
+    if (selected) return selected;
+
+    // A source-only move changes the position address. If a fresh chain read
+    // contains exactly one position, it is safe enough for this wallet+pool
+    // scoped example to reconcile to the replacement in memory.
+    if (positions.length === 1) {
+      process.stdout.write(
+        `RECONCILE  ${state.managedPosition} -> ${positions[0]!.position}\n`,
       );
+      state.managedPosition = positions[0]!.position;
+      return positions[0]!;
     }
-    // Consume live bootstrap authorization before submission. If submission is
-    // ambiguous or partially succeeds, the loop will never fund a second position.
-    if (flags.has("live") && hasBootstrapFunding)
-      state.bootstrapConsumed = true;
+    if (positions.length === 0) return null;
+    throw new Error(
+      `Managed position ${state.managedPosition} disappeared and ${positions.length} positions now exist in the pool. ` +
+        "Pass --position <address> to disambiguate.",
+    );
+  }
+
+  if (positions.length === 0) return null;
+  if (positions.length === 1) {
+    state.managedPosition = positions[0]!.position;
+    process.stdout.write(
+      `RECONCILE  adopted sole on-chain position=${state.managedPosition}\n`,
+    );
+    return positions[0]!;
+  }
+
+  throw new Error(
+    `Found ${positions.length} positions for this wallet in pool ${pool}. ` +
+      `On-chain state does not encode which one belongs to this process; pass --position <address>. ` +
+      `Positions: ${positions.map((row) => row.position).join(", ")}`,
+  );
+}
+
+async function runCycle(args: {
+  slrd: Solard;
+  flags: Flags;
+  state: RuntimeState;
+  walletRef: string;
+  wallet: string;
+  pool: string;
+}): Promise<void> {
+  const { slrd, flags, state, walletRef, wallet, pool } = args;
+  const target = await previousClosedFiveMinuteTarget(slrd, pool, flags);
+  const position = await reconcilePosition({
+    slrd,
+    flags,
+    state,
+    pool,
+    wallet,
+  });
+
+  if (!position) {
     const openedPosition = await bootstrapIfNeeded({
       slrd,
       flags,
       walletRef,
       pool,
       target,
+      state,
     });
-    if (flags.has("live") && openedPosition) {
+    if (flags.has("live") && openedPosition)
       state.managedPosition = openedPosition;
-      state.everManagedPosition = true;
-    }
     return;
   }
 
-  if (positions.length > 1 && !requestedPosition) {
-    throw new Error(
-      `Wallet has ${positions.length} positions in this pool. ` +
-        "Pass --position <address> so the example agent cannot move unrelated positions.",
-    );
-  }
-
-  const position = positions[0]!;
-  state.managedPosition = position.position;
-  state.everManagedPosition = true;
   const currentMin = Number(position.lowerBin);
   const currentMax = Number(position.upperBin);
   if (!Number.isInteger(currentMin) || !Number.isInteger(currentMax)) {
@@ -406,9 +569,7 @@ async function runCycle(
   process.stdout.write(
     `${action}  ${position.position}  current=${currentMin}..${currentMax}  ` +
       `target=${range.minBinId}..${range.maxBinId}  active=${target.activeBin}  ` +
-      `shift=${shift}  inventory=${inv}  ` +
-      `candle=${new Date(target.candleTimestamp * 1_000).toISOString()} ` +
-      `${target.candleLow}..${target.candleHigh}\n`,
+      `shift=${shift}  inventory=${inv}\n`,
   );
 
   if (action !== "MOVE" || !flags.has("live")) return;
@@ -433,7 +594,6 @@ async function runCycle(
     { attempts: 6, retryDelayMs: 500, commitment: "confirmed" },
   );
   state.managedPosition = result.targetPosition;
-  state.everManagedPosition = true;
   process.stdout.write(
     `MOVED  ${result.sourcePosition} -> ${result.targetPosition}  ` +
       `close=${result.close.signatures.join(",")}  open=${result.open.signatures.join(",")}\n`,
@@ -454,28 +614,41 @@ async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2));
   if (flags.has("help")) {
     process.stdout.write(
-      "Meteora previous-5m-candle liquidity agent example\n\n" +
+      "Meteora previous-closed-5m-candle liquidity agent example\n\n" +
         "Usage:\n" +
-        "  slrd run examples/meteora-liquidity-agent.ts --pool <pool> --wallet <wallet> [--position <position>] [--loop] [--live]\n" +
-        "  slrd run examples/meteora-liquidity-agent.ts --pool <pool> --wallet <wallet> --sol 0.1 --loop --live\n\n" +
-        "If the wallet has no position in the pool, --sol or --amount-x/--amount-y bootstraps one.\n" +
+        "  slrd run examples/meteora-liquidity-agent.ts --pool <dlmm-pool> --wallet <wallet> [--position <position>] [--loop] [--live]\n" +
+        "  slrd run examples/meteora-liquidity-agent.ts --token <mint> --wallet <wallet> --sol 0.1 --loop --live\n\n" +
+        "If --pool is accidentally given a token mint, the example falls back to token-pool discovery.\n" +
+        "With --sol it prefers an existing WSOL DLMM pool and selects the highest-TVL exact match.\n" +
+        "State is in memory only. On restart, zero/one/many positions reconcile as bootstrap/adopt/require --position.\n" +
+        "By default the SDK will only open/move when the required shared bin infrastructure already exists.\n" +
+        "Missing bin arrays remain denied unless --allow-bin-array-init plus --max-infra-lamports is explicitly supplied.\n" +
         "Live Meteora writes also require SOLARD_ENABLE_LIVE_TRADES=1.\n",
     );
     return;
   }
 
-  required(flags, "wallet");
-  required(flags, "pool");
+  const walletRef = required(flags, "wallet");
   const slrd = createTraderSolard();
-  const state: AgentState = {
-    managedPosition: flag(flags, "position") ?? null,
-    bootstrapConsumed: false,
-    everManagedPosition: false,
-  };
+  const wallet = slrd.resolveWallet(walletRef).address.toBase58();
+  const state: RuntimeState = { managedPosition: null, bootstrapUsed: false };
+
   try {
+    const resolved = await resolvePool(slrd, flags);
+    process.stdout.write(
+      `LP AGENT  wallet=${wallet}  pool=${resolved.pool}  source=${resolved.source}\n`,
+    );
+
     while (true) {
       try {
-        await runCycle(slrd, flags, state);
+        await runCycle({
+          slrd,
+          flags,
+          state,
+          walletRef,
+          wallet,
+          pool: resolved.pool,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         process.stderr.write(`LP AGENT ERROR  ${message}\n`);

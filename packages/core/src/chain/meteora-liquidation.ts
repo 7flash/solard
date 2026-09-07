@@ -1,5 +1,9 @@
 import type { Solard } from "../core/solard.ts";
+import { createSolardMeasure } from "../core/log.ts";
+import { measured } from "../core/measured.ts";
 import type { MeteoraExecutionResult } from "../venues/meteora/index.ts";
+
+const m = createSolardMeasure("meteora:liquidation");
 
 export type RegistryMeteoraPosition = {
   walletName: string;
@@ -57,9 +61,18 @@ export async function planRegistryMeteoraLiquidation(
   const scanErrors: RegistryMeteoraLiquidationPlan["scanErrors"] = [];
   const delayMs = Math.max(0, options.delayMs ?? 100);
 
-  for (const wallet of wallets) {
+  for (let index = 0; index < wallets.length; index += 1) {
+    const wallet = wallets[index]!;
     try {
-      const found = await slrd.meteora.getWalletPositions(wallet.address);
+      const found = await measured(
+        m,
+        `scan-wallet ${index + 1}/${wallets.length} @${wallet.name}`,
+        async () => await slrd.meteora.getWalletPositions(wallet.address),
+        (result) => ({
+          wallet: wallet.address,
+          positions: result.totalPositions,
+        }),
+      );
       for (const row of found.positions) {
         if (!row.position || !row.pool) continue;
         positions.push({
@@ -106,15 +119,25 @@ export async function executeRegistryMeteoraLiquidation(
         pool: position.pool,
         position: position.position,
       });
-      const result = await slrd.meteora.executePreparedAndVerify(
-        prepared,
-        {
-          live: true,
-          simulate: true,
-          skipPreflight: false,
-          commitment: "confirmed",
-        },
-        { attempts: 6, retryDelayMs: 500, commitment: "confirmed" },
+      const result = await measured(
+        m,
+        `close-position ${position.position}`,
+        async () =>
+          await slrd.meteora.executePreparedAndVerify(
+            prepared,
+            {
+              live: true,
+              simulate: true,
+              skipPreflight: false,
+              commitment: "confirmed",
+            },
+            { attempts: 6, retryDelayMs: 500, commitment: "confirmed" },
+          ),
+        (receipt) => ({
+          pool: position.pool,
+          position: position.position,
+          signatures: receipt.signatures.length,
+        }),
       );
       out.push({ position, result });
     } catch (error) {

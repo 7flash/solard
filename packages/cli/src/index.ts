@@ -348,7 +348,7 @@ Scripts (strategies stay outside the kernel)
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
-  slrd run examples/meteora-liquidity-agent.ts --pool <pool> --wallet <wallet> [--sol 0.1] [--loop] [--live]
+  slrd run examples/meteora-liquidity-agent.ts --pool <pool> --wallet <wallet> [--sol 0.1] [--state-file <path>] [--loop] [--live]
 
 Raydium
   slrd raydium quote --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui>

@@ -18,8 +18,12 @@ What changed
      $env:SOLARD_ENABLE_LIVE_TRADES="1"
      slrd run examples/meteora-liquidity-agent.ts --pool <POOL> --wallet pumpfun --sol 0.1 --loop --live
 
-   Once a position exists, omit --sol. If there are multiple positions in the pool,
-   pass --position <POSITION> so the agent cannot move an unrelated position.
+   The agent persists the exact position it manages under .solard/agents by default.
+   Existing positions are never auto-adopted: pass --position <POSITION> once to
+   explicitly adopt one. The persisted bootstrap-consumed flag is written before a
+   live bootstrap broadcast, so a crash/restart cannot accidentally fund a second
+   position. Use --state-file <path> when you intentionally run another independent
+   agent for the same wallet/pool.
 
 3. Wallet-wide Meteora inventory:
      slrd meteora positions --all-wallets
