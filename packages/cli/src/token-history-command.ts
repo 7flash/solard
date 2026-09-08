@@ -3,8 +3,12 @@ import {
   analyzeTokenHistory,
   analyzeTokenHistoryForensicsFromStore,
   backfillTokenHistory,
+  backfillRaydiumTokenHistory,
   getTokenHistoryCoverage,
   loadTokenHistoryTrades,
+  TokenHistoryError,
+  type BackfillTokenHistoryOptions,
+  type TokenHistoryCoverage,
   type TokenHistoryTrade,
 } from "@solard/sdk";
 
@@ -112,7 +116,12 @@ function tradeLine(
   index: number,
   names: Map<string, string>,
 ): string {
-  const venue = row.history.venue === "pumpswap" ? "AMM" : "CURVE";
+  const venue =
+    row.history.venue === "pumpswap"
+      ? "AMM"
+      : row.history.venue === "raydium"
+        ? "RAY"
+        : "CURVE";
   const side = row.side.toUpperCase().padEnd(4);
   const owner = ownerLabel(row.owner, names).padEnd(12);
   const sol = `${fmtNumber(Math.abs(row.solDeltaUi), 6)} SOL`.padStart(16);
@@ -140,8 +149,10 @@ async function runBackfill(args: {
     if (!jsonMode) process.stderr.write(`${line}\n`);
   };
   progress(`TOKEN BACKFILL  ${args.mint}`);
-  const result = await backfillTokenHistory(args.slrd.connection(), args.mint, {
-    commitment: args.flags.has("confirmed") ? "confirmed" : "finalized",
+  const backfillOptions: BackfillTokenHistoryOptions = {
+    commitment: args.flags.has("confirmed")
+      ? ("confirmed" as const)
+      : ("finalized" as const),
     pageSize: numberFlag(args.flags, "page-size", 1_000),
     transactionBatchSize: numberFlag(args.flags, "batch-size", 100),
     transactionConcurrency: numberFlag(args.flags, "rpc-concurrency", 3),
@@ -200,7 +211,35 @@ async function runBackfill(args: {
         progress(`1S     trades=${row.trades} sparse-candles=${row.candles}`);
       }
     },
-  });
+  };
+  let result: TokenHistoryCoverage;
+  try {
+    result = await backfillTokenHistory(
+      args.slrd.connection(),
+      args.mint,
+      backfillOptions,
+    );
+  } catch (error) {
+    if (
+      !(error instanceof TokenHistoryError) ||
+      error.code !== "UNSUPPORTED_TOKEN"
+    )
+      throw error;
+    progress(
+      "VENUE  Pump history unsupported; trying Raydium/LaunchLab discovery",
+    );
+    result = await backfillRaydiumTokenHistory(
+      args.slrd.connection(),
+      args.mint,
+      {
+        ...backfillOptions,
+        maxRaydiumPools: Math.max(
+          1,
+          Math.trunc(numberFlag(args.flags, "raydium-pools", 8) ?? 8),
+        ),
+      },
+    );
+  }
   if (jsonMode) {
     args.emit(`${json(result)}\n`);
     return;
@@ -212,8 +251,12 @@ async function runBackfill(args: {
       `Mint:              ${result.mint}`,
       `Coverage:          ${coverageText(result)}`,
       `Creation:          ${fmtDate(result.creationAtMs)} ${result.creationSignature ? compact(result.creationSignature, 10, 10) : "-"}`,
-      `Bonding curve:     ${result.bondingCurve}`,
-      `PumpSwap pool:     ${result.pool ?? "not observed / not graduated"}`,
+      result.venueFamily === "raydium"
+        ? `LaunchLab pool:    ${result.launchLabPool ?? "not found / history begins after launch"}`
+        : `Bonding curve:     ${result.bondingCurve}`,
+      result.venueFamily === "raydium"
+        ? `Raydium pools:     ${(result.raydiumPools ?? []).join(", ") || "none discovered"}`
+        : `PumpSwap pool:     ${result.pool ?? "not observed / not graduated"}`,
       `Signatures:        ${result.uniqueSignatures}`,
       `Parsed tx:         ${result.parsedTransactions}`,
       `Missing tx:        ${result.missingTransactions}`,

@@ -3,7 +3,7 @@ import type {
   ParsedTransactionWithMeta,
 } from "@solana/web3.js";
 
-export type TokenHistoryVenue = "pump-curve" | "pumpswap";
+export type TokenHistoryVenue = "pump-curve" | "pumpswap" | "raydium";
 export type TokenHistorySide = "buy" | "sell";
 export type TokenHistoryScanKind = "curve" | "pool";
 export type TokenHistoryCommitment = "confirmed" | "finalized";
@@ -93,6 +93,8 @@ export type AddressHistoryCoverage = {
 
 export type TokenHistoryCoverage = {
   version: 1;
+  /** Optional venue family. Omitted by historical Pump coverage rows. */
+  venueFamily?: "pump" | "raydium";
   mint: string;
   quoteMint: string;
   decimals: number;
@@ -103,6 +105,10 @@ export type TokenHistoryCoverage = {
   commitment: TokenHistoryCommitment;
   curve: AddressHistoryCoverage;
   pumpswap: AddressHistoryCoverage | null;
+  /** All scanned market addresses for multi-pool Raydium history. */
+  scanAddresses?: AddressHistoryCoverage[];
+  launchLabPool?: string | null;
+  raydiumPools?: string[];
   uniqueSignatures: number;
   parsedTransactions: number;
   missingTransactions: number;
