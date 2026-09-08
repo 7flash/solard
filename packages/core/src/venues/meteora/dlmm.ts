@@ -1,6 +1,7 @@
 import BN from "bn.js";
 import bs58 from "bs58";
 import {
+  ComputeBudgetProgram,
   Keypair,
   PublicKey,
   Transaction,
@@ -231,6 +232,30 @@ function toBN(value: MeteoraInteger, label: string): BN {
   return new BN(normalized, 10);
 }
 
+function positiveDecimalFraction(value: unknown): {
+  numerator: bigint;
+  denominator: bigint;
+} {
+  const text = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  const match = /^([+]?(?:\d+(?:\.\d*)?|\.\d+))(?:e([+-]?\d+))?$/.exec(text);
+  if (!match)
+    throw new Error(`Invalid positive decimal value: ${String(value)}`);
+  const mantissa = match[1]!.replace(/^\+/, "");
+  const exponent = Number(match[2] ?? "0");
+  if (!Number.isInteger(exponent))
+    throw new Error(`Invalid decimal exponent: ${String(value)}`);
+  const [whole = "0", fraction = ""] = mantissa.split(".");
+  let numerator = BigInt(`${whole || "0"}${fraction}` || "0");
+  let denominator = 10n ** BigInt(fraction.length);
+  if (exponent > 0) numerator *= 10n ** BigInt(exponent);
+  else if (exponent < 0) denominator *= 10n ** BigInt(-exponent);
+  if (numerator <= 0n)
+    throw new Error(`Decimal value must be positive: ${String(value)}`);
+  return { numerator, denominator };
+}
+
 function decimalToRaw(value: MeteoraUiAmount, decimals: number): BN {
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 30)
     throw new Error(`Invalid token decimals: ${decimals}`);
@@ -312,6 +337,22 @@ function isLegacyTransaction(
   return transaction instanceof Transaction;
 }
 
+/**
+ * Solard's default Meteora execution policy is minimum-fee: keep compute-unit
+ * limits, but do not pay an optional compute-unit price unless a future caller
+ * explicitly opts into one.  The current Meteora execution options do not expose
+ * a priority-price knob, so any upstream SetComputeUnitPrice instruction is
+ * removed from legacy transactions before signing.
+ */
+function stripLegacyPriorityFee(transaction: Transaction): void {
+  transaction.instructions = transaction.instructions.filter((instruction) => {
+    if (!instruction.programId.equals(ComputeBudgetProgram.programId))
+      return true;
+    // ComputeBudgetInstruction::SetComputeUnitPrice = 3.
+    return instruction.data.length === 0 || instruction.data[0] !== 3;
+  });
+}
+
 function envEnabled(name: string): boolean {
   const value = process.env[name]?.trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes";
@@ -319,7 +360,7 @@ function envEnabled(name: string): boolean {
 
 function transportError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /socket|fetch|ECONNRESET|ETIMEDOUT|EAI_AGAIN|429|502|503|504|network|connection.*closed/i.test(
+  return /socket|fetch|ECONNRESET|ETIMEDOUT|EAI_AGAIN|429|502|503|504|network|connection.*closed|not confirmed|TransactionExpiredTimeoutError|expired.*timeout/i.test(
     message,
   );
 }
@@ -3292,6 +3333,144 @@ export class MeteoraDlmmService {
       throw new Error("Meteora pricePerLamport must be positive");
     const pool = await this.rawPool(poolAddress);
     return pool.getBinIdFromPrice(pricePerLamport, roundDown);
+  }
+
+  /**
+   * Quote a capital-preserving two-sided allocation for a range when the caller
+   * currently owns only X or only Y.  This is range geometry only: it does not
+   * perform the swap.  The returned swapInputRaw is the amount of the one-sided
+   * principal that should be converted into the missing token before opening.
+   */
+  async quoteSingleSidedBalancedPosition(args: {
+    pool: string;
+    minBinId: number;
+    maxBinId: number;
+    strategy?: MeteoraStrategy;
+    side: "x" | "y";
+    totalAmountRaw: MeteoraInteger;
+  }): Promise<{
+    pool: string;
+    activeBin: number;
+    strategy: MeteoraStrategy;
+    minBinId: number;
+    maxBinId: number;
+    side: "x" | "y";
+    totalAmountRaw: string;
+    targetXRaw: string;
+    targetYRaw: string;
+    swapInputRaw: string;
+    pricePerLamport: string;
+  }> {
+    if (
+      !Number.isInteger(args.minBinId) ||
+      !Number.isInteger(args.maxBinId) ||
+      args.minBinId > args.maxBinId
+    ) {
+      throw new Error(
+        "Balanced Meteora range must use ordered integer bin ids",
+      );
+    }
+    const total = toBN(args.totalAmountRaw, "totalAmountRaw");
+    if (total.isZero())
+      throw new Error("Balanced Meteora principal must be positive");
+
+    const pool = await this.rawPool(args.pool, true);
+    const sdk = await dlmmSdk();
+    const { StrategyType } = sdk;
+    const strategy = args.strategy ?? "spot";
+    const strategyType = normalizeStrategy(strategy, StrategyType);
+    const active = await pool.getActiveBin();
+    const activeBin =
+      extractBinId(active) ?? numberOrNull((pool.lbPair as any)?.activeId);
+    const binStep = numberOrNull((pool.lbPair as any)?.binStep);
+    if (activeBin == null || binStep == null) {
+      throw new Error(
+        "Meteora active bin/bin step is unavailable for balanced allocation",
+      );
+    }
+    if (activeBin < args.minBinId || activeBin > args.maxBinId) {
+      throw new Error(
+        `Cannot balance a two-sided position while active bin ${activeBin} is outside target ${args.minBinId}..${args.maxBinId}`,
+      );
+    }
+    const pricePerLamport = String((active as any).price);
+    const price = positiveDecimalFraction(pricePerLamport);
+    const zero = new BN(0);
+    const totalBig = BigInt(total.toString(10));
+
+    if (args.side === "y") {
+      const autoFillX = (sdk as any).autoFillXByStrategy;
+      if (typeof autoFillX !== "function") {
+        throw new MeteoraError(
+          "Installed @meteora-ag/dlmm does not expose autoFillXByStrategy",
+          "SDK_INCOMPATIBLE",
+        );
+      }
+      const fullX = autoFillX(
+        activeBin,
+        binStep,
+        total,
+        zero,
+        zero,
+        args.minBinId,
+        args.maxBinId,
+        strategyType,
+      ) as BN;
+      const xBig = BigInt(fullX.toString(10));
+      const scaleNumerator = totalBig * price.denominator;
+      const scaleDenominator = scaleNumerator + xBig * price.numerator;
+      const targetY = (totalBig * scaleNumerator) / scaleDenominator;
+      const targetX = (xBig * scaleNumerator) / scaleDenominator;
+      return {
+        pool: pool.pubkey.toBase58(),
+        activeBin,
+        strategy,
+        minBinId: args.minBinId,
+        maxBinId: args.maxBinId,
+        side: args.side,
+        totalAmountRaw: totalBig.toString(),
+        targetXRaw: targetX.toString(),
+        targetYRaw: targetY.toString(),
+        swapInputRaw: (totalBig - targetY).toString(),
+        pricePerLamport,
+      };
+    }
+
+    const autoFillY = (sdk as any).autoFillYByStrategy;
+    if (typeof autoFillY !== "function") {
+      throw new MeteoraError(
+        "Installed @meteora-ag/dlmm does not expose autoFillYByStrategy",
+        "SDK_INCOMPATIBLE",
+      );
+    }
+    const fullY = autoFillY(
+      activeBin,
+      binStep,
+      total,
+      zero,
+      zero,
+      args.minBinId,
+      args.maxBinId,
+      strategyType,
+    ) as BN;
+    const yBig = BigInt(fullY.toString(10));
+    const scaleNumerator = totalBig * price.numerator;
+    const scaleDenominator = scaleNumerator + yBig * price.denominator;
+    const targetX = (totalBig * scaleNumerator) / scaleDenominator;
+    const targetY = (yBig * scaleNumerator) / scaleDenominator;
+    return {
+      pool: pool.pubkey.toBase58(),
+      activeBin,
+      strategy,
+      minBinId: args.minBinId,
+      maxBinId: args.maxBinId,
+      side: args.side,
+      totalAmountRaw: totalBig.toString(),
+      targetXRaw: targetX.toString(),
+      targetYRaw: targetY.toString(),
+      swapInputRaw: (totalBig - targetX).toString(),
+      pricePerLamport,
+    };
   }
 
   /**
@@ -8690,6 +8869,10 @@ export class MeteoraDlmmService {
           }
         }
         const enriched = { ...error.result, verification };
+        // A confirmation timeout is not an execution failure when the intended
+        // on-chain state can be proven.  Treat verified state as success instead
+        // of killing long-lived agents after an ambiguous RPC confirmation.
+        if (verification.ok) return enriched;
         throw new MeteoraPartialExecutionError(
           error.message,
           enriched,
@@ -8747,6 +8930,7 @@ export class MeteoraDlmmService {
     try {
       for (const transaction of prepared.transactions) {
         if (isLegacyTransaction(transaction)) {
+          stripLegacyPriorityFee(transaction);
           if (!transaction.feePayer) transaction.feePayer = wallet.publicKey;
           if (!transaction.recentBlockhash) {
             transaction.recentBlockhash = (
@@ -8955,15 +9139,280 @@ export class MeteoraDlmmService {
     );
   }
 
+  private async balanceRecoveredInventoryForRange(args: {
+    wallet: WalletRef;
+    pool: string;
+    tokenXMint: string;
+    tokenYMint: string;
+    eligibleX: bigint;
+    eligibleY: bigint;
+    minBinId: number;
+    maxBinId: number;
+    strategy: MeteoraStrategy;
+    slippageBps: number;
+    options: MeteoraExecutionOptions;
+    commitment: Commitment;
+    beforeSwapWallet: MeteoraWalletAccountingSnapshot;
+  }): Promise<{
+    x: bigint;
+    y: bigint;
+    performed: boolean;
+    direction: "x-to-y" | "y-to-x" | null;
+    inputRaw: bigint;
+    outputRaw: bigint;
+    signatures: string[];
+  }> {
+    const unchanged = () => ({
+      x: args.eligibleX,
+      y: args.eligibleY,
+      performed: false as const,
+      direction: null,
+      inputRaw: 0n,
+      outputRaw: 0n,
+      signatures: [] as string[],
+    });
+    if (args.eligibleX === 0n && args.eligibleY === 0n) return unchanged();
+
+    const pool = await this.rawPool(args.pool, true);
+    const sdk = await dlmmSdk();
+    const { StrategyType } = sdk;
+    const strategyType = normalizeStrategy(args.strategy, StrategyType);
+    const active = await pool.getActiveBin();
+    const activeBin =
+      extractBinId(active) ?? numberOrNull((pool.lbPair as any)?.activeId);
+    const binStep = numberOrNull((pool.lbPair as any)?.binStep);
+    if (activeBin == null || binStep == null) return unchanged();
+    // If the market escaped during the close, do not add another market trade.
+    // Reopen with recovered inventory and let the next agent cycle reassess.
+    if (activeBin < args.minBinId || activeBin > args.maxBinId)
+      return unchanged();
+
+    const zero = new BN(0);
+    let ratioYNum: bigint;
+    let ratioXDen: bigint;
+    if (args.eligibleX > 0n) {
+      const autoFillY = (sdk as any).autoFillYByStrategy;
+      if (typeof autoFillY !== "function") return unchanged();
+      const requiredY = autoFillY(
+        activeBin,
+        binStep,
+        new BN(args.eligibleX.toString(), 10),
+        zero,
+        zero,
+        args.minBinId,
+        args.maxBinId,
+        strategyType,
+      ) as BN;
+      ratioYNum = BigInt(requiredY.toString(10));
+      ratioXDen = args.eligibleX;
+    } else {
+      const autoFillX = (sdk as any).autoFillXByStrategy;
+      if (typeof autoFillX !== "function") return unchanged();
+      const requiredX = autoFillX(
+        activeBin,
+        binStep,
+        new BN(args.eligibleY.toString(), 10),
+        zero,
+        zero,
+        args.minBinId,
+        args.maxBinId,
+        strategyType,
+      ) as BN;
+      const x = BigInt(requiredX.toString(10));
+      if (x === 0n) return unchanged();
+      ratioYNum = args.eligibleY;
+      ratioXDen = x;
+    }
+    if (ratioXDen <= 0n) return unchanged();
+
+    const currentYScaled = args.eligibleY * ratioXDen;
+    const targetYScaled = ratioYNum * args.eligibleX;
+    if (currentYScaled === targetYScaled) return unchanged();
+
+    const price = positiveDecimalFraction(String((active as any).price));
+    let direction: "x-to-y" | "y-to-x";
+    let candidate: bigint;
+    if (currentYScaled > targetYScaled) {
+      direction = "y-to-x";
+      const excessScaled = currentYScaled - targetYScaled;
+      const denominator =
+        ratioXDen * price.numerator + ratioYNum * price.denominator;
+      candidate =
+        denominator > 0n ? (excessScaled * price.numerator) / denominator : 0n;
+      if (ratioYNum > 0n && candidate >= args.eligibleY)
+        candidate = args.eligibleY > 1n ? args.eligibleY - 1n : 0n;
+    } else {
+      direction = "x-to-y";
+      const excessScaled = targetYScaled - currentYScaled;
+      const denominator =
+        ratioYNum * price.denominator + price.numerator * ratioXDen;
+      candidate =
+        denominator > 0n
+          ? (excessScaled * price.denominator) / denominator
+          : 0n;
+      if (ratioYNum > 0n && candidate >= args.eligibleX)
+        candidate = args.eligibleX > 1n ? args.eligibleX - 1n : 0n;
+    }
+    if (candidate <= 0n) return unchanged();
+
+    const swapForY = direction === "x-to-y";
+    let quote = await this.quoteSwapExactIn({
+      pool: args.pool,
+      swapForY,
+      amountInRaw: candidate.toString(),
+      slippageBps: args.slippageBps,
+    });
+    const quoteIn = bigintOrZero(quote.inAmountRaw);
+    const quoteOut = bigintOrZero(quote.outAmountRaw);
+    if (quoteIn <= 0n || quoteOut <= 0n) return unchanged();
+
+    // One refinement uses the executable quote rate rather than the active-bin
+    // mid price, accounting for pool fees and impact without an RPC-heavy search.
+    let refined = candidate;
+    if (direction === "y-to-x") {
+      const excessScaled = currentYScaled - targetYScaled;
+      const denominator = ratioXDen * quoteIn + ratioYNum * quoteOut;
+      if (denominator > 0n) refined = (excessScaled * quoteIn) / denominator;
+      if (ratioYNum > 0n && refined >= args.eligibleY)
+        refined = args.eligibleY > 1n ? args.eligibleY - 1n : 0n;
+    } else {
+      const excessScaled = targetYScaled - currentYScaled;
+      const denominator = ratioYNum * quoteIn + quoteOut * ratioXDen;
+      if (denominator > 0n) refined = (excessScaled * quoteIn) / denominator;
+      if (ratioYNum > 0n && refined >= args.eligibleX)
+        refined = args.eligibleX > 1n ? args.eligibleX - 1n : 0n;
+    }
+    if (refined <= 0n) return unchanged();
+    if (refined !== quoteIn) {
+      quote = await this.quoteSwapExactIn({
+        pool: args.pool,
+        swapForY,
+        amountInRaw: refined.toString(),
+        slippageBps: args.slippageBps,
+      });
+    }
+
+    const prepared = await this.buildSwapExactIn({
+      wallet: args.wallet,
+      pool: args.pool,
+      swapForY,
+      amountInRaw: quote.inAmountRaw,
+      slippageBps: args.slippageBps,
+    });
+    let swapResult: MeteoraExecutionResult | null = null;
+    let swapError: unknown = null;
+    try {
+      swapResult = await this.executePreparedUnlocked(prepared, args.options);
+    } catch (error) {
+      if (
+        !(error instanceof MeteoraPartialExecutionError) &&
+        !transportError(error)
+      ) {
+        throw error;
+      }
+      swapError = error;
+      const partial =
+        error instanceof MeteoraPartialExecutionError ? error : null;
+      const signatures = partial?.result.signatures ?? [];
+      // A balance swap happens after the source position has already been
+      // closed. Resolve ambiguous signatures aggressively before deciding how
+      // much recovered principal is safe to reopen.
+      for (const signature of signatures) {
+        const landed = await recoverSubmittedSignature(
+          this.host.connection(),
+          signature,
+          args.commitment,
+          12,
+        );
+        if (landed && partial) {
+          swapResult = { ...partial.result, signatures };
+          break;
+        }
+      }
+    }
+
+    const afterSwap = await this.walletAccountingSnapshot(
+      asPublicKey(this.resolveWalletAddress(args.wallet)),
+      args.tokenXMint,
+      args.tokenYMint,
+      args.commitment,
+    );
+
+    const beforeX = bigintOrZero(args.beforeSwapWallet.tokenXRaw);
+    const beforeY = bigintOrZero(args.beforeSwapWallet.tokenYRaw);
+    const afterX = bigintOrZero(afterSwap.tokenXRaw);
+    const afterY = bigintOrZero(afterSwap.tokenYRaw);
+    const requestedInput = bigintOrZero(prepared.metadata?.inAmountRaw);
+    const guaranteedOutput = bigintOrZero(
+      prepared.metadata?.minOutAmountRaw ?? prepared.metadata?.outAmountRaw,
+    );
+
+    const debit = (mint: string, before: bigint, after: bigint): bigint => {
+      const spl = before > after ? before - after : 0n;
+      if (spl > 0n) return spl;
+      // Exact-in Meteora swaps consume the requested amount. When the input is
+      // WSOL, the SDK may fund it directly from native SOL and leave no persistent
+      // SPL WSOL debit to observe. Only trust this fallback after the swap itself
+      // has been proven landed/recovered.
+      return mint === WSOL_MINT && swapResult ? requestedInput : 0n;
+    };
+    const credit = (mint: string, before: bigint, after: bigint): bigint => {
+      const spl = after > before ? after - before : 0n;
+      if (spl > 0n) return spl;
+      // A WSOL output may be unwrapped immediately. A landed exact-in swap is
+      // guaranteed to have produced at least minOutAmountRaw, so use that
+      // conservative floor rather than mixing transaction fees/rent into a native
+      // wallet-delta calculation. Any excess stays as harmless wallet dust.
+      return mint === WSOL_MINT && swapResult ? guaranteedOutput : 0n;
+    };
+
+    if (direction === "y-to-x") {
+      const spent = debit(args.tokenYMint, beforeY, afterY);
+      const gained = credit(args.tokenXMint, beforeX, afterX);
+      if (spent <= 0n || gained <= 0n || spent > args.eligibleY) {
+        if (swapError && swapResult) throw swapError;
+        return unchanged();
+      }
+      return {
+        x: args.eligibleX + gained,
+        y: args.eligibleY - spent,
+        performed: true,
+        direction,
+        inputRaw: spent,
+        outputRaw: gained,
+        signatures: swapResult?.signatures ?? [],
+      };
+    }
+
+    const spent = debit(args.tokenXMint, beforeX, afterX);
+    const gained = credit(args.tokenYMint, beforeY, afterY);
+    if (spent <= 0n || gained <= 0n || spent > args.eligibleX) {
+      if (swapError && swapResult) throw swapError;
+      return unchanged();
+    }
+    return {
+      x: args.eligibleX - spent,
+      y: args.eligibleY + gained,
+      performed: true,
+      direction,
+      inputRaw: spent,
+      outputRaw: gained,
+      signatures: swapResult?.signatures ?? [],
+    };
+  }
+
   /**
    * Close one exact source position and reopen a replacement using only the X/Y
-   * inventory attributable to that close. No swap is performed, native SOL is
-   * never treated as WSOL principal, and fresh wallet token balances are never
-   * added to the replacement principal.
+   * inventory attributable to that close. By default no swap is performed. When
+   * balanceInventory=true, Solard may swap only part of that recovered inventory
+   * to fit the target strategy/range; fresh wallet token/SOL balances are never
+   * added to replacement principal.
    *
-   * The close deliberately uses skipUnwrapSol=true so recovered WSOL is observed
-   * as an SPL-token delta. This keeps refundable native position rent completely
-   * outside principal attribution.
+   * The close requests skipUnwrapSol=true. Some SDK/runtime paths can still make
+   * WSOL-side proceeds observable as native SOL rather than an SPL WSOL delta.
+   * Solard therefore accepts native-SOL recovery evidence only for the pool's WSOL
+   * side and clips it to the exact source-attributable position amount, so returned
+   * position rent or unrelated wallet SOL can never increase replacement principal.
    */
   async movePositionFromSource(
     args: MeteoraMovePositionArgs,
@@ -8992,13 +9441,30 @@ export class MeteoraDlmmService {
           `Meteora source position ${args.position} owner mismatch: expected ${walletAddress}, received ${source.owner ?? "unknown"}`,
         );
       }
+      if (args.balanceInventory === true) {
+        if (
+          !Number.isInteger(args.minBinId) ||
+          !Number.isInteger(args.maxBinId)
+        ) {
+          throw new Error(
+            "balanceInventory requires explicit integer minBinId/maxBinId so inventory policy is known before the source is closed",
+          );
+        }
+        const active = await this.getActiveBin(args.pool, true);
+        if (active.binId < args.minBinId! || active.binId > args.maxBinId!) {
+          throw new Error(
+            `Refusing balanced move before close: active bin ${active.binId} is outside target ${args.minBinId}..${args.maxBinId}`,
+          );
+        }
+      }
 
       const sourceAttributableX =
         bigintOrZero(source.totalXRaw) + bigintOrZero(source.feeXRaw);
       const sourceAttributableY =
         bigintOrZero(source.totalYRaw) + bigintOrZero(source.feeYRaw);
+      const walletOwner = asPublicKey(walletAddress);
       const beforeCloseWallet = await this.walletAccountingSnapshot(
-        walletAddress,
+        walletOwner,
         source.tokenX.mint,
         source.tokenY.mint,
         commitment,
@@ -9029,7 +9495,7 @@ export class MeteoraDlmmService {
       }
 
       const afterCloseWallet = await this.walletAccountingSnapshot(
-        walletAddress,
+        walletOwner,
         source.tokenX.mint,
         source.tokenY.mint,
         commitment,
@@ -9038,14 +9504,49 @@ export class MeteoraDlmmService {
         const delta = bigintOrZero(afterRaw) - bigintOrZero(beforeRaw);
         return delta > 0n ? delta : 0n;
       };
-      const observedRecoveredX = positiveDelta(
+      const observedRecoveredNative = positiveDelta(
+        afterCloseWallet.nativeLamports,
+        beforeCloseWallet.nativeLamports,
+      );
+      let observedRecoveredX = positiveDelta(
         afterCloseWallet.tokenXRaw,
         beforeCloseWallet.tokenXRaw,
       );
-      const observedRecoveredY = positiveDelta(
+      let observedRecoveredY = positiveDelta(
         afterCloseWallet.tokenYRaw,
         beforeCloseWallet.tokenYRaw,
       );
+      let nativeRecoveryAppliedTo: "x" | "y" | null = null;
+
+      // A verified close can return the WSOL side as native SOL even when the
+      // caller requested skipUnwrapSol. Use that native delta only as evidence
+      // for the WSOL side, then cap it by the source position's attributable
+      // principal+fees. This deliberately excludes returned position-account rent
+      // and any unrelated wallet SOL from replacement principal.
+      if (
+        source.tokenX.mint === WSOL_MINT &&
+        sourceAttributableX > 0n &&
+        observedRecoveredX === 0n &&
+        observedRecoveredNative > 0n
+      ) {
+        observedRecoveredX =
+          observedRecoveredNative < sourceAttributableX
+            ? observedRecoveredNative
+            : sourceAttributableX;
+        nativeRecoveryAppliedTo = "x";
+      } else if (
+        source.tokenY.mint === WSOL_MINT &&
+        sourceAttributableY > 0n &&
+        observedRecoveredY === 0n &&
+        observedRecoveredNative > 0n
+      ) {
+        observedRecoveredY =
+          observedRecoveredNative < sourceAttributableY
+            ? observedRecoveredNative
+            : sourceAttributableY;
+        nativeRecoveryAppliedTo = "y";
+      }
+
       const eligibleX =
         observedRecoveredX < sourceAttributableX
           ? observedRecoveredX
@@ -9055,27 +9556,32 @@ export class MeteoraDlmmService {
           ? observedRecoveredY
           : sourceAttributableY;
 
-      const attribution: MeteoraMoveCapitalAttribution = {
-        sourcePosition: source.position,
-        principalSource: "source-position-only",
-        sourceAttributableXRaw: sourceAttributableX.toString(),
-        sourceAttributableYRaw: sourceAttributableY.toString(),
-        observedRecoveredXRaw: observedRecoveredX.toString(),
-        observedRecoveredYRaw: observedRecoveredY.toString(),
-        eligibleReopenXRaw: eligibleX.toString(),
-        eligibleReopenYRaw: eligibleY.toString(),
-        reopenedXRaw: eligibleX.toString(),
-        reopenedYRaw: eligibleY.toString(),
-        freshWalletPrincipalXRaw: "0",
-        freshWalletPrincipalYRaw: "0",
-        nativeSolUsedAsPrincipal: false,
-        marketSwapPerformed: false,
-        closeUsedSkipUnwrapSol: true,
-      };
-
       if (eligibleX === 0n && eligibleY === 0n) {
+        const attribution: MeteoraMoveCapitalAttribution = {
+          sourcePosition: source.position,
+          principalSource: "source-position-only",
+          sourceAttributableXRaw: sourceAttributableX.toString(),
+          sourceAttributableYRaw: sourceAttributableY.toString(),
+          observedRecoveredXRaw: observedRecoveredX.toString(),
+          observedRecoveredYRaw: observedRecoveredY.toString(),
+          observedRecoveredNativeLamports: observedRecoveredNative.toString(),
+          nativeRecoveryAppliedTo,
+          eligibleReopenXRaw: eligibleX.toString(),
+          eligibleReopenYRaw: eligibleY.toString(),
+          reopenedXRaw: "0",
+          reopenedYRaw: "0",
+          freshWalletPrincipalXRaw: "0",
+          freshWalletPrincipalYRaw: "0",
+          nativeSolUsedAsPrincipal: nativeRecoveryAppliedTo != null,
+          marketSwapPerformed: false,
+          marketSwapDirection: null,
+          marketSwapInputRaw: "0",
+          marketSwapOutputRaw: "0",
+          marketSwapSignatures: [],
+          closeUsedSkipUnwrapSol: true,
+        };
         throw new MeteoraMovePositionError({
-          message: `Meteora source-only move closed ${args.position}, but no attributable SPL X/Y inventory was recovered for reopening`,
+          message: `Meteora source-only move closed ${args.position}, but no attributable X/Y inventory was recovered for reopening (including native-SOL evidence for a WSOL side)`,
           stage: "reopen",
           sourcePosition: args.position,
           closeResult,
@@ -9083,14 +9589,72 @@ export class MeteoraDlmmService {
         });
       }
 
+      let reopenX = eligibleX;
+      let reopenY = eligibleY;
+      let inventorySwap: {
+        x: bigint;
+        y: bigint;
+        performed: boolean;
+        direction: "x-to-y" | "y-to-x" | null;
+        inputRaw: bigint;
+        outputRaw: bigint;
+        signatures: string[];
+      } | null = null;
+      if (args.balanceInventory === true) {
+        inventorySwap = await this.balanceRecoveredInventoryForRange({
+          wallet: args.wallet,
+          pool: args.pool,
+          tokenXMint: source.tokenX.mint,
+          tokenYMint: source.tokenY.mint,
+          eligibleX,
+          eligibleY,
+          minBinId: args.minBinId!,
+          maxBinId: args.maxBinId!,
+          strategy: args.strategy ?? "spot",
+          slippageBps: Math.max(
+            0,
+            Math.min(10_000, Math.trunc(args.slippageBps ?? 100)),
+          ),
+          options,
+          commitment,
+          beforeSwapWallet: afterCloseWallet,
+        });
+        reopenX = inventorySwap.x;
+        reopenY = inventorySwap.y;
+      }
+
+      const attribution: MeteoraMoveCapitalAttribution = {
+        sourcePosition: source.position,
+        principalSource: "source-position-only",
+        sourceAttributableXRaw: sourceAttributableX.toString(),
+        sourceAttributableYRaw: sourceAttributableY.toString(),
+        observedRecoveredXRaw: observedRecoveredX.toString(),
+        observedRecoveredYRaw: observedRecoveredY.toString(),
+        observedRecoveredNativeLamports: observedRecoveredNative.toString(),
+        nativeRecoveryAppliedTo,
+        eligibleReopenXRaw: eligibleX.toString(),
+        eligibleReopenYRaw: eligibleY.toString(),
+        reopenedXRaw: reopenX.toString(),
+        reopenedYRaw: reopenY.toString(),
+        freshWalletPrincipalXRaw: "0",
+        freshWalletPrincipalYRaw: "0",
+        nativeSolUsedAsPrincipal: nativeRecoveryAppliedTo != null,
+        marketSwapPerformed: inventorySwap?.performed ?? false,
+        marketSwapDirection: inventorySwap?.direction ?? null,
+        marketSwapInputRaw: (inventorySwap?.inputRaw ?? 0n).toString(),
+        marketSwapOutputRaw: (inventorySwap?.outputRaw ?? 0n).toString(),
+        marketSwapSignatures: inventorySwap?.signatures ?? [],
+        closeUsedSkipUnwrapSol: true,
+      };
+
       let openPrepared: MeteoraPreparedTransactions;
       try {
         openPrepared = await this.buildOpenPosition({
           wallet: args.wallet,
           pool: args.pool,
           strategy: args.strategy,
-          amountXRaw: eligibleX.toString(),
-          amountYRaw: eligibleY.toString(),
+          amountXRaw: reopenX.toString(),
+          amountYRaw: reopenY.toString(),
           minBinId: args.minBinId,
           maxBinId: args.maxBinId,
           binsBelow: args.binsBelow,

@@ -8,6 +8,9 @@ export type SolardRpcStats = {
   responses: number;
   rateLimited429: number;
   retries429: number;
+  networkErrors: number;
+  retriesNetwork: number;
+  finalNetworkErrors: number;
   finalHttpErrors: number;
   gateWaitMs: number;
 };
@@ -18,6 +21,9 @@ const rpcStats: SolardRpcStats = {
   responses: 0,
   rateLimited429: 0,
   retries429: 0,
+  networkErrors: 0,
+  retriesNetwork: 0,
+  finalNetworkErrors: 0,
   finalHttpErrors: 0,
   gateWaitMs: 0,
 };
@@ -32,6 +38,9 @@ export function resetSolardRpcStats(): void {
   rpcStats.responses = 0;
   rpcStats.rateLimited429 = 0;
   rpcStats.retries429 = 0;
+  rpcStats.networkErrors = 0;
+  rpcStats.retriesNetwork = 0;
+  rpcStats.finalNetworkErrors = 0;
   rpcStats.finalHttpErrors = 0;
   rpcStats.gateWaitMs = 0;
 }
@@ -106,6 +115,8 @@ async function acquireRpcSlot(maxRps: number): Promise<void> {
 export type SolardRpcFetchOptions = {
   /** Disable transport-level 429 retries when the caller owns retry/backoff. */
   retry429?: boolean;
+  /** Disable retries for fetch-level transport failures such as ECONNRESET. */
+  retryNetwork?: boolean;
 };
 
 /**
@@ -121,40 +132,78 @@ export async function solardRpcFetch(
   options: SolardRpcFetchOptions = {},
 ): Promise<Response> {
   const maxRps = envInt("SLRD_RPC_MAX_RPS", 5, 1);
-  const maxRetries =
+  const max429Retries =
     options.retry429 === false ? 0 : envInt("SLRD_RPC_429_RETRIES", 6, 0);
-  const baseDelayMs = envInt("SLRD_RPC_429_BASE_DELAY_MS", 500, 1);
-  const maxDelayMs = envInt("SLRD_RPC_429_MAX_DELAY_MS", 8_000, 1);
+  const base429DelayMs = envInt("SLRD_RPC_429_BASE_DELAY_MS", 500, 1);
+  const max429DelayMs = envInt("SLRD_RPC_429_MAX_DELAY_MS", 8_000, 1);
+  const maxNetworkRetries =
+    options.retryNetwork === false
+      ? 0
+      : envInt("SLRD_RPC_NETWORK_RETRIES", 4, 0);
+  const networkBaseDelayMs = envInt("SLRD_RPC_NETWORK_BASE_DELAY_MS", 250, 1);
+  const networkMaxDelayMs = envInt("SLRD_RPC_NETWORK_MAX_DELAY_MS", 4_000, 1);
   const debug =
     process.env.SLRD_RPC_RETRY_LOG === "1" ||
     process.env.SLRD_RPC_RETRY_LOG === "true";
 
   rpcStats.maxRps = maxRps;
-  let attempt = 0;
+  let attempt429 = 0;
+  let attemptNetwork = 0;
 
   while (true) {
     await acquireRpcSlot(maxRps);
-    const response = await globalThis.fetch(input, init);
-    rpcStats.responses += 1;
 
+    let response: Response;
+    try {
+      response = await globalThis.fetch(input, init);
+    } catch (error) {
+      rpcStats.networkErrors += 1;
+      const aborted =
+        init?.signal?.aborted === true ||
+        (error instanceof Error && error.name === "AbortError");
+      if (aborted || attemptNetwork >= maxNetworkRetries) {
+        rpcStats.finalNetworkErrors += 1;
+        throw error;
+      }
+
+      rpcStats.retriesNetwork += 1;
+      const delayMs = Math.min(
+        networkMaxDelayMs,
+        networkBaseDelayMs * 2 ** attemptNetwork,
+      );
+      if (debug) {
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(
+          `[slrd:rpc] network retry ${attemptNetwork + 1}/${maxNetworkRetries} after ${delayMs}ms: ${message}\n`,
+        );
+      }
+      attemptNetwork += 1;
+      await sleep(delayMs);
+      continue;
+    }
+
+    rpcStats.responses += 1;
     if (response.status === 429) rpcStats.rateLimited429 += 1;
 
-    if (response.status !== 429 || attempt >= maxRetries) {
+    if (response.status !== 429 || attempt429 >= max429Retries) {
       if (!response.ok) rpcStats.finalHttpErrors += 1;
       return response;
     }
 
     rpcStats.retries429 += 1;
-    const exponential = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+    const exponential = Math.min(
+      max429DelayMs,
+      base429DelayMs * 2 ** attempt429,
+    );
     const delayMs = retryAfterMs(response, exponential);
 
     if (debug) {
       process.stderr.write(
-        `[slrd:rpc] 429 retry ${attempt + 1}/${maxRetries} after ${delayMs}ms\n`,
+        `[slrd:rpc] 429 retry ${attempt429 + 1}/${max429Retries} after ${delayMs}ms\n`,
       );
     }
 
-    attempt += 1;
+    attempt429 += 1;
     await sleep(delayMs);
   }
 }

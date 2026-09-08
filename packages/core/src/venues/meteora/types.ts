@@ -1719,6 +1719,12 @@ export type MeteoraMovePositionArgs = {
   slippageBps?: number;
   /** Default-deny policy for shared Meteora infrastructure required by the target range. */
   infrastructure?: MeteoraInfrastructureFundingPolicy;
+  /**
+   * When true, swap only recovered source-position inventory as needed to fit
+   * the target strategy/range before reopening. Fresh wallet principal remains
+   * excluded. Defaults to false for backwards compatibility.
+   */
+  balanceInventory?: boolean;
 };
 
 export type MeteoraMoveCapitalAttribution = {
@@ -1727,9 +1733,16 @@ export type MeteoraMoveCapitalAttribution = {
   /** Source position inventory + unclaimed fees immediately before close. */
   sourceAttributableXRaw: string;
   sourceAttributableYRaw: string;
-  /** Positive SPL wallet deltas produced by the source close, before source-cap clipping. */
+  /** Positive wallet deltas attributable to the source close, before source-cap clipping.
+   * For a WSOL side, Solard may conservatively map a positive native-SOL delta
+   * back to that side when no SPL WSOL delta is observable.
+   */
   observedRecoveredXRaw: string;
   observedRecoveredYRaw: string;
+  /** Positive native-SOL wallet delta observed across the source close. */
+  observedRecoveredNativeLamports: string;
+  /** WSOL side that used native-SOL recovery evidence, when applicable. */
+  nativeRecoveryAppliedTo: "x" | "y" | null;
   /** Amounts eligible to become new LP principal: min(observed close delta, source attributable cap). */
   eligibleReopenXRaw: string;
   eligibleReopenYRaw: string;
@@ -1738,8 +1751,15 @@ export type MeteoraMoveCapitalAttribution = {
   reopenedYRaw: string;
   freshWalletPrincipalXRaw: "0";
   freshWalletPrincipalYRaw: "0";
-  nativeSolUsedAsPrincipal: false;
-  marketSwapPerformed: false;
+  /** True only when source-attributable WSOL proceeds were observed as native SOL.
+   * Fresh wallet SOL is still excluded by source-attributable clipping.
+   */
+  nativeSolUsedAsPrincipal: boolean;
+  marketSwapPerformed: boolean;
+  marketSwapDirection: "x-to-y" | "y-to-x" | null;
+  marketSwapInputRaw: string;
+  marketSwapOutputRaw: string;
+  marketSwapSignatures: string[];
   closeUsedSkipUnwrapSol: true;
 };
 

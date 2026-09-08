@@ -1,47 +1,83 @@
 declare module "measure-fn" {
+  export type MeasureLogEvent = {
+    type: "start" | "success" | "error" | "annotation" | string;
+    id?: string;
+    label: string;
+    data?: unknown;
+    value?: unknown;
+    result?: unknown;
+    error?: unknown;
+    duration?: number;
+    depth?: number;
+    meta?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+
+  export type MeasureLogger = (
+    event: MeasureLogEvent,
+    next?: () => void,
+  ) => void;
+
   export type MeasureAction<T = unknown> =
     | string
     | {
-        label: string;
+        start?: () => unknown;
+        end?: (value: T) => unknown;
+        catch?: (error: unknown) => T | Promise<T>;
         budget?: number;
         timeout?: number;
         maxResultLength?: number;
-        result?: (value: T) => unknown;
+        summarize?: boolean;
+        stripScopePrefix?: boolean;
         meta?: Record<string, unknown>;
         [key: string]: unknown;
       };
+
   export type MeasureFn = {
     <T = null>(
       action: MeasureAction<T>,
-      fn?:
-        | (() => Promise<T>)
-        | ((measure: MeasureFn, measureSync: MeasureSyncFn) => Promise<T>),
-      onError?: (error: unknown) => T | null | Promise<T | null>,
-    ): Promise<T | null>;
-    assert<T>(
-      action: MeasureAction<T>,
-      fn: (() => Promise<T>) | ((measure: MeasureFn) => Promise<T>),
+      fn?: (() => Promise<T>) | (() => T),
     ): Promise<T>;
+    retry?: (...args: any[]) => Promise<any>;
+    wrap?: (...args: any[]) => any;
+    batch?: (...args: any[]) => Promise<any>;
+    root?: (...args: any[]) => Promise<any>;
+    timed?: (...args: any[]) => Promise<any>;
   };
+
   export type MeasureSyncFn = {
-    <T = null>(
-      action: MeasureAction<T>,
-      fn?: (() => T) | ((measure: MeasureSyncFn) => T),
-      onError?: (error: unknown) => T | null,
-    ): T | null;
-    assert<T>(
-      action: MeasureAction<T>,
-      fn: (() => T) | ((measure: MeasureSyncFn) => T),
-    ): T;
+    <T = null>(action: MeasureAction<T>, fn?: () => T): T;
   };
-  export type MeasureScope = {
+
+  /**
+   * Modern measure-fn scopes are callable. Compatibility properties remain
+   * declared because older Solard code still uses m.measure(...) / m.measureSync(...).
+   */
+  export type MeasureScope = MeasureFn & {
     measure: MeasureFn;
     measureSync: MeasureSyncFn;
-    resetCounter(): void;
+    sync: MeasureSyncFn;
+    note: (...args: any[]) => unknown;
+    retry: (...args: any[]) => Promise<any>;
+    wrap: (...args: any[]) => any;
+    batch: (...args: any[]) => Promise<any>;
+    root: (...args: any[]) => Promise<any>;
+    timed: (...args: any[]) => Promise<any>;
+    resetCounter?: () => void;
   };
+
   export function createMeasure(
     scope: string,
     options?: { maxResultLength?: number },
   ): MeasureScope;
-  export function configure(options: Record<string, unknown>): void;
+
+  export function configure(options: {
+    logger?: MeasureLogger | null;
+    [key: string]: unknown;
+  }): void;
+
+  export const measure: MeasureFn;
+  export const measureSync: MeasureSyncFn;
+  export function safeStringify(value: unknown): string;
+  export function summarizeForMeasure(value: unknown): unknown;
 }

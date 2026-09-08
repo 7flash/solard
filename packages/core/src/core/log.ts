@@ -27,6 +27,8 @@ export type SolardMeasureEvent = {
   label?: string;
   depth?: number;
   duration?: number;
+  data?: unknown;
+  value?: unknown;
   result?: unknown;
   error?: unknown;
   meta?: Record<string, unknown>;
@@ -34,8 +36,14 @@ export type SolardMeasureEvent = {
   maxResultLength?: number;
 };
 
+export type SolardMeasureNext = () => void;
+export type SolardMeasureLogger = (
+  event: SolardMeasureEvent,
+  next?: SolardMeasureNext,
+) => void;
+
 export type SolardMeasureOptions = Partial<SolardMeasureRuntimeOptions> & {
-  logger?: ((event: SolardMeasureEvent) => void) | null;
+  logger?: SolardMeasureLogger | null;
 };
 
 export type SolardMeasureLabelSummary = {
@@ -58,7 +66,10 @@ export type SolardMeasureSummary = {
 };
 
 export type SolardMeasureCollector = {
-  logger: (event: SolardMeasureEvent) => void;
+  /** Replacement logger: collect the event and suppress measure-fn's built-in output. */
+  logger: SolardMeasureLogger;
+  /** Middleware logger: collect the event and delegate to measure-fn's built-in output. */
+  middleware: SolardMeasureLogger;
   snapshot(): SolardMeasureSummary;
   reset(): void;
 };
@@ -107,7 +118,7 @@ export function createSolardMeasureCollector(): SolardMeasureCollector {
     labels.clear();
   };
 
-  const logger = (event: SolardMeasureEvent) => {
+  const logger: SolardMeasureLogger = (event) => {
     if (event.type === "annotation") {
       annotations += 1;
       return;
@@ -143,8 +154,14 @@ export function createSolardMeasureCollector(): SolardMeasureCollector {
     labels.set(label, row);
   };
 
+  const middleware: SolardMeasureLogger = (event, next) => {
+    logger(event);
+    next?.();
+  };
+
   return {
     logger,
+    middleware,
     snapshot() {
       return {
         completed,

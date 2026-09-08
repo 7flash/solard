@@ -19,6 +19,17 @@ export type TokenBacktestCoverage = {
   creationSignature: string | null;
 };
 
+export type TokenBacktestPriceAnomaly = {
+  id: string;
+  signature: string;
+  atMs: number;
+  priceSol: number;
+  beforeMedianSol: number;
+  afterMedianSol: number;
+  ratioToBefore: number;
+  ratioToAfter: number;
+};
+
 export type TokenBacktestTape = {
   mint: string;
   source: "trades" | "candles-1s";
@@ -26,6 +37,8 @@ export type TokenBacktestTape = {
   usableRows: number;
   skippedDropped: number;
   skippedNoPrice: number;
+  skippedAnomalousPrice: number;
+  priceAnomalies: TokenBacktestPriceAnomaly[];
   confidence: {
     processed: number;
     confirmed: number;
@@ -43,11 +56,103 @@ export type TokenBacktestTapeOptions = {
   toMs?: number;
   includeProcessed?: boolean;
   coverageToleranceMs?: number;
+  /** Disable only for forensic replay of raw parser output. Default true. */
+  priceSanity?: boolean;
+  /** Point must differ from both neighboring medians by this factor. Default 1000x. */
+  isolatedPriceSpikeRatio?: number;
+  /** Neighboring medians must agree within this factor. Default 5x. */
+  priceContinuityRatio?: number;
+  /** Nearby events sampled on each side. Default 20. */
+  priceSanityWindow?: number;
+  /** Maximum temporal distance for neighboring events. Default 5 minutes. */
+  priceSanityWindowMs?: number;
 };
 
 function positive(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1]! + sorted[middle]!) / 2
+    : sorted[middle]!;
+}
+
+function priceRatio(left: number, right: number): number {
+  const low = Math.min(left, right);
+  const high = Math.max(left, right);
+  return low > 0 ? high / low : Number.POSITIVE_INFINITY;
+}
+
+function filterIsolatedPriceAnomalies(
+  events: BacktestTapeEvent[],
+  options: TokenBacktestTapeOptions,
+): { events: BacktestTapeEvent[]; anomalies: TokenBacktestPriceAnomaly[] } {
+  if (options.priceSanity === false || events.length < 7) {
+    return { events, anomalies: [] };
+  }
+  const spikeRatio = Math.max(
+    2,
+    Number(options.isolatedPriceSpikeRatio ?? 1000),
+  );
+  const continuityRatio = Math.max(
+    1,
+    Number(options.priceContinuityRatio ?? 5),
+  );
+  const window = Math.max(3, Math.trunc(options.priceSanityWindow ?? 20));
+  const windowMs = Math.max(
+    1_000,
+    Math.trunc(options.priceSanityWindowMs ?? 300_000),
+  );
+  const anomalies: TokenBacktestPriceAnomaly[] = [];
+  const rejected = new Set<number>();
+
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i]!;
+    const before: number[] = [];
+    const after: number[] = [];
+    for (let j = i - 1; j >= 0 && before.length < window; j -= 1) {
+      const candidate = events[j]!;
+      if (event.tradedAtMs - candidate.tradedAtMs > windowMs) break;
+      before.push(candidate.priceSol);
+    }
+    for (let j = i + 1; j < events.length && after.length < window; j += 1) {
+      const candidate = events[j]!;
+      if (candidate.tradedAtMs - event.tradedAtMs > windowMs) break;
+      after.push(candidate.priceSol);
+    }
+    // A genuine repricing persists. Only reject a spike when both sides contain
+    // enough observations and the before/after neighborhoods agree with each other.
+    if (before.length < 3 || after.length < 3) continue;
+    const beforeMedianSol = median(before);
+    const afterMedianSol = median(after);
+    if (beforeMedianSol == null || afterMedianSol == null) continue;
+    if (priceRatio(beforeMedianSol, afterMedianSol) > continuityRatio) continue;
+    const ratioToBefore = priceRatio(event.priceSol, beforeMedianSol);
+    const ratioToAfter = priceRatio(event.priceSol, afterMedianSol);
+    if (ratioToBefore < spikeRatio || ratioToAfter < spikeRatio) continue;
+    rejected.add(i);
+    anomalies.push({
+      id: event.id,
+      signature: event.signature,
+      atMs: event.tradedAtMs,
+      priceSol: event.priceSol,
+      beforeMedianSol,
+      afterMedianSol,
+      ratioToBefore,
+      ratioToAfter,
+    });
+  }
+  return {
+    events: rejected.size
+      ? events.filter((_event, index) => !rejected.has(index))
+      : events,
+    anomalies,
+  };
 }
 
 function canonicalPriceSol(row: TokenHistoryTrade): number | null {
@@ -95,7 +200,7 @@ export function buildTokenBacktestTape(input: {
   let skippedDropped = 0;
   let skippedNoPrice = 0;
   const confidence = { processed: 0, confirmed: 0, finalized: 0 };
-  const events: BacktestTapeEvent[] = [];
+  const candidateEvents: BacktestTapeEvent[] = [];
 
   for (const row of rows) {
     if (row.tradedAtMs < fromMs || row.tradedAtMs > toMs) continue;
@@ -115,7 +220,7 @@ export function buildTokenBacktestTape(input: {
       skippedNoPrice += 1;
       continue;
     }
-    events.push({
+    candidateEvents.push({
       id: row.eventKey,
       signature: row.signature,
       slot: row.slot,
@@ -126,6 +231,10 @@ export function buildTokenBacktestTape(input: {
       confidence: row.confidence,
     });
   }
+
+  const sanitized = filterIsolatedPriceAnomalies(candidateEvents, options);
+  const events = sanitized.events;
+  const priceAnomalies = sanitized.anomalies;
 
   const firstRecordedTradeAtMs = rows[0]?.tradedAtMs ?? null;
   const lastRecordedTradeAtMs = rows.at(-1)?.tradedAtMs ?? null;
@@ -150,6 +259,8 @@ export function buildTokenBacktestTape(input: {
     usableRows: events.length,
     skippedDropped,
     skippedNoPrice,
+    skippedAnomalousPrice: priceAnomalies.length,
+    priceAnomalies,
     confidence,
     token: null,
     coverage: {
@@ -206,12 +317,12 @@ export function buildTokenBacktestTapeFromCandles(input: {
       left.firstSlot - right.firstSlot ||
       left.candleKey.localeCompare(right.candleKey),
   );
-  const events: BacktestTapeEvent[] = [];
+  const candidateEvents: BacktestTapeEvent[] = [];
   for (const row of rows) {
     const eventAtMs = row.bucketAtMs + 999;
     if (eventAtMs < fromMs || eventAtMs > toMs) continue;
     if (!Number.isFinite(row.closePriceSol) || row.closePriceSol <= 0) continue;
-    events.push({
+    candidateEvents.push({
       id: row.candleKey,
       signature: row.lastSignature,
       slot: row.lastSlot,
@@ -225,6 +336,10 @@ export function buildTokenBacktestTapeFromCandles(input: {
           : "confirmed",
     });
   }
+
+  const sanitized = filterIsolatedPriceAnomalies(candidateEvents, options);
+  const events = sanitized.events;
+  const priceAnomalies = sanitized.anomalies;
 
   const firstRecordedTradeAtMs = rows[0]?.bucketAtMs ?? null;
   const lastRecordedTradeAtMs = rows.at(-1)?.bucketAtMs ?? null;
@@ -255,7 +370,9 @@ export function buildTokenBacktestTapeFromCandles(input: {
     sourceRows: rows.length,
     usableRows: events.length,
     skippedDropped: 0,
-    skippedNoPrice: rows.length - events.length,
+    skippedNoPrice: rows.length - candidateEvents.length,
+    skippedAnomalousPrice: priceAnomalies.length,
+    priceAnomalies,
     confidence,
     token: null,
     coverage: {

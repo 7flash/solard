@@ -1,4 +1,9 @@
-import { NATIVE_MINT } from "@solana/spl-token";
+import {
+  NATIVE_MINT,
+  TOKEN_2022_PROGRAM_ID,
+  createBurnCheckedInstruction,
+  createHarvestWithheldTokensToMintInstruction,
+} from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 
 import type { Solard } from "../core/solard.ts";
@@ -101,8 +106,10 @@ export type RegistryTokenLiquidationOptions = {
   routeDelayMs?: number;
   portfolioConcurrency?: number;
   portfolioDelayMs?: number;
-  /** Try Jupiter Swap V2 for holdings unsupported by native Solard venues. */
+  /** Try Jupiter when native routing/build/execution fails. */
   jupiterFallback?: boolean;
+  /** Explicitly destroy unprotected unsellable balances so their accounts can close. */
+  burnUnsellable?: boolean;
   onProgress?: (event: RegistryTokenLiquidationProgress) => void;
 };
 
@@ -118,6 +125,151 @@ const pause = (ms: number) =>
   ms > 0
     ? new Promise<void>((resolve) => setTimeout(resolve, ms))
     : Promise.resolve();
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function liveMintAccounts(slrd: Solard, wallet: string, mint: string) {
+  return (await slrd.tokenAccounts(wallet)).filter(
+    (account) => account.mint === mint && account.amountRaw > 0n,
+  );
+}
+
+async function associatedSellableAmount(
+  slrd: Solard,
+  wallet: string,
+  mint: string,
+): Promise<bigint> {
+  const accounts = await liveMintAccounts(slrd, wallet, mint);
+  return accounts
+    .filter((account) => account.isAssociated)
+    .reduce((sum, account) => sum + account.amountRaw, 0n);
+}
+
+async function burnUnsellableMint(
+  slrd: Solard,
+  action: RegistryTokenLiquidationAction,
+  via: SenderId,
+): Promise<SendReceipt[]> {
+  const signer = slrd.signer(action.walletAddress);
+  const accounts = await liveMintAccounts(
+    slrd,
+    action.walletAddress,
+    action.mint,
+  );
+  const receipts: SendReceipt[] = [];
+  for (const account of accounts) {
+    const composer = slrd.tx(action.walletAddress);
+    composer.add(
+      createBurnCheckedInstruction(
+        new PublicKey(account.address),
+        new PublicKey(action.mint),
+        signer.publicKey,
+        account.amountRaw,
+        account.decimals,
+        [],
+        new PublicKey(account.tokenProgram),
+      ),
+      {
+        kind: "burn-token",
+        mint: new PublicKey(action.mint),
+        meta: {
+          reason: "registry-liquidation-unsellable",
+          amountRaw: account.amountRaw.toString(),
+        },
+      },
+    );
+    receipts.push(
+      await composer.send({
+        via,
+        kind: "registry-token-liquidation:burn-unsellable",
+        skipSimulation: false,
+        skipPreflight: false,
+      }),
+    );
+  }
+  return receipts;
+}
+
+function isWithheldFeeCloseError(message: string): boolean {
+  return /withheld fee balance|harvest fees to the mint|custom program error: 0x23|Custom\":35/i.test(
+    message,
+  );
+}
+
+function isAccountGoneError(message: string): boolean {
+  return /AccountNotFound|account not found|could not find account/i.test(
+    message,
+  );
+}
+
+async function closeEmptyAccountRobust(
+  slrd: Solard,
+  action: RegistryTokenLiquidationAction,
+  via: SenderId,
+): Promise<SendReceipt | null> {
+  if (!action.tokenAccount || !action.tokenProgram)
+    throw new Error("Missing zero-balance token-account metadata");
+
+  const current = (await slrd.tokenAccounts(action.walletAddress)).find(
+    (account) => account.address === action.tokenAccount,
+  );
+  if (!current) return null;
+  if (current.amountRaw !== 0n)
+    throw new Error(
+      `Refusing to close non-empty token account ${action.tokenAccount}`,
+    );
+  if (current.closeAuthority && current.closeAuthority !== action.walletAddress)
+    throw new Error(
+      `Refusing token account with different close authority ${current.closeAuthority}`,
+    );
+
+  const sendClose = async (harvest: boolean): Promise<SendReceipt> => {
+    const composer = slrd.tx(action.walletAddress);
+    if (harvest) {
+      composer.add(
+        createHarvestWithheldTokensToMintInstruction(
+          new PublicKey(action.mint),
+          [new PublicKey(action.tokenAccount!)],
+          TOKEN_2022_PROGRAM_ID,
+        ),
+        { kind: "harvest-withheld-fees", mint: new PublicKey(action.mint) },
+      );
+    }
+    return await composer
+      .closeTokenAccountAddress(
+        action.tokenAccount!,
+        current.tokenProgram ?? action.tokenProgram!,
+      )
+      .send({
+        via,
+        kind: harvest
+          ? "registry-token-liquidation:harvest-close-empty"
+          : "registry-token-liquidation:close-empty",
+        skipSimulation: false,
+        skipPreflight: false,
+      });
+  };
+
+  try {
+    return await sendClose(false);
+  } catch (error) {
+    const message = errorMessage(error);
+    if (isAccountGoneError(message)) {
+      const exists = (await slrd.tokenAccounts(action.walletAddress)).some(
+        (account) => account.address === action.tokenAccount,
+      );
+      if (!exists) return null;
+    }
+    if (
+      current.tokenProgram === TOKEN_2022_PROGRAM_ID.toBase58() &&
+      isWithheldFeeCloseError(message)
+    ) {
+      return await sendClose(true);
+    }
+    throw error;
+  }
+}
 
 function isPublicKey(value: string): boolean {
   try {
@@ -575,7 +727,8 @@ export async function executeRegistryTokenLiquidation(
     (action) =>
       action.kind === "sell" ||
       action.kind === "jupiter-sell" ||
-      action.kind === "unwrap-wsol",
+      action.kind === "unwrap-wsol" ||
+      (options.burnUnsellable && action.kind === "skip-unsupported"),
   );
 
   for (let index = 0; index < primary.length; index += 1) {
@@ -590,26 +743,155 @@ export async function executeRegistryTokenLiquidation(
     try {
       if (action.kind === "sell") {
         if (!action.token) throw new Error("Missing routed token metadata");
-        const receipt = await slrd
-          .tx(action.walletAddress)
-          .sell(action.token, {
-            bps: 10_000,
-            slippageBps: options.slippageBps ?? 1_500,
-          })
-          .send({
-            via,
-            kind: "registry-token-liquidation",
-            skipSimulation: false,
-            skipPreflight: false,
+        let primaryError: unknown = null;
+        try {
+          const receipt = await slrd
+            .tx(action.walletAddress)
+            .sell(action.token, {
+              bps: 10_000,
+              slippageBps: options.slippageBps ?? 1_500,
+            })
+            .send({
+              via,
+              kind: "registry-token-liquidation",
+              skipSimulation: false,
+              skipPreflight: false,
+            });
+          out.push({ action, receipt });
+        } catch (error) {
+          primaryError = error;
+          if (options.jupiterFallback === false) throw error;
+          const amountRaw = await associatedSellableAmount(
+            slrd,
+            action.walletAddress,
+            action.mint,
+          );
+          if (amountRaw <= 0n) {
+            const remaining = await liveMintAccounts(
+              slrd,
+              action.walletAddress,
+              action.mint,
+            );
+            if (!remaining.length) {
+              out.push({ action });
+              primaryError = null;
+            } else if (!options.burnUnsellable) {
+              throw error;
+            }
+          }
+          if (primaryError == null) {
+            // Account disappeared or was already emptied between planning and execution.
+          } else if (amountRaw > 0n)
+            try {
+              const jupiter = await executeJupiterTokenToSol({
+                inputMint: action.mint,
+                amountRaw,
+                signer: slrd.signer(action.walletAddress),
+              });
+              out.push({
+                action: {
+                  ...action,
+                  kind: "jupiter-sell",
+                  amountRaw,
+                  amountUi: formatRaw(amountRaw, action.decimals),
+                  venue: "jupiter:fallback",
+                },
+                jupiter,
+              });
+              primaryError = null;
+            } catch (jupiterError) {
+              if (!options.burnUnsellable) {
+                throw new Error(
+                  `Native sell failed: ${errorMessage(error)}; Jupiter fallback failed: ${errorMessage(jupiterError)}`,
+                );
+              }
+            }
+        }
+        if (primaryError && options.burnUnsellable) {
+          const receipts = await burnUnsellableMint(slrd, action, via);
+          out.push({
+            action: {
+              ...action,
+              reason: `burned unsellable balance after route failures (${receipts.length} account(s))`,
+            },
+            receipt: receipts.at(-1),
           });
-        out.push({ action, receipt });
+        }
       } else if (action.kind === "jupiter-sell") {
-        const jupiter = await executeJupiterTokenToSol({
-          inputMint: action.mint,
-          amountRaw: action.amountRaw,
-          signer: slrd.signer(action.walletAddress),
-        });
-        out.push({ action, jupiter });
+        const amountRaw = await associatedSellableAmount(
+          slrd,
+          action.walletAddress,
+          action.mint,
+        );
+        if (amountRaw <= 0n) {
+          const remaining = await liveMintAccounts(
+            slrd,
+            action.walletAddress,
+            action.mint,
+          );
+          if (!remaining.length) {
+            out.push({ action });
+          } else if (options.burnUnsellable) {
+            const receipts = await burnUnsellableMint(slrd, action, via);
+            out.push({
+              action: {
+                ...action,
+                reason: `burned ${remaining.length} non-ATA/unsellable account balance(s)`,
+              },
+              receipt: receipts.at(-1),
+            });
+          } else {
+            throw new Error(
+              "Token balance exists only outside the associated token account; Jupiter cannot spend it. Re-run with --burn-unsellable to destroy unprotected dust and reclaim rent.",
+            );
+          }
+        } else {
+          try {
+            const jupiter = await executeJupiterTokenToSol({
+              inputMint: action.mint,
+              amountRaw,
+              signer: slrd.signer(action.walletAddress),
+            });
+            out.push({
+              action: {
+                ...action,
+                amountRaw,
+                amountUi: formatRaw(amountRaw, action.decimals),
+              },
+              jupiter,
+            });
+          } catch (error) {
+            if (!options.burnUnsellable) throw error;
+            const receipts = await burnUnsellableMint(slrd, action, via);
+            out.push({
+              action: {
+                ...action,
+                reason: `burned unsellable balance after Jupiter failure: ${errorMessage(error)}`,
+              },
+              receipt: receipts.at(-1),
+            });
+          }
+        }
+      } else if (action.kind === "skip-unsupported") {
+        if (!options.burnUnsellable)
+          throw new Error(action.reason ?? "Unsupported token");
+        const remaining = await liveMintAccounts(
+          slrd,
+          action.walletAddress,
+          action.mint,
+        );
+        if (!remaining.length) {
+          out.push({ action });
+        } else {
+          const receipts = await burnUnsellableMint(slrd, action, via);
+          out.push({
+            action: {
+              ...action,
+              reason: `burned unsupported unprotected balance from ${receipts.length} account(s): ${action.reason ?? "no route"}`,
+            },
+            receipt: receipts.at(-1),
+          });
+        }
       } else {
         const receipt = await slrd.unwrapWsol(action.walletAddress, {
           via,
@@ -618,6 +900,22 @@ export async function executeRegistryTokenLiquidation(
           skipPreflight: false,
         });
         out.push({ action, receipt });
+      }
+
+      // A venue normally spends the ATA only. Explicit --burn-unsellable means
+      // convergence is more important than preserving otherwise stranded dust:
+      // after a successful sale, destroy any residual unprotected balance in
+      // non-ATA or fee-stranded accounts so phase 2 can reclaim their rent.
+      if (
+        options.burnUnsellable &&
+        (action.kind === "sell" || action.kind === "jupiter-sell")
+      ) {
+        const residual = await liveMintAccounts(
+          slrd,
+          action.walletAddress,
+          action.mint,
+        );
+        if (residual.length) await burnUnsellableMint(slrd, action, via);
       }
 
       options.onProgress?.({
@@ -696,19 +994,8 @@ export async function executeRegistryTokenLiquidation(
           throw new Error(
             `Refusing token account with different close authority ${current.closeAuthority}`,
           );
-        const receipt = await slrd
-          .tx(action.walletAddress)
-          .closeTokenAccountAddress(
-            action.tokenAccount,
-            current.tokenProgram ?? action.tokenProgram,
-          )
-          .send({
-            via,
-            kind: "registry-token-liquidation:close-empty",
-            skipSimulation: false,
-            skipPreflight: false,
-          });
-        out.push({ action, receipt });
+        const receipt = await closeEmptyAccountRobust(slrd, action, via);
+        out.push({ ...(receipt ? { receipt } : {}), action });
       }
       options.onProgress?.({
         stage: "action-done",

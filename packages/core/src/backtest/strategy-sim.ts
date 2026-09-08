@@ -63,6 +63,10 @@ export type BacktestLot = {
 
 export type BacktestExecution = {
   eventIndex: number;
+  eventId: string;
+  signature: string;
+  source: string;
+  confidence: BacktestTapeEvent["confidence"];
   atMs: number;
   side: "buy" | "sell";
   status: "filled" | "skipped";
@@ -315,6 +319,10 @@ export function simulateAthDipProfitStrategy(
       lot.returnPct = lot.costSol > 0 ? (lot.pnlSol / lot.costSol) * 100 : null;
       executions.push({
         eventIndex,
+        eventId: event.id,
+        signature: event.signature,
+        source: event.source,
+        confidence: event.confidence,
         atMs: event.tradedAtMs,
         side: "sell",
         status: "filled",
@@ -342,6 +350,10 @@ export function simulateAthDipProfitStrategy(
         skippedEntries += 1;
         executions.push({
           eventIndex,
+          eventId: event.id,
+          signature: event.signature,
+          source: event.source,
+          confidence: event.confidence,
           atMs: event.tradedAtMs,
           side: "buy",
           status: "skipped",
@@ -385,6 +397,10 @@ export function simulateAthDipProfitStrategy(
       lots.push(lot);
       executions.push({
         eventIndex,
+        eventId: event.id,
+        signature: event.signature,
+        source: event.source,
+        confidence: event.confidence,
         atMs: event.tradedAtMs,
         side: "buy",
         status: "filled",

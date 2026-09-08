@@ -3,14 +3,12 @@ import {
   addExternalContact,
   configureSolardMeasure,
   createSolardMeasureCollector,
-  executeRegistryProgramBuffers,
   executeRegistrySolSweep,
   executeRegistryTokenLiquidation,
   findExternalContact,
   getSolardRpcStats,
   listExternalContacts,
   loadWalletAssetPortfolio,
-  planRegistryProgramBuffers,
   planRegistrySolSweep,
   planRegistryTokenLiquidation,
   removeExternalContact,
@@ -18,7 +16,6 @@ import {
   resolveTokenMintForPolicy,
   runScript,
   listScripts,
-  simulateRegistryProgramBuffers,
   simulateRegistrySolSweep,
   simulateRegistryTokenLiquidation,
   wrappedSolAta,
@@ -26,7 +23,6 @@ import {
 } from "@solard/sdk";
 
 import { handleMeteoraCommand } from "./meteora-commands.ts";
-import { handleRaydiumCommand } from "./raydium-commands.ts";
 import { resolveDestinationRef } from "./refs.ts";
 
 function emit(value: string): void {
@@ -209,23 +205,6 @@ function formatPrice(value: number | null | undefined): string {
     : value.toExponential(6);
 }
 
-function envEnabled(name: string): boolean {
-  const value = process.env[name]?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
-}
-
-function requireLiveWriteGate(label: string): void {
-  const enabled =
-    envEnabled("SOLARD_ENABLE_LIVE_TRADES") ||
-    envEnabled("SOLWAL_ENABLE_LIVE_TRADES") ||
-    envEnabled("SLRD_ENABLE_LIVE_TRADES");
-  if (!enabled) {
-    throw new Error(
-      `${label} live execution requires SOLARD_ENABLE_LIVE_TRADES=1`,
-    );
-  }
-}
-
 function csv(value: string | undefined): string[] {
   return (value ?? "")
     .split(",")
@@ -307,7 +286,7 @@ Prices
   slrd price watch <token|ca...> [--interval 1s] [--period 1m]
 
 Backtesting
-  slrd backtest <mint> --dip-pct 20 --profit-pct 40 --buy-sol 0.1 [--capital-sol 5] [--require-from-start] [--exact-trades] [--ledger] [--json]
+  slrd backtest <mint> --dip-pct 20 --profit-pct 40 --buy-sol 0.1 [--from creation|migration|<time>] [--to <time>] [--capital-sol 5] [--slippage-bps N] [--venue-fee-bps N] [--network-fee-sol N] [--latency-ms N] [--require-from-start] [--exact-trades] [--ledger[=<csv>]] [--json]
                                                         Replays sparse 1s candles by default; --exact-trades uses durable market fills
 
 Transfers and consolidation
@@ -317,16 +296,13 @@ Transfers and consolidation
                                                         Without --wallets, sweep considers all stored signing wallets
 
 Token liquidation
-  slrd liquidate tokens --except <token|mint> [--wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--simulate | --live]
+  slrd liquidate tokens --except <token|mint> [--wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--burn-unsellable] [--simulate | --live]
                                                         Sell supported tokens except protected mint(s); unwrap WSOL; close unprotected zero-balance token accounts and reclaim rent
-
-Cleanup
-  slrd cleanup program-buffers [--wallets <a,b,...>] [--simulate | --live] [--json]
-                                                        Find upgradeable-loader buffers controlled by stored wallets and reclaim their rent
 
 RPC
   All Solard JSON-RPC traffic is globally rate-limited to 5 req/s by default.
   Override only when your provider allows it: SLRD_RPC_MAX_RPS=<n>
+  Fetch-level network failures (ECONNRESET, socket close, etc.) retry 4 times by default; SLRD_RPC_NETWORK_RETRIES=<n>.
   Jupiter fallback: keyless 0.5 req/s, API-key default 1 req/s; override SLRD_JUPITER_MAX_RPS=<n>
 
 Diagnostics
@@ -335,7 +311,7 @@ Diagnostics
   --measure-stream  Restore raw live measure-fn output for low-level debugging
 
 Trading
-  slrd swap --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui> --wallet <wallet> [--venue raydium] [--live]  Jupiter by default; native Raydium with --venue raydium
+  slrd swap --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui> --wallet <wallet> [--live]  Jupiter exact-input any -> any; quote-only unless --live
   slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]                              Compatibility: SOL -> token
   slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
@@ -348,16 +324,6 @@ Scripts (strategies stay outside the kernel)
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
-  slrd run examples/meteora-liquidity-agent.ts --pool <pool> --wallet <wallet> [--sol 0.1] [--state-file <path>] [--loop] [--live]
-
-Raydium
-  slrd raydium quote --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui>
-  slrd raydium swap --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui> --wallet <wallet> [--live]
-  slrd raydium launchlab configs [--quote <SOL|token|mint>]
-  slrd raydium launchlab launch --wallet <wallet> --name <name> --symbol <symbol> --uri <metadata-uri> [--quote SOL|mint] [--buy <ui>] [--live]
-  slrd raydium launchlab buy|sell <mint> --wallet <wallet> [--quote SOL|mint] --amount <ui> [--live]
-  slrd raydium cpmm create --wallet <wallet> --mint-a <token|mint> --mint-b <token|mint> --amount-a <ui> --amount-b <ui> [--live]
-  slrd raydium help                              Full Raydium command reference
 
 Meteora DLMM
   slrd meteora discover --timeframe 30m --sort fee-active-tvl --limit 20
@@ -367,14 +333,11 @@ Meteora DLMM
   slrd meteora pool <pool> [--timeframe 30m]
   slrd meteora candles <pool> [--timeframe 5m]
   slrd meteora positions --wallet <wallet|address>
-  slrd meteora positions --all-wallets
   slrd meteora open <pool> --wallet <wallet> --sol 0.1 --bins 40 [--strategy spot] [--live]
   slrd meteora move <position> --wallet <wallet> [--bins 10] [--live]
   slrd meteora migrate <position> --wallet <wallet> --to-pool <pool> [--bins 10] [--live]
   slrd meteora add|remove|claim|close <position> --wallet <wallet> [--live]
   slrd meteora close-all <pool> --wallet <wallet> [--live]
-  slrd meteora close-all --wallet <wallet> --all-pools [--live]
-  slrd meteora close-all --all-wallets --all-pools [--live]
   slrd meteora quote <pool> (--in-x N|--in-y N|--out-x N|--out-y N)
   slrd meteora swap <pool> --wallet <wallet> (--in-x N|--in-y N|--out-x N|--out-y N) [--live]
   slrd meteora help                              Full Meteora command reference
@@ -437,8 +400,18 @@ async function main() {
     process.env.SLRD_MEASURE_STREAM === "true";
   configureSolardMeasure(
     streamMeasures
-      ? { silent: false, logger: null }
-      : { silent: false, logger: measureCollector.logger },
+      ? {
+          silent: false,
+          // Middleware mode: accumulate the structured event and then delegate
+          // to measure-fn's built-in logger. The collector itself does not own
+          // formatting or streaming.
+          logger: measureCollector.middleware,
+        }
+      : {
+          silent: false,
+          // Replacement mode: accumulate without printing every span.
+          logger: measureCollector.logger,
+        },
   );
 
   let perfPrinted = false;
@@ -462,7 +435,10 @@ async function main() {
       `PERF     wall=${formatDurationMs(wallMs)}  ` +
         `measure=${measures.completed} (${measures.errors} err)  ` +
         `rpc=${rpc.requestStarts}  429=${rpc.rateLimited429}  ` +
-        `retries=${rpc.retries429}  limit=${rpc.maxRps}/s\n`,
+        `neterr=${rpc.networkErrors}  ` +
+        `retries=${rpc.retries429 + rpc.retriesNetwork} ` +
+        `(429=${rpc.retries429},net=${rpc.retriesNetwork})  ` +
+        `limit=${rpc.maxRps}/s\n`,
     );
 
     if (flags.has("measure") && !streamMeasures) {
@@ -707,11 +683,6 @@ async function main() {
   try {
     if (command === "meteora") {
       await handleMeteoraCommand({ slrd, values, flags, emit });
-      return;
-    }
-
-    if (command === "raydium") {
-      await handleRaydiumCommand({ slrd, values, flags, emit });
       return;
     }
 
@@ -1621,79 +1592,11 @@ async function main() {
       );
       return;
     }
-    if (
-      command === "cleanup" &&
-      ["program-buffers", "buffers"].includes(values[0] ?? "")
-    ) {
-      if (flags.has("simulate") && flags.has("live")) {
-        throw new Error("Use either --simulate or --live, not both");
-      }
-      const walletRefs = csv(flags.get("wallets"));
-      const options = {
-        walletRefs: walletRefs.length ? walletRefs : undefined,
-        delayMs: Math.max(0, Math.trunc(int(flags, "delay-ms", 100) ?? 100)),
-      };
-      const plan = await planRegistryProgramBuffers(slrd, options);
-      if (flags.has("json") && !flags.has("simulate") && !flags.has("live")) {
-        emit(json(plan) + "\n");
-        return;
-      }
-
-      const mode = flags.has("live")
-        ? "LIVE"
-        : flags.has("simulate")
-          ? "SIMULATE"
-          : "PLAN";
-      if (!flags.has("json")) {
-        emit(
-          `PROGRAM BUFFERS ${mode}\n` +
-            `Wallets scanned: ${plan.walletsScanned}\n` +
-            `Buffers: ${plan.buffers.length}\n` +
-            `Reclaimable: ${formatRaw(plan.reclaimableLamports, 9)} SOL\n`,
-        );
-        if (plan.buffers.length) {
-          emit("\nWALLET            RECLAIM SOL       BUFFER\n");
-          for (const row of plan.buffers) {
-            emit(
-              `${row.walletName.slice(0, 16).padEnd(17)} ` +
-                `${formatRaw(row.lamports, 9).padStart(15)}  ${row.buffer}\n`,
-            );
-          }
-        }
-        for (const row of plan.scanErrors) {
-          emit(`SCAN FAIL @${row.walletName}: ${row.error}\n`);
-        }
-      }
-
-      if (!flags.has("simulate") && !flags.has("live")) {
-        if (!flags.has("json")) {
-          emit(`\n${OWL} plan only. Use --simulate, then --live.\n`);
-        }
-        return;
-      }
-
-      if (flags.has("live")) requireLiveWriteGate("Program-buffer cleanup");
-      const results = flags.has("simulate")
-        ? await simulateRegistryProgramBuffers(slrd, plan, options)
-        : await executeRegistryProgramBuffers(slrd, plan, options);
-      if (flags.has("json")) {
-        emit(json({ mode: mode.toLowerCase(), plan, results }) + "\n");
-        return;
-      }
-      const failed = results.filter((row) => Boolean(row.error)).length;
-      const ok = results.length - failed;
-      emit(`\nDONE     ok=${ok}  failed=${failed}\n`);
-      for (const row of results.filter((item) => item.error)) {
-        emit(`FAIL     ${row.buffer.buffer}  ${row.error}\n`);
-      }
-      return;
-    }
-
     if (command === "liquidate" && (values[0] ?? "tokens") === "tokens") {
       const except = csv(flags.get("except"));
       if (except.length === 0) {
         throw new Error(
-          "Usage: slrd liquidate tokens --except <token|mint>[,<token|mint>...] [--wallets <a,b,...>] [--simulate | --live]",
+          "Usage: slrd liquidate tokens --except <token|mint>[,<token|mint>...] [--wallets <a,b,...>] [--burn-unsellable] [--simulate | --live]",
         );
       }
       if (flags.has("simulate") && flags.has("live")) {
@@ -1746,6 +1649,7 @@ async function main() {
         portfolioConcurrency: 1,
         portfolioDelayMs: 0,
         jupiterFallback: !flags.has("no-jupiter"),
+        burnUnsellable: flags.has("burn-unsellable"),
         onProgress: (event: any) => {
           if (event.stage === "portfolio-start") {
             emit("SCAN     wallet token accounts...\n");
