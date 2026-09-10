@@ -1521,6 +1521,34 @@ export type MeteoraPositionSnapshot = {
   lowerBin: number | null;
   upperBin: number | null;
   inRange: boolean | null;
+  /**
+   * Position-local funded-bin proof derived from the SDK's positionBinData.
+   * This is stronger than lowerBin/upperBin: a position may declare a wide
+   * range while only a subset of those bins actually carries liquidity.
+   */
+  liquidityCoverage?: {
+    /** True when the SDK exposed enough per-bin data to prove or disprove full funding. */
+    observable: boolean;
+    /** lowerBin..upperBin width when both bounds are known. */
+    expectedBinCount: number | null;
+    /** Raw number of SDK positionBinData rows observed. */
+    positionBinDataCount: number;
+    /** Unique rows whose bin id and liquidity amount could both be decoded. */
+    mappedBinCount: number;
+    /** Rows whose bin id or liquidity amount could not be decoded safely. */
+    unreadableBinCount: number;
+    /** Bin ids carrying strictly positive position liquidity. */
+    fundedBinIds: number[];
+    /** Mapped bin ids explicitly reporting zero position liquidity. */
+    zeroLiquidityBinIds: number[];
+    /** Expected range bins not proven to carry positive position liquidity. */
+    missingFundedBinIds: number[];
+    /**
+     * true: every declared bin is proven funded; false: at least one declared
+     * bin is proven/unambiguously missing; null: installed SDK data is insufficient.
+     */
+    fullRangeFunded: boolean | null;
+  };
   tokenX: MeteoraPoolToken;
   tokenY: MeteoraPoolToken;
   totalXRaw: string;

@@ -1,787 +1,431 @@
 #!/usr/bin/env bun
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
-  configureSolardMeasure,
-  createSolardMeasure,
+  getAccount,
+  getAssociatedTokenAddressSync,
+  getMint,
+  NATIVE_MINT,
+} from "@solana/spl-token";
+import { PublicKey } from "@solana/web3.js";
+import {
+  configure,
+  createMeasure,
+  safeStringify,
+  type MeasureLogEvent,
+} from "measure-fn";
+import {
   createTraderSolard,
   executeJupiterSwap,
   quoteJupiterSwap,
-  quoteJupiterTokenToSol,
-  type JupiterSwapQuote,
 } from "@solard/sdk";
-import {
-  normalizeValueBandPolicy,
-  planValueBandDecision,
-  type ValueBandBuyMode,
-  type ValueBandPolicy,
-} from "../packages/core/src/strategy/value-band.ts";
-import {
-  TradingDashboard,
-  createTradingAudit,
-  defaultTradingLogPath,
-  fmtSol,
-  short,
-  sleep,
-} from "./lib/trading-terminal.ts";
 
-const WSOL = "So11111111111111111111111111111111111111112";
-const m = createSolardMeasure("value-band-agent");
 type Flags = Map<string, string>;
-
-type Journal = {
-  version: 1;
-  wallet: string;
-  mint: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  lowerArmed: boolean;
-  cumulativeBuySol: number;
-  cumulativeSellSol: number;
-  peakNetCapitalDeployedSol: number;
-  executions: number;
-};
-
-type Snapshot = {
-  atMs: number;
-  amountRaw: bigint;
-  decimals: number | null;
-  amountUi: number | null;
-  liquidationSol: number;
-  walletSol: number;
-  effectivePriceSol: number | null;
-  quote: JupiterSwapQuote | null;
-};
+const SOL = NATIVE_MINT.toBase58();
+const m = createMeasure("value-band-agent");
 
 function parseArgs(argv: string[]): Flags {
-  const flags = new Map<string, string>();
+  const out = new Map<string, string>();
   for (let i = 0; i < argv.length; i += 1) {
-    const value = argv[i]!;
-    if (!value.startsWith("--")) continue;
-    const [key, inline] = value.slice(2).split("=", 2);
-    if (inline != null) flags.set(key!, inline);
+    const item = argv[i]!;
+    if (!item.startsWith("--")) continue;
+    const [key, inline] = item.slice(2).split("=", 2);
+    if (inline != null) out.set(key!, inline);
     else if (argv[i + 1] && !argv[i + 1]!.startsWith("--"))
-      flags.set(key!, argv[++i]!);
-    else flags.set(key!, "true");
+      out.set(key!, argv[++i]!);
+    else out.set(key!, "true");
   }
-  return flags;
+  return out;
 }
-
 function flag(flags: Flags, key: string): string | undefined {
-  const value = flags.get(key);
-  return value && value !== "true" ? value : undefined;
+  const v = flags.get(key);
+  return v && v !== "true" ? v : undefined;
 }
-
 function required(flags: Flags, key: string): string {
-  const value = flag(flags, key);
-  if (!value) throw new Error(`Missing --${key} <value>`);
-  return value;
+  const v = flag(flags, key);
+  if (!v) throw new Error(`Missing --${key} <value>`);
+  return v;
 }
-
-function numberFlag(flags: Flags, key: string, fallback: number): number {
+function num(flags: Flags, key: string, fallback: number): number {
   const raw = flag(flags, key);
   if (raw == null) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) throw new Error(`Invalid --${key}: ${raw}`);
-  return parsed;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`Invalid --${key}: ${raw}`);
+  return value;
 }
-
-function integerFlag(flags: Flags, key: string, fallback: number): number {
-  return Math.trunc(numberFlag(flags, key, fallback));
-}
-
-function liveEnabled(): boolean {
+function liveGate(): boolean {
   return [
     process.env.SOLARD_ENABLE_LIVE_TRADES,
     process.env.SLRD_ENABLE_LIVE_TRADES,
     process.env.SOLWAL_ENABLE_LIVE_TRADES,
-  ].some((value) => value === "1" || value === "true");
+  ].some((v) => v === "1" || v === "true");
+}
+function short(v: string): string {
+  return v.length <= 18 ? v : `${v.slice(0, 8)}…${v.slice(-6)}`;
+}
+function sleep(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, Math.max(0, ms)));
 }
 
-function resolveMint(
+async function tokenRuntime(
   slrd: ReturnType<typeof createTraderSolard>,
-  ref: string,
-): string {
-  try {
-    return slrd.resolveToken(ref).mint;
-  } catch {
-    return ref;
-  }
-}
-
-function buyMode(flags: Flags): ValueBandBuyMode {
-  const raw = flag(flags, "buy-mode") ?? "same-value";
-  if (raw === "match-current") return "same-value";
-  if (raw === "same-value" || raw === "same-tokens" || raw === "to-base")
-    return raw;
-  throw new Error(
-    "--buy-mode must be same-value, same-tokens, to-base, or match-current",
-  );
-}
-
-function journalPath(flags: Flags, wallet: string, mint: string): string {
-  return resolve(
-    flag(flags, "state-file") ??
-      `.solard/agents/value-band-${wallet.slice(0, 8)}-${mint.slice(0, 8)}.json`,
-  );
-}
-
-function freshJournal(wallet: string, mint: string): Journal {
-  const now = Date.now();
-  return {
-    version: 1,
-    wallet,
+  mint: PublicKey,
+) {
+  const info = await slrd.connection().getAccountInfo(mint, "confirmed");
+  if (!info) throw new Error(`Mint not found: ${mint.toBase58()}`);
+  const mintInfo = await getMint(
+    slrd.connection(),
     mint,
-    createdAtMs: now,
-    updatedAtMs: now,
-    lowerArmed: true,
-    cumulativeBuySol: 0,
-    cumulativeSellSol: 0,
-    peakNetCapitalDeployedSol: 0,
-    executions: 0,
-  };
-}
-
-function readJournal(path: string, wallet: string, mint: string): Journal {
-  if (!existsSync(path)) return freshJournal(wallet, mint);
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<Journal>;
-  if (
-    parsed.version !== 1 ||
-    parsed.wallet !== wallet ||
-    parsed.mint !== mint
-  ) {
-    throw new Error(
-      `State file ${path} belongs to another wallet/mint or unsupported version`,
-    );
-  }
-  return {
-    ...freshJournal(wallet, mint),
-    ...parsed,
-    lowerArmed: parsed.lowerArmed !== false,
-    cumulativeBuySol: Math.max(0, Number(parsed.cumulativeBuySol ?? 0)),
-    cumulativeSellSol: Math.max(0, Number(parsed.cumulativeSellSol ?? 0)),
-    peakNetCapitalDeployedSol: Math.max(
-      0,
-      Number(parsed.peakNetCapitalDeployedSol ?? 0),
-    ),
-    executions: Math.max(0, Math.trunc(Number(parsed.executions ?? 0))),
-  };
-}
-
-function writeJournal(path: string, journal: Journal): void {
-  journal.updatedAtMs = Date.now();
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
-  renameSync(tmp, path);
-}
-
-function netCapital(journal: Journal): number {
-  return Math.max(0, journal.cumulativeBuySol - journal.cumulativeSellSol);
-}
-
-function recordBuy(journal: Journal, sol: number): void {
-  journal.cumulativeBuySol += sol;
-  journal.peakNetCapitalDeployedSol = Math.max(
-    journal.peakNetCapitalDeployedSol,
-    netCapital(journal),
+    "confirmed",
+    info.owner,
   );
-  journal.executions += 1;
+  return { tokenProgram: info.owner, decimals: mintInfo.decimals };
 }
 
-function recordSell(journal: Journal, sol: number): void {
-  journal.cumulativeSellSol += sol;
-  journal.executions += 1;
-}
-
-async function snapshot(
-  slrd: ReturnType<typeof createTraderSolard>,
-  walletRef: string,
-  mint: string,
-): Promise<Snapshot> {
-  const wallet = slrd.resolveWallet(walletRef);
-  const [accounts, lamports] = await Promise.all([
-    slrd.tokenAccounts(walletRef),
-    slrd.connection().getBalance(wallet.address, "confirmed"),
-  ]);
-  const mine = accounts.filter(
-    (row) => row.mint === mint && row.isAssociated && row.amountRaw > 0n,
+async function tokenBalanceRaw(args: {
+  slrd: ReturnType<typeof createTraderSolard>;
+  owner: PublicKey;
+  mint: PublicKey;
+  tokenProgram: PublicKey;
+}): Promise<bigint> {
+  const ata = getAssociatedTokenAddressSync(
+    args.mint,
+    args.owner,
+    false,
+    args.tokenProgram,
   );
-  const amountRaw = mine.reduce((sum, row) => sum + row.amountRaw, 0n);
-  const decimals = mine[0]?.decimals ?? null;
-  const amountUi = decimals == null ? null : Number(amountRaw) / 10 ** decimals;
-  let quote: JupiterSwapQuote | null = null;
-  let liquidationSol = 0;
-  if (amountRaw > 0n) {
-    quote = await quoteJupiterTokenToSol({ inputMint: mint, amountRaw });
-    liquidationSol = Number(quote.outAmountRaw) / 1e9;
+  try {
+    return (
+      await getAccount(
+        args.slrd.connection(),
+        ata,
+        "confirmed",
+        args.tokenProgram,
+      )
+    ).amount;
+  } catch {
+    return 0n;
   }
+}
+
+async function quoteLiquidation(mint: string, raw: bigint) {
+  if (raw <= 0n)
+    return {
+      outRaw: 0n,
+      sol: 0,
+      feeBps: null as number | null,
+      router: null as string | null,
+    };
+  const q = await quoteJupiterSwap({
+    inputMint: mint,
+    outputMint: SOL,
+    amountRaw: raw,
+  });
   return {
-    atMs: Date.now(),
-    amountRaw,
-    decimals,
-    amountUi,
-    liquidationSol,
-    walletSol: Number(lamports) / 1e9,
-    effectivePriceSol:
-      amountUi != null && amountUi > 0 ? liquidationSol / amountUi : null,
-    quote,
+    outRaw: q.outAmountRaw,
+    sol: Number(q.outAmountRaw) / 1e9,
+    feeBps: q.feeBps,
+    router: q.router,
   };
 }
 
-async function sizeSameTokens(args: {
+async function quoteBuyInputForTokenTarget(args: {
   mint: string;
-  tokenRaw: bigint;
-  maxLamports: bigint;
-  iterations: number;
-}): Promise<{ lamports: bigint; expectedTokensRaw: bigint }> {
-  if (args.tokenRaw <= 0n || args.maxLamports <= 0n)
-    return { lamports: 0n, expectedTokensRaw: 0n };
-  let low = 1n;
-  let high = args.maxLamports;
-  let best = high;
-  let bestOut = 0n;
-  for (let i = 0; i < args.iterations && high - low > 1n; i += 1) {
-    const mid = (low + high) / 2n;
+  targetTokenRaw: bigint;
+  maxSolRaw: bigint;
+}): Promise<{ inputRaw: bigint; expectedOutRaw: bigint }> {
+  if (args.targetTokenRaw <= 0n) return { inputRaw: 0n, expectedOutRaw: 0n };
+  let lo = 1n;
+  let hi = args.maxSolRaw;
+  let best: { inputRaw: bigint; expectedOutRaw: bigint } | null = null;
+  for (let i = 0; i < 9 && lo <= hi; i += 1) {
+    const mid = (lo + hi) / 2n;
     const q = await quoteJupiterSwap({
-      inputMint: WSOL,
+      inputMint: SOL,
       outputMint: args.mint,
       amountRaw: mid,
     });
-    best = mid;
-    bestOut = q.outAmountRaw;
-    if (q.outAmountRaw < args.tokenRaw) low = mid + 1n;
-    else high = mid;
+    if (q.outAmountRaw >= args.targetTokenRaw) {
+      best = { inputRaw: mid, expectedOutRaw: q.outAmountRaw };
+      hi = mid - 1n;
+    } else {
+      lo = mid + 1n;
+    }
   }
+  if (best) return best;
   const q = await quoteJupiterSwap({
-    inputMint: WSOL,
+    inputMint: SOL,
     outputMint: args.mint,
-    amountRaw: high,
+    amountRaw: args.maxSolRaw,
   });
-  best = high;
-  bestOut = q.outAmountRaw;
-  return { lamports: best, expectedTokensRaw: bestOut };
+  return { inputRaw: args.maxSolRaw, expectedOutRaw: q.outAmountRaw };
 }
 
-async function futureLiquidationForBuy(args: {
-  mint: string;
-  currentRaw: bigint;
-  buyLamports: bigint;
-}): Promise<{ liquidationSol: number; outRaw: bigint }> {
-  const buy = await quoteJupiterSwap({
-    inputMint: WSOL,
-    outputMint: args.mint,
-    amountRaw: args.buyLamports,
-  });
-  const totalRaw = args.currentRaw + buy.outAmountRaw;
-  const sell = await quoteJupiterTokenToSol({
-    inputMint: args.mint,
-    amountRaw: totalRaw,
-  });
-  return {
-    liquidationSol: Number(sell.outAmountRaw) / 1e9,
-    outRaw: buy.outAmountRaw,
-  };
+type Dashboard = {
+  now: string;
+  token: string;
+  wallet: string;
+  live: boolean;
+  baseSol: number;
+  lowerSol: number;
+  upperSol: number;
+  tokenRaw: bigint;
+  tokenUi: number;
+  liquidationSol: number;
+  walletSol: number;
+  freeSol: number;
+  router: string | null;
+  action: string;
+  detail: string;
+  lastSignature: string | null;
+};
+
+function draw(d: Dashboard, logPath: string, adjustStep: number) {
+  process.stdout.write("\x1b[2J\x1b[H");
+  console.log("SOLARD VALUE-BAND AGENT");
+  console.log(`Token:   ${d.token}`);
+  console.log(`Wallet:  ${d.wallet}`);
+  console.log(`Mode:    ${d.live ? "LIVE" : "DRY"}`);
+  console.log("");
+  console.log(
+    `Target:  ${d.baseSol.toFixed(4)} SOL   band=${d.lowerSol.toFixed(4)}..${d.upperSol.toFixed(4)} SOL`,
+  );
+  console.log(
+    `Token:   ${d.tokenUi.toLocaleString(undefined, { maximumFractionDigits: 6 })}`,
+  );
+  console.log(`Exit value now: ${d.liquidationSol.toFixed(6)} SOL`);
+  console.log(
+    `Wallet SOL:     ${d.walletSol.toFixed(6)} SOL   free=${d.freeSol.toFixed(6)}`,
+  );
+  console.log(`Route:   ${d.router ?? "-"}`);
+  console.log(`Action:  ${d.action} ${d.detail}`);
+  console.log(`Tx:      ${d.lastSignature ?? "-"}`);
+  console.log(`Updated: ${d.now}`);
+  console.log("");
+  console.log(
+    `Controls: [+] target +${adjustStep} SOL   [-] target -${adjustStep} SOL   [s] scale toward target now   [q] quit`,
+  );
+  console.log(`Measure log: ${logPath}`);
 }
 
-async function sizeToBase(args: {
-  mint: string;
-  currentRaw: bigint;
-  targetSol: number;
-  maxLamports: bigint;
-  iterations: number;
-}): Promise<{
-  lamports: bigint;
-  expectedLiquidationSol: number;
-  expectedTokensRaw: bigint;
-}> {
-  if (args.maxLamports <= 0n)
-    return { lamports: 0n, expectedLiquidationSol: 0, expectedTokensRaw: 0n };
-  let low = 1n;
-  let high = args.maxLamports;
-  let best = high;
-  let bestLiq = 0;
-  let bestOut = 0n;
-  for (let i = 0; i < args.iterations && high - low > 1n; i += 1) {
-    const mid = (low + high) / 2n;
-    const evaluated = await futureLiquidationForBuy({
-      mint: args.mint,
-      currentRaw: args.currentRaw,
-      buyLamports: mid,
-    });
-    best = mid;
-    bestLiq = evaluated.liquidationSol;
-    bestOut = evaluated.outRaw;
-    if (evaluated.liquidationSol < args.targetSol) low = mid + 1n;
-    else high = mid;
-  }
-  const evaluated = await futureLiquidationForBuy({
-    mint: args.mint,
-    currentRaw: args.currentRaw,
-    buyLamports: high,
-  });
-  best = high;
-  bestLiq = evaluated.liquidationSol;
-  bestOut = evaluated.outRaw;
-  return {
-    lamports: best,
-    expectedLiquidationSol: bestLiq,
-    expectedTokensRaw: bestOut,
-  };
-}
-
-async function main(): Promise<void> {
+async function main() {
   const flags = parseArgs(process.argv.slice(2));
   if (flags.has("help")) {
     console.log(
-      "Usage: slrd run examples/value-band-trading-agent.ts --token <mint|alias> --wallet <wallet> " +
-        "[--base-sol 0.1] [--lower-multiple 0.5] [--upper-multiple 1.8] [--sell-fraction 0.5] " +
-        "[--buy-mode same-value|same-tokens|to-base] [--max-capital-sol 0.5] [--max-buy-sol 0.1] " +
-        "[--scale-now] [--loop] [--live] [--log file.jsonl]",
+      "Usage: slrd run examples/value-band-trading-agent.ts --token <mint> --wallet <wallet> [--base-sol 0.1] [--lower-multiple 0.5] [--upper-multiple 1.8] [--sell-fraction 0.5] [--reserve-sol 0.02] [--poll-ms 5000] [--scale-now] [--dashboard] [--live]",
     );
     return;
   }
-
-  const tokenRef = required(flags, "token");
+  const token = new PublicKey(required(flags, "token"));
   const walletRef = required(flags, "wallet");
-  let baseSol = Math.max(0.000001, numberFlag(flags, "base-sol", 0.1));
-  const initialLowerMultiple = numberFlag(flags, "lower-sol", NaN);
-  const initialUpperMultiple = numberFlag(flags, "upper-sol", NaN);
-  const lowerRatio = Number.isFinite(initialLowerMultiple)
-    ? initialLowerMultiple / baseSol
-    : numberFlag(flags, "lower-multiple", 0.5);
-  const upperRatio = Number.isFinite(initialUpperMultiple)
-    ? initialUpperMultiple / baseSol
-    : numberFlag(flags, "upper-multiple", 1.8);
-  const sellFraction = numberFlag(flags, "sell-fraction", 0.5);
-  const stepSol = Math.max(
-    0.000001,
-    numberFlag(flags, "step-sol", Math.max(0.01, baseSol * 0.1)),
+  let baseSol = Math.max(0.000001, num(flags, "base-sol", 0.1));
+  const lowerMultiple = Math.max(0, num(flags, "lower-multiple", 0.5));
+  const upperMultiple = Math.max(
+    lowerMultiple,
+    num(flags, "upper-multiple", 1.8),
   );
-  const sampleMs = Math.max(1_000, integerFlag(flags, "sample-ms", 5_000));
-  const cooldownMs = Math.max(0, integerFlag(flags, "cooldown-ms", 10_000));
-  const sizingIterations = Math.max(
-    2,
-    Math.min(8, integerFlag(flags, "sizing-iterations", 4)),
+  const sellFraction = Math.min(
+    1,
+    Math.max(0.0001, num(flags, "sell-fraction", 0.5)),
   );
-  const minTradeSol = Math.max(0, numberFlag(flags, "min-trade-sol", 0.001));
-  const reserveSol = Math.max(0, numberFlag(flags, "reserve-sol", 0.02));
-  const explicitMaxCapital = flag(flags, "max-capital-sol");
-  const explicitMaxBuy = flag(flags, "max-buy-sol");
-  const mode = buyMode(flags);
+  const reserveSol = Math.max(0, num(flags, "reserve-sol", 0.02));
+  const pollMs = Math.max(1000, Math.trunc(num(flags, "poll-ms", 5000)));
   const live = flags.has("live");
-  if (live && !liveEnabled()) {
+  const dashboard = flags.has("dashboard") || Boolean(process.stdout.isTTY);
+  const adjustStep = Math.max(
+    0.000001,
+    num(flags, "adjust-step-sol", Math.max(0.01, baseSol * 0.1)),
+  );
+  let scaleNow = flags.has("scale-now");
+  let quit = false;
+  let lastSignature: string | null = null;
+  if (live && !liveGate())
     throw new Error(
-      "Live value-band trading requires --live and SOLARD_ENABLE_LIVE_TRADES=1",
+      "Live trading requires --live and SOLARD_ENABLE_LIVE_TRADES=1",
     );
-  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const logPath = resolve(
+    flag(flags, "log") ?? `logs/value-band-${token.toBase58()}-${stamp}.jsonl`,
+  );
+  mkdirSync(dirname(logPath), { recursive: true });
+  configure({
+    logger(event: MeasureLogEvent, next: () => void) {
+      appendFileSync(
+        logPath,
+        `${safeStringify({ at: new Date().toISOString(), event })}\n`,
+      );
+      if (!dashboard) next();
+    },
+  });
 
   const slrd = createTraderSolard();
-  const mint = resolveMint(slrd, tokenRef);
-  const wallet = slrd.resolveWallet(walletRef).address.toBase58();
-  const statePath = journalPath(flags, wallet, mint);
-  const journal = readJournal(statePath, wallet, mint);
-  const logPath =
-    flag(flags, "log") ??
-    defaultTradingLogPath(`value-band-${short(wallet)}-${short(mint)}`);
-  const audit = createTradingAudit(logPath);
-  configureSolardMeasure({ silent: false, logger: audit.logger });
-  const dashboard = new TradingDashboard(
-    "SLRD VALUE-BAND CONTROLLER",
-    !flags.has("no-ui"),
-  );
+  const signer = slrd.signer(walletRef);
+  const owner = signer.publicKey;
+  const runtime = await tokenRuntime(slrd, token);
 
-  let paused = false;
-  let quitting = false;
-  let scaleNow = flags.has("scale-now");
-  let latest: Snapshot | null = null;
-  let lastAction = "starting";
-  let lastError: string | null = null;
-  let lastTradeAt = 0;
-
-  const policy = (): ValueBandPolicy =>
-    normalizeValueBandPolicy({
-      version: 1,
-      kind: "value-band",
-      name: "interactive executable-liquidation value band",
-      baseSol,
-      lowerMultiple: lowerRatio,
-      upperMultiple: upperRatio,
-      sellFraction,
-      buyMode: mode,
-      minTradeSol,
-      maxCapitalDeployedSol: explicitMaxCapital
-        ? Number(explicitMaxCapital)
-        : baseSol * 5,
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode?.(true);
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (key: string) => {
+      if (key === "q" || key === "\u0003") quit = true;
+      else if (key === "+" || key === "=") baseSol += adjustStep;
+      else if (key === "-")
+        baseSol = Math.max(adjustStep, baseSol - adjustStep);
+      else if (key.toLowerCase() === "s") scaleNow = true;
     });
-  const maxBuySol = () =>
-    Math.max(minTradeSol, explicitMaxBuy ? Number(explicitMaxBuy) : baseSol);
+  }
 
-  dashboard.keys({
-    plus: () => {
-      baseSol += stepSol;
-      audit.event("control", { action: "base+", baseSol });
-    },
-    minus: () => {
-      baseSol = Math.max(stepSol, baseSol - stepSol);
-      audit.event("control", { action: "base-", baseSol });
-    },
-    pause: () => {
-      paused = !paused;
-      audit.event("control", { action: paused ? "pause" : "resume" });
-    },
-    rearm: () => {
-      journal.lowerArmed = true;
-      if (live) writeJournal(statePath, journal);
-      audit.event("control", { action: "rearm-lower" });
-    },
-    rebalance: () => {
-      scaleNow = true;
-      audit.event("control", { action: "scale-to-base" });
-    },
-    quit: () => {
-      quitting = true;
-    },
-  });
-
-  audit.event("start", {
-    mint,
-    wallet,
+  await m("policy", async () => ({
+    token: token.toBase58(),
+    wallet: owner.toBase58(),
     live,
     baseSol,
-    lowerRatio,
-    upperRatio,
+    lowerMultiple,
+    upperMultiple,
     sellFraction,
-    buyMode: mode,
-    statePath,
+    reserveSol,
+    pollMs,
     logPath,
-  });
+  }));
 
-  const render = () => {
-    const p = normalizeValueBandPolicy(policy());
-    const lower = p.baseSol * p.lowerMultiple;
-    const upper = p.baseSol * p.upperMultiple;
-    dashboard.render(
-      [
-        ["Token", short(mint)],
-        ["Wallet", short(wallet)],
-        ["Mode", `${live ? "LIVE" : "DRY"}${paused ? " / PAUSED" : ""}`],
-        ["Band", `${fmtSol(lower)} ← ${fmtSol(p.baseSol)} → ${fmtSol(upper)}`],
-        ["Liquidation value", fmtSol(latest?.liquidationSol)],
-        ["Wallet SOL", fmtSol(latest?.walletSol)],
-        [
-          "Token amount",
-          latest?.amountUi == null
-            ? (latest?.amountRaw.toString() ?? "-")
-            : latest.amountUi.toLocaleString(undefined, {
-                maximumFractionDigits: 8,
-              }),
-        ],
-        [
-          "Executable price",
-          latest?.effectivePriceSol == null
-            ? "-"
-            : `${latest.effectivePriceSol.toExponential(6)} SOL/token`,
-        ],
-        ["Lower armed", journal.lowerArmed ? "YES" : "NO"],
-        [
-          "Net capital",
-          `${fmtSol(netCapital(journal))} / cap ${fmtSol(p.maxCapitalDeployedSol)}`,
-        ],
-        ["Peak net capital", fmtSol(journal.peakNetCapitalDeployedSol)],
-        [
-          "Gross buys/sells",
-          `${journal.cumulativeBuySol.toFixed(6)} / ${journal.cumulativeSellSol.toFixed(6)} SOL`,
-        ],
-        ["Last action", lastAction],
-        ["Last error", lastError ?? "-"],
-        ["Log", audit.logPath],
-      ],
-      "+/- base  p pause  r rearm lower  b scale to base  q quit",
-    );
-  };
-
-  async function availableBuyBudget(
-    p: ReturnType<typeof normalizeValueBandPolicy>,
-    snap: Snapshot,
-  ): Promise<number> {
-    const capitalRemaining = Math.max(
-      0,
-      p.maxCapitalDeployedSol - netCapital(journal),
-    );
-    const walletAvailable = Math.max(0, snap.walletSol - reserveSol);
-    return Math.max(
-      0,
-      Math.min(capitalRemaining, walletAvailable, maxBuySol()),
-    );
-  }
-
-  async function planBuy(
-    p: ReturnType<typeof normalizeValueBandPolicy>,
-    snap: Snapshot,
-    forceToBase = false,
-  ) {
-    const maxSol = await availableBuyBudget(p, snap);
-    if (maxSol < p.minTradeSol)
-      return {
-        lamports: 0n,
-        expectedLiquidationSol: snap.liquidationSol,
-        expectedTokensRaw: 0n,
-        reason: "buy budget below minimum",
-      };
-    const maxLamports = BigInt(Math.floor(maxSol * 1e9));
-    const selectedMode: ValueBandBuyMode = forceToBase ? "to-base" : p.buyMode;
-    if (selectedMode === "same-value") {
-      const spendSol = Math.min(maxSol, Math.max(0, snap.liquidationSol));
-      if (spendSol < p.minTradeSol)
-        return {
-          lamports: 0n,
-          expectedLiquidationSol: snap.liquidationSol,
-          expectedTokensRaw: 0n,
-          reason: "same-value buy below minimum",
-        };
-      const lamports = BigInt(Math.floor(spendSol * 1e9));
-      const q = await quoteJupiterSwap({
-        inputMint: WSOL,
-        outputMint: mint,
-        amountRaw: lamports,
-      });
-      return {
-        lamports,
-        expectedLiquidationSol: NaN,
-        expectedTokensRaw: q.outAmountRaw,
-        reason: "same-value",
-      };
-    }
-    if (selectedMode === "same-tokens") {
-      const sized = await sizeSameTokens({
-        mint,
-        tokenRaw: snap.amountRaw,
-        maxLamports,
-        iterations: sizingIterations,
-      });
-      return {
-        lamports: sized.lamports,
-        expectedLiquidationSol: NaN,
-        expectedTokensRaw: sized.expectedTokensRaw,
-        reason: "same-tokens",
-      };
-    }
-    const sized = await sizeToBase({
-      mint,
-      currentRaw: snap.amountRaw,
-      targetSol: p.baseSol,
-      maxLamports,
-      iterations: sizingIterations,
-    });
-    return {
-      lamports: sized.lamports,
-      expectedLiquidationSol: sized.expectedLiquidationSol,
-      expectedTokensRaw: sized.expectedTokensRaw,
-      reason: "to-base",
-    };
-  }
-
-  async function executeBuy(
-    snap: Snapshot,
-    forceToBase = false,
-  ): Promise<void> {
-    const p = normalizeValueBandPolicy(policy());
-    const sized = await m(
-      {
-        start: () =>
-          forceToBase
-            ? "size scale-to-base buy"
-            : `size lower-band ${p.buyMode} buy`,
-        end: (v: any) => v,
-      },
-      () => planBuy(p, snap, forceToBase),
-    );
-    const buySol = Number(sized.lamports) / 1e9;
-    if (buySol < p.minTradeSol) {
-      lastAction = `hold: ${sized.reason}`;
-      return;
-    }
-    const decision = {
-      action: live ? "buy" : "would-buy",
-      reason: sized.reason,
-      buySol,
-      expectedTokensRaw: sized.expectedTokensRaw.toString(),
-      expectedLiquidationSol: Number.isFinite(sized.expectedLiquidationSol)
-        ? sized.expectedLiquidationSol
-        : null,
-      liquidationBeforeSol: snap.liquidationSol,
-      forceToBase,
-    };
-    audit.event("decision", decision);
-    if (!live) {
-      lastAction = `would buy ${buySol.toFixed(6)} SOL (${sized.reason})`;
-      return;
-    }
-    const result = await executeJupiterSwap({
-      inputMint: WSOL,
-      outputMint: mint,
-      amountRaw: sized.lamports,
-      signer: slrd.signer(walletRef),
-    });
-    recordBuy(journal, buySol);
-    if (!forceToBase) journal.lowerArmed = false;
-    writeJournal(statePath, journal);
-    lastTradeAt = Date.now();
-    lastAction = `BUY ${buySol.toFixed(6)} SOL  ${result.signature ?? "submitted"}`;
-    audit.event("execution", { ...decision, result, journal });
-  }
-
-  async function executeSell(snap: Snapshot): Promise<void> {
-    const p = normalizeValueBandPolicy(policy());
-    const sellRaw =
-      (snap.amountRaw * BigInt(Math.floor(p.sellFraction * 1_000_000))) /
-      1_000_000n;
-    if (sellRaw <= 0n) {
-      lastAction = "hold: sell amount rounded to zero";
-      return;
-    }
-    const quote = await quoteJupiterTokenToSol({
-      inputMint: mint,
-      amountRaw: sellRaw,
-    });
-    const proceedsSol = Number(quote.outAmountRaw) / 1e9;
-    if (proceedsSol < p.minTradeSol) {
-      lastAction = `hold: sell proceeds ${proceedsSol.toFixed(6)} < min ${p.minTradeSol}`;
-      return;
-    }
-    const decision = {
-      action: live ? "sell" : "would-sell",
-      sellRaw: sellRaw.toString(),
-      sellFraction: p.sellFraction,
-      expectedProceedsSol: proceedsSol,
-      liquidationBeforeSol: snap.liquidationSol,
-    };
-    audit.event("decision", decision);
-    if (!live) {
-      lastAction = `would sell ${(p.sellFraction * 100).toFixed(1)}% for ~${proceedsSol.toFixed(6)} SOL`;
-      return;
-    }
-    const result = await executeJupiterSwap({
-      inputMint: mint,
-      outputMint: WSOL,
-      amountRaw: sellRaw,
-      signer: slrd.signer(walletRef),
-    });
-    const actualRaw = result.outputAmountResult ?? result.totalOutputAmount;
-    const actualSol =
-      actualRaw && /^\d+$/.test(actualRaw)
-        ? Number(BigInt(actualRaw)) / 1e9
-        : proceedsSol;
-    recordSell(journal, actualSol);
-    writeJournal(statePath, journal);
-    lastTradeAt = Date.now();
-    lastAction = `SELL ${(p.sellFraction * 100).toFixed(1)}% ~${actualSol.toFixed(6)} SOL  ${result.signature ?? "submitted"}`;
-    audit.event("execution", { ...decision, actualSol, result, journal });
-  }
-
-  try {
-    while (!quitting) {
-      try {
-        latest = await m(
-          {
-            start: () => "executable liquidation snapshot",
-            end: (v: Snapshot) => ({
-              tokenRaw: v.amountRaw.toString(),
-              liquidationSol: v.liquidationSol,
-              walletSol: v.walletSol,
-            }),
-          },
-          () => snapshot(slrd, walletRef, mint),
-        );
-        lastError = null;
-      } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error);
-        audit.event("snapshot-error", { error: lastError });
-        render();
-        if (!flags.has("loop")) throw error;
-        await sleep(sampleMs);
-        continue;
-      }
-
-      const p = normalizeValueBandPolicy(policy());
-      const decision = planValueBandDecision({
-        policy: p,
-        liquidationValueSol: latest.liquidationSol,
-        state: {
-          lowerArmed: journal.lowerArmed,
-          cumulativeBuySol: journal.cumulativeBuySol,
-          cumulativeSellSol: journal.cumulativeSellSol,
-          peakNetCapitalDeployedSol: journal.peakNetCapitalDeployedSol,
-        },
-      });
-      if (decision.rearmLower && !journal.lowerArmed) {
-        journal.lowerArmed = true;
-        if (live) writeJournal(statePath, journal);
-        audit.event("state", {
-          action: "lower-rearmed",
-          liquidationSol: latest.liquidationSol,
+  while (!quit) {
+    try {
+      await m("cycle", async () => {
+        const tokenRaw = await tokenBalanceRaw({
+          slrd,
+          owner,
+          mint: token,
+          tokenProgram: runtime.tokenProgram,
         });
-      }
+        const walletLamports = BigInt(
+          await slrd.connection().getBalance(owner, "confirmed"),
+        );
+        const walletSol = Number(walletLamports) / 1e9;
+        const freeLamports =
+          walletLamports > BigInt(Math.ceil(reserveSol * 1e9))
+            ? walletLamports - BigInt(Math.ceil(reserveSol * 1e9))
+            : 0n;
+        const liquidation = await quoteLiquidation(token.toBase58(), tokenRaw);
+        const lowerSol = baseSol * lowerMultiple;
+        const upperSol = baseSol * upperMultiple;
+        let action = "HOLD";
+        let detail = "inside band";
 
-      const cooldownReady = Date.now() - lastTradeAt >= cooldownMs;
-      if (!paused && cooldownReady) {
-        try {
-          if (scaleNow) {
-            scaleNow = false;
-            if (latest.liquidationSol < p.baseSol)
-              await executeBuy(latest, true);
-            else
-              lastAction = `hold: already >= base ${p.baseSol.toFixed(6)} SOL`;
-          } else if (decision.action === "sell") {
-            await executeSell(latest);
-          } else if (decision.action === "buy") {
-            await executeBuy(latest, false);
-          } else {
-            lastAction = `hold: ${decision.reason}`;
+        if (tokenRaw === 0n) {
+          action = "BUY";
+          detail = `bootstrap ${baseSol.toFixed(4)} SOL`;
+          if (live && freeLamports > 0n) {
+            const inputRaw = BigInt(
+              Math.min(Number(freeLamports), Math.floor(baseSol * 1e9)),
+            );
+            if (inputRaw > 0n) {
+              const result = await executeJupiterSwap({
+                inputMint: SOL,
+                outputMint: token.toBase58(),
+                amountRaw: inputRaw,
+                signer,
+              });
+              lastSignature = result.signature ?? null;
+            }
           }
-        } catch (error) {
-          lastError = error instanceof Error ? error.message : String(error);
-          lastAction = "trade failed";
-          audit.event("trade-error", { error: lastError, decision });
-          if (!flags.has("loop") || flags.has("fail-fast")) throw error;
+        } else if (liquidation.sol >= upperSol) {
+          const sellRaw = BigInt(
+            Math.max(1, Math.floor(Number(tokenRaw) * sellFraction)),
+          );
+          action = "SELL";
+          detail = `${(sellFraction * 100).toFixed(1)}% because ${liquidation.sol.toFixed(4)} >= ${upperSol.toFixed(4)} SOL`;
+          if (live) {
+            const result = await executeJupiterSwap({
+              inputMint: token.toBase58(),
+              outputMint: SOL,
+              amountRaw: sellRaw,
+              signer,
+            });
+            lastSignature = result.signature ?? null;
+          }
+        } else if (liquidation.sol < lowerSol || scaleNow) {
+          const targetRaw = scaleNow
+            ? tokenRaw === 0n
+              ? 0n
+              : BigInt(
+                  Math.max(
+                    0,
+                    Math.floor(
+                      Number(tokenRaw) *
+                        Math.max(
+                          0,
+                          baseSol / Math.max(liquidation.sol, 1e-12) - 1,
+                        ),
+                    ),
+                  ),
+                )
+            : tokenRaw;
+          if (targetRaw > 0n && freeLamports > 0n) {
+            const q = await quoteBuyInputForTokenTarget({
+              mint: token.toBase58(),
+              targetTokenRaw: targetRaw,
+              maxSolRaw: freeLamports,
+            });
+            action = "BUY";
+            detail = `${Number(q.inputRaw) / 1e9} SOL to add ~${Number(targetRaw) / 10 ** runtime.decimals} tokens${scaleNow ? " (scale-now)" : " (match current units)"}`;
+            if (live && q.inputRaw > 0n) {
+              const result = await executeJupiterSwap({
+                inputMint: SOL,
+                outputMint: token.toBase58(),
+                amountRaw: q.inputRaw,
+                signer,
+              });
+              lastSignature = result.signature ?? null;
+            }
+          } else {
+            action = "HOLD";
+            detail =
+              "below target but no free SOL or no additional token target";
+          }
+          scaleNow = false;
         }
-      } else if (paused) {
-        lastAction = "hold: paused";
-      } else {
-        lastAction = `hold: cooldown ${Math.max(0, cooldownMs - (Date.now() - lastTradeAt))}ms`;
-      }
 
-      if (live && lastTradeAt > 0 && Date.now() - lastTradeAt < sampleMs * 2) {
-        try {
-          latest = await snapshot(slrd, walletRef, mint);
-        } catch {
-          // Next loop will retry and log normally.
-        }
-      }
-      render();
-      if (!flags.has("loop")) return;
-      await sleep(sampleMs);
+        const d: Dashboard = {
+          now: new Date().toISOString(),
+          token: token.toBase58(),
+          wallet: owner.toBase58(),
+          live,
+          baseSol,
+          lowerSol,
+          upperSol,
+          tokenRaw,
+          tokenUi: Number(tokenRaw) / 10 ** runtime.decimals,
+          liquidationSol: liquidation.sol,
+          walletSol,
+          freeSol: Number(freeLamports) / 1e9,
+          router: liquidation.router,
+          action,
+          detail,
+          lastSignature,
+        };
+        if (dashboard) draw(d, logPath, adjustStep);
+        return { ...d, tokenRaw: tokenRaw.toString() };
+      });
+    } catch (error) {
+      await m(
+        { start: () => "recoverable cycle error", end: (x) => x },
+        async () => ({
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      if (flags.has("fail-fast")) throw error;
     }
-  } finally {
-    audit.event("stop", {
-      reason: quitting ? "user" : "exit",
-      journal,
-      measure: audit.measureSummary(),
-    });
-    dashboard.close();
+    if (!flags.has("loop")) break;
+    await sleep(pollMs);
   }
+  process.stdin.setRawMode?.(false);
+  process.stdin.pause();
 }
 
 main().catch((error) => {
-  process.stderr.write(
-    `VALUE-BAND AGENT ERROR: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
-  );
+  process.stdin.setRawMode?.(false);
+  console.error(error);
   process.exitCode = 1;
 });

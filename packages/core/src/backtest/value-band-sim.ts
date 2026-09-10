@@ -83,6 +83,7 @@ export function simulateValueBandStrategy(
   let maxDrawdownPct = 0;
   let state: ValueBandRuntimeState = {
     lowerArmed: true,
+    lowerSide: null,
     cumulativeBuySol: 0,
     cumulativeSellSol: 0,
     peakNetCapitalDeployedSol: 0,
@@ -155,6 +156,7 @@ export function simulateValueBandStrategy(
     const liquidation = tokens * event.priceSol * (1 - degradation);
     state = {
       lowerArmed: state.lowerArmed,
+      lowerSide: state.lowerSide ?? null,
       cumulativeBuySol,
       cumulativeSellSol,
       peakNetCapitalDeployedSol: peakNet,
@@ -166,7 +168,8 @@ export function simulateValueBandStrategy(
     });
     state.lowerArmed = decision.lowerArmed;
     if (decision.action === "sell") {
-      sell(event, policy.sellFraction, liquidation);
+      if (sell(event, policy.sellFraction, liquidation))
+        state.lowerArmed = false;
     } else if (decision.action === "buy") {
       let requested = liquidation;
       if (policy.buyMode === "to-base")
@@ -175,6 +178,16 @@ export function simulateValueBandStrategy(
         requested = tokens * event.priceSol;
       if (buy(event, requested, liquidation)) state.lowerArmed = false;
     }
+
+    // Record the side after our own trade.  Own position resizing is never itself
+    // a lower-edge crossing; a later market observation must first recover above
+    // the boundary and then cross back below it.
+    const postTradeLiquidation = tokens * event.priceSol * (1 - degradation);
+    const lowerSol = policy.baseSol * policy.lowerMultiple;
+    const epsilon = Math.max(1e-12, policy.baseSol * 1e-9);
+    state.lowerSide =
+      postTradeLiquidation > lowerSol + epsilon ? "above" : "below";
+
     const equity = sol + tokens * event.priceSol * (1 - degradation);
     peakEquity = Math.max(peakEquity, equity);
     if (peakEquity > 0)

@@ -51,11 +51,3 @@ export {
   backtestTargetWeightTokenWithDependencies,
 } from "../../core/src/backtest/token-backtest.ts";
 export type { TokenTargetWeightBacktestResult } from "../../core/src/backtest/token-backtest.ts";
-// Raydium/LaunchLab durable history fallback. Kept as direct source re-exports
-// so this overlay does not need to replace the large @solard/core root barrel.
-export {
-  backfillRaydiumTokenHistory,
-  discoverRaydiumHistory,
-} from "../../core/src/chain/token-history/raydium-backfill.ts";
-export { parseRaydiumHistoryTransaction } from "../../core/src/chain/token-history/raydium-parser.ts";
-export type { RaydiumHistoryDiscovery } from "../../core/src/chain/token-history/raydium-backfill.ts";

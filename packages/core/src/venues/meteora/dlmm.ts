@@ -1275,19 +1275,91 @@ function extractBinId(bin: unknown): number | null {
   );
 }
 
-function positionHasLiquidity(position: any): boolean {
-  const bins = Array.isArray(position?.positionData?.positionBinData)
+function positionLiquidityCoverage(
+  position: any,
+  lowerBin: number | null,
+  upperBin: number | null,
+): MeteoraPositionSnapshot["liquidityCoverage"] {
+  const rows = Array.isArray(position?.positionData?.positionBinData)
     ? position.positionData.positionBinData
     : [];
-  return bins.some((bin: any) => {
-    const raw =
-      bin?.positionLiquidity ?? bin?.liquidityShare ?? bin?.liquidity ?? "0";
-    try {
-      return new BN(String(raw), 10).gt(new BN(0));
-    } catch {
-      return false;
+  const funded = new Set<number>();
+  const zero = new Set<number>();
+  const mapped = new Set<number>();
+  let unreadableBinCount = 0;
+
+  for (const row of rows) {
+    const binId = extractBinId(row);
+    const rawLiquidity =
+      row?.positionLiquidity ?? row?.liquidityShare ?? row?.liquidity;
+    if (binId == null || rawLiquidity == null) {
+      unreadableBinCount += 1;
+      continue;
     }
-  });
+    let liquidity: BN;
+    try {
+      liquidity = new BN(String(rawLiquidity), 10);
+    } catch {
+      unreadableBinCount += 1;
+      continue;
+    }
+    if (!Number.isInteger(binId)) {
+      unreadableBinCount += 1;
+      continue;
+    }
+    mapped.add(binId);
+    if (liquidity.gt(new BN(0))) funded.add(binId);
+    else zero.add(binId);
+  }
+
+  const rangeKnown =
+    Number.isInteger(lowerBin) &&
+    Number.isInteger(upperBin) &&
+    (lowerBin as number) <= (upperBin as number);
+  const expectedBinCount = rangeKnown
+    ? (upperBin as number) - (lowerBin as number) + 1
+    : null;
+  const expectedBinIds: number[] = [];
+  // DLMM positions are bounded. Keep a defensive cap so malformed upstream
+  // data cannot force an unbounded allocation while normalizing a snapshot.
+  if (rangeKnown && expectedBinCount != null && expectedBinCount <= 20_000) {
+    for (let id = lowerBin as number; id <= (upperBin as number); id += 1)
+      expectedBinIds.push(id);
+  }
+
+  const missingFundedBinIds = expectedBinIds.filter((id) => !funded.has(id));
+  let fullRangeFunded: boolean | null = null;
+  if (expectedBinIds.length > 0) {
+    if (missingFundedBinIds.length === 0) {
+      fullRangeFunded = true;
+    } else if (unreadableBinCount === 0 && mapped.size > 0) {
+      // positionBinData is readable and at least one concrete bin was exposed;
+      // expected bins absent from the positive-liquidity set are not funded.
+      fullRangeFunded = false;
+    }
+  }
+
+  return {
+    observable: fullRangeFunded != null,
+    expectedBinCount,
+    positionBinDataCount: rows.length,
+    mappedBinCount: mapped.size,
+    unreadableBinCount,
+    fundedBinIds: [...funded].sort((a, b) => a - b),
+    zeroLiquidityBinIds: [...zero].sort((a, b) => a - b),
+    missingFundedBinIds,
+    fullRangeFunded,
+  };
+}
+
+function positionHasLiquidity(position: any): boolean {
+  const data = position?.positionData ?? {};
+  const coverage = positionLiquidityCoverage(
+    position,
+    numberOrNull(data.lowerBinId),
+    numberOrNull(data.upperBinId),
+  );
+  return coverage.fundedBinIds.length > 0;
 }
 
 function mapEntries<T>(
@@ -4821,6 +4893,11 @@ export class MeteoraDlmmService {
     const upperBin = numberOrNull(data.upperBinId);
     const owner =
       publicKeyString(data.owner) ?? publicKeyString(position?.owner) ?? null;
+    const liquidityCoverage = positionLiquidityCoverage(
+      position,
+      lowerBin,
+      upperBin,
+    );
     return {
       position: publicKeyString(position?.publicKey) ?? "",
       pool: poolAddress,
@@ -4832,6 +4909,7 @@ export class MeteoraDlmmService {
         activeBin != null && lowerBin != null && upperBin != null
           ? activeBin >= lowerBin && activeBin <= upperBin
           : null,
+      liquidityCoverage,
       tokenX: tokenReserve(info?.tokenX),
       tokenY: tokenReserve(info?.tokenY),
       totalXRaw: integerString(data.totalXAmount),

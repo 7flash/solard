@@ -359,6 +359,7 @@ function positionsTable(result: AnyRow): string {
       pad("RANGE", 14),
       pad("ACTIVE", 7, "right"),
       pad("IN", 3),
+      pad("FUNDED", 9, "right"),
       pad("X", 16, "right"),
       pad("Y", 14, "right"),
       pad("FEE X", 12, "right"),
@@ -374,6 +375,19 @@ function positionsTable(result: AnyRow): string {
         pad(`${row.lowerBin ?? "?"}..${row.upperBin ?? "?"}`, 14),
         pad(row.activeBin ?? "-", 7, "right"),
         pad(row.inRange ? "yes" : "no", 3),
+        pad(
+          row.liquidityCoverage?.expectedBinCount != null
+            ? `${row.liquidityCoverage?.fundedBinIds?.length ?? 0}/${row.liquidityCoverage.expectedBinCount}${
+                row.liquidityCoverage.fullRangeFunded === false
+                  ? "!"
+                  : row.liquidityCoverage.fullRangeFunded == null
+                    ? "?"
+                    : ""
+              }`
+            : "?",
+          9,
+          "right",
+        ),
         pad(rawUiText(row.totalXRaw ?? row.xRaw, xd), 16, "right"),
         pad(rawUiText(row.totalYRaw ?? row.yRaw, yd), 14, "right"),
         pad(rawUiText(row.feeXRaw, xd), 12, "right"),

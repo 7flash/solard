@@ -24,6 +24,12 @@ import {
 
 import { handleMeteoraCommand } from "./meteora-commands.ts";
 import { resolveDestinationRef } from "./refs.ts";
+import {
+  VaultOnboardingError,
+  cliVaultStatus,
+  ensureCliVaultReady,
+  loadRememberedCliVault,
+} from "./vault-onboarding.ts";
 
 function emit(value: string): void {
   process.stdout.write(value);
@@ -93,6 +99,24 @@ function formatError(error: unknown): string {
   } catch {
     return String(error);
   }
+}
+
+function friendlyCliError(error: unknown): string | null {
+  const debug =
+    process.argv.includes("--debug") ||
+    process.env.SLRD_DEBUG === "1" ||
+    process.env.SOLARD_DEBUG === "1";
+  if (debug || !(error instanceof Error)) return null;
+  const code =
+    "code" in error &&
+    typeof (error as Error & { code?: unknown }).code === "string"
+      ? String((error as Error & { code?: unknown }).code)
+      : null;
+  if (error instanceof VaultOnboardingError) return error.message;
+  if (code === "MISSING_CONFIG" && error.message.includes("SLRD_MASTER_KEY")) {
+    return `${error.message}\n\nRun \`slrd setup\` in an interactive terminal, or set SLRD_MASTER_KEY for automation/CI.`;
+  }
+  return null;
 }
 function duration(value: string | undefined, fallbackMs: number): number {
   if (!value) return fallbackMs;
@@ -234,10 +258,65 @@ function targetWallets(
     group,
   };
 }
+function commandNeedsSigningVault(
+  command: string | undefined,
+  values: string[],
+  flags: Flags,
+): boolean {
+  if (!command) return false;
+  if (command === "wallet" && values[0] === "create") return true;
+  if (
+    [
+      "import",
+      "export",
+      "transfer",
+      "send-sol",
+      "buy",
+      "sell",
+      "unwrap-wsol",
+      "claim",
+    ].includes(command)
+  )
+    return true;
+  if (command === "alt" && (values[0] === "create" || values[0] === "extend"))
+    return true;
+  if (command === "vanity" && values[0] === "pool" && values[1] === "generate")
+    return true;
+  if (
+    flags.has("live") &&
+    [
+      "swap",
+      "sweep",
+      "liquidate",
+      "meteora",
+      "raydium",
+      "launch",
+      "deploy",
+      "vamp",
+      "spam-buy",
+      "buy-spam",
+      "run",
+    ].includes(command)
+  )
+    return true;
+  return false;
+}
+
+async function storedWalletCount(): Promise<number> {
+  const { createTraderSolard } = await import("@solard/sdk");
+  const probe = createTraderSolard();
+  try {
+    return probe.wallets.list().length;
+  } finally {
+    probe.close();
+  }
+}
+
 function help(): string {
   return `${OWL} slrd — multi-wallet Solana CLI + SDK for traders and AI agents
 
 Wallets and tokens
+  slrd setup [--status] [--adopt-env]        First-time local vault setup / migrate an existing SLRD_MASTER_KEY
   slrd wallet create [name]                  Generate and persist an encrypted Solana wallet
   slrd import <private_key> [name]
   cat key.json | slrd import --stdin [name]
@@ -292,7 +371,7 @@ Backtesting
 Transfers and consolidation
   slrd transfer <contact|wallet|address> --wallet <source-wallet> --sol <amount> [--simulate-only]
   slrd transfer <contact|wallet|address> --wallet <source-wallet> --token <USDC|mint> --amount <ui> [--simulate-only]
-  slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]
+  slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--max-balance-sol <SOL>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]
                                                         Without --wallets, sweep considers all stored signing wallets
 
 Token liquidation
@@ -369,7 +448,7 @@ Transactions and ALTs
 
 Environment
   SLRD_DB_PATH      shared SDK/CLI database; default ./slrd.db (SOLARD_DB_PATH alias supported)
-  SLRD_MASTER_KEY   required to create/import/decrypt stored wallets
+  SLRD_MASTER_KEY   optional explicit override for CI/automation; interactive CLI uses the local vault
   RPC_ENDPOINT      required only for chain operations
   HELIUS_SENDER_URL regional/global Helius Sender endpoint used by launch scripts
   HELIUS_RPC_URL    RPC endpoint used for ordinary Helius-RPC buyer lane
@@ -413,6 +492,52 @@ async function main() {
           logger: measureCollector.logger,
         },
   );
+
+  const vaultCommand = command === "setup";
+  const needsVault = commandNeedsSigningVault(command, values, flags);
+  if (vaultCommand || needsVault) {
+    // Environment overrides always win; otherwise use the remembered Windows
+    // credential when available. This runs before launch/run subcommands so
+    // child scripts inherit SLRD_MASTER_KEY without needing a second prompt.
+    loadRememberedCliVault();
+
+    if (vaultCommand && flags.has("status")) {
+      const status = cliVaultStatus();
+      if (flags.has("json")) {
+        emit(json(status) + "\n");
+      } else {
+        emit(
+          `${OWL} vault\n` +
+            `  configured   ${status.configured ? "yes" : "no"}\n` +
+            `  remembered   ${status.remembered ? "yes" : "no"}\n` +
+            `  env override ${status.environmentOverride ? "yes" : "no"}\n` +
+            `  profile      ${status.path}\n`,
+        );
+      }
+      return;
+    }
+
+    if (vaultCommand || !process.env.SLRD_MASTER_KEY?.trim()) {
+      const result = await ensureCliVaultReady({
+        existingWalletCount: await storedWalletCount(),
+        allowCreate: true,
+        adoptEnvironment: vaultCommand && flags.has("adopt-env"),
+      });
+      if (vaultCommand) {
+        emit(
+          `${OWL} vault ready  source=${result.source}  ` +
+            `remembered=${result.remembered ? "yes" : "no"}\n` +
+            `   ${result.path}\n`,
+        );
+        if (result.source === "env" && !result.created) {
+          emit(
+            `   Tip: run \`slrd setup --adopt-env\` to persist the current environment key safely.\n`,
+          );
+        }
+        return;
+      }
+    }
+  }
 
   let perfPrinted = false;
   const printPerfSummary = () => {
@@ -754,8 +879,25 @@ async function main() {
     }
 
     if (command === "wallet" && values[0] === "create") {
-      const wallet = slrd.createWallet(values[1]);
-      emit(`${OWL} created @${wallet.name} ${wallet.address}\n`);
+      const firstWallet = slrd.wallets.list().length === 0;
+      const wallet = slrd.createWallet(
+        values[1] ?? (firstWallet ? "main" : undefined),
+      );
+      if (flags.has("json")) {
+        emit(json(wallet) + "\n");
+      } else if (process.stdout.isTTY) {
+        emit(
+          `\n╭─ ${OWL} wallet ready ──────────────────────────────────╮\n` +
+            `  name     @${wallet.name}\n` +
+            `  address  ${wallet.address}\n` +
+            `  storage  encrypted in your local Solard vault\n` +
+            `╰──────────────────────────────────────────────────────╯\n` +
+            `\nNext:  slrd balances --wallet ${wallet.name}\n` +
+            `Backup: slrd export ${wallet.name} --out .\\${wallet.name}-key.txt\n`,
+        );
+      } else {
+        emit(`${OWL} created @${wallet.name} ${wallet.address}\n`);
+      }
       return;
     }
     if (command === "export") {
@@ -1772,7 +1914,7 @@ async function main() {
       const destinationInput = flags.get("to") ?? values[1];
       if (!destinationInput || destinationInput === "true") {
         throw new Error(
-          "Usage: slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]",
+          "Usage: slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--max-balance-sol <SOL>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]",
         );
       }
 
@@ -1833,6 +1975,7 @@ async function main() {
         excludeGroups,
         excludePrefixes,
         includeWallets: includeWallets.length ? includeWallets : undefined,
+        maxBalanceSol: flags.get("max-balance-sol"),
         keepSolByWallet,
         defaultKeepSol: flags.get("default-keep-sol") ?? "0",
         keepSolIfTokens: flags.get("keep-if-tokens"),
@@ -2310,7 +2453,10 @@ async function main() {
   }
 }
 main().catch((error) => {
-  emit(`${OWL} error: ${formatError(error)}\n`);
+  const friendly = friendlyCliError(error);
+  emit(
+    friendly ? `${OWL} ${friendly}\n` : `${OWL} error: ${formatError(error)}\n`,
+  );
   process.exitCode = 1;
 });
 

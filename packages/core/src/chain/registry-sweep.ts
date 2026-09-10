@@ -42,6 +42,8 @@ export type RegistrySolSweepOptions = {
   excludeGroups?: string[];
   excludePrefixes?: string[];
   includeWallets?: string[];
+  /** Only sweep wallets whose confirmed native SOL balance is strictly below this amount. */
+  maxBalanceSol?: string;
   keepSolByWallet?: Record<string, string>;
   defaultKeepSol?: string;
   /** Keep this much SOL when a wallet still has any nonzero SPL/Token-2022 holding. */
@@ -236,6 +238,12 @@ export async function planRegistrySolSweep(
 
   const candidates = wallets.filter((wallet) => !excluded.has(wallet.address));
 
+  const maxBalanceLamports =
+    options.maxBalanceSol != null ? sol(options.maxBalanceSol).raw : null;
+  if (maxBalanceLamports != null && maxBalanceLamports <= 0n) {
+    throw new Error("maxBalanceSol must be greater than zero");
+  }
+
   if (options.keepSolIfTokens != null && options.keepSolIfToken != null) {
     throw new Error("Use either keepSolIfTokens or keepSolIfToken, not both.");
   }
@@ -286,6 +294,8 @@ export async function planRegistrySolSweep(
   const rows: RegistrySolSweepRow[] = [];
   for (const wallet of candidates) {
     const balanceLamports = balances.get(wallet.address) ?? 0n;
+    const excludedByMaxBalance =
+      maxBalanceLamports != null && balanceLamports >= maxBalanceLamports;
     const configured = explicitKeepLamportsFor(wallet, options);
     const portfolioRow = portfolioByAddress.get(wallet.address);
     const tokenHoldingCount =
@@ -341,6 +351,7 @@ export async function planRegistrySolSweep(
     }
 
     const sendLamports =
+      !excludedByMaxBalance &&
       balanceLamports > keepLamports + sharedFeeLamports
         ? balanceLamports - keepLamports - sharedFeeLamports
         : 0n;
@@ -358,7 +369,11 @@ export async function planRegistrySolSweep(
       reserveReason,
       reserveTokenMint,
       reserveTokenAmountRaw,
-      skippedReason: sendLamports > 0n ? undefined : "balance-too-low",
+      skippedReason: excludedByMaxBalance
+        ? "balance-at-or-above-max"
+        : sendLamports > 0n
+          ? undefined
+          : "balance-too-low",
     });
   }
 

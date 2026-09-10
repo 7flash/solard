@@ -1,4 +1,5 @@
 export type ValueBandBuyMode = "same-value" | "same-tokens" | "to-base";
+export type ValueBandLowerSide = "above" | "below";
 
 export type ValueBandPolicy = {
   version: 1;
@@ -16,6 +17,8 @@ export type ValueBandPolicy = {
 
 export type ValueBandRuntimeState = {
   lowerArmed: boolean;
+  /** Side of the lower boundary after the previous observed/control-cycle state. */
+  lowerSide?: ValueBandLowerSide | null;
   cumulativeBuySol: number;
   cumulativeSellSol: number;
   peakNetCapitalDeployedSol?: number;
@@ -32,6 +35,8 @@ export type ValueBandDecision = {
   buyMode: ValueBandBuyMode;
   lowerArmed: boolean;
   rearmLower: boolean;
+  lowerCrossed: boolean;
+  lowerSide: ValueBandLowerSide;
   currentNetCapitalDeployedSol: number;
   remainingBuyBudgetSol: number;
 };
@@ -115,6 +120,7 @@ export function planValueBandDecision(args: {
   const lowerSol = policy.baseSol * policy.lowerMultiple;
   const upperSol = policy.baseSol * policy.upperMultiple;
   const lowerArmed = args.state?.lowerArmed !== false;
+  const previousLowerSide = args.state?.lowerSide ?? null;
   const cumulativeBuySol = nonNegative(
     args.state?.cumulativeBuySol ?? 0,
     "cumulativeBuySol",
@@ -131,8 +137,28 @@ export function planValueBandDecision(args: {
     0,
     policy.maxCapitalDeployedSol - currentNetCapitalDeployedSol,
   );
-  const rearmLower = !lowerArmed && liquidationValueSol >= lowerSol;
+  const epsilon = Math.max(1e-12, policy.baseSol * 1e-9);
+
+  // The lower edge is a transition, not a level.  Treat the exact boundary as
+  // below so rearming requires a real recovery *above* it.  This prevents our
+  // own upper-band sale (which reduces position value) from manufacturing the
+  // next lower-band buy.
+  const lowerSide: ValueBandLowerSide =
+    liquidationValueSol > lowerSol + epsilon ? "above" : "below";
+  const rearmLower = !lowerArmed && lowerSide === "above";
   const effectiveArmed = lowerArmed || rearmLower;
+  const lowerCrossed =
+    effectiveArmed && previousLowerSide === "above" && lowerSide === "below";
+
+  // Preserve automatic zero-inventory bootstrap for a brand-new controller.
+  // A migrated/previously-used strategy with no edge observation does not buy
+  // merely because it happened to restart below the lower boundary.
+  const freshZeroBootstrap =
+    previousLowerSide == null &&
+    cumulativeBuySol === 0 &&
+    cumulativeSellSol === 0 &&
+    liquidationValueSol <= epsilon;
+
   const base = {
     liquidationValueSol,
     baseSol: policy.baseSol,
@@ -142,11 +168,11 @@ export function planValueBandDecision(args: {
     buyMode: policy.buyMode,
     lowerArmed: effectiveArmed,
     rearmLower,
+    lowerCrossed,
+    lowerSide,
     currentNetCapitalDeployedSol,
     remainingBuyBudgetSol,
   };
-
-  const epsilon = Math.max(1e-12, policy.baseSol * 1e-9);
 
   if (liquidationValueSol + epsilon >= upperSol) {
     return {
@@ -155,25 +181,48 @@ export function planValueBandDecision(args: {
       reason: `liquidation value ${liquidationValueSol.toFixed(6)} >= upper ${upperSol.toFixed(6)}`,
     };
   }
-  if (liquidationValueSol <= lowerSol + epsilon) {
-    if (!effectiveArmed)
+
+  if (lowerSide === "below") {
+    if (!effectiveArmed) {
       return {
         ...base,
         action: "hold",
         reason:
-          "lower edge already consumed; waiting for value to recover above lower threshold before rearming",
+          "lower edge disarmed; waiting for market value to recover above lower threshold",
       };
-    if (remainingBuyBudgetSol < policy.minTradeSol)
+    }
+    if (remainingBuyBudgetSol < policy.minTradeSol) {
       return {
         ...base,
         action: "hold",
         reason: "net capital deployment budget exhausted",
       };
+    }
+    if (freshZeroBootstrap) {
+      return { ...base, action: "buy", reason: "zero-position bootstrap" };
+    }
+    if (lowerCrossed) {
+      return {
+        ...base,
+        action: "buy",
+        reason: `market crossed lower edge: > ${lowerSol.toFixed(6)} to ${liquidationValueSol.toFixed(6)} SOL`,
+      };
+    }
     return {
       ...base,
-      action: "buy",
-      reason: `liquidation value ${liquidationValueSol.toFixed(6)} <= lower ${lowerSol.toFixed(6)}`,
+      action: "hold",
+      reason:
+        previousLowerSide == null
+          ? "below lower threshold but no prior above-edge observation; waiting for a real recovery/crossing"
+          : "below lower threshold without a new downward market crossing",
     };
   }
-  return { ...base, action: "hold", reason: "inside value band" };
+
+  return {
+    ...base,
+    action: "hold",
+    reason: rearmLower
+      ? "lower edge rearmed above threshold"
+      : "inside value band",
+  };
 }

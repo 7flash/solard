@@ -13,7 +13,8 @@ const WSOL = "So11111111111111111111111111111111111111112";
 const FIVE_MINUTES_MS = 5 * 60_000;
 const FIVE_MINUTES_SECONDS = 5 * 60;
 const m = createSolardMeasure("lp-agent");
-const AGENT_POLICY_VERSION = 9;
+const AGENT_POLICY_VERSION = 14;
+const DEFAULT_MAX_BREAKOUT_BINS = 50;
 
 type Flags = Map<string, string>;
 type Inventory = "x-only" | "y-only" | "mixed" | "empty";
@@ -36,6 +37,7 @@ type Target = {
 type RuntimeState = {
   managedPosition: string | null;
   bootstrapUsed: boolean;
+  lastCompletedCandleTimestamp: number | null;
 };
 
 type ResolvedPool = {
@@ -174,6 +176,108 @@ function retryableCycleError(error: unknown): boolean {
   );
 }
 
+async function waitForBootstrapOutputBalance(args: {
+  slrd: Solard;
+  walletRef: string;
+  pool: string;
+  before: any;
+  wsolSide: "x" | "y";
+  attempts?: number;
+}): Promise<{ after: any; acquired: bigint; attempts: number }> {
+  const attempts = Math.max(1, args.attempts ?? 12);
+  let after = args.before;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    after = await args.slrd.meteora.getWalletPoolBalances({
+      wallet: args.walletRef,
+      pool: args.pool,
+      commitment:
+        attempt >= Math.ceil(attempts * 0.75) ? "finalized" : "confirmed",
+    });
+    const acquired =
+      args.wsolSide === "y"
+        ? positiveDelta(after.tokenXRaw, args.before.tokenXRaw)
+        : positiveDelta(after.tokenYRaw, args.before.tokenYRaw);
+    if (acquired > 0n) return { after, acquired, attempts: attempt };
+    if (attempt < attempts) {
+      const waitMs = Math.min(1_500, 300 + attempt * 150);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  return { after, acquired: 0n, attempts };
+}
+
+function positiveOutputDeltaFromTransaction(
+  tx: any,
+  outputMint: string,
+  wallet: string,
+): bigint {
+  const pre = Array.isArray(tx?.meta?.preTokenBalances)
+    ? tx.meta.preTokenBalances
+    : [];
+  const post = Array.isArray(tx?.meta?.postTokenBalances)
+    ? tx.meta.postTokenBalances
+    : [];
+  const byIndex = new Map<
+    number,
+    { pre: bigint; post: bigint; owner: string | null }
+  >();
+  for (const row of pre) {
+    if (row?.mint !== outputMint || !Number.isInteger(row?.accountIndex))
+      continue;
+    byIndex.set(row.accountIndex, {
+      pre: raw(row?.uiTokenAmount?.amount),
+      post: 0n,
+      owner: typeof row?.owner === "string" ? row.owner : null,
+    });
+  }
+  for (const row of post) {
+    if (row?.mint !== outputMint || !Number.isInteger(row?.accountIndex))
+      continue;
+    const current = byIndex.get(row.accountIndex) ?? {
+      pre: 0n,
+      post: 0n,
+      owner: null,
+    };
+    current.post = raw(row?.uiTokenAmount?.amount);
+    if (typeof row?.owner === "string") current.owner = row.owner;
+    byIndex.set(row.accountIndex, current);
+  }
+  let exactOwner = 0n;
+  let largestPositive = 0n;
+  for (const row of byIndex.values()) {
+    const delta = row.post > row.pre ? row.post - row.pre : 0n;
+    if (delta <= 0n) continue;
+    if (row.owner === wallet) exactOwner += delta;
+    if (delta > largestPositive) largestPositive = delta;
+  }
+  // Parsed token-balance owner is optional on some RPC providers. For a swap
+  // transaction the positive output-mint delta is the user receive leg; pool
+  // vaults move in the opposite direction. Prefer explicit ownership when present.
+  return exactOwner > 0n ? exactOwner : largestPositive;
+}
+
+async function confirmedSwapOutputDelta(args: {
+  slrd: Solard;
+  signatures: string[];
+  outputMint: string;
+  wallet: string;
+}): Promise<bigint> {
+  let best = 0n;
+  for (const signature of [...args.signatures].reverse()) {
+    const tx = await args.slrd.connection().getParsedTransaction(signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    const delta = positiveOutputDeltaFromTransaction(
+      tx,
+      args.outputMint,
+      args.wallet,
+    );
+    if (delta > best) best = delta;
+  }
+  return best;
+}
+
 function raw(value: unknown): bigint {
   try {
     return BigInt(String(value ?? "0"));
@@ -199,6 +303,44 @@ function inventoryFromPosition(position: MeteoraPositionSnapshot): Inventory {
   if (x > 0n) return "x-only";
   if (y > 0n) return "y-only";
   return "empty";
+}
+
+function fundedCoverageSummary(position: MeteoraPositionSnapshot): {
+  fullRangeFunded: boolean | null;
+  expected: number | null;
+  funded: number;
+  missing: number[];
+  unreadable: number;
+} {
+  const coverage = position.liquidityCoverage;
+  return {
+    fullRangeFunded: coverage?.fullRangeFunded ?? null,
+    expected: coverage?.expectedBinCount ?? null,
+    funded: coverage?.fundedBinIds?.length ?? 0,
+    missing: coverage?.missingFundedBinIds ?? [],
+    unreadable: coverage?.unreadableBinCount ?? 0,
+  };
+}
+
+function assertSpotCoverageObservable(
+  flags: Flags,
+  position: MeteoraPositionSnapshot,
+  strategy: MeteoraStrategy,
+): void {
+  if (strategy !== "spot") return;
+  const coverage = fundedCoverageSummary(position);
+  if (
+    coverage.fullRangeFunded == null &&
+    !flags.has("allow-unverified-bin-coverage")
+  ) {
+    throw new Error(
+      `Cannot prove funded-bin coverage for Spot position ${position.position}. ` +
+        `SDK snapshot exposes funded=${coverage.funded}/${coverage.expected ?? "?"} ` +
+        `with ${coverage.unreadable} unreadable bin row(s). Refusing autonomous ` +
+        `management because lower/upper bounds alone do not prove the candle is funded. ` +
+        `Upgrade the Meteora SDK/parser or explicitly pass --allow-unverified-bin-coverage.`,
+    );
+  }
 }
 
 /**
@@ -395,7 +537,10 @@ async function previousClosedFiveMinuteTarget(
   const endTime = currentBucketStart - 1;
   // Literal strategy default: contain the candle low/high, without hidden padding.
   const paddingBins = Math.max(0, integer(flags, "padding-bins", 0));
-  const maxBreakoutBins = Math.max(0, integer(flags, "max-breakout-bins", 0));
+  const maxBreakoutBins = Math.max(
+    0,
+    integer(flags, "max-breakout-bins", DEFAULT_MAX_BREAKOUT_BINS),
+  );
 
   const [ohlcv, active] = await Promise.all([
     slrd.meteora.getPoolOhlcv(pool, {
@@ -612,10 +757,6 @@ async function bootstrapIfNeeded(args: {
             amountXRaw = (raw(totalRaw) - consumedRaw).toString();
           }
         } else {
-          // The swap is the first write in a balanced bootstrap. Mark the one-shot
-          // principal as used before broadcasting so an ambiguous response can
-          // never trigger another 0.2 SOL conversion on the next cycle.
-          state.bootstrapUsed = true;
           const before = await measuredValue(
             "snapshot balances before bootstrap swap",
             () =>
@@ -623,66 +764,161 @@ async function bootstrapIfNeeded(args: {
             (value) => ({
               xRaw: value.tokenXRaw,
               yRaw: value.tokenYRaw,
+              xAccounts: value.tokenXAccountCount,
+              yAccounts: value.tokenYAccountCount,
               nativeLamports: value.nativeLamports,
             }),
           );
-          let swapResult: any = null;
-          let swapError: unknown = null;
-          try {
-            swapResult = await measuredValue(
-              "balance bootstrap inventory",
-              () =>
-                slrd.meteora.swapExactIn(
-                  {
-                    wallet: walletRef,
-                    pool,
-                    swapForY,
-                    amountInRaw: consumedRaw.toString(),
-                    slippageBps,
-                  },
-                  {
-                    live: true,
-                    simulate: !flags.has("skip-simulation"),
-                    skipPreflight: flags.has("skip-preflight"),
-                    commitment: "confirmed",
-                  },
-                ),
-              (value) => ({ signatures: value.signatures.map(short) }),
-            );
-          } catch (error) {
-            if (!retryableCycleError(error)) throw error;
-            swapError = error;
-          }
+          const existingOutputRaw =
+            wsolSide === "y" ? raw(before.tokenXRaw) : raw(before.tokenYRaw);
 
-          const after = await measuredValue(
-            "verify bootstrap inventory swap by balance delta",
-            () =>
-              slrd.meteora.getWalletPoolBalances({ wallet: walletRef, pool }),
-            (value) => ({
-              xRaw: value.tokenXRaw,
-              yRaw: value.tokenYRaw,
-              nativeLamports: value.nativeLamports,
-            }),
-          );
-          const acquired =
-            wsolSide === "y"
-              ? positiveDelta(after.tokenXRaw, before.tokenXRaw)
-              : positiveDelta(after.tokenYRaw, before.tokenYRaw);
-          if (acquired <= 0n) {
-            if (swapError) throw swapError;
-            throw new Error(
-              "Bootstrap balance swap returned without an observable output-token balance increase",
+          if (existingOutputRaw > 0n) {
+            if (!flags.has("resume-bootstrap")) {
+              throw new Error(
+                `Wallet already holds ${existingOutputRaw} raw units of the bootstrap output token while no LP position exists. ` +
+                  `Refusing another --sol balancing swap because a previous bootstrap may already have swapped successfully. ` +
+                  `Inspect with: slrd balances --wallet ${walletRef}. If this inventory belongs to the interrupted bootstrap, rerun with --resume-bootstrap.`,
+              );
+            }
+
+            const targetOutputRaw =
+              wsolSide === "y" ? raw(plan.targetXRaw) : raw(plan.targetYRaw);
+            const targetWsolRaw =
+              wsolSide === "y" ? raw(plan.targetYRaw) : raw(plan.targetXRaw);
+            const adoptedOutputRaw =
+              targetOutputRaw > 0n && existingOutputRaw > targetOutputRaw
+                ? targetOutputRaw
+                : existingOutputRaw;
+            const adoptedWsolRaw =
+              targetOutputRaw > 0n
+                ? (targetWsolRaw * adoptedOutputRaw) / targetOutputRaw
+                : 0n;
+
+            await measuredValue(
+              "adopt interrupted bootstrap inventory",
+              async () => ({ adoptedOutputRaw, adoptedWsolRaw }),
+              (value) => ({
+                outputRaw: value.adoptedOutputRaw.toString(),
+                wsolRaw: value.adoptedWsolRaw.toString(),
+                existingOutputRaw: existingOutputRaw.toString(),
+              }),
             );
-          }
-          balanceSignatures.push(
-            ...(swapResult?.signatures ?? resultSignatures(swapError)),
-          );
-          if (wsolSide === "y") {
-            amountXRaw = acquired.toString();
-            amountYRaw = (raw(totalRaw) - consumedRaw).toString();
+            state.bootstrapUsed = true;
+            if (wsolSide === "y") {
+              amountXRaw = adoptedOutputRaw.toString();
+              amountYRaw = adoptedWsolRaw.toString();
+            } else {
+              amountXRaw = adoptedWsolRaw.toString();
+              amountYRaw = adoptedOutputRaw.toString();
+            }
           } else {
-            amountXRaw = (raw(totalRaw) - consumedRaw).toString();
-            amountYRaw = acquired.toString();
+            // The swap is the first write in a balanced bootstrap. Mark the one-shot
+            // principal as used before broadcasting so an ambiguous response cannot
+            // trigger another conversion in the same process.
+            state.bootstrapUsed = true;
+            let swapResult: any = null;
+            let swapError: unknown = null;
+            try {
+              swapResult = await measuredValue(
+                "balance bootstrap inventory",
+                () =>
+                  slrd.meteora.swapExactIn(
+                    {
+                      wallet: walletRef,
+                      pool,
+                      swapForY,
+                      amountInRaw: consumedRaw.toString(),
+                      slippageBps,
+                    },
+                    {
+                      live: true,
+                      simulate: !flags.has("skip-simulation"),
+                      skipPreflight: flags.has("skip-preflight"),
+                      commitment: "confirmed",
+                    },
+                  ),
+                (value) => ({ signatures: value.signatures.map(short) }),
+              );
+            } catch (error) {
+              if (!retryableCycleError(error)) throw error;
+              swapError = error;
+            }
+
+            const swapSignatures = [
+              ...(swapResult?.signatures ?? resultSignatures(swapError)),
+            ];
+            const verified = await measuredValue(
+              "verify bootstrap inventory swap by balance delta",
+              () =>
+                waitForBootstrapOutputBalance({
+                  slrd,
+                  walletRef,
+                  pool,
+                  before,
+                  wsolSide,
+                  attempts: Math.max(
+                    4,
+                    integer(flags, "post-swap-balance-attempts", 12),
+                  ),
+                }),
+              (value) => ({
+                xRaw: value.after.tokenXRaw,
+                yRaw: value.after.tokenYRaw,
+                xAccounts: value.after.tokenXAccountCount,
+                yAccounts: value.after.tokenYAccountCount,
+                nativeLamports: value.after.nativeLamports,
+                acquiredRaw: value.acquired.toString(),
+                attempts: value.attempts,
+              }),
+            );
+
+            let acquired = verified.acquired;
+            if (acquired <= 0n && swapSignatures.length) {
+              const outputMint =
+                wsolSide === "y" ? before.tokenX.mint : before.tokenY.mint;
+              const walletAddress = slrd
+                .resolveWallet(walletRef)
+                .address.toBase58();
+              const txAcquired = await measuredValue(
+                "inspect confirmed bootstrap swap token delta",
+                () =>
+                  confirmedSwapOutputDelta({
+                    slrd,
+                    signatures: swapSignatures,
+                    outputMint,
+                    wallet: walletAddress,
+                  }),
+                (value) => ({
+                  outputMint: short(outputMint),
+                  acquiredRaw: value.toString(),
+                }),
+              );
+              if (txAcquired > 0n) {
+                throw new Error(
+                  `Bootstrap swap succeeded and transaction metadata shows ${txAcquired} raw output tokens received, ` +
+                    `but the RPC token-account index still does not expose the wallet balance after ${verified.attempts} checks. ` +
+                    `Do NOT repeat the --sol bootstrap. Wait for RPC indexing, verify with 'slrd balances --wallet ${walletRef}', ` +
+                    `then rerun this agent with --resume-bootstrap.`,
+                );
+              }
+            }
+
+            if (acquired <= 0n) {
+              if (swapError) throw swapError;
+              throw new Error(
+                `Bootstrap balance swap returned without an observable output-token balance increase after ${verified.attempts} checks. ` +
+                  `Do NOT blindly repeat --sol; inspect the swap signature and wallet balances first.`,
+              );
+            }
+
+            balanceSignatures.push(...swapSignatures);
+            if (wsolSide === "y") {
+              amountXRaw = acquired.toString();
+              amountYRaw = (raw(totalRaw) - consumedRaw).toString();
+            } else {
+              amountXRaw = (raw(totalRaw) - consumedRaw).toString();
+              amountYRaw = acquired.toString();
+            }
           }
         }
       } else if (wsolSide === "x") {
@@ -819,17 +1055,10 @@ async function reconcilePosition(args: {
   const positions = await slrd.meteora.getPoolPositions(pool, wallet);
   const explicit = flag(flags, "position");
 
-  if (explicit) {
-    const selected = positions.find((row) => row.position === explicit) ?? null;
-    if (!selected) {
-      throw new Error(
-        `--position ${explicit} is not currently open for wallet ${wallet} in pool ${pool}`,
-      );
-    }
-    state.managedPosition = explicit;
-    return selected;
-  }
-
+  // --position is a startup seed, not a permanent address pin. A successful
+  // rebalance closes that source and creates a replacement with a new address;
+  // once state.managedPosition is set, follow the replacement instead of trying
+  // to re-adopt the original command-line address on every candle.
   if (state.managedPosition) {
     const selected =
       positions.find((row) => row.position === state.managedPosition) ?? null;
@@ -843,6 +1072,18 @@ async function reconcilePosition(args: {
       `Managed position ${state.managedPosition} disappeared and ${positions.length} positions now exist in the pool. ` +
         "Pass --position <address> to disambiguate.",
     );
+  }
+
+  if (explicit) {
+    const selected = positions.find((row) => row.position === explicit) ?? null;
+    if (!selected) {
+      throw new Error(
+        `Startup --position ${explicit} is not currently open for wallet ${wallet} in pool ${pool}`,
+      );
+    }
+    state.managedPosition = explicit;
+    state.bootstrapUsed = true;
+    return selected;
   }
 
   if (positions.length === 0) return null;
@@ -900,6 +1141,7 @@ async function runCycle(args: {
   );
   const range = targetRange(target, flags);
   const candleIso = new Date(target.candleTimestamp * 1_000).toISOString();
+  const strategy = (flag(flags, "strategy") ?? "spot") as MeteoraStrategy;
 
   const position = await measuredValue(
     "reconcile on-chain position",
@@ -911,14 +1153,69 @@ async function runCycle(args: {
           ? `${value.lowerBin}..${value.upperBin}`
           : null,
       found: value != null,
+      funded:
+        value?.liquidityCoverage?.expectedBinCount != null
+          ? `${value.liquidityCoverage.fundedBinIds.length}/${value.liquidityCoverage.expectedBinCount}`
+          : null,
+      fullRangeFunded: value?.liquidityCoverage?.fullRangeFunded ?? null,
     }),
   );
   // Once this process adopts an existing LP, the capital lifecycle is already
   // established. A later missing position must never re-arm --sol bootstrap.
   if (position) state.bootstrapUsed = true;
 
-  const maxBreakoutBins = Math.max(0, integer(flags, "max-breakout-bins", 0));
+  let coverageNeedsRepair = false;
+  if (position) {
+    assertSpotCoverageObservable(flags, position, strategy);
+    const coverage = await measuredValue(
+      "inspect funded-bin coverage",
+      async () => fundedCoverageSummary(position),
+      (value) => ({
+        position: short(position.position),
+        expected: value.expected,
+        funded: value.funded,
+        missing: value.missing,
+        unreadable: value.unreadable,
+        fullRangeFunded: value.fullRangeFunded,
+      }),
+    );
+    coverageNeedsRepair =
+      strategy === "spot" && coverage.fullRangeFunded === false;
+  }
+
+  if (
+    state.lastCompletedCandleTimestamp === target.candleTimestamp &&
+    !flags.has("force") &&
+    !coverageNeedsRepair
+  ) {
+    return {
+      action: position ? "keep" : "skip",
+      pool,
+      position: position?.position ?? null,
+      currentRange:
+        position?.lowerBin != null && position?.upperBin != null
+          ? `${position.lowerBin}..${position.upperBin}`
+          : null,
+      targetRange: `${range.minBinId}..${range.maxBinId}`,
+      activeBin: target.activeBin,
+      candle: candleIso,
+      reason:
+        "this fully closed 5m candle was already processed by this manager",
+    };
+  }
+
+  const maxBreakoutBins = Math.max(
+    0,
+    integer(flags, "max-breakout-bins", DEFAULT_MAX_BREAKOUT_BINS),
+  );
   if (target.breakoutBins > maxBreakoutBins) {
+    if (coverageNeedsRepair && position) {
+      throw new Error(
+        `Spot position ${position.position} does not fund its full declared range, but the new previous-candle target is ` +
+          `${target.breakoutBins} bins away from active price (max ${maxBreakoutBins}). Refusing to leave a known-partial LP ` +
+          `or chase a stale target automatically; inspect the position/range before resuming.`,
+      );
+    }
     return {
       action: "skip",
       pool,
@@ -988,7 +1285,8 @@ async function runCycle(args: {
     Math.abs(range.maxBinId - currentMax),
   );
   const minShift = Math.max(0, integer(flags, "min-shift-bins", 1));
-  const shouldMove = flags.has("force") || shift >= minShift;
+  const shouldMove =
+    flags.has("force") || coverageNeedsRepair || shift >= minShift;
   if (!shouldMove) {
     return {
       action: "keep",
@@ -1022,7 +1320,6 @@ async function runCycle(args: {
     }
   }
 
-  const strategy = (flag(flags, "strategy") ?? "spot") as MeteoraStrategy;
   const infra = infrastructure(flags);
   const replacementInfrastructure = await measuredValue(
     "preflight replacement candle range",
@@ -1052,6 +1349,9 @@ async function runCycle(args: {
       candle: candleIso,
       shiftBins: shift,
       inventory: inv,
+      reason: coverageNeedsRepair
+        ? "current Spot position does not fund every bin in its declared range; rebuild required"
+        : undefined,
     };
   }
 
@@ -1130,30 +1430,166 @@ async function runCycle(args: {
   };
 }
 
-function nextRunAt(flags: Flags): number {
-  const settleMs = Math.max(
-    0,
-    Math.min(60_000, integer(flags, "settle-ms", 5_000)),
-  );
+function continuousManager(flags: Flags): boolean {
+  // A live liquidity *agent* should keep managing its position unless the caller
+  // explicitly asks for one cycle. --loop is retained for backwards compatibility
+  // and for deliberately looping previews.
+  return flags.has("loop") || (flags.has("live") && !flags.has("once"));
+}
+
+function settleMs(flags: Flags): number {
+  return Math.max(0, Math.min(60_000, integer(flags, "settle-ms", 5_000)));
+}
+
+function nextRunAtAfterCycle(result: CycleResult, flags: Flags): number {
+  // Schedule from the candle we just processed, not from the wall clock after
+  // the cycle. If a cycle starts just before a boundary and finishes just after
+  // it, wall-clock scheduling would otherwise jump an entire extra 5m candle.
+  const candleStartMs = Date.parse(result.candle);
+  if (Number.isFinite(candleStartMs)) {
+    const nextCandleAvailableAt =
+      candleStartMs + FIVE_MINUTES_MS * 2 + settleMs(flags);
+    if (nextCandleAvailableAt > Date.now() + 250) return nextCandleAvailableAt;
+    // We crossed the expected wake time while processing. Run again promptly;
+    // the lastCompletedCandle guard prevents duplicate writes to the same candle.
+    return Date.now() + 500;
+  }
   return (
-    (Math.floor(Date.now() / FIVE_MINUTES_MS) + 1) * FIVE_MINUTES_MS + settleMs
+    (Math.floor(Date.now() / FIVE_MINUTES_MS) + 1) * FIVE_MINUTES_MS +
+    settleMs(flags)
   );
+}
+
+function parseRange(
+  text: string | null | undefined,
+): { minBinId: number; maxBinId: number } | null {
+  const match = /^(\-?\d+)\.\.(\-?\d+)$/.exec(text ?? "");
+  if (!match) return null;
+  const minBinId = Number(match[1]);
+  const maxBinId = Number(match[2]);
+  return Number.isInteger(minBinId) &&
+    Number.isInteger(maxBinId) &&
+    minBinId <= maxBinId
+    ? { minBinId, maxBinId }
+    : null;
+}
+
+async function verifyManagedPositionAfterCycle(args: {
+  slrd: Solard;
+  flags: Flags;
+  state: RuntimeState;
+  walletRef: string;
+  pool: string;
+  result: CycleResult;
+}): Promise<void> {
+  if (!args.flags.has("live")) return;
+  const position =
+    args.result.targetPosition ??
+    args.state.managedPosition ??
+    args.result.position;
+  if (!position) return;
+
+  const expectedRange =
+    args.result.action === "open" || args.result.action === "move"
+      ? parseRange(args.result.targetRange)
+      : parseRange(args.result.currentRange);
+
+  const verification = await measuredValue(
+    "verify managed position after cycle",
+    () =>
+      expectedRange
+        ? args.slrd.meteora.verifyPositionRange({
+            pool: args.pool,
+            position,
+            wallet: args.walletRef,
+            minBinId: expectedRange.minBinId,
+            maxBinId: expectedRange.maxBinId,
+            attempts: 4,
+            retryDelayMs: 500,
+            commitment: "confirmed",
+          })
+        : args.slrd.meteora.verifyPositionPresent({
+            pool: args.pool,
+            position,
+            wallet: args.walletRef,
+            attempts: 4,
+            retryDelayMs: 500,
+            commitment: "confirmed",
+          }),
+    (value) => ({
+      position: short(position),
+      ok: value.ok,
+      expectedRange: expectedRange
+        ? `${expectedRange.minBinId}..${expectedRange.maxBinId}`
+        : null,
+      actualRange:
+        value.actual?.lowerBin != null && value.actual?.upperBin != null
+          ? `${value.actual.lowerBin}..${value.actual.upperBin}`
+          : null,
+      errors: value.errors,
+      funded:
+        value.actual?.liquidityCoverage?.expectedBinCount != null
+          ? `${value.actual.liquidityCoverage.fundedBinIds.length}/${value.actual.liquidityCoverage.expectedBinCount}`
+          : null,
+      fullRangeFunded: value.actual?.liquidityCoverage?.fullRangeFunded ?? null,
+      missingFundedBins:
+        value.actual?.liquidityCoverage?.missingFundedBinIds ?? [],
+    }),
+  );
+
+  if (!verification.ok) {
+    throw new Error(
+      `Managed Meteora position ${position} failed post-cycle verification: ${verification.errors.join("; ") || "unknown verification failure"}`,
+    );
+  }
+
+  const strategy = (flag(args.flags, "strategy") ?? "spot") as MeteoraStrategy;
+  if (strategy === "spot" && verification.actual) {
+    const coverage = fundedCoverageSummary(verification.actual);
+    if (coverage.fullRangeFunded === false) {
+      throw new Error(
+        `Managed Spot position ${position} has correct declared bounds but does not fund the complete range: ` +
+          `${coverage.funded}/${coverage.expected ?? "?"} funded; missing bins ` +
+          `${coverage.missing.join(",") || "unknown"}. Stopping instead of repeatedly churning principal.`,
+      );
+    }
+    if (
+      coverage.fullRangeFunded == null &&
+      !args.flags.has("allow-unverified-bin-coverage")
+    ) {
+      throw new Error(
+        `Managed Spot position ${position} range verified, but per-bin funded coverage cannot be proven. ` +
+          `Stopping because lower/upper bounds alone are insufficient; pass --allow-unverified-bin-coverage only if intentional.`,
+      );
+    }
+  }
+  args.state.managedPosition = position;
 }
 
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2));
+  if (flags.has("once") && flags.has("loop")) {
+    throw new Error("Use --once or --loop, not both");
+  }
+  const continuous = continuousManager(flags);
   if (flags.has("help")) {
     process.stdout.write(
       "Meteora previous-closed-5m-candle liquidity agent example\n\n" +
         "Usage:\n" +
-        "  slrd run examples/meteora-liquidity-agent.ts --pool <dlmm-pool> --wallet <wallet> [--position <position>] [--loop] [--live]\n" +
-        "  slrd run examples/meteora-liquidity-agent.ts --token <mint> --wallet <wallet> --sol 0.1 --loop --live\n\n" +
+        "  slrd run examples/meteora-liquidity-agent.ts --pool <dlmm-pool> --wallet <wallet> [--position <position>] [--live] [--once|--loop]\n" +
+        "  slrd run examples/meteora-liquidity-agent.ts --token <mint> --wallet <wallet> --sol 0.1 --live\n\n" +
         "Default target is the exact bin interval containing the previous fully closed 5m candle low/high.\n" +
         "With --sol, the agent balances that principal into both pool tokens before a Spot deposit so both sides of an in-range candle can be funded; --no-auto-balance disables this.\n" +
         "There is no hidden minimum width. --padding-bins N and --min-bins N are explicit opt-in widening controls.\n" +
+        `Small breakouts are tolerated by default (--max-breakout-bins ${DEFAULT_MAX_BREAKOUT_BINS}); set 0 for strict previous-candle containment.\n` +
         "Live writes require at least 30s remaining before the next 5m boundary by default, preventing a previous-candle target from becoming stale during build/confirmation; tune with --min-write-window-ms.\n" +
         "The example keeps only process memory and reconciles zero/one/many on-chain positions as bootstrap/adopt/require --position.\n" +
         "Before opening or moving it inspects shared bin infrastructure; missing arrays remain denied unless explicitly authorized.\n" +
+        "If a live bootstrap swap succeeded but opening was interrupted, --resume-bootstrap adopts existing output inventory instead of swapping principal again.\n" +
+        "Live mode manages continuously by default; pass --once for exactly one cycle. --loop remains available for looping previews/backward compatibility.\n" +
+        "For Spot positions the manager also proves every declared bin carries non-zero position liquidity; known partial coverage forces a source-only rebuild. Unverifiable SDK coverage stops the agent unless --allow-unverified-bin-coverage is explicitly supplied.\n" +
+        "--position is only a startup disambiguation seed; after a rebalance the verified replacement address becomes the managed position automatically.\n" +
+        "Completed candles are deduplicated, scheduling is derived from the candle just processed, and retryable RPC failures retry with bounded backoff instead of skipping directly to the next candle.\n" +
         "Runtime progress is emitted through measure-fn. Live writes also require SOLARD_ENABLE_LIVE_TRADES=1.\n",
     );
     return;
@@ -1169,7 +1605,10 @@ async function main(): Promise<void> {
     },
     () => ({
       exactPreviousClosed5m: true,
-      maxBreakoutBins: Math.max(0, integer(flags, "max-breakout-bins", 0)),
+      maxBreakoutBins: Math.max(
+        0,
+        integer(flags, "max-breakout-bins", DEFAULT_MAX_BREAKOUT_BINS),
+      ),
       autoBalance: !flags.has("no-auto-balance"),
       minWriteWindowMs: Math.max(
         5_000,
@@ -1177,13 +1616,28 @@ async function main(): Promise<void> {
       ),
       precloseWalletFundingSimulation: false,
       sourceOnlyRebalance: true,
+      postSwapBalanceAttempts: Math.max(
+        4,
+        integer(flags, "post-swap-balance-attempts", 12),
+      ),
+      resumeBootstrap: flags.has("resume-bootstrap"),
+      continuousManager: continuous,
+      oneShot: !continuous,
+      dedupeCompletedCandles: true,
+      postCyclePositionVerification: true,
+      spotFundedBinCoverageProof: true,
+      allowUnverifiedBinCoverage: flags.has("allow-unverified-bin-coverage"),
     }),
   );
 
   const walletRef = required(flags, "wallet");
   const slrd = createTraderSolard();
   const wallet = slrd.resolveWallet(walletRef).address.toBase58();
-  const state: RuntimeState = { managedPosition: null, bootstrapUsed: false };
+  const state: RuntimeState = {
+    managedPosition: null,
+    bootstrapUsed: false,
+    lastCompletedCandleTimestamp: null,
+  };
 
   try {
     const resolved = await measuredValue(
@@ -1200,9 +1654,11 @@ async function main(): Promise<void> {
       }),
     );
 
+    let consecutiveFailures = 0;
     while (true) {
+      let cycleResult: CycleResult;
       try {
-        await m.measure(
+        cycleResult = await m.measure(
           {
             start: () => "5m liquidity cycle",
             end: (result: CycleResult) => result,
@@ -1217,37 +1673,70 @@ async function main(): Promise<void> {
               pool: resolved.pool,
             }),
         );
+
+        await verifyManagedPositionAfterCycle({
+          slrd,
+          flags,
+          state,
+          walletRef,
+          pool: resolved.pool,
+          result: cycleResult,
+        });
+        const completedAt = Date.parse(cycleResult.candle);
+        if (Number.isFinite(completedAt)) {
+          state.lastCompletedCandleTimestamp = Math.trunc(completedAt / 1_000);
+        }
+        consecutiveFailures = 0;
       } catch (error) {
         if (
-          !flags.has("loop") ||
+          !continuous ||
           flags.has("fail-fast") ||
           !retryableCycleError(error)
         ) {
           throw error;
         }
+        consecutiveFailures += 1;
+        const baseRetryMs = Math.max(500, integer(flags, "retry-ms", 2_000));
+        const retryMs = Math.min(
+          30_000,
+          baseRetryMs * 2 ** Math.min(4, consecutiveFailures - 1),
+        );
         await m.measure(
           {
             start: () => "recoverable cycle failure",
-            end: (value: { retry: string; error: string }) => value,
+            end: (value: {
+              retryInMs: number;
+              failures: number;
+              error: string;
+            }) => value,
           },
-          async () => ({
-            retry: "next 5m boundary",
-            error: error instanceof Error ? error.message : String(error),
-          }),
+          async () => {
+            await new Promise<void>((resolve) => setTimeout(resolve, retryMs));
+            return {
+              retryInMs: retryMs,
+              failures: consecutiveFailures,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          },
         );
+        continue;
       }
-      if (!flags.has("loop")) return;
-      const next = nextRunAt(flags);
+
+      if (!continuous) return;
+      const next = nextRunAtAfterCycle(cycleResult, flags);
       await m.measure(
         {
           start: () => "wait for next closed 5m candle",
-          end: (result: { next: string }) => result,
+          end: (result: { next: string; fromCandle: string }) => result,
         },
         async () => {
           await new Promise<void>((resolve) =>
             setTimeout(resolve, Math.max(250, next - Date.now())),
           );
-          return { next: new Date(next).toISOString() };
+          return {
+            next: new Date(next).toISOString(),
+            fromCandle: cycleResult.candle,
+          };
         },
       );
     }

@@ -35,6 +35,12 @@ export type JupiterSwapRequest = {
 
 export type JupiterSwapExecuteRequest = JupiterSwapRequest & {
   signer: Keypair;
+  /**
+   * Guard on the fresh executable /order response fetched with the taker.
+   * The order is rejected before deserialization/signing if its advertised
+   * outAmount is below this threshold.
+   */
+  minOutputRaw?: bigint;
 };
 
 export type JupiterSwapService = {
@@ -109,6 +115,17 @@ export function createJupiterSwapService(
             throw new JupiterRouteError(
               order.errorMessage ??
                 `Jupiter could not build a transaction from ${args.inputMint} to ${args.outputMint}`,
+            );
+          }
+
+          const executableOutAmountRaw = parsedOutAmount(order);
+          if (
+            args.minOutputRaw != null &&
+            (executableOutAmountRaw <= 0n ||
+              executableOutAmountRaw < args.minOutputRaw)
+          ) {
+            throw new JupiterRouteError(
+              `Jupiter executable order output ${executableOutAmountRaw.toString()} is below required ${args.minOutputRaw.toString()}; refusing to sign stale/adverse order`,
             );
           }
 

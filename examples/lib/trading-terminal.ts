@@ -5,20 +5,14 @@ import {
   type SolardMeasureEvent,
 } from "@solard/sdk";
 
-export type TradingAudit = {
-  logPath: string;
+export type MeasureFileSink = {
+  path: string;
+  /** measure-fn replacement logger. Built-in formatted output is redirected to path, never stdout. */
   logger: (event: SolardMeasureEvent, next?: () => void) => void;
-  event(kind: string, data?: unknown): void;
-  measureSummary(): ReturnType<
+  summary(): ReturnType<
     ReturnType<typeof createSolardMeasureCollector>["snapshot"]
   >;
 };
-
-function json(value: unknown): string {
-  return JSON.stringify(value, (_key, item) =>
-    typeof item === "bigint" ? item.toString() : item,
-  );
-}
 
 function safeName(value: string): string {
   return (
@@ -26,29 +20,56 @@ function safeName(value: string): string {
   );
 }
 
-export function defaultTradingLogPath(name: string): string {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return resolve(".solard", "logs", `${safeName(name)}-${stamp}.jsonl`);
+function withoutAnsi(value: string): string {
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
-export function createTradingAudit(logPath: string): TradingAudit {
+export function defaultMeasureLogPath(name: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return resolve(".solard", "logs", `${safeName(name)}-${stamp}.measure.log`);
+}
+
+/**
+ * Keep measure-fn as the sole logging/instrumentation system.
+ *
+ * `next()` asks measure-fn to render the exact normal human-readable line. The
+ * renderer writes synchronously, so during that one call stdout/stderr are
+ * redirected into the file. We do not invent a second JSON event format and we
+ * do not let measure-fn fight the interactive dashboard for stdout.
+ */
+export function createMeasureFileSink(logPath: string): MeasureFileSink {
   const path = resolve(logPath);
   mkdirSync(dirname(path), { recursive: true });
   const collector = createSolardMeasureCollector();
-  const write = (row: unknown) =>
-    appendFileSync(path, `${json(row)}\n`, "utf8");
+
+  const append = (chunk: unknown): boolean => {
+    const text = Buffer.isBuffer(chunk)
+      ? chunk.toString("utf8")
+      : String(chunk);
+    appendFileSync(path, withoutAnsi(text), "utf8");
+    return true;
+  };
+
   return {
-    logPath: path,
-    logger(event, _next) {
+    path,
+    logger(event, next) {
       collector.logger(event);
-      write({ at: new Date().toISOString(), kind: "measure", event });
-      // Intentionally do not delegate to measure-fn's terminal formatter. stdout
-      // belongs to the dashboard; the JSONL file is the durable diagnostic stream.
+      if (!next) return;
+
+      const stdoutWrite = process.stdout.write;
+      const stderrWrite = process.stderr.write;
+      try {
+        process.stdout.write = ((chunk: any) =>
+          append(chunk)) as typeof process.stdout.write;
+        process.stderr.write = ((chunk: any) =>
+          append(chunk)) as typeof process.stderr.write;
+        next();
+      } finally {
+        process.stdout.write = stdoutWrite;
+        process.stderr.write = stderrWrite;
+      }
     },
-    event(kind, data) {
-      write({ at: new Date().toISOString(), kind, data });
-    },
-    measureSummary: () => collector.snapshot(),
+    summary: () => collector.snapshot(),
   };
 }
 
@@ -58,33 +79,45 @@ export class TradingDashboard {
   private readonly tty: boolean;
   private lastNonTtyAt = 0;
   private cleanupKeys: (() => void) | null = null;
+  private lastFrame = "";
+  private alternateScreen = false;
 
   constructor(
     private readonly title: string,
     private readonly enabled = true,
   ) {
     this.tty = Boolean(enabled && process.stdout.isTTY);
+    if (this.tty) {
+      // Alternate screen keeps refreshes out of the terminal scrollback. This is
+      // the same mechanism used by full-screen TUIs; close() restores the user's
+      // original terminal contents.
+      process.stdout.write("\x1b[?1049h\x1b[H");
+      this.alternateScreen = true;
+    }
   }
 
   render(rows: DashboardRow[], footer: string): void {
     if (!this.enabled) return;
+    const width = Math.max(68, Math.min(process.stdout.columns || 100, 120));
+    const line = "─".repeat(width);
+    let frame = `${this.title}\n${line}\n`;
+    for (const [label, value] of rows)
+      frame += `${label.padEnd(22)} ${value}\n`;
+    frame += `${line}\n${footer}\n`;
+
+    // Avoid repainting when nothing visible changed.
+    if (frame === this.lastFrame) return;
+    this.lastFrame = frame;
+
     if (!this.tty) {
       const now = Date.now();
       if (now - this.lastNonTtyAt < 30_000) return;
       this.lastNonTtyAt = now;
-      const body = rows.map(([k, v]) => `${k}=${v}`).join("  ");
-      process.stdout.write(`${this.title}  ${body}\n`);
+      process.stdout.write(frame);
       return;
     }
-    const width = Math.max(68, Math.min(process.stdout.columns || 100, 120));
-    const line = "─".repeat(width);
-    let out = "\x1b[2J\x1b[H";
-    out += `${this.title}\n${line}\n`;
-    for (const [label, value] of rows) {
-      out += `${label.padEnd(22)} ${value}\n`;
-    }
-    out += `${line}\n${footer}\n`;
-    process.stdout.write(out);
+
+    process.stdout.write(`\x1b[H\x1b[2J${frame}`);
   }
 
   keys(handlers: {
@@ -103,8 +136,7 @@ export class TradingDashboard {
     stdin.resume();
     stdin.setEncoding("utf8");
     const onData = (chunk: string | Buffer) => {
-      const text = String(chunk);
-      for (const key of text) {
+      for (const key of String(chunk)) {
         if (key === "+" || key === "=") handlers.plus?.();
         else if (key === "-" || key === "_") handlers.minus?.();
         else if (key === "p" || key === "P") handlers.pause?.();
@@ -125,7 +157,10 @@ export class TradingDashboard {
   close(): void {
     this.cleanupKeys?.();
     this.cleanupKeys = null;
-    if (this.tty) process.stdout.write("\x1b[2J\x1b[H");
+    if (this.alternateScreen) {
+      process.stdout.write("\x1b[?1049l");
+      this.alternateScreen = false;
+    }
   }
 }
 
