@@ -97,3 +97,12 @@ export type BrowserSolardOptions = {
   rpcMaxRps?: number;
   fetch?: typeof globalThis.fetch;
 };
+export type BrowserPumpDeploymentBuild =
+  import("@solard/core/launches/pump/external-deployment.ts").PumpExternalDeploymentBuild;
+
+export type BrowserPumpDeploymentResult = BrowserBroadcastResult & {
+  mint: string;
+  beneficiary: string;
+  quoteMint: string;
+  quoteKind: "native-sol" | "spl-token";
+};

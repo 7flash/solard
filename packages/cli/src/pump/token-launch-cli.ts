@@ -10,6 +10,7 @@ import {
   cleanVanitySuffix,
   defaultVanityMaxAttempts,
   executePumpTokenLaunch,
+  findExternalContact,
   generateMintKeypairWithSuffix,
   installPumpLaunchSenders,
   loadExplicitBuyerAllocations,
@@ -18,6 +19,7 @@ import {
   parseArmedBuyerEndpoint,
   PUMP_PROGRAM_ID,
   preparePumpTokenLaunch,
+  resolvePumpQuoteAsset,
   pumpLaunchEnvironment,
   releaseArmedBuyerEndpoints,
   releaseVanityMintReservation,
@@ -35,6 +37,7 @@ import {
   type PumpLaunchEnvironment,
   type PumpTokenLaunchPlan,
   type PumpTokenLaunchResult,
+  type QuoteAsset,
   type SendReceipt,
   type SimulationResult,
   type Solard,
@@ -73,7 +76,10 @@ export type PumpTokenLaunchCliOptions = {
 export type PumpTokenLaunchCliResult = {
   createdAt: string;
   live: boolean;
+  /** Transaction payer / local signing wallet. */
   creator: string;
+  /** On-chain Pump creator fee/reward beneficiary. */
+  beneficiary: string;
   buyerGroup: string | null;
   buyPlan?: string | null;
   transport: Record<string, unknown>;
@@ -82,6 +88,10 @@ export type PumpTokenLaunchCliResult = {
     metadataUri: string;
     mint: string;
     feeMode: "creator-fees";
+    pair: "SOL" | "USDC" | "mint";
+    quoteMint: string;
+    quoteDecimals: number;
+    beneficiary: string;
     cashback: boolean;
     mayhemMode: boolean;
     vanityMintSuffix?: string | null;
@@ -1125,6 +1135,8 @@ export async function preparePumpTokenLaunchFromFlags(args: {
   flags: Flags;
   token: TokenMetadata;
   creator: string;
+  creatorBeneficiary?: PublicKey;
+  quoteAsset?: QuoteAsset;
   env?: PumpLaunchEnvironment;
   options?: PumpTokenLaunchCliOptions;
   mint?: Keypair;
@@ -1226,6 +1238,8 @@ export async function preparePumpTokenLaunchFromFlags(args: {
     ),
     senderPolicy: env.policy,
     mint: args.mint,
+    creatorBeneficiary: args.creatorBeneficiary,
+    quoteAsset: args.quoteAsset,
     cashback: args.cashback ?? args.token.cashback ?? false,
     mayhemMode: args.mayhemMode ?? args.token.mayhemMode ?? false,
   });
@@ -1236,6 +1250,37 @@ function vanitySuffixFromFlags(flags: Flags): string | null {
   if (explicit && explicit !== "true") return explicit.trim();
   if (enabled(flags, "pump-suffix", "SOLARD_LAUNCH_PUMP_SUFFIX")) return "pump";
   return null;
+}
+
+function resolvePublicAddress(
+  slrd: Solard,
+  value: string | undefined,
+  fallback: PublicKey,
+  label: string,
+): PublicKey {
+  if (!value || value === "true") return fallback;
+  try {
+    return slrd.resolveWallet(value).address;
+  } catch {
+    // Stored wallet refs are convenient but not required for a beneficiary.
+  }
+  const contact = findExternalContact(value);
+  if (contact) return new PublicKey(contact.address);
+  try {
+    return new PublicKey(value);
+  } catch {
+    throw new Error(
+      `Invalid ${label} ${JSON.stringify(value)}. Use a stored wallet, contact, or Solana address.`,
+    );
+  }
+}
+
+function pairLabel(quoteAsset: QuoteAsset): "SOL" | "USDC" | "mint" {
+  if (quoteAsset.kind === "native-sol") return "SOL";
+  return quoteAsset.mint.toBase58() ===
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    ? "USDC"
+    : "mint";
 }
 
 function envNumber(name: string, fallback: number): number {
@@ -1479,6 +1524,31 @@ export async function runPumpTokenLaunchFromArgs(
   const slrd = createTraderSolard({ rpcUrl: env.rpcUrl });
   installPumpLaunchSenders(slrd, env);
 
+  const payerAddress = slrd.resolveWallet(creator).address;
+  const beneficiary = resolvePublicAddress(
+    slrd,
+    first(flags, "beneficiary"),
+    payerAddress,
+    "--beneficiary",
+  );
+  const pairInput = first(flags, "pair") ?? first(flags, "quote-mint") ?? "SOL";
+  const quoteAsset = await resolvePumpQuoteAsset(slrd.connection(), pairInput);
+  const creatorBuyLamports = optionalSol(
+    flags,
+    "creator-buy-sol",
+    "creator-buy-lamports",
+    0n,
+  );
+  if (
+    quoteAsset.kind !== "native-sol" &&
+    (hasBuyers || creatorBuyLamports > 0n)
+  ) {
+    throw new Error(
+      `Pump ${pairLabel(quoteAsset)}-paired launches currently support deploy-only creation. ` +
+        "Buyer plans and --creator-buy-sol are SOL-denominated; Solard will not reinterpret them as quote-token amounts.",
+    );
+  }
+
   if (vanityMint) {
     await assertPumpMintIsUnused({
       slrd,
@@ -1519,6 +1589,8 @@ export async function runPumpTokenLaunchFromArgs(
       flags,
       token,
       creator,
+      creatorBeneficiary: beneficiary,
+      quoteAsset,
       env,
       options,
       mint: vanityMint,
@@ -1534,6 +1606,10 @@ export async function runPumpTokenLaunchFromArgs(
         name: input.name,
         symbol: input.symbol,
         mint,
+        beneficiary: beneficiary.toBase58(),
+        pair: pairLabel(quoteAsset),
+        quoteMint: quoteAsset.mint.toBase58(),
+        quoteDecimals: quoteAsset.decimals,
         metadataUri: uri,
         website: input.website ?? null,
         twitter: input.twitter ?? null,
@@ -1559,12 +1635,7 @@ export async function runPumpTokenLaunchFromArgs(
       vanityMintSuffix,
       vanityMintAttempts,
       vanityMintElapsedMs,
-      creatorBuyLamports: optionalSol(
-        flags,
-        "creator-buy-sol",
-        "creator-buy-lamports",
-        0n,
-      ),
+      creatorBuyLamports,
       buyerGroup: group ?? null,
       buyPlan:
         first(flags, "buy-plan") ??
@@ -1674,6 +1745,7 @@ export async function runPumpTokenLaunchFromArgs(
       createdAt: new Date().toISOString(),
       live,
       creator,
+      beneficiary: beneficiary.toBase58(),
       buyerGroup: group ?? null,
       buyPlan:
         first(flags, "buy-plan") ??
@@ -1702,6 +1774,10 @@ export async function runPumpTokenLaunchFromArgs(
         metadataUri: uri,
         mint,
         feeMode: "creator-fees",
+        pair: pairLabel(quoteAsset),
+        quoteMint: quoteAsset.mint.toBase58(),
+        quoteDecimals: quoteAsset.decimals,
+        beneficiary: beneficiary.toBase58(),
         cashback,
         mayhemMode,
         vanityMintSuffix,

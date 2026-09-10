@@ -234,7 +234,6 @@ export {
 export type {
   RegistrySolSweepOptions,
   RegistrySolSweepPlan,
-  RegistrySolSweepProgress,
   RegistrySolSweepReceipt,
   RegistrySolSweepRow,
   RegistrySolSweepSimulation,
@@ -491,6 +490,17 @@ export type {
   TraderReceiptOutcome,
   TraderSubmitMode,
 } from "./launches/pump/token-launch.ts";
+
+export {
+  PUMP_USDC_MINT,
+  buildPumpExternalDeployment,
+  resolvePumpQuoteAsset,
+} from "./launches/pump/external-deployment.ts";
+export type {
+  PumpExternalDeploymentBuild,
+  PumpCustomPairSelection,
+  PumpLaunchPairInput,
+} from "./launches/pump/external-deployment.ts";
 
 export { runPumpSpamBuyers } from "./launches/pump/spam-buy.ts";
 export type {

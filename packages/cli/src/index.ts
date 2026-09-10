@@ -13,6 +13,7 @@ import {
   planRegistryTokenLiquidation,
   removeExternalContact,
   resetSolardRpcStats,
+  resolvePumpQuoteAsset,
   resolveTokenMintForPolicy,
   runScript,
   listScripts,
@@ -28,7 +29,6 @@ import {
   VaultOnboardingError,
   cliVaultStatus,
   ensureCliVaultReady,
-  loadRememberedCliVault,
 } from "./vault-onboarding.ts";
 
 function emit(value: string): void {
@@ -114,7 +114,7 @@ function friendlyCliError(error: unknown): string | null {
       : null;
   if (error instanceof VaultOnboardingError) return error.message;
   if (code === "MISSING_CONFIG" && error.message.includes("SLRD_MASTER_KEY")) {
-    return `${error.message}\n\nRun \`slrd setup\` in an interactive terminal, or set SLRD_MASTER_KEY for automation/CI.`;
+    return `${error.message}\n\nEnter the wallet password interactively, or set SLRD_MASTER_KEY for automation/CI.`;
   }
   return null;
 }
@@ -265,6 +265,7 @@ function commandNeedsSigningVault(
 ): boolean {
   if (!command) return false;
   if (command === "wallet" && values[0] === "create") return true;
+  if (command === "rewards" && values[0] === "claim") return true;
   if (
     [
       "import",
@@ -282,6 +283,16 @@ function commandNeedsSigningVault(
     return true;
   if (command === "vanity" && values[0] === "pool" && values[1] === "generate")
     return true;
+
+  // Local Pump launch planning/building resolves a real signing wallet even in
+  // dry-run mode. External-wallet preparation is deliberately public-key-only.
+  if (
+    command === "launch" &&
+    (values[0] === "pump" || values[0] === "pump-token")
+  )
+    return !flags.has("prepare");
+  if (command === "deploy" || command === "vamp") return true;
+
   if (
     flags.has("live") &&
     [
@@ -290,9 +301,6 @@ function commandNeedsSigningVault(
       "liquidate",
       "meteora",
       "raydium",
-      "launch",
-      "deploy",
-      "vamp",
       "spam-buy",
       "buy-spam",
       "run",
@@ -316,7 +324,7 @@ function help(): string {
   return `${OWL} slrd — multi-wallet Solana CLI + SDK for traders and AI agents
 
 Wallets and tokens
-  slrd setup [--status] [--adopt-env]        First-time local vault setup / migrate an existing SLRD_MASTER_KEY
+  slrd setup [--status]                      Check ephemeral wallet-password mode; no password is persisted
   slrd wallet create [name]                  Generate and persist an encrypted Solana wallet
   slrd import <private_key> [name]
   cat key.json | slrd import --stdin [name]
@@ -348,14 +356,16 @@ Vanity mints
   launch/vamp: add --mint-pool pump [--mint-pool-address <address>] to consume a pooled mint
 
 Metadata and launching
-  slrd launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--alias <name>] [--live] [--skip-simulation]
+  slrd launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--pair SOL|USDC|<custom-quote-mint>] [--beneficiary <wallet|address>] [--alias <name>] [--live] [--skip-simulation]
                     [--deployment-sender helius-rpc|helius-fast] [--helius-tip-sol 0.01]
+  slrd prepare pump --payer <phantom-address> --name <name> --symbol <symbol> --uri <metadata_uri> [--pair SOL|USDC|<custom-quote-mint>] [--beneficiary <address>] [--out prepared.json]
+                                                        Build + mint-partial-sign only; payer remains unsigned and nothing is broadcast
   slrd metadata upload --image <local_path> --name <name> --symbol <symbol> --description <text> [--provider pump-frontend|pinata]
                        [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
   slrd vamp <source-mint> --creator <wallet> [--name <name>] [--symbol <symbol>] [--image <path-or-url>] [--description <text>]
                      [--website <url>] [--twitter <url>] [--telegram <url>] [--video <url>] [--uri <metadata-uri>]
                      [--buy-plan <file>] [--mint-pool pump] [--submit-mode jito-bundle] [--live] [--skip-simulation]
-  slrd deploy pump --wallet <wallet> --name <name> --symbol <symbol> (--uri <metadata_uri> | --image <local_path> --description <text>) [--alias <name>] [--live]
+  slrd deploy pump --wallet <wallet> --name <name> --symbol <symbol> (--uri <metadata_uri> | --image <local_path> --description <text>) [--pair SOL|USDC|<custom-quote-mint>] [--beneficiary <wallet|address>] [--alias <name>] [--live]
                    [--twitter <url>] [--telegram <url>] [--website <url>] [--video <url>] [--hide-name]
 
 Prices
@@ -398,6 +408,8 @@ Trading
   slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--continue-on-error] [--simulate-only]
   slrd claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
+  slrd rewards inspect <token|ca>                      Show claim source, quote asset, estimated accrued creator reward, and payout address
+  slrd rewards claim <token|ca> --wallet <fee-payer>  Claim creator rewards; on-chain beneficiary receives the reward
 
 Scripts (strategies stay outside the kernel)
   slrd scripts                              List scripts registered in slrd.config.ts
@@ -447,8 +459,8 @@ Transactions and ALTs
   slrd alt extend <address> --wallet <wallet> <account...>
 
 Environment
-  SLRD_DB_PATH      shared SDK/CLI database; default ./slrd.db (SOLARD_DB_PATH alias supported)
-  SLRD_MASTER_KEY   optional explicit override for CI/automation; interactive CLI uses the local vault
+  SLRD_DB_PATH      shared SDK/CLI database; default ~/.solard/solard.sqlite (SOLARD_DB_PATH alias supported)
+  SLRD_MASTER_KEY   optional explicit override for CI/automation; otherwise signing commands prompt each invocation and never persist the password
   RPC_ENDPOINT      required only for chain operations
   HELIUS_SENDER_URL regional/global Helius Sender endpoint used by launch scripts
   HELIUS_RPC_URL    RPC endpoint used for ordinary Helius-RPC buyer lane
@@ -495,48 +507,53 @@ async function main() {
 
   const vaultCommand = command === "setup";
   const needsVault = commandNeedsSigningVault(command, values, flags);
-  if (vaultCommand || needsVault) {
-    // Environment overrides always win; otherwise use the remembered Windows
-    // credential when available. This runs before launch/run subcommands so
-    // child scripts inherit SLRD_MASTER_KEY without needing a second prompt.
-    loadRememberedCliVault();
+  if (vaultCommand && flags.has("status")) {
+    const status = cliVaultStatus();
+    if (flags.has("json")) {
+      emit(json(status) + "\n");
+    } else {
+      emit(
+        `${OWL} wallet password mode\n` +
+          `  mode                ephemeral per command\n` +
+          `  password persisted  no\n` +
+          `  env override        ${status.environmentOverride ? "yes" : "no"}\n`,
+      );
+    }
+    return;
+  }
 
-    if (vaultCommand && flags.has("status")) {
-      const status = cliVaultStatus();
-      if (flags.has("json")) {
-        emit(json(status) + "\n");
-      } else {
-        emit(
-          `${OWL} vault\n` +
-            `  configured   ${status.configured ? "yes" : "no"}\n` +
-            `  remembered   ${status.remembered ? "yes" : "no"}\n` +
-            `  env override ${status.environmentOverride ? "yes" : "no"}\n` +
-            `  profile      ${status.path}\n`,
-        );
-      }
+  if (vaultCommand) {
+    const count = await storedWalletCount();
+    if (count === 0 && !process.env.SLRD_MASTER_KEY?.trim()) {
+      emit(
+        `${OWL} no wallet password is stored by Solard.\n` +
+          `   No signing wallets exist yet. Run: slrd wallet create [name]\n` +
+          `   That command will ask for a password twice and use it only for that process.\n`,
+      );
       return;
     }
+    const result = await ensureCliVaultReady({
+      existingWalletCount: count,
+      allowCreate: false,
+    });
+    emit(
+      `${OWL} wallet password accepted  source=${result.source}\n` +
+        `   Nothing was written to disk; a future invocation will prompt again unless SLRD_MASTER_KEY is set.\n`,
+    );
+    return;
+  }
 
-    if (vaultCommand || !process.env.SLRD_MASTER_KEY?.trim()) {
-      const result = await ensureCliVaultReady({
-        existingWalletCount: await storedWalletCount(),
-        allowCreate: true,
-        adoptEnvironment: vaultCommand && flags.has("adopt-env"),
-      });
-      if (vaultCommand) {
-        emit(
-          `${OWL} vault ready  source=${result.source}  ` +
-            `remembered=${result.remembered ? "yes" : "no"}\n` +
-            `   ${result.path}\n`,
-        );
-        if (result.source === "env" && !result.created) {
-          emit(
-            `   Tip: run \`slrd setup --adopt-env\` to persist the current environment key safely.\n`,
-          );
-        }
-        return;
-      }
-    }
+  if (needsVault && !process.env.SLRD_MASTER_KEY?.trim()) {
+    const allowCreate =
+      (command === "wallet" && values[0] === "create") ||
+      command === "import" ||
+      (command === "vanity" &&
+        values[0] === "pool" &&
+        values[1] === "generate");
+    await ensureCliVaultReady({
+      existingWalletCount: await storedWalletCount(),
+      allowCreate,
+    });
   }
 
   let perfPrinted = false;
@@ -735,6 +752,18 @@ async function main() {
     return;
   }
   if (
+    (command === "prepare" && values[0] === "pump") ||
+    (command === "launch" &&
+      (values[0] === "pump" || values[0] === "pump-token") &&
+      flags.has("prepare"))
+  ) {
+    const { runPumpExternalDeploymentFromArgs } =
+      await import("./pump/external-deployment-cli.ts");
+    const externalArgs = command === "prepare" ? rest.slice(1) : rest.slice(1);
+    await runPumpExternalDeploymentFromArgs(externalArgs);
+    return;
+  }
+  if (
     command === "launch" &&
     (values[0] === "pump" || values[0] === "pump-token")
   ) {
@@ -890,7 +919,8 @@ async function main() {
           `\n╭─ ${OWL} wallet ready ──────────────────────────────────╮\n` +
             `  name     @${wallet.name}\n` +
             `  address  ${wallet.address}\n` +
-            `  storage  encrypted in your local Solard vault\n` +
+            `  storage  encrypted in Solard's local wallet database\n` +
+            `  password NOT saved; you will enter it again next invocation\n` +
             `╰──────────────────────────────────────────────────────╯\n` +
             `\nNext:  slrd balances --wallet ${wallet.name}\n` +
             `Backup: slrd export ${wallet.name} --out .\\${wallet.name}-key.txt\n`,
@@ -1538,14 +1568,39 @@ async function main() {
         );
         uri = (uploadedMetadata as { metadataUri: string }).metadataUri;
       }
-      const creator = flags.get("creator")
-        ? slrd.resolveWallet(flags.get("creator")!).address
-        : slrd.signer(wallet).publicKey;
+      const payer = slrd.signer(wallet).publicKey;
+      const beneficiaryInput = flags.get("beneficiary") ?? flags.get("creator");
+      let creator = payer;
+      if (beneficiaryInput && beneficiaryInput !== "true") {
+        try {
+          creator = slrd.resolveWallet(beneficiaryInput).address;
+        } catch {
+          const contact = findExternalContact(beneficiaryInput);
+          const { PublicKey } = await import("@solana/web3.js");
+          creator = new PublicKey(contact?.address ?? beneficiaryInput);
+        }
+      }
+      const quoteAsset =
+        launchpad === "pump"
+          ? await resolvePumpQuoteAsset(
+              slrd.connection(),
+              flags.get("pair") ?? flags.get("quote-mint") ?? "SOL",
+            )
+          : undefined;
+      if (
+        launchpad !== "pump" &&
+        (flags.has("pair") || flags.has("beneficiary"))
+      ) {
+        throw new Error(
+          "--pair and --beneficiary are currently defined for Pump create_v2 deployment only.",
+        );
+      }
       const deployment = await slrd.prepareTokenDeployment(launchpad, wallet, {
         name,
         symbol,
         uri,
         creator,
+        quoteAsset,
         mayhemMode: flags.has("mayhem"),
         cashback: flags.has("cashback"),
       });
@@ -1564,6 +1619,12 @@ async function main() {
         name,
         symbol,
         uri,
+        beneficiary: creator.toBase58(),
+        pair:
+          quoteAsset?.kind === "native-sol"
+            ? "SOL"
+            : (quoteAsset?.mint.toBase58() ?? null),
+        quoteMint: quoteAsset?.mint.toBase58() ?? null,
         uploadedMetadata,
         live: flags.has("live"),
       };
@@ -2293,6 +2354,74 @@ async function main() {
       emit(json(receipts) + "\n");
       return;
     }
+    if (command === "rewards") {
+      const action = values[0] ?? "inspect";
+      const tokenRef = values[1];
+      if (!tokenRef)
+        throw new Error(
+          "Usage: slrd rewards <inspect|claim> <token|ca> [--wallet <fee-payer>]",
+        );
+
+      if (action === "claim") {
+        const wallet = need(flags, "wallet");
+        const receipt = await slrd.claim(tokenRef, wallet, {
+          via: flags.get("sender") ?? "rpc",
+        });
+        emit(
+          json({
+            action: "claim",
+            token: tokenRef,
+            feePayer: wallet,
+            receipt,
+          }) + "\n",
+        );
+        return;
+      }
+
+      if (action === "inspect") {
+        let token = slrd.resolveToken(tokenRef);
+        try {
+          token = await slrd.refreshToken(token);
+        } catch {
+          // A registered token can still expose a useful claim plan when one
+          // enrichment source is temporarily unavailable.
+        }
+        const { PublicKey } = await import("@solana/web3.js");
+        const probeUser = token.creator
+          ? new PublicKey(token.creator)
+          : new PublicKey(token.mint);
+        const plan = await slrd.resolveClaim(token, probeUser);
+        const payoutAddress =
+          typeof plan.meta?.payoutAddress === "string"
+            ? plan.meta.payoutAddress
+            : token.creator;
+        const output = {
+          action: "inspect",
+          token: token.mint,
+          source: plan.source,
+          payoutAddress: payoutAddress ?? null,
+          quote: {
+            kind: plan.quoteAsset.kind,
+            mint: plan.quoteAsset.mint.toBase58(),
+            decimals: plan.quoteAsset.decimals,
+            tokenProgram: plan.quoteAsset.tokenProgram.toBase58(),
+          },
+          estimatedClaimRaw: plan.estimatedClaimRaw.toString(),
+          estimatedClaimUi: formatRaw(
+            plan.estimatedClaimRaw,
+            plan.quoteAsset.decimals,
+          ),
+          spendableByProbeRaw: plan.spendableByUserRaw.toString(),
+          sharingConfig: plan.meta?.sharingConfig ?? null,
+          note: "Claim is permissionless where supported; --wallet is the transaction fee payer. The configured on-chain beneficiary receives the reward.",
+        };
+        emit(json(output) + "\n");
+        return;
+      }
+
+      throw new Error("Usage: slrd rewards <inspect|claim> <token|ca>");
+    }
+
     if (command === "claim") {
       const token = values[0];
       if (!token)

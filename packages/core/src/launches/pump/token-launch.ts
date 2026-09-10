@@ -6,7 +6,12 @@ import {
   type Keypair,
 } from "@solana/web3.js";
 
-import { rawAmount, SOL_ASSET } from "../../core/amounts.ts";
+import {
+  rawAmount,
+  sameAsset,
+  SOL_ASSET,
+  type QuoteAsset,
+} from "../../core/amounts.ts";
 import type { WalletRef } from "../../core/refs.ts";
 import type { Solard } from "../../core/solard.ts";
 import { HeliusSender } from "../../tx/senders/helius-sender.ts";
@@ -882,6 +887,10 @@ export async function preparePumpTokenLaunch(args: {
   buyerPriorityMicroLamports: number;
   senderPolicy: LaunchSenderPolicy;
   mint?: Keypair;
+  /** On-chain Pump creator/reward beneficiary. Defaults to the payer wallet. */
+  creatorBeneficiary?: PublicKey;
+  /** Quote side for Pump create_v2. Defaults to native SOL. */
+  quoteAsset?: QuoteAsset;
   cashback?: boolean;
   mayhemMode?: boolean;
 }): Promise<PumpTokenLaunchPlan> {
@@ -893,6 +902,18 @@ export async function preparePumpTokenLaunch(args: {
       ? Math.trunc(args.cuLimit)
       : 600_000;
 
+  const payer = args.slrd.signer(args.creatorWallet).publicKey;
+  const quoteAsset = args.quoteAsset ?? SOL_ASSET;
+  const hasSequentialBuys =
+    args.creatorBuyLamports > 0n ||
+    args.traders.some((trader) => trader.spendLamports > 0n);
+  if (!sameAsset(quoteAsset, SOL_ASSET) && hasSequentialBuys) {
+    throw new Error(
+      "Pump non-SOL quote launches currently support deploy-only creation. " +
+        "--creator-buy-sol, --buyer-group, and buy-plan amounts are SOL-denominated and cannot be reused as quote-token amounts.",
+    );
+  }
+
   const deployment = await args.slrd.prepareTokenDeployment(
     "pump",
     args.creatorWallet,
@@ -900,7 +921,8 @@ export async function preparePumpTokenLaunch(args: {
       name: args.token.name,
       symbol: args.token.symbol,
       uri: args.token.uri,
-      creator: args.slrd.signer(args.creatorWallet).publicKey,
+      creator: args.creatorBeneficiary ?? payer,
+      quoteAsset,
       mint: args.mint,
       mayhemMode: args.mayhemMode ?? args.token.mayhemMode ?? false,
       cashback: args.cashback ?? args.token.cashback ?? false,
@@ -914,15 +936,18 @@ export async function preparePumpTokenLaunch(args: {
     reserveLamports: args.creatorReserveLamports,
   });
 
-  let state = await args.slrd.initialPendingMarketState("pump", deployment);
+  let state: PendingMarketState | null = null;
   let initialBuy: PreparedPendingBuy | null = null;
+  if (creator || args.traders.length > 0) {
+    state = await args.slrd.initialPendingMarketState("pump", deployment);
+  }
   if (creator) {
     initialBuy = await args.slrd.preparePendingBuy(
       "pump",
       deployment,
       args.creatorWallet,
       rawAmount(creator.spendLamports, SOL_ASSET),
-      state,
+      state!,
       { slippageBps: args.slippageBps },
     );
     state = initialBuy.nextState;
@@ -978,13 +1003,15 @@ export async function preparePumpTokenLaunch(args: {
     return { sender, tip: tipForSender(sender, trader, index), lane };
   });
 
-  const pendingBuys = await prepareWorstCaseBuys({
-    slrd: args.slrd,
-    deployment,
-    traders: args.traders,
-    initialState: state,
-    slippageBps: args.slippageBps,
-  });
+  const pendingBuys = args.traders.length
+    ? await prepareWorstCaseBuys({
+        slrd: args.slrd,
+        deployment,
+        traders: args.traders,
+        initialState: state!,
+        slippageBps: args.slippageBps,
+      })
+    : [];
 
   const traderPlans: PlannedTransaction[] = [];
   for (let index = 0; index < args.traders.length; index += 1) {

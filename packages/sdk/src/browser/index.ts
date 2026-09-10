@@ -20,11 +20,23 @@ export {
 } from "./storage.ts";
 export { BrowserKeyVault, KeypairBrowserSigner } from "./wallet.ts";
 export { buildLocalPumpBuy, buildLocalPumpSell } from "./pump.ts";
+export {
+  PUMP_USDC_MINT,
+  buildPumpExternalDeployment,
+  resolvePumpQuoteAsset,
+} from "@solard/core/launches/pump/external-deployment.ts";
+export type {
+  PumpExternalDeploymentBuild,
+  PumpCustomPairSelection,
+  PumpLaunchPairInput,
+} from "@solard/core/launches/pump/external-deployment.ts";
 
 export type {
   BrowserBroadcastResult,
   BrowserContact,
   BrowserPortfolio,
+  BrowserPumpDeploymentBuild,
+  BrowserPumpDeploymentResult,
   BrowserSolardOptions,
   BrowserStorageLike,
   BrowserTokenAlias,

@@ -6,11 +6,18 @@ import {
   VersionedTransaction,
 } from "@solana/web3.js";
 
+import {
+  buildPumpExternalDeployment,
+  type PumpLaunchPairInput,
+} from "@solard/core/launches/pump/external-deployment.ts";
+
 import { BrowserSolardStore, defaultBrowserStorage } from "./storage.ts";
 import { buildLocalPumpBuy, buildLocalPumpSell } from "./pump.ts";
 import type {
   BrowserBroadcastResult,
   BrowserPortfolio,
+  BrowserPumpDeploymentBuild,
+  BrowserPumpDeploymentResult,
   BrowserSolardOptions,
   BrowserTradeBuild,
   BrowserTradeResult,
@@ -314,6 +321,59 @@ export class BrowserSolard {
       new VersionedTransaction(message),
       latest,
     );
+  }
+
+  /**
+   * Build a Pump create_v2 transaction for the connected wallet without asking
+   * it to sign and without broadcasting. The generated mint signature is already
+   * present; the connected wallet remains the missing payer signature.
+   */
+  async buildPumpDeployment(args: {
+    name: string;
+    symbol: string;
+    uri: string;
+    pair?: PumpLaunchPairInput;
+    beneficiary?: string | PublicKey;
+    mayhemMode?: boolean;
+    cashback?: boolean;
+    cuLimit?: number;
+    priorityMicroLamports?: number;
+  }): Promise<BrowserPumpDeploymentBuild> {
+    const payer = this.signer().publicKey;
+    if (!payer) throw new Error("Connected browser wallet has no public key.");
+    return await buildPumpExternalDeployment({
+      connection: this.connection,
+      payer,
+      ...args,
+    });
+  }
+
+  /** Build, request the wallet signature, broadcast, and confirm a Pump launch. */
+  async deployPump(args: {
+    name: string;
+    symbol: string;
+    uri: string;
+    pair?: PumpLaunchPairInput;
+    beneficiary?: string | PublicKey;
+    mayhemMode?: boolean;
+    cashback?: boolean;
+    cuLimit?: number;
+    priorityMicroLamports?: number;
+    skipPreflight?: boolean;
+  }): Promise<BrowserPumpDeploymentResult> {
+    const build = await this.buildPumpDeployment(args);
+    const receipt = await this.signAndBroadcast(build.transaction, {
+      blockhash: build.blockhash,
+      lastValidBlockHeight: build.lastValidBlockHeight,
+      skipPreflight: args.skipPreflight,
+    });
+    return {
+      ...receipt,
+      mint: build.mint,
+      beneficiary: build.beneficiary,
+      quoteMint: build.quoteMint,
+      quoteKind: build.quoteKind,
+    };
   }
 
   async buildBuy(args: {
