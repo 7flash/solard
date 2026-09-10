@@ -24,6 +24,7 @@ import {
 } from "@solard/sdk";
 
 import { handleMeteoraCommand } from "./meteora-commands.ts";
+import { handleFairfunCommand } from "./fairfun-commands.ts";
 import { resolveDestinationRef } from "./refs.ts";
 import {
   VaultOnboardingError,
@@ -266,6 +267,9 @@ function commandNeedsSigningVault(
   if (!command) return false;
   if (command === "wallet" && values[0] === "create") return true;
   if (command === "rewards" && values[0] === "claim") return true;
+  if (command === "rewards" && values[0] === "distribute")
+    return flags.has("live");
+  if (command === "transfer-many") return flags.has("live");
   if (
     [
       "import",
@@ -347,6 +351,8 @@ External contacts (public addresses only; never signing wallets or group members
   slrd token trades <ca> [--from-start] [--min-sol N] [--owner <wallet>] [--side buy|sell] [--limit N] [--json]
   slrd token analyze <ca> [--top N] [--json]
   slrd tokens
+  slrd holders <token|ca> [--exclude <a,b>] [--min-raw N] [--json]         Complete on-chain holder snapshot
+  slrd events <token|ca> [--swaps-only|--transfers-only] [--jsonl]          Live typed Pump/PumpSwap + transfer stream
 
 Vanity mints
   slrd vanity --suffix pump --out .\\mint.json [--count <n>]
@@ -408,6 +414,9 @@ Trading
   slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--continue-on-error] [--simulate-only]
   slrd claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
+  slrd transfer-many --wallet <wallet> (--token <mint>|--sol) --file <allocations.json> [--live]
+  slrd rewards distribute <token|ca> --wallet <beneficiary> [--claim-first|--amount-raw N] [--id <epoch>] [--live]
+  slrd rewards status <distribution-id>
   slrd rewards inspect <token|ca>                      Show claim source, quote asset, estimated accrued creator reward, and payout address
   slrd rewards claim <token|ca> --wallet <fee-payer>  Claim creator rewards; on-chain beneficiary receives the reward
 
@@ -835,6 +844,10 @@ async function main() {
     ]);
   const slrd = createTraderSolard();
   try {
+    if (await handleFairfunCommand({ command, values, flags, slrd, emit })) {
+      return;
+    }
+
     if (command === "meteora") {
       await handleMeteoraCommand({ slrd, values, flags, emit });
       return;

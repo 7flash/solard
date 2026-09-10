@@ -1,4 +1,4 @@
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { getAssociatedTokenAddressSync, NATIVE_MINT } from "@solana/spl-token";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   AddressLookupTableProgram,
@@ -18,8 +18,22 @@ import {
   readTokenAmount,
   type OwnedTokenAccount,
 } from "../chain/state.ts";
+import {
+  snapshotTokenHolders,
+  type TokenHolderSnapshotOptions,
+} from "../chain/holders.ts";
+import {
+  subscribeTokenEvents as openTokenEventStream,
+  type SubscribeTokenEventsOptions,
+} from "../events/token-events.ts";
 import { simulatePlanned } from "../chain/simulate.ts";
-import { sameAsset, toRawAmount, type HumanAmount } from "../core/amounts.ts";
+import {
+  SOL_ASSET,
+  sameAsset,
+  toRawAmount,
+  type HumanAmount,
+  type QuoteAsset,
+} from "../core/amounts.ts";
 import { QuoteAssetMismatchError } from "../core/errors.ts";
 import { optionalDecimals } from "../core/decimals.ts";
 import type { GroupRef, TokenRef, WalletRef } from "../core/refs.ts";
@@ -81,6 +95,16 @@ import {
   SolardTransaction,
   TransactionBuilder,
 } from "../tx/transaction-builder.ts";
+import {
+  packTransferMany,
+  type TransferManyAllocation,
+} from "../tx/transfer-batch.ts";
+import {
+  executeHolderRewardDistribution,
+  planHolderRewardDistribution,
+  type ExecuteHolderRewardDistributionOptions,
+  type HolderRewardPlanOptions,
+} from "../rewards/holder-distributor.ts";
 import type {
   BatchSendReceipt,
   PlannedTransaction,
@@ -1223,6 +1247,113 @@ export class Solard implements ComposerHost {
     return await this.tx(wallet)
       .claimFees(token)
       .send({ via: options.via ?? "rpc", kind: "claim" });
+  }
+
+  /** Complete on-chain holder snapshot. Use this, not websocket deltas, for payouts. */
+  async snapshotHolders(
+    tokenRef: TokenRef,
+    options: Omit<TokenHolderSnapshotOptions, "token"> = {},
+  ) {
+    const token = this.resolveToken(tokenRef);
+    return await snapshotTokenHolders(this.connection(), token.mint, {
+      ...options,
+      token,
+    });
+  }
+
+  /** Typed Pump/PumpSwap swap + mint-mentioned SPL transfer stream for one token. */
+  async subscribeTokenEvents(
+    tokenRef: TokenRef,
+    options: SubscribeTokenEventsOptions = {},
+  ) {
+    const token = this.resolveToken(tokenRef);
+    return await openTokenEventStream({
+      connection: this.connection(),
+      token,
+      options,
+    });
+  }
+
+  private async transferAsset(
+    asset: "SOL" | string | PublicKey | QuoteAsset,
+  ): Promise<QuoteAsset> {
+    if (
+      typeof asset === "object" &&
+      !(asset instanceof PublicKey) &&
+      "kind" in asset
+    )
+      return asset;
+    const raw =
+      asset instanceof PublicKey ? asset.toBase58() : String(asset).trim();
+    if (!raw || raw.toUpperCase() === "SOL" || raw === NATIVE_MINT.toBase58())
+      return SOL_ASSET;
+    const mint = new PublicKey(raw);
+    const info = await readMint(this.connection(), mint);
+    return {
+      kind: "spl-token",
+      mint,
+      tokenProgram: info.tokenProgram,
+      decimals: info.decimals,
+    };
+  }
+
+  /** Read-only size-aware packing of many payments into v0 transactions. */
+  async planTransferMany(args: {
+    wallet: WalletRef;
+    asset: "SOL" | string | PublicKey | QuoteAsset;
+    allocations: TransferManyAllocation[];
+    cuLimit?: number;
+    priorityMicroLamports?: number;
+    maxRecipientsPerTransaction?: number;
+  }) {
+    const payer = this.resolveWallet(args.wallet).address;
+    return await packTransferMany({
+      connection: this.connection(),
+      payer,
+      asset: await this.transferAsset(args.asset),
+      allocations: args.allocations,
+      altAddresses: this.alts.list().map((row) => row.address),
+      cuLimit: args.cuLimit,
+      priorityMicroLamports: args.priorityMicroLamports,
+      maxRecipientsPerTransaction: args.maxRecipientsPerTransaction,
+    });
+  }
+
+  /** Build/sign/send every packed transfer batch sequentially. */
+  async sendTransferMany(args: {
+    wallet: WalletRef;
+    asset: "SOL" | string | PublicKey | QuoteAsset;
+    allocations: TransferManyAllocation[];
+    via?: SenderId;
+    cuLimit?: number;
+    priorityMicroLamports?: number;
+    maxRecipientsPerTransaction?: number;
+    skipSimulation?: boolean;
+    skipPreflight?: boolean;
+  }): Promise<BatchSendReceipt> {
+    const plan = await this.planTransferMany(args);
+    const signer = this.signer(args.wallet);
+    const receipts: SendReceipt[] = [];
+    for (const batch of plan.batches) {
+      const compiled = await this.compile(signer, batch.draft);
+      receipts.push(
+        await this.sendPlan(compiled, args.via ?? "rpc", "transfer-many", {
+          skipSimulation: args.skipSimulation,
+          skipPreflight: args.skipPreflight,
+        }),
+      );
+    }
+    return { sender: String(args.via ?? "rpc"), mode: "parallel", receipts };
+  }
+
+  async planHolderRewards(options: HolderRewardPlanOptions) {
+    return await planHolderRewardDistribution(this, options);
+  }
+
+  async distributeHolderRewards(
+    options: ExecuteHolderRewardDistributionOptions,
+  ) {
+    return await executeHolderRewardDistribution(this, options);
   }
 
   listAgents() {

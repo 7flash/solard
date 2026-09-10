@@ -79,6 +79,30 @@ export {
 } from "./tx/transaction-builder.ts";
 export { lookupCandidates } from "./tx/assemble.ts";
 export { TransactionComposer, BatchComposer } from "./tx/composer.ts";
+export {
+  packTransferMany,
+  SOLARD_V0_PACKET_LIMIT,
+} from "./tx/transfer-batch.ts";
+export type {
+  TransferManyAllocation,
+  PackedTransferAllocation,
+  PackedTransferBatch,
+  PackedTransferPlan,
+  PackTransferManyOptions,
+} from "./tx/transfer-batch.ts";
+export {
+  executeHolderRewardDistribution,
+  getHolderRewardDistributionState,
+  planHolderRewardDistribution,
+} from "./rewards/holder-distributor.ts";
+export type {
+  HolderRewardAllocation,
+  HolderRewardPendingTransaction,
+  HolderRewardDistributionState,
+  HolderRewardPlanOptions,
+  HolderRewardDistributionPlan,
+  ExecuteHolderRewardDistributionOptions,
+} from "./rewards/holder-distributor.ts";
 export type {
   PlannedTransaction,
   TransactionDraft,
@@ -240,6 +264,21 @@ export type {
 } from "./chain/registry-sweep.ts";
 export type { PriceWindow } from "./db/price-repo.ts";
 export { listOwnedTokenAccounts } from "./chain/state.ts";
+export { snapshotTokenHolders } from "./chain/holders.ts";
+export type {
+  TokenHolder,
+  ExcludedTokenHolder,
+  TokenHolderSnapshot,
+  TokenHolderSnapshotOptions,
+} from "./chain/holders.ts";
+export { subscribeTokenEvents } from "./events/token-events.ts";
+export type {
+  SolardTokenEvent,
+  SolardTokenSwapEvent,
+  SolardTokenTransferEvent,
+  SubscribeTokenEventsOptions,
+  TokenEventSubscription,
+} from "./events/token-events.ts";
 export { readMint } from "./chain/state.ts";
 export type { OwnedTokenAccount } from "./chain/state.ts";
 export {

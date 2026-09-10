@@ -30,6 +30,21 @@ export type {
   PumpCustomPairSelection,
   PumpLaunchPairInput,
 } from "@solard/core/launches/pump/external-deployment.ts";
+export { snapshotTokenHolders } from "@solard/core/chain/holders.ts";
+export type {
+  TokenHolder,
+  ExcludedTokenHolder,
+  TokenHolderSnapshot,
+  TokenHolderSnapshotOptions,
+} from "@solard/core/chain/holders.ts";
+export { subscribeTokenEvents } from "@solard/core/events/token-events.ts";
+export type {
+  SolardTokenEvent,
+  SolardTokenSwapEvent,
+  SolardTokenTransferEvent,
+  SubscribeTokenEventsOptions,
+  TokenEventSubscription,
+} from "@solard/core/events/token-events.ts";
 
 export type {
   BrowserBroadcastResult,

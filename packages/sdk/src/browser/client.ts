@@ -11,6 +11,20 @@ import {
   type PumpLaunchPairInput,
 } from "@solard/core/launches/pump/external-deployment.ts";
 
+import {
+  snapshotTokenHolders,
+  type TokenHolderSnapshotOptions,
+} from "@solard/core/chain/holders.ts";
+import { readMint } from "@solard/core/chain/state.ts";
+import {
+  subscribeTokenEvents,
+  type SubscribeTokenEventsOptions,
+} from "@solard/core/events/token-events.ts";
+import type { TokenRow } from "@solard/core/db/schema.ts";
+import { PumpCurveVenue } from "@solard/core/venues/pump/pump-curve-venue.ts";
+import { PumpSwapVenue } from "@solard/core/venues/pump/pumpswap-venue.ts";
+import { VenueRegistry } from "@solard/core/venues/route-resolver.ts";
+
 import { BrowserSolardStore, defaultBrowserStorage } from "./storage.ts";
 import { buildLocalPumpBuy, buildLocalPumpSell } from "./pump.ts";
 import type {
@@ -175,6 +189,67 @@ export class BrowserSolard {
     } catch {
       return this.store.resolveToken(value);
     }
+  }
+
+  private async inspectPumpToken(value: string): Promise<TokenRow> {
+    const mintText = this.resolveTokenOrMint(value);
+    const mint = new PublicKey(mintText);
+    const info = await readMint(this.connection, mint);
+    const registry = new VenueRegistry()
+      .register(new PumpCurveVenue())
+      .register(new PumpSwapVenue());
+    const inspected = await registry.inspect(this.connection, mint);
+    if (!inspected)
+      throw new Error(
+        `Mint ${mintText} is not a supported Pump/PumpSwap token.`,
+      );
+    const now = Date.now();
+    return {
+      id: 0,
+      mint: mintText,
+      name: null,
+      symbol: null,
+      decimals: info.decimals,
+      createKind: "unknown",
+      creator: null,
+      quoteMint: null,
+      quoteTokenProgram: null,
+      baseTokenProgram: info.tokenProgram.toBase58(),
+      bondingCurve: null,
+      pool: null,
+      sharingConfig: null,
+      venueHint: "unknown",
+      metadataJson: null,
+      refreshedAtMs: now,
+      createdAtMs: now,
+      updatedAtMs: now,
+      ...inspected,
+    } as TokenRow;
+  }
+
+  /** Complete holder snapshot suitable for reward allocation. */
+  async snapshotHolders(
+    token: string,
+    options: Omit<TokenHolderSnapshotOptions, "token"> = {},
+  ) {
+    const row = await this.inspectPumpToken(token);
+    return await snapshotTokenHolders(this.connection, row.mint, {
+      ...options,
+      token: row,
+    });
+  }
+
+  /** Typed Pump/PumpSwap swap and mint-mentioned transfer stream. */
+  async subscribeTokenEvents(
+    token: string,
+    options: SubscribeTokenEventsOptions = {},
+  ) {
+    const row = await this.inspectPumpToken(token);
+    return await subscribeTokenEvents({
+      connection: this.connection,
+      token: row,
+      options,
+    });
   }
 
   async getPortfolio(address?: string | PublicKey): Promise<BrowserPortfolio> {
