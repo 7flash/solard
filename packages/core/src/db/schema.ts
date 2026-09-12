@@ -140,6 +140,46 @@ export const WatchSchema = z.object({
   updatedAtMs: z.number(),
 });
 
+export const HistoryReplayItemSchema = z.object({
+  replayKey: z.string(),
+  mint: z.string(),
+  signature: z.string(),
+  slot: z.number(),
+  timestampSec: z.number().nullable().default(null),
+  transactionIndex: z.number().nullable().default(null),
+  instructionIndex: z.number().nullable().default(null),
+  innerInstructionIndex: z.number().nullable().default(null),
+  kind: z.string(),
+  trxJson: z.string(),
+  beforeBalanceRaw: z.string().nullable().default(null),
+  postBalanceRaw: z.string().nullable().default(null),
+  payoutsJson: z.string().default("[]"),
+  quoteMint: z.string().nullable().default(null),
+  claimAttribution: z
+    .enum(["exact-token", "creator-aggregate-ambiguous"])
+    .nullable()
+    .default(null),
+  parserVersion: z.string(),
+  observedAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
+export const HistoryReplayCoverageSchema = z.object({
+  mint: z.string(),
+  parserVersion: z.string(),
+  recipient: z.string().nullable().default(null),
+  originalCreator: z.string().nullable().default(null),
+  creationSlot: z.number().nullable().default(null),
+  finalizedThroughSlot: z.number(),
+  attemptedThroughSlot: z.number().default(0),
+  authoritative: z.number().default(0),
+  tokenBalancesAuthoritative: z.number().default(0),
+  creatorRewardsAuthoritative: z.number().default(0),
+  complete: z.number().default(0),
+  warningsJson: z.string().default("[]"),
+  updatedAtMs: z.number(),
+});
+
 export const SettingSchema = z.object({
   key: z.string(),
   value: z.string(),
@@ -161,6 +201,12 @@ export type GroupWalletRow = z.infer<typeof GroupWalletSchema> & { id: number };
 export type AgentRow = z.infer<typeof AgentSchema> & { id: number };
 export type AltRow = z.infer<typeof AltSchema> & { id: number };
 export type WatchRow = z.infer<typeof WatchSchema> & { id: number };
+export type HistoryReplayItemRow = z.infer<typeof HistoryReplayItemSchema> & {
+  id: number;
+};
+export type HistoryReplayCoverageRow = z.infer<
+  typeof HistoryReplayCoverageSchema
+> & { id: number };
 export type SettingRow = z.infer<typeof SettingSchema> & { id: number };
 
 export type SolardDatabase = Database<{
@@ -177,5 +223,7 @@ export type SolardDatabase = Database<{
   agents: typeof AgentSchema;
   alts: typeof AltSchema;
   watches: typeof WatchSchema;
+  historyReplayItems: typeof HistoryReplayItemSchema;
+  historyReplayCoverage: typeof HistoryReplayCoverageSchema;
   settings: typeof SettingSchema;
 }>;

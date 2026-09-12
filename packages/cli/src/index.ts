@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
+import { configure } from "measure-fn";
 import {
   addExternalContact,
-  configureSolardMeasure,
   createSolardMeasureCollector,
   executeRegistrySolSweep,
   executeRegistryTokenLiquidation,
@@ -24,7 +24,7 @@ import {
 } from "@solard/sdk";
 
 import { handleMeteoraCommand } from "./meteora-commands.ts";
-import { handleFairfunCommand } from "./fairfun-commands.ts";
+import { handleAccountingCommand } from "./accounting-commands.ts";
 import { resolveDestinationRef } from "./refs.ts";
 import {
   VaultOnboardingError,
@@ -77,7 +77,12 @@ function int(flags: Flags, key: string, fallback?: number): number | undefined {
 function json(value: unknown): string {
   return JSON.stringify(
     value,
-    (_, item) => (typeof item === "bigint" ? item.toString() : item),
+    (_, item) =>
+      typeof item === "bigint"
+        ? item.toString()
+        : item instanceof Map
+          ? Object.fromEntries(item)
+          : item,
     2,
   );
 }
@@ -269,7 +274,11 @@ function commandNeedsSigningVault(
   if (command === "rewards" && values[0] === "claim") return true;
   if (command === "rewards" && values[0] === "distribute")
     return flags.has("live");
-  if (command === "transfer-many") return flags.has("live");
+  if (command === "transfer-many") {
+    if (values[0] === "status") return false;
+    if (values[0] === "resume") return true;
+    return flags.has("live");
+  }
   if (
     [
       "import",
@@ -318,7 +327,7 @@ async function storedWalletCount(): Promise<number> {
   const { createTraderSolard } = await import("@solard/sdk");
   const probe = createTraderSolard();
   try {
-    return probe.wallets.list().length;
+    return (probe.db.wallets.select().all() as unknown[]).length;
   } finally {
     probe.close();
   }
@@ -329,7 +338,7 @@ function help(): string {
 
 Wallets and tokens
   slrd setup [--status]                      Check ephemeral wallet-password mode; no password is persisted
-  slrd wallet create [name]                  Generate and persist an encrypted Solana wallet
+  slrd wallet create [name] [--vanity <suffix>]        Generate and persist an encrypted Solana wallet
   slrd import <private_key> [name]
   cat key.json | slrd import --stdin [name]
 
@@ -352,7 +361,9 @@ External contacts (public addresses only; never signing wallets or group members
   slrd token analyze <ca> [--top N] [--json]
   slrd tokens
   slrd holders <token|ca> [--exclude <a,b>] [--min-raw N] [--json]         Complete on-chain holder snapshot
-  slrd events <token|ca> [--swaps-only|--transfers-only] [--jsonl]          Live typed Pump/PumpSwap + transfer stream
+  slrd events <token|ca> [--all|--swaps|--transfers|--creates] [--jsonl]     Live typed Pump/PumpSwap + transfer/create stream
+  slrd events history <token|ca> [--provider auto|solscan|rpc] [--from-slot N] [--to-slot N] [--slot-order] [--json]
+                                                        Historical holder-balance movements with explicit completeness verification
 
 Vanity mints
   slrd vanity --suffix pump --out .\\mint.json [--count <n>]
@@ -360,6 +371,9 @@ Vanity mints
   slrd vanity pool list [--suffix pump] [--status available|reserved|used]
   slrd vanity pool release <mint-address>               Release an ambiguous/failed launch reservation
   launch/vamp: add --mint-pool pump [--mint-pool-address <address>] to consume a pooled mint
+
+Pump pairs
+  slrd pump pairs [--json]                              Read Pump-supported quote mints from the on-chain Global account
 
 Metadata and launching
   slrd launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--pair SOL|USDC|<custom-quote-mint>] [--beneficiary <wallet|address>] [--alias <name>] [--live] [--skip-simulation]
@@ -391,8 +405,8 @@ Transfers and consolidation
                                                         Without --wallets, sweep considers all stored signing wallets
 
 Token liquidation
-  slrd liquidate tokens --except <token|mint> [--wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--burn-unsellable] [--simulate | --live]
-                                                        Sell supported tokens except protected mint(s); unwrap WSOL; close unprotected zero-balance token accounts and reclaim rent
+  slrd liquidate tokens [--except <token|mint>] [--wallets <a,b,...>] [--except-wallet <wallet>] [--except-wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--burn-unsellable] [--simulate | --live]
+                                                        Sell all supported tokens unless protected with --except; excluded wallets are not scanned or touched
 
 RPC
   All Solard JSON-RPC traffic is globally rate-limited to 5 req/s by default.
@@ -414,11 +428,18 @@ Trading
   slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
   slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--continue-on-error] [--simulate-only]
   slrd claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
-  slrd transfer-many --wallet <wallet> (--token <mint>|--sol) --file <allocations.json> [--live]
-  slrd rewards distribute <token|ca> --wallet <beneficiary> [--claim-first|--amount-raw N] [--id <epoch>] [--live]
-  slrd rewards status <distribution-id>
+  slrd transfer-many --wallet <wallet> (--token <mint>|--sol) --file <allocations.json> [--id <stable-id> --live]
+  slrd transfer-many status <stable-id>
+  slrd transfer-many resume <stable-id> [--sender rpc|helius]
+  slrd rewards history <token|ca> [--wallet <reward-recipient>] [--provider auto|solscan|rpc] [--json]
+  slrd rewards distribute <token|ca> --wallet <beneficiary> --snapshot <snapshot.json> [--reward-mint <mint>] [--live]
+                                                        Pay every outstanding cumulative holder entitlement and exit when complete
+  slrd rewards stop <token|ca>                         Ask the currently running distribution for this token to stop before its next transfer
+  slrd rewards status <token|ca>                       Show remembered cumulative entitlement/payment state
+  slrd rewards audit <token|ca> [--holder <wallet>]   Show entitlement and confirmed-payment history
   slrd rewards inspect <token|ca>                      Show claim source, quote asset, estimated accrued creator reward, and payout address
-  slrd rewards claim <token|ca> --wallet <fee-payer>  Claim creator rewards; on-chain beneficiary receives the reward
+  slrd rewards claim <token|ca> --wallet <fee-payer> [--id <stable-claim-id> --basis <reward-basis.json>]
+  slrd rewards claim-status <stable-claim-id>
 
 Scripts (strategies stay outside the kernel)
   slrd scripts                              List scripts registered in slrd.config.ts
@@ -473,6 +494,7 @@ Environment
   RPC_ENDPOINT      required only for chain operations
   HELIUS_SENDER_URL regional/global Helius Sender endpoint used by launch scripts
   HELIUS_RPC_URL    RPC endpoint used for ordinary Helius-RPC buyer lane
+  SOLSCAN_API_KEY   optional indexed token-history provider; enables authoritative historical transfer reconstruction
   HELIUS_TIP_ACCOUNT, HELIUS_TIP_LAMPORTS, HELIUS_PRIORITY_MICRO_LAMPORTS launch transport policy
   SLRD_LAUNCH_*     launch resend/timeout policy; shared environment, not per-token metadata
   JITO_BLOCK_ENGINE_URL only when explicitly selecting the separate Jito sender
@@ -498,7 +520,7 @@ async function main() {
     flags.has("measure-stream") ||
     process.env.SLRD_MEASURE_STREAM === "1" ||
     process.env.SLRD_MEASURE_STREAM === "true";
-  configureSolardMeasure(
+  configure(
     streamMeasures
       ? {
           silent: false,
@@ -552,7 +574,7 @@ async function main() {
     return;
   }
 
-  if (needsVault && !process.env.SLRD_MASTER_KEY?.trim()) {
+  if (needsVault) {
     const allowCreate =
       (command === "wallet" && values[0] === "create") ||
       command === "import" ||
@@ -844,12 +866,26 @@ async function main() {
     ]);
   const slrd = createTraderSolard();
   try {
-    if (await handleFairfunCommand({ command, values, flags, slrd, emit })) {
+    if (await handleAccountingCommand({ command, values, flags, slrd, emit })) {
       return;
     }
 
     if (command === "meteora") {
       await handleMeteoraCommand({ slrd, values, flags, emit });
+      return;
+    }
+
+    if (command === "pump" && values[0] === "pairs") {
+      const pairs = await slrd.pump.getSupportedPairs();
+      if (flags.has("json")) {
+        emit(json(pairs) + "\n");
+      } else {
+        for (const pair of pairs) {
+          emit(
+            `${(pair.symbol ?? "?").padEnd(12)} ${(pair.name ?? "?").padEnd(28)} ${pair.mint}  decimals=${pair.decimals}\n`,
+          );
+        }
+      }
       return;
     }
 
@@ -922,21 +958,48 @@ async function main() {
 
     if (command === "wallet" && values[0] === "create") {
       const firstWallet = slrd.wallets.list().length === 0;
-      const wallet = slrd.createWallet(
-        values[1] ?? (firstWallet ? "main" : undefined),
-      );
+      const name = values[1] ?? (firstWallet ? "main" : undefined);
+      const vanity = flags.has("vanity") ? need(flags, "vanity") : null;
+      const vanityResult = vanity
+        ? await slrd.createVanityWallet(name, {
+            suffix: vanity,
+            workers: int(flags, "workers"),
+            maxAttempts: int(flags, "max-attempts"),
+            timeoutMs: int(flags, "timeout-ms", 0),
+            reportEvery: int(flags, "report-every", 1_000_000),
+            onProgress: process.stderr.isTTY
+              ? (progress) =>
+                  process.stderr.write(
+                    `${OWL} wallet vanity ${progress.suffix}: ${progress.attempts} attempts, ${progress.ratePerSecond}/s\r`,
+                  )
+              : undefined,
+          })
+        : null;
+      if (vanityResult && process.stderr.isTTY) process.stderr.write("\n");
+      const wallet = vanityResult?.wallet ?? slrd.createWallet(name);
+      const output = vanityResult
+        ? {
+            ...wallet,
+            vanity: {
+              suffix: vanityResult.suffix,
+              attempts: vanityResult.attempts,
+              elapsedMs: vanityResult.elapsedMs,
+              ratePerSecond: vanityResult.ratePerSecond,
+            },
+          }
+        : wallet;
       if (flags.has("json")) {
-        emit(json(wallet) + "\n");
+        emit(json(output) + "\n");
       } else if (process.stdout.isTTY) {
         emit(
           `\n╭─ ${OWL} wallet ready ──────────────────────────────────╮\n` +
             `  name     @${wallet.name}\n` +
             `  address  ${wallet.address}\n` +
-            `  storage  encrypted in Solard's local wallet database\n` +
-            `  password NOT saved; you will enter it again next invocation\n` +
+            (vanityResult
+              ? `  vanity   suffix=${vanityResult.suffix} attempts=${vanityResult.attempts}\n`
+              : "") +
             `╰──────────────────────────────────────────────────────╯\n` +
-            `\nNext:  slrd balances --wallet ${wallet.name}\n` +
-            `Backup: slrd export ${wallet.name} --out .\\${wallet.name}-key.txt\n`,
+            `\nNext:  slrd balances --wallet ${wallet.name}\n`,
         );
       } else {
         emit(`${OWL} created @${wallet.name} ${wallet.address}\n`);
@@ -1810,11 +1873,18 @@ async function main() {
     }
     if (command === "liquidate" && (values[0] ?? "tokens") === "tokens") {
       const except = csv(flags.get("except"));
-      if (except.length === 0) {
-        throw new Error(
-          "Usage: slrd liquidate tokens --except <token|mint>[,<token|mint>...] [--wallets <a,b,...>] [--burn-unsellable] [--simulate | --live]",
-        );
-      }
+      const exceptWalletValue =
+        flags.get("except-wallet") ?? flags.get("exceptWallet");
+      const exceptWalletsValue =
+        flags.get("except-wallets") ?? flags.get("exceptWallets");
+      if (exceptWalletValue === "true")
+        throw new Error("Missing --except-wallet <wallet>");
+      if (exceptWalletsValue === "true")
+        throw new Error("Missing --except-wallets <a,b,...>");
+      const exceptWalletRefs = [
+        ...(exceptWalletValue ? [exceptWalletValue] : []),
+        ...csv(exceptWalletsValue),
+      ].filter((ref, index, refs) => refs.indexOf(ref) === index);
       if (flags.has("simulate") && flags.has("live")) {
         throw new Error("Use either --simulate or --live, not both");
       }
@@ -1829,6 +1899,10 @@ async function main() {
       for (const ref of except) {
         const mint = resolveTokenMintForPolicy(slrd, ref);
         emit(`PROTECT  ${ref} -> ${mint}\n`);
+      }
+      for (const ref of exceptWalletRefs) {
+        const wallet = slrd.resolveWallet(ref);
+        emit(`EXCLUDE  ${ref} -> ${wallet.address.toBase58()}\n`);
       }
       emit(
         `RPC      hard limit ${process.env.SLRD_RPC_MAX_RPS ?? "5"} req/s\n`,
@@ -1845,19 +1919,27 @@ async function main() {
           name: string | null;
           amountUi: string;
           kind: string;
+          tokenAccount?: string;
         },
       ) => {
         const label = action.symbol ?? action.name ?? shortKey(action.mint);
+        const account =
+          action.kind === "close-empty" && action.tokenAccount
+            ? flags.has("verbose")
+              ? action.tokenAccount
+              : shortKey(action.tokenAccount)
+            : null;
         emit(
           `${prefix} ${index}/${total}  @${action.walletName}  ` +
             `${action.kind === "unwrap-wsol" ? "WSOL" : label}  ${action.amountUi}` +
-            `${action.kind === "close-empty" ? "  [close empty account]" : ""}\n`,
+            `${action.kind === "close-empty" ? `  [close empty account${account ? ` ${account}` : ""}]` : ""}\n`,
         );
       };
 
       const options = {
         except,
         walletRefs: csv(flags.get("wallets")),
+        exceptWalletRefs,
         slippageBps: int(flags, "slippage-bps", 1500) ?? 1500,
         via: flags.get("sender") ?? "rpc",
         delayMs: int(flags, "delay-ms", 0) ?? 0,
@@ -1887,6 +1969,13 @@ async function main() {
             );
           } else if (event.stage === "action-done") {
             showAction("OK  ", event.index, event.total, event.action);
+          } else if (event.stage === "action-pending") {
+            showAction("WAIT", event.index, event.total, event.action);
+            if (flags.has("verbose")) {
+              emit(
+                `         attempt=${event.attempt}/${event.maxAttempts} signature=${event.signature ?? "-"} ${event.reason}\n`,
+              );
+            }
           } else if (event.stage === "action-error") {
             showAction("FAIL", event.index, event.total, event.action);
             emit(`         ${event.error}\n`);
@@ -1927,7 +2016,7 @@ async function main() {
         }
 
         emit(
-          `KEEP     ${plan.totals.keepProtected} protected SLRD holding(s)\n` +
+          `KEEP     ${plan.totals.keepProtected} protected token holding(s)\n` +
             `SKIP     ${plan.totals.skipUnsupported} unsupported/no-liquidity holding(s)`,
         );
         if (plan.totals.skipUnsupported > 0) {
@@ -2369,23 +2458,84 @@ async function main() {
     }
     if (command === "rewards") {
       const action = values[0] ?? "inspect";
+
+      if (action === "claim-status") {
+        const id = values[1];
+        if (!id)
+          throw new Error("Usage: slrd rewards claim-status <stable-claim-id>");
+        emit(json(slrd.rewards.claimStatus(id)) + "\n");
+        return;
+      }
+
       const tokenRef = values[1];
       if (!tokenRef)
         throw new Error(
-          "Usage: slrd rewards <inspect|claim> <token|ca> [--wallet <fee-payer>]",
+          "Usage: slrd rewards <inspect|claim|claim-status> <token|ca> [--wallet <fee-payer>]",
         );
 
       if (action === "claim") {
         const wallet = need(flags, "wallet");
-        const receipt = await slrd.claim(tokenRef, wallet, {
+        const basisPath = flags.get("basis");
+        let basis:
+          | {
+              id: string;
+              slot: number;
+              hash: string;
+              observedAtMs?: number | null;
+            }
+          | undefined;
+        if (basisPath && basisPath !== "true") {
+          const { readFileSync } = await import("node:fs");
+          const { resolve } = await import("node:path");
+          const parsed = JSON.parse(
+            readFileSync(resolve(basisPath), "utf8"),
+          ) as Record<string, unknown>;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+            throw new Error("Reward basis file must contain a JSON object");
+          basis = {
+            id: String(parsed.id ?? "").trim(),
+            slot: Number(parsed.slot),
+            hash: String(parsed.hash ?? "").trim(),
+            observedAtMs:
+              parsed.observedAtMs == null ? null : Number(parsed.observedAtMs),
+          };
+        }
+        const result = await slrd.rewards.claim(tokenRef, wallet, {
+          id: flags.get("id"),
+          basis,
           via: flags.get("sender") ?? "rpc",
+          skipSimulation: flags.has("skip-simulation"),
+          skipPreflight: flags.has("skip-preflight"),
         });
         emit(
           json({
             action: "claim",
-            token: tokenRef,
-            feePayer: wallet,
-            receipt,
+            claimId: result.claimId,
+            token: result.tokenMint,
+            feePayer: result.feePayer,
+            source: result.source,
+            quote: result.quoteAsset,
+            estimatedClaimRaw: result.estimatedClaimRaw,
+            claimedRaw: result.claimedRaw,
+            claimedUi:
+              result.claimedRaw == null
+                ? null
+                : formatRaw(result.claimedRaw, result.quoteAsset.decimals),
+            payouts: result.payouts,
+            receipt: result.receipt,
+            basis: result.basis,
+            checkpoint:
+              result.claimedRaw == null
+                ? null
+                : {
+                    id: result.claimId ?? result.claimSignature,
+                    claimSignature: result.claimSignature,
+                    slot: result.claimSlot,
+                    claimedRaw: result.claimedRaw,
+                    quoteMint: result.quoteAsset.mint,
+                    observedAtMs: result.observedAtMs,
+                    basis: result.basis,
+                  },
           }) + "\n",
         );
         return;
@@ -2395,24 +2545,27 @@ async function main() {
         let token = slrd.resolveToken(tokenRef);
         try {
           token = await slrd.refreshToken(token);
-        } catch {
-          // A registered token can still expose a useful claim plan when one
-          // enrichment source is temporarily unavailable.
-        }
+        } catch {}
         const { PublicKey } = await import("@solana/web3.js");
         const probeUser = token.creator
           ? new PublicKey(token.creator)
           : new PublicKey(token.mint);
         const plan = await slrd.resolveClaim(token, probeUser);
+        const payoutAddresses = plan.payouts?.length
+          ? plan.payouts.map((row) => row.address.toBase58())
+          : typeof plan.meta?.payoutAddress === "string"
+            ? [plan.meta.payoutAddress]
+            : token.creator
+              ? [token.creator]
+              : [];
         const payoutAddress =
-          typeof plan.meta?.payoutAddress === "string"
-            ? plan.meta.payoutAddress
-            : token.creator;
+          payoutAddresses.length === 1 ? payoutAddresses[0] : null;
         const output = {
           action: "inspect",
           token: token.mint,
           source: plan.source,
           payoutAddress: payoutAddress ?? null,
+          payoutAddresses,
           quote: {
             kind: plan.quoteAsset.kind,
             mint: plan.quoteAsset.mint.toBase58(),
@@ -2432,7 +2585,7 @@ async function main() {
         return;
       }
 
-      throw new Error("Usage: slrd rewards <inspect|claim> <token|ca>");
+      throw new Error("Usage: slrd rewards <inspect|claim|claim-status> ...");
     }
 
     if (command === "claim") {

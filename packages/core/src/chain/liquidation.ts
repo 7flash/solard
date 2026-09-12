@@ -8,7 +8,12 @@ import { PublicKey } from "@solana/web3.js";
 
 import type { Solard } from "../core/solard.ts";
 import type { TokenRow } from "../db/schema.ts";
-import type { SendReceipt, SenderId, SimulationResult } from "../tx/types.ts";
+import type {
+  SendReceipt,
+  SenderId,
+  SimulationResult,
+  SubmittedPlan,
+} from "../tx/types.ts";
 import {
   loadWalletAssetPortfolio,
   type WalletTokenHolding,
@@ -90,6 +95,16 @@ export type RegistryTokenLiquidationProgress =
       action: RegistryTokenLiquidationAction;
     }
   | {
+      stage: "action-pending";
+      index: number;
+      total: number;
+      action: RegistryTokenLiquidationAction;
+      attempt: number;
+      maxAttempts: number;
+      signature: string | null;
+      reason: string;
+    }
+  | {
       stage: "action-error";
       index: number;
       total: number;
@@ -100,6 +115,7 @@ export type RegistryTokenLiquidationProgress =
 export type RegistryTokenLiquidationOptions = {
   except?: string[];
   walletRefs?: string[];
+  exceptWalletRefs?: string[];
   slippageBps?: number;
   via?: SenderId;
   delayMs?: number;
@@ -152,40 +168,109 @@ async function burnUnsellableMint(
   via: SenderId,
 ): Promise<SendReceipt[]> {
   const signer = slrd.signer(action.walletAddress);
-  const accounts = await liveMintAccounts(
+  const receipts: SendReceipt[] = [];
+  const priorityMicroLamports = await cleanupPriorityMicroLamports(slrd);
+
+  for (let sweep = 0; sweep < 4; sweep += 1) {
+    const accounts = await liveMintAccounts(
+      slrd,
+      action.walletAddress,
+      action.mint,
+    );
+    if (!accounts.length) return receipts;
+
+    for (const candidate of accounts) {
+      const current = (await slrd.tokenAccounts(action.walletAddress)).find(
+        (account) => account.address === candidate.address,
+      );
+      if (!current || current.amountRaw <= 0n) continue;
+      if (current.mint !== action.mint) {
+        throw new Error(
+          `Refusing burn because token account ${current.address} now contains mint ${current.mint}, expected ${action.mint}`,
+        );
+      }
+
+      const composer = slrd.tx(action.walletAddress).priorityFee({
+        cuLimit: 50_000,
+        microLamports: priorityMicroLamports,
+      });
+      composer.add(
+        createBurnCheckedInstruction(
+          new PublicKey(current.address),
+          new PublicKey(action.mint),
+          signer.publicKey,
+          current.amountRaw,
+          current.decimals,
+          [],
+          new PublicKey(current.tokenProgram),
+        ),
+        {
+          kind: "burn-token",
+          mint: new PublicKey(action.mint),
+          meta: {
+            reason: "registry-liquidation-unsellable",
+            tokenAccount: current.address,
+            amountRaw: current.amountRaw.toString(),
+          },
+        },
+      );
+
+      try {
+        let receipt = await composer.send({
+          via,
+          kind: "registry-token-liquidation:burn-unsellable",
+          skipSimulation: false,
+          skipPreflight: false,
+        });
+        if (receipt.status === "failed") {
+          throw new Error(
+            `Burn failed on-chain account=${current.address} signature=${receipt.signature}: ${receipt.error ?? "transaction failed"}`,
+          );
+        }
+
+        let after = (await slrd.tokenAccounts(action.walletAddress)).find(
+          (account) => account.address === current.address,
+        );
+        if (after && after.amountRaw > 0n && receipt.status === "broadcast") {
+          receipt = await slrd.confirmSignature(
+            receipt.signature,
+            receipt.sender,
+            5_000,
+          );
+          if (receipt.status === "failed") {
+            throw new Error(
+              `Burn failed on-chain account=${current.address} signature=${receipt.signature}: ${receipt.error ?? "transaction failed"}`,
+            );
+          }
+          after = (await slrd.tokenAccounts(action.walletAddress)).find(
+            (account) => account.address === current.address,
+          );
+        }
+        receipts.push(receipt);
+        if (after && after.amountRaw > 0n && sweep === 3) {
+          throw new Error(
+            `Burn not verified account=${current.address}: ${after.amountRaw.toString()} raw token units remain`,
+          );
+        }
+      } catch (error) {
+        const after = (await slrd.tokenAccounts(action.walletAddress)).find(
+          (account) => account.address === current.address,
+        );
+        if (!after || after.amountRaw <= 0n) continue;
+        if (isAccountGoneError(errorMessage(error)) && sweep < 3) continue;
+        throw error;
+      }
+    }
+  }
+
+  const remaining = await liveMintAccounts(
     slrd,
     action.walletAddress,
     action.mint,
   );
-  const receipts: SendReceipt[] = [];
-  for (const account of accounts) {
-    const composer = slrd.tx(action.walletAddress);
-    composer.add(
-      createBurnCheckedInstruction(
-        new PublicKey(account.address),
-        new PublicKey(action.mint),
-        signer.publicKey,
-        account.amountRaw,
-        account.decimals,
-        [],
-        new PublicKey(account.tokenProgram),
-      ),
-      {
-        kind: "burn-token",
-        mint: new PublicKey(action.mint),
-        meta: {
-          reason: "registry-liquidation-unsellable",
-          amountRaw: account.amountRaw.toString(),
-        },
-      },
-    );
-    receipts.push(
-      await composer.send({
-        via,
-        kind: "registry-token-liquidation:burn-unsellable",
-        skipSimulation: false,
-        skipPreflight: false,
-      }),
+  if (remaining.length) {
+    throw new Error(
+      `Burn cleanup did not converge for ${action.mint}: ${remaining.map((account) => `${account.address}=${account.amountRaw.toString()}`).join(", ")}`,
     );
   }
   return receipts;
@@ -203,18 +288,82 @@ function isAccountGoneError(message: string): boolean {
   );
 }
 
-async function closeEmptyAccountRobust(
+async function tokenAccountExistsConfirmed(
+  slrd: Solard,
+  address: string,
+): Promise<boolean> {
+  return (
+    (await slrd
+      .connection()
+      .getAccountInfo(new PublicKey(address), "confirmed")) != null
+  );
+}
+
+type PendingCloseSubmission = {
+  action: RegistryTokenLiquidationAction;
+  submission: SubmittedPlan;
+  receipt: SendReceipt;
+  harvest: boolean;
+  index: number;
+  total: number;
+};
+
+type CloseEmptyAccountOutcome =
+  | { state: "closed"; receipt?: SendReceipt }
+  | {
+      state: "pending";
+      pending: PendingCloseSubmission | null;
+      harvest: boolean;
+      reason: string;
+    };
+
+function broadcastReceipt(submission: SubmittedPlan): SendReceipt {
+  return {
+    signature: submission.signature,
+    slot: null,
+    sender: submission.sender,
+    status: "broadcast",
+  };
+}
+
+function isExpiredSubmissionError(message: string): boolean {
+  return /blockhash not found|block height exceeded|expired|transactionexpired/i.test(
+    message,
+  );
+}
+
+async function cleanupPriorityMicroLamports(slrd: Solard): Promise<number> {
+  try {
+    const rows = await slrd.connection().getRecentPrioritizationFees();
+    const fees = rows
+      .map((row) => row.prioritizationFee)
+      .filter((value) => Number.isSafeInteger(value) && value >= 0)
+      .sort((left, right) => left - right);
+    if (!fees.length) return 10_000;
+    const index = Math.min(
+      fees.length - 1,
+      Math.floor((fees.length - 1) * 0.75),
+    );
+    return Math.max(10_000, Math.min(250_000, fees[index]!));
+  } catch {
+    return 10_000;
+  }
+}
+
+async function currentClosableAccount(
   slrd: Solard,
   action: RegistryTokenLiquidationAction,
-  via: SenderId,
-): Promise<SendReceipt | null> {
-  if (!action.tokenAccount || !action.tokenProgram)
+) {
+  if (!action.tokenAccount)
     throw new Error("Missing zero-balance token-account metadata");
-
   const current = (await slrd.tokenAccounts(action.walletAddress)).find(
     (account) => account.address === action.tokenAccount,
   );
-  if (!current) return null;
+  if (!current) {
+    return (await tokenAccountExistsConfirmed(slrd, action.tokenAccount))
+      ? undefined
+      : null;
+  }
   if (current.amountRaw !== 0n)
     throw new Error(
       `Refusing to close non-empty token account ${action.tokenAccount}`,
@@ -223,9 +372,147 @@ async function closeEmptyAccountRobust(
     throw new Error(
       `Refusing token account with different close authority ${current.closeAuthority}`,
     );
+  return current;
+}
 
-  const sendClose = async (harvest: boolean): Promise<SendReceipt> => {
-    const composer = slrd.tx(action.walletAddress);
+async function reconcilePendingClose(
+  slrd: Solard,
+  action: RegistryTokenLiquidationAction,
+  pending: PendingCloseSubmission,
+  currentBlockHeight: number | null,
+): Promise<CloseEmptyAccountOutcome> {
+  if (!action.tokenAccount)
+    throw new Error("Missing zero-balance token-account metadata");
+  if (!(await tokenAccountExistsConfirmed(slrd, action.tokenAccount))) {
+    return { state: "closed", receipt: pending.receipt };
+  }
+
+  const receipt = await slrd.confirmSignature(
+    pending.submission.signature,
+    pending.submission.sender,
+    1,
+  );
+  pending.receipt = receipt;
+
+  if (!(await tokenAccountExistsConfirmed(slrd, action.tokenAccount))) {
+    return { state: "closed", receipt };
+  }
+
+  if (receipt.status === "failed") {
+    return {
+      state: "pending",
+      pending: null,
+      harvest: pending.harvest || isWithheldFeeCloseError(receipt.error ?? ""),
+      reason: `previous close failed on-chain: ${receipt.error ?? "transaction failed"}`,
+    };
+  }
+
+  if (receipt.status === "confirmed") {
+    return {
+      state: "pending",
+      pending: null,
+      harvest: pending.harvest,
+      reason:
+        "close confirmed but the exact account still exists; rebuilding from fresh state",
+    };
+  }
+
+  if (
+    currentBlockHeight != null &&
+    currentBlockHeight > pending.submission.plan.lastValidBlockHeight
+  ) {
+    return {
+      state: "pending",
+      pending: null,
+      harvest: pending.harvest,
+      reason: "close submission expired before the account disappeared",
+    };
+  }
+
+  try {
+    const returned = await slrd.senders
+      .resolve(pending.submission.sender)
+      .send({
+        connection: slrd.connection(),
+        transaction: pending.submission.plan.transaction,
+        options: { skipPreflight: true },
+      });
+    if (returned !== pending.submission.signature) {
+      throw new Error(
+        `Close rebroadcast returned signature ${returned}, expected ${pending.submission.signature}`,
+      );
+    }
+  } catch (error) {
+    if (!(await tokenAccountExistsConfirmed(slrd, action.tokenAccount))) {
+      return { state: "closed", receipt };
+    }
+    const message = errorMessage(error);
+    if (isExpiredSubmissionError(message)) {
+      return {
+        state: "pending",
+        pending: null,
+        harvest: pending.harvest,
+        reason: message,
+      };
+    }
+    if (!isAccountGoneError(message)) throw error;
+  }
+
+  return {
+    state: "pending",
+    pending,
+    harvest: pending.harvest,
+    reason:
+      "close broadcast is still unconfirmed; the same signed transaction was rebroadcast",
+  };
+}
+
+async function closeEmptyAccountRobust(
+  slrd: Solard,
+  action: RegistryTokenLiquidationAction,
+  via: SenderId,
+  args: {
+    pending?: PendingCloseSubmission;
+    harvest: boolean;
+    currentBlockHeight: number | null;
+    priorityMicroLamports: number;
+    index: number;
+    total: number;
+  },
+): Promise<CloseEmptyAccountOutcome> {
+  if (!action.tokenAccount || !action.tokenProgram)
+    throw new Error("Missing zero-balance token-account metadata");
+
+  const current = await currentClosableAccount(slrd, action);
+  if (current === null) {
+    return { state: "closed", receipt: args.pending?.receipt };
+  }
+  if (current === undefined) {
+    return {
+      state: "pending",
+      pending: args.pending ?? null,
+      harvest: args.harvest,
+      reason:
+        "wallet token-account scan no longer sees the account but confirmed state has not converged yet",
+    };
+  }
+
+  if (args.pending) {
+    return await reconcilePendingClose(
+      slrd,
+      action,
+      args.pending,
+      args.currentBlockHeight,
+    );
+  }
+
+  const submit = async (
+    harvest: boolean,
+  ): Promise<CloseEmptyAccountOutcome> => {
+    const composer = slrd.tx(action.walletAddress).priorityFee({
+      cuLimit: 50_000,
+      microLamports: args.priorityMicroLamports,
+    });
     if (harvest) {
       composer.add(
         createHarvestWithheldTokensToMintInstruction(
@@ -236,39 +523,62 @@ async function closeEmptyAccountRobust(
         { kind: "harvest-withheld-fees", mint: new PublicKey(action.mint) },
       );
     }
-    return await composer
-      .closeTokenAccountAddress(
-        action.tokenAccount!,
-        current.tokenProgram ?? action.tokenProgram!,
-      )
-      .send({
+    composer.closeTokenAccountAddress(
+      action.tokenAccount!,
+      current.tokenProgram ?? action.tokenProgram!,
+    );
+    try {
+      const submission = await slrd.broadcastPlan(
+        await composer.build(),
         via,
-        kind: harvest
+        harvest
           ? "registry-token-liquidation:harvest-close-empty"
           : "registry-token-liquidation:close-empty",
-        skipSimulation: false,
-        skipPreflight: false,
-      });
+        { skipSimulation: false, skipPreflight: false },
+      );
+      const receipt = broadcastReceipt(submission);
+      if (!(await tokenAccountExistsConfirmed(slrd, action.tokenAccount!))) {
+        return { state: "closed", receipt };
+      }
+      return {
+        state: "pending",
+        pending: {
+          action,
+          submission,
+          receipt,
+          harvest,
+          index: args.index,
+          total: args.total,
+        },
+        harvest,
+        reason:
+          "close submitted; waiting for the exact token account to disappear",
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      if (isAccountGoneError(message)) {
+        if (!(await tokenAccountExistsConfirmed(slrd, action.tokenAccount!))) {
+          return { state: "closed" };
+        }
+        return {
+          state: "pending",
+          pending: null,
+          harvest,
+          reason: message,
+        };
+      }
+      if (
+        !harvest &&
+        current.tokenProgram === TOKEN_2022_PROGRAM_ID.toBase58() &&
+        isWithheldFeeCloseError(message)
+      ) {
+        return await submit(true);
+      }
+      throw error;
+    }
   };
 
-  try {
-    return await sendClose(false);
-  } catch (error) {
-    const message = errorMessage(error);
-    if (isAccountGoneError(message)) {
-      const exists = (await slrd.tokenAccounts(action.walletAddress)).some(
-        (account) => account.address === action.tokenAccount,
-      );
-      if (!exists) return null;
-    }
-    if (
-      current.tokenProgram === TOKEN_2022_PROGRAM_ID.toBase58() &&
-      isWithheldFeeCloseError(message)
-    ) {
-      return await sendClose(true);
-    }
-    throw error;
-  }
+  return await submit(args.harvest);
 }
 
 function isPublicKey(value: string): boolean {
@@ -426,6 +736,7 @@ export async function planRegistryTokenLiquidation(
   options.onProgress?.({ stage: "portfolio-start" });
   const portfolio = await loadWalletAssetPortfolio(slrd, {
     walletRefs: options.walletRefs,
+    excludeWalletRefs: options.exceptWalletRefs,
     concurrency: options.portfolioConcurrency ?? 1,
     requestDelayMs: options.portfolioDelayMs ?? 100,
   });
@@ -939,9 +1250,6 @@ export async function executeRegistryTokenLiquidation(
     await pause(delayMs);
   }
 
-  // Phase 2 is intentionally based on a fresh scan, not the original plan. This
-  // both catches accounts emptied by successful sales and prevents closing an
-  // account that received tokens after planning. Protected mints remain protected.
   const protectedMints = new Set(plan.protectedMints);
   const walletRows = Array.from(
     new Map(
@@ -957,65 +1265,197 @@ export async function executeRegistryTokenLiquidation(
       ),
     ).values(),
   );
-  const cleanup = await discoverEmptyTokenAccountActions(
+  const cleanupAttempts = 6;
+  const priorityMicroLamports = await cleanupPriorityMicroLamports(slrd);
+  const pendingClose = new Map<string, PendingCloseSubmission>();
+  const harvestClose = new Set<string>();
+  const attemptedClose = new Map<
+    string,
+    { action: RegistryTokenLiquidationAction; index: number; total: number }
+  >();
+  const cleanupResults = new Map<string, RegistryTokenLiquidationResult>();
+  const lastCloseError = new Map<string, string>();
+
+  const recordClosed = (
+    account: string,
+    action: RegistryTokenLiquidationAction,
+    index: number,
+    total: number,
+    receipt?: SendReceipt,
+  ) => {
+    if (cleanupResults.has(account)) return;
+    cleanupResults.set(account, {
+      action,
+      ...(receipt ? { receipt } : {}),
+    });
+    pendingClose.delete(account);
+    harvestClose.delete(account);
+    lastCloseError.delete(account);
+    options.onProgress?.({
+      stage: "action-done",
+      index,
+      total,
+      action,
+    });
+  };
+
+  const reconcileMissingAttempts = async (
+    cleanup: RegistryTokenLiquidationAction[],
+  ) => {
+    const live = new Set(
+      cleanup
+        .map((action) => action.tokenAccount)
+        .filter((value): value is string => Boolean(value)),
+    );
+    for (const [account, previous] of attemptedClose) {
+      if (cleanupResults.has(account) || live.has(account)) continue;
+      if (await tokenAccountExistsConfirmed(slrd, account)) continue;
+      recordClosed(
+        account,
+        previous.action,
+        previous.index,
+        previous.total,
+        pendingClose.get(account)?.receipt,
+      );
+    }
+  };
+
+  for (let attempt = 1; attempt <= cleanupAttempts; attempt += 1) {
+    const cleanup = await discoverEmptyTokenAccountActions(
+      slrd,
+      walletRows,
+      protectedMints,
+    );
+    await reconcileMissingAttempts(cleanup);
+    if (!cleanup.length) break;
+
+    const currentBlockHeight = pendingClose.size
+      ? await slrd
+          .connection()
+          .getBlockHeight("confirmed")
+          .catch(() => null)
+      : null;
+
+    for (let index = 0; index < cleanup.length; index += 1) {
+      const action = cleanup[index]!;
+      const account = action.tokenAccount;
+      if (!account || cleanupResults.has(account)) continue;
+      attemptedClose.set(account, {
+        action,
+        index: index + 1,
+        total: cleanup.length,
+      });
+      options.onProgress?.({
+        stage: "action-start",
+        index: index + 1,
+        total: cleanup.length,
+        action,
+      });
+
+      try {
+        const outcome = await closeEmptyAccountRobust(slrd, action, via, {
+          pending: pendingClose.get(account),
+          harvest: harvestClose.has(account),
+          currentBlockHeight,
+          priorityMicroLamports,
+          index: index + 1,
+          total: cleanup.length,
+        });
+        if (outcome.state === "closed") {
+          recordClosed(
+            account,
+            action,
+            index + 1,
+            cleanup.length,
+            outcome.receipt,
+          );
+        } else {
+          if (outcome.pending) pendingClose.set(account, outcome.pending);
+          else pendingClose.delete(account);
+          if (outcome.harvest) harvestClose.add(account);
+          else harvestClose.delete(account);
+          lastCloseError.delete(account);
+          options.onProgress?.({
+            stage: "action-pending",
+            index: index + 1,
+            total: cleanup.length,
+            action,
+            attempt,
+            maxAttempts: cleanupAttempts,
+            signature: outcome.pending?.submission.signature ?? null,
+            reason: outcome.reason,
+          });
+        }
+      } catch (error) {
+        if (!(await tokenAccountExistsConfirmed(slrd, account))) {
+          recordClosed(
+            account,
+            action,
+            index + 1,
+            cleanup.length,
+            pendingClose.get(account)?.receipt,
+          );
+        } else {
+          pendingClose.delete(account);
+          const message = errorMessage(error);
+          lastCloseError.set(account, message);
+          if (
+            action.tokenProgram === TOKEN_2022_PROGRAM_ID.toBase58() &&
+            isWithheldFeeCloseError(message)
+          ) {
+            harvestClose.add(account);
+          }
+          if (attempt < cleanupAttempts) {
+            options.onProgress?.({
+              stage: "action-pending",
+              index: index + 1,
+              total: cleanup.length,
+              action,
+              attempt,
+              maxAttempts: cleanupAttempts,
+              signature: null,
+              reason: message,
+            });
+          }
+        }
+      }
+      await pause(delayMs);
+    }
+
+    if (attempt < cleanupAttempts) await pause(Math.max(100, delayMs));
+  }
+
+  const remainingCleanup = await discoverEmptyTokenAccountActions(
     slrd,
     walletRows,
     protectedMints,
   );
-
-  for (let index = 0; index < cleanup.length; index += 1) {
-    const action = cleanup[index]!;
-    options.onProgress?.({
-      stage: "action-start",
-      index: index + 1,
-      total: cleanup.length,
-      action,
-    });
-    try {
-      if (!action.tokenAccount || !action.tokenProgram)
-        throw new Error("Missing zero-balance token-account metadata");
-
-      // Race guard immediately before building the close transaction.
-      const current = (await slrd.tokenAccounts(action.walletAddress)).find(
-        (account) => account.address === action.tokenAccount,
-      );
-      if (!current) {
-        // Already closed (for example WSOL was closed by unwrap). Treat as done.
-        out.push({ action });
-      } else {
-        if (current.amountRaw !== 0n)
-          throw new Error(
-            `Refusing to close non-empty token account ${action.tokenAccount}`,
-          );
-        if (
-          current.closeAuthority &&
-          current.closeAuthority !== action.walletAddress
-        )
-          throw new Error(
-            `Refusing token account with different close authority ${current.closeAuthority}`,
-          );
-        const receipt = await closeEmptyAccountRobust(slrd, action, via);
-        out.push({ ...(receipt ? { receipt } : {}), action });
-      }
-      options.onProgress?.({
-        stage: "action-done",
-        index: index + 1,
-        total: cleanup.length,
-        action,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      out.push({ action, error: message });
-      options.onProgress?.({
-        stage: "action-error",
-        index: index + 1,
-        total: cleanup.length,
-        action,
-        error: message,
-      });
+  await reconcileMissingAttempts(remainingCleanup);
+  for (let index = 0; index < remainingCleanup.length; index += 1) {
+    const action = remainingCleanup[index]!;
+    const account = action.tokenAccount;
+    if (!account || cleanupResults.has(account)) continue;
+    if (!(await tokenAccountExistsConfirmed(slrd, account))) {
+      recordClosed(account, action, index + 1, remainingCleanup.length);
+      continue;
     }
-    await pause(delayMs);
+    const pending = pendingClose.get(account);
+    const message =
+      lastCloseError.get(account) ??
+      (pending
+        ? `Cleanup did not converge for token account ${account}; submission ${pending.submission.signature} remains unresolved`
+        : `Cleanup did not converge for token account ${account}; the account still exists after ${cleanupAttempts} fresh-state attempts`);
+    cleanupResults.set(account, { action, error: message });
+    options.onProgress?.({
+      stage: "action-error",
+      index: index + 1,
+      total: remainingCleanup.length,
+      action,
+      error: message,
+    });
   }
+
+  out.push(...cleanupResults.values());
 
   return out;
 }

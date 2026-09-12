@@ -1,9 +1,4 @@
-export {
-  configureSolardMeasure,
-  createSolardMeasureCollector,
-  measure,
-  shortKey,
-} from "./core/log.ts";
+export { createSolardMeasureCollector, shortKey } from "./core/log.ts";
 export type {
   SolardMeasureCollector,
   SolardMeasureEvent,
@@ -35,8 +30,32 @@ export type {
 } from "./chain/token-history.ts";
 
 export type { SolardRpcStats } from "./chain/connection.ts";
+export {
+  REPLAY_PARSER_VERSION,
+  compareReplayItems,
+  mergeReplayEventSubscriptions,
+  mergeReplayHistories,
+  normalizeReplayEvent,
+  normalizeReplayEvents,
+  replayCoverageThroughSlot,
+} from "./history/replay.ts";
+export type {
+  MergedReplayEventStream,
+  ReplayClaimAttribution,
+  ReplayCoverage,
+  ReplayEventSubscription,
+  ReplayEventsOptions,
+  ReplayHistory,
+  ReplayItem,
+  ReplayOptions,
+  ReplayTransaction,
+} from "./history/replay.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
-export type { SolardOptions } from "./core/solard.ts";
+export type {
+  SolardEventsApi,
+  SolardHistoryApi,
+  SolardOptions,
+} from "./core/solard.ts";
 export { createTraderSolard } from "./presets/trader.ts";
 
 export {

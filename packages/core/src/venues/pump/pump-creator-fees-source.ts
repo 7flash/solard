@@ -119,6 +119,17 @@ export class PumpCreatorFeesSource implements ClaimSourcePlugin {
       : quoteAsset.kind === "native-sol"
         ? ammVaultRaw
         : 0n;
+    const payouts = shared
+      ? (sharing?.shareholders ?? []).map((holder) => ({
+          address: holder.address,
+          shareBps: holder.shareBps,
+        }))
+      : [
+          { address: curve.creator, shareBps: null },
+          ...(includeAmm && coinCreator && !coinCreator.equals(curve.creator)
+            ? [{ address: coinCreator, shareBps: null }]
+            : []),
+        ];
 
     return {
       source: this.id,
@@ -137,6 +148,7 @@ export class PumpCreatorFeesSource implements ClaimSourcePlugin {
       }),
       estimatedClaimRaw,
       spendableByUserRaw,
+      payouts,
       meta: {
         path: shared
           ? "sharing-config"
@@ -148,7 +160,9 @@ export class PumpCreatorFeesSource implements ClaimSourcePlugin {
         pumpVaultRaw: pumpVaultRaw.toString(),
         ammVaultRaw: ammVaultRaw.toString(),
         nonSpendableClaimRaw: nonSpendableClaimRaw.toString(),
-        payoutAddress: shared ? ctx.user.toBase58() : curve.creator.toBase58(),
+        payoutAddress:
+          payouts.length === 1 ? payouts[0]!.address.toBase58() : null,
+        payoutAddresses: payouts.map((row) => row.address.toBase58()),
         spendableByUser: spendableByUserRaw > 0n,
         userShareBps: userShare?.shareBps ?? null,
         shareholders:

@@ -1,5 +1,9 @@
 export class VaultOnboardingError extends Error {
-  readonly name = "VaultOnboardingError";
+  readonly name: string = "VaultOnboardingError";
+}
+
+export class VaultIntegrityError extends VaultOnboardingError {
+  readonly name: string = "VaultIntegrityError";
 }
 
 export type VaultReadyResult = {
@@ -30,7 +34,10 @@ async function promptHidden(message: string): Promise<string> {
 
   return await new Promise<string>((resolve, reject) => {
     let value = "";
+    let settled = false;
     const cleanup = () => {
+      if (settled) return;
+      settled = true;
       input.off("data", onData);
       input.setRawMode(Boolean(wasRaw));
       input.pause();
@@ -67,6 +74,11 @@ function clearMasterKey(): void {
   delete process.env.SLRD_MASTER_KEY;
 }
 
+function environmentMasterKey(): string | null {
+  const value = process.env.SLRD_MASTER_KEY;
+  return value != null && value.length > 0 ? value : null;
+}
+
 async function confirmNewPassword(): Promise<string> {
   process.stdout.write(
     [
@@ -101,21 +113,25 @@ async function confirmNewPassword(): Promise<string> {
   );
 }
 
-async function validateExistingWalletPassword(password: string): Promise<void> {
+async function validateAllStoredWallets(password: string): Promise<void> {
   setMasterKey(password);
   const { createTraderSolard } = await import("@solard/sdk");
   const probe = createTraderSolard();
   try {
-    const wallets = probe.wallets.list();
-    if (!wallets.length) return;
-    // Decrypt one persisted wallet. All persisted wallets use the same process-level
-    // SLRD_MASTER_KEY contract, so this is enough to catch a mistyped password before
-    // the requested command begins doing work.
-    probe.wallets.signer(wallets[0]!.address);
-  } catch {
+    const integrity = probe.wallets.integrity();
+    if (!integrity.failures.length) return;
     clearMasterKey();
-    throw new VaultOnboardingError(
-      "That wallet password could not decrypt the stored wallets.",
+    if (integrity.decrypted === 0) {
+      throw new VaultOnboardingError(
+        "That wallet password could not decrypt the stored wallet database.",
+      );
+    }
+    const affected = integrity.failures
+      .map((wallet) => `@${wallet.name} ${wallet.address}`)
+      .join(", ");
+    throw new VaultIntegrityError(
+      `Wallet database integrity check failed: one master password must decrypt every stored signing wallet. ` +
+        `Decrypted ${integrity.decrypted}/${integrity.total}; undecryptable or mismatched: ${affected}`,
     );
   } finally {
     probe.close();
@@ -126,9 +142,10 @@ async function unlockExistingWallets(): Promise<string> {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const password = await promptHidden("Wallet password: ");
     try {
-      await validateExistingWalletPassword(password);
+      await validateAllStoredWallets(password);
       return password;
     } catch (error) {
+      if (error instanceof VaultIntegrityError) throw error;
       if (attempt === 3) throw error;
       process.stdout.write("Incorrect password. Try again.\n\n");
     }
@@ -136,18 +153,13 @@ async function unlockExistingWallets(): Promise<string> {
   throw new VaultOnboardingError("Unable to unlock the stored wallets.");
 }
 
-/**
- * Ensure the process has an SLRD_MASTER_KEY before a command that needs a local
- * signing wallet runs. Nothing is written to disk. The password/master-key value
- * exists only in process.env for this process (and intentionally inherited child
- * processes such as `slrd run ...`).
- */
 export async function ensureCliVaultReady(options: {
   existingWalletCount: number;
   allowCreate?: boolean;
 }): Promise<VaultReadyResult> {
-  const existing = process.env.SLRD_MASTER_KEY?.trim();
+  const existing = environmentMasterKey();
   if (existing) {
+    await validateAllStoredWallets(existing);
     return {
       source: "env",
       created: false,
@@ -197,13 +209,12 @@ export function cliVaultStatus(): {
 } {
   return {
     mode: "ephemeral-password",
-    environmentOverride: Boolean(process.env.SLRD_MASTER_KEY?.trim()),
+    environmentOverride: environmentMasterKey() != null,
     passwordPersisted: false,
     remembered: false,
   };
 }
 
-/** Optional helper for tests/tools that want a visible prompt without a signing command. */
 export async function promptForWalletPassword(
   existingWalletCount: number,
 ): Promise<void> {

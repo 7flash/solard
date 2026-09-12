@@ -1,3 +1,9 @@
+import { createTraderSolard } from "@solard/core";
+
+const slrd = createTraderSolard();
+
+export default slrd;
+
 /**
  * Public Solard SDK.
  *

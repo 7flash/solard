@@ -19,11 +19,13 @@ import { readMint } from "@solard/core/chain/state.ts";
 import {
   subscribeTokenEvents,
   type SubscribeTokenEventsOptions,
+  type TokenEventSubscription,
 } from "@solard/core/events/token-events.ts";
 import type { TokenRow } from "@solard/core/db/schema.ts";
 import { PumpCurveVenue } from "@solard/core/venues/pump/pump-curve-venue.ts";
 import { PumpSwapVenue } from "@solard/core/venues/pump/pumpswap-venue.ts";
 import { VenueRegistry } from "@solard/core/venues/route-resolver.ts";
+import { PumpPairService } from "@solard/core/launches/pump/pairs.ts";
 
 import { BrowserSolardStore, defaultBrowserStorage } from "./storage.ts";
 import { buildLocalPumpBuy, buildLocalPumpSell } from "./pump.ts";
@@ -43,7 +45,7 @@ export const SOL_MINT = "So11111111111111111111111111111111111111112";
 export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const TOKEN_2022_PROGRAM_ID =
-  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHn5qCXEpPxuEb";
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 const CANONICAL_LABELS: Record<string, string> = {
   [SOL_MINT]: "WSOL",
@@ -114,6 +116,13 @@ export class BrowserSolard {
   readonly store: BrowserSolardStore;
   readonly contacts;
   readonly tokens;
+  readonly pump: PumpPairService;
+  readonly events: {
+    subscribeToken: (
+      token: string,
+      options?: SubscribeTokenEventsOptions,
+    ) => Promise<TokenEventSubscription>;
+  };
   private wallet: BrowserWalletSigner | null;
 
   constructor(readonly options: BrowserSolardOptions) {
@@ -127,6 +136,11 @@ export class BrowserSolard {
       fetch: rpcFetch,
     });
     this.wallet = options.wallet ?? null;
+    this.pump = new PumpPairService(() => this.connection);
+    this.events = {
+      subscribeToken: (token, eventOptions = {}) =>
+        this.subscribeTokenEvents(token, eventOptions),
+    };
     this.store = new BrowserSolardStore(
       options.storage ?? defaultBrowserStorage(),
       options.storageNamespace ?? "solard:browser:v1",

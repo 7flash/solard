@@ -39,6 +39,18 @@ function publicWallet(row: WalletRow): WalletInfo {
   };
 }
 
+export type WalletIntegrityFailure = {
+  id: number;
+  name: string;
+  address: string;
+};
+
+export type WalletIntegrityResult = {
+  total: number;
+  decrypted: number;
+  failures: WalletIntegrityFailure[];
+};
+
 export type WalletImportOptions = {
   /**
    * When this is true, it should or will allow replacing a different wallet that already uses the
@@ -52,11 +64,15 @@ export class WalletRepo {
 
   /** Generate a new Solana keypair and persist it encrypted in the canonical Solard DB. */
   create(name?: string): WalletInfo {
+    return this.createFromKeypair(Keypair.generate(), name);
+  }
+
+  createFromKeypair(keypair: Keypair, name?: string): WalletInfo {
     return publicWallet(
       measuredSync(
         m,
         "create",
-        () => this.persistKeypair(Keypair.generate(), name),
+        () => this.persistKeypair(keypair, name),
         walletLog,
       ),
     );
@@ -82,61 +98,100 @@ export class WalletRepo {
     name?: string,
     options: WalletImportOptions = {},
   ): WalletRow {
-    const address = keypair.publicKey.toBase58();
-    const encrypted = encryptKeypair(keypair);
-    const resolvedName = clean(name ?? address.slice(0, 8));
-    const byAddress = this.db.wallets.select().where({ address }).first() as
-      WalletRow | undefined;
-    const byName = this.db.wallets
-      .select()
-      .where({ name: resolvedName })
-      .first() as WalletRow | undefined;
+    return this.db.transaction(() => {
+      const address = keypair.publicKey.toBase58();
+      const resolvedName = clean(name ?? address.slice(0, 8));
+      const byAddress = this.db.wallets.select().where({ address }).first() as
+        WalletRow | undefined;
+      const byName = this.db.wallets
+        .select()
+        .where({ name: resolvedName })
+        .first() as WalletRow | undefined;
 
-    // Name is held by a different address: refuse unless overwrite.
-    if (byName && byName.address !== address) {
-      if (!options.overwrite) {
+      if (byName && byName.address !== address && !options.overwrite) {
         throw new Error(
           `Wallet name '${resolvedName}' is already used by ${byName.address}. ` +
             `Choose a different name, or pass overwrite/force to replace it.`,
         );
       }
-    }
 
-    const existing =
-      byAddress ??
-      (byName && (byName.address === address || options.overwrite)
-        ? byName
-        : undefined);
+      const existing =
+        byAddress ??
+        (byName && (byName.address === address || options.overwrite)
+          ? byName
+          : undefined);
 
-    if (existing) {
-      this.db.wallets
-        .update({
+      this.assertWalletsDecryptable(existing?.id);
+      const encrypted = encryptKeypair(keypair);
+
+      let stored: WalletRow;
+      if (existing) {
+        this.db.wallets
+          .update({
+            name: resolvedName,
+            address,
+            encryptedSecretKey: encrypted.encryptedSecretKey,
+            nonce: encrypted.nonce,
+            authTag: encrypted.authTag,
+            isActive: 1,
+            updatedAtMs: Date.now(),
+          })
+          .where({ id: existing.id })
+          .exec();
+        const updated = this.db.wallets
+          .select()
+          .where({ id: existing.id })
+          .first() as WalletRow | undefined;
+        if (!updated)
+          throw new Error(`Wallet update failed for ${resolvedName}`);
+        stored = updated;
+      } else {
+        const now = Date.now();
+        stored = this.db.wallets.insert({
           name: resolvedName,
           address,
-          encryptedSecretKey: encrypted.encryptedSecretKey,
-          nonce: encrypted.nonce,
-          authTag: encrypted.authTag,
+          ...encrypted,
           isActive: 1,
-          updatedAtMs: Date.now(),
-        })
-        .where({ id: existing.id })
-        .exec();
-      const updated = this.db.wallets
-        .select()
-        .where({ id: existing.id })
-        .first() as WalletRow | undefined;
-      if (!updated) throw new Error(`Wallet update failed for ${resolvedName}`);
-      return updated;
+          createdAtMs: now,
+          updatedAtMs: now,
+        }) as WalletRow;
+      }
+
+      this.assertWalletsDecryptable();
+      return stored;
+    });
+  }
+
+  integrity(excludeId?: number): WalletIntegrityResult {
+    const rows = (this.db.wallets.select().all() as WalletRow[]).filter(
+      (row) => row.id !== excludeId,
+    );
+    const failures: WalletIntegrityFailure[] = [];
+    let decrypted = 0;
+    for (const row of rows) {
+      try {
+        const signer = decryptKeypair(row);
+        if (signer.publicKey.toBase58() !== row.address) {
+          failures.push({ id: row.id, name: row.name, address: row.address });
+          continue;
+        }
+        decrypted += 1;
+      } catch {
+        failures.push({ id: row.id, name: row.name, address: row.address });
+      }
     }
-    const now = Date.now();
-    return this.db.wallets.insert({
-      name: resolvedName,
-      address,
-      ...encrypted,
-      isActive: 1,
-      createdAtMs: now,
-      updatedAtMs: now,
-    }) as WalletRow;
+    return { total: rows.length, decrypted, failures };
+  }
+
+  private assertWalletsDecryptable(excludeId?: number): void {
+    const result = this.integrity(excludeId);
+    if (!result.failures.length) return;
+    const affected = result.failures
+      .map((row) => `@${row.name} ${row.address}`)
+      .join(", ");
+    throw new Error(
+      `Wallet database integrity check failed: the current SLRD_MASTER_KEY must decrypt every stored signing wallet. Undecryptable or mismatched: ${affected}`,
+    );
   }
 
   list(): WalletInfo[] {
@@ -180,11 +235,18 @@ export class WalletRepo {
     row?: WalletRow;
     signer: Keypair;
   } {
+    if (!(ref instanceof Keypair)) this.assertWalletsDecryptable();
     const resolved = this.resolve(ref);
     if (resolved.signer) return { ...resolved, signer: resolved.signer };
     if (!resolved.row)
       throw new WalletCannotSignError(resolved.address.toBase58());
     const signer = decryptKeypair(resolved.row);
+    const derived = signer.publicKey.toBase58();
+    if (derived !== resolved.row.address) {
+      throw new Error(
+        `Wallet database integrity check failed for @${resolved.row.name}: stored=${resolved.row.address} derived=${derived}`,
+      );
+    }
     return { address: signer.publicKey, row: resolved.row, signer };
   }
 }

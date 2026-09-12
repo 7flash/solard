@@ -15,7 +15,6 @@ bun.lockb
 *.swp
 *.swo
 
-scripts
 # examples
 
 package-lock.json
@@ -45,3 +44,7 @@ run
 *.csv
 
 *.txt
+
+!package.json
+
+*.csv

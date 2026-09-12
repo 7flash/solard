@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { PublicKey } from "@solana/web3.js";
 import type { HolderRewardEntitlementSnapshotInput, Solard } from "@solard/sdk";
 
-export type FairfunCliFlags = Map<string, string>;
+export type AccountingCliFlags = Map<string, string>;
 type Emit = (value: string) => void;
 
 function json(value: unknown): string {
@@ -18,12 +18,12 @@ function json(value: unknown): string {
   );
 }
 
-function flag(flags: FairfunCliFlags, key: string): string | undefined {
+function flag(flags: AccountingCliFlags, key: string): string | undefined {
   const value = flags.get(key);
   return value && value !== "true" ? value : undefined;
 }
 
-function bool(flags: FairfunCliFlags, key: string): boolean {
+function bool(flags: AccountingCliFlags, key: string): boolean {
   return flags.has(key) && flags.get(key) !== "false";
 }
 
@@ -78,7 +78,7 @@ function requireLiveGate(): void {
   ].some((value) => /^(1|true|yes)$/i.test(value?.trim() ?? ""));
   if (!enabled) {
     throw new Error(
-      "Live Fairfun/reward transfers require SOLARD_ENABLE_LIVE_TRADES=1 as well as --live.",
+      "Live reward transfers require SOLARD_ENABLE_LIVE_TRADES=1 as well as --live.",
     );
   }
 }
@@ -169,10 +169,10 @@ function rewardSnapshotFile(
   return { recipients, totalEntitledRaw, observedAtMs };
 }
 
-export async function handleFairfunCommand(args: {
+export async function handleAccountingCommand(args: {
   command: string | undefined;
   values: string[];
-  flags: FairfunCliFlags;
+  flags: AccountingCliFlags;
   slrd: Solard;
   emit: Emit;
 }): Promise<boolean> {

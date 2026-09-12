@@ -1,8 +1,5 @@
 export {
-  configureSolardMeasure,
-  createSolardMeasure,
   createSolardMeasureCollector,
-  measure,
   compactId,
   shortKey,
   summarizeError,
@@ -61,8 +58,32 @@ export type {
   TokenHistoryVenue,
 } from "./chain/token-history.ts";
 export type { SolardRpcStats } from "./chain/connection.ts";
+export {
+  REPLAY_PARSER_VERSION,
+  compareReplayItems,
+  mergeReplayEventSubscriptions,
+  mergeReplayHistories,
+  normalizeReplayEvent,
+  normalizeReplayEvents,
+  replayCoverageThroughSlot,
+} from "./history/replay.ts";
+export type {
+  MergedReplayEventStream,
+  ReplayClaimAttribution,
+  ReplayCoverage,
+  ReplayEventSubscription,
+  ReplayEventsOptions,
+  ReplayHistory,
+  ReplayItem,
+  ReplayOptions,
+  ReplayTransaction,
+} from "./history/replay.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
-export type { SolardOptions } from "./core/solard.ts";
+export type {
+  SolardEventsApi,
+  SolardHistoryApi,
+  SolardOptions,
+} from "./core/solard.ts";
 export { createTraderSolard } from "./presets/trader.ts";
 
 export {
@@ -91,18 +112,73 @@ export type {
   PackTransferManyOptions,
 } from "./tx/transfer-batch.ts";
 export {
+  durableTransferManyStatus,
+  executeDurableTransferMany,
+  getDurableTransferManyState,
+  resumeDurableTransferMany,
+} from "./tx/durable-transfer-many.ts";
+export type {
+  DurableTransferManyAllocation,
+  DurableTransferManyPending,
+  DurableTransferManyReceipt,
+  DurableTransferManyState,
+  DurableTransferManyExecuteOptions,
+  DurableTransferManyResumeOptions,
+} from "./tx/durable-transfer-many.ts";
+export {
   executeHolderRewardDistribution,
+  getHolderRewardDistributionAudit,
+  getHolderRewardDistributionRun,
   getHolderRewardDistributionState,
   planHolderRewardDistribution,
+  requestHolderRewardDistributionStop,
 } from "./rewards/holder-distributor.ts";
 export type {
   HolderRewardAllocation,
+  HolderRewardEntitlementEvent,
+  HolderRewardEntitlementInput,
+  HolderRewardEntitlementSnapshotInput,
+  HolderRewardOutstandingRecipient,
+  HolderRewardPayment,
   HolderRewardPendingTransaction,
+  HolderRewardRecipientAudit,
+  HolderRewardRecipientState,
+  HolderRewardSnapshotState,
+  HolderRewardDistributionAudit,
   HolderRewardDistributionState,
   HolderRewardPlanOptions,
   HolderRewardDistributionPlan,
+  HolderRewardRunState,
+  HolderRewardStopResult,
   ExecuteHolderRewardDistributionOptions,
 } from "./rewards/holder-distributor.ts";
+export {
+  claimCreatorRewards,
+  confirmedCreatorRewardTransaction,
+  creatorRewardPayoutDelta,
+  getCreatorRewardClaimCheckpoint,
+  getCreatorRewardClaimState,
+  hashRewardEntitlementBasis,
+  normalizeRewardEntitlementBasis,
+} from "./rewards/creator-claim.ts";
+export type {
+  ClaimCreatorRewardsOptions,
+  CreatorRewardClaimCheckpoint,
+  CreatorRewardClaimPayout,
+  CreatorRewardClaimResult,
+  DurableCreatorRewardClaimPending,
+  DurableCreatorRewardClaimState,
+  RewardEntitlementBasis,
+  RewardEntitlementBasisInput,
+} from "./rewards/creator-claim.ts";
+export { historyCreatorRewards } from "./rewards/creator-reward-history.ts";
+export type {
+  CreatorRewardHistory,
+  CreatorRewardHistoryCoverage,
+  CreatorRewardHistoryOptions,
+  HistoricalCreatorRewardAttribution,
+  HistoricalCreatorRewardClaimEvent,
+} from "./rewards/creator-reward-history.ts";
 export type {
   PlannedTransaction,
   TransactionDraft,
@@ -131,7 +207,11 @@ export type {
   BuiltInstructions,
 } from "./venues/venue-plugin.ts";
 export { VenueRegistry } from "./venues/route-resolver.ts";
-export type { ClaimSourcePlugin, ClaimPlan } from "./claims/claim-source.ts";
+export type {
+  ClaimSourcePlugin,
+  ClaimPlan,
+  ClaimPayout,
+} from "./claims/claim-source.ts";
 export type {
   LaunchSourcePlugin,
   LaunchFilter,
@@ -166,7 +246,12 @@ export type {
   SettingRow,
 } from "./db/schema.ts";
 export { WalletRepo } from "./db/wallet-repo.ts";
-export type { WalletImportOptions, WalletInfo } from "./db/wallet-repo.ts";
+export type {
+  WalletImportOptions,
+  WalletInfo,
+  WalletIntegrityFailure,
+  WalletIntegrityResult,
+} from "./db/wallet-repo.ts";
 export { TokenRepo } from "./db/token-repo.ts";
 export { PriceRepo } from "./db/price-repo.ts";
 export { openDatabase, closeDatabase, resolveDbPath } from "./db/database.ts";
@@ -273,12 +358,26 @@ export type {
 } from "./chain/holders.ts";
 export { subscribeTokenEvents } from "./events/token-events.ts";
 export type {
+  SolardTokenCreateEvent,
   SolardTokenEvent,
   SolardTokenSwapEvent,
   SolardTokenTransferEvent,
+  SolardTokenTransferMovement,
+  SolardTokenTransferSource,
   SubscribeTokenEventsOptions,
   TokenEventSubscription,
 } from "./events/token-events.ts";
+export {
+  historyTokenEvents,
+  replayTokenBalances,
+} from "./events/token-event-history.ts";
+export type {
+  TokenEventHistory,
+  TokenEventHistoryBalanceVerification,
+  TokenEventHistoryCoverage,
+  TokenEventHistoryOptions,
+  TokenEventHistoryProvider,
+} from "./events/token-event-history.ts";
 export { readMint } from "./chain/state.ts";
 export type { OwnedTokenAccount } from "./chain/state.ts";
 export {
@@ -531,6 +630,12 @@ export type {
 } from "./launches/pump/token-launch.ts";
 
 export {
+  getSupportedPumpPairs,
+  PumpPairService,
+} from "./launches/pump/pairs.ts";
+export type { PumpSupportedPair } from "./launches/pump/pairs.ts";
+
+export {
   PUMP_USDC_MINT,
   buildPumpExternalDeployment,
   resolvePumpQuoteAsset,
@@ -565,6 +670,11 @@ export {
   loadMintKeypairFile,
   saveMintKeypairFile,
   withPregeneratedMintKeypair,
+} from "./launches/pump/vanity-mint.ts";
+export type {
+  VanityMintOptions,
+  VanityMintProgress,
+  VanityMintResult,
 } from "./launches/pump/vanity-mint.ts";
 
 export {

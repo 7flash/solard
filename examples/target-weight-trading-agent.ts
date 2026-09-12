@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
+import { configure, createMeasure } from "measure-fn";
 import {
-  configureSolardMeasure,
-  createSolardMeasure,
   createTraderSolard,
   planTargetWeightRebalance,
   sol,
@@ -11,7 +10,7 @@ import {
 } from "@solard/sdk";
 
 const FIVE_MINUTES_MS = 300_000;
-const m = createSolardMeasure("target-weight-agent");
+const m = createMeasure("slrd:target-weight-agent", { maxResultLength: 1600 });
 type Flags = Map<string, string>;
 
 type SampleCandle = TargetWeightCandle & {
@@ -153,7 +152,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  configureSolardMeasure({ silent: false });
+  configure({ silent: false });
   const tokenRef = required(flags, "token");
   const walletRef = required(flags, "wallet");
   const strategy = policy(flags);

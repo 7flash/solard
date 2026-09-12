@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
+import { configure, createMeasure } from "measure-fn";
 import {
-  configureSolardMeasure,
-  createSolardMeasure,
   createTraderSolard,
   type MeteoraPoolSearchResult,
   type MeteoraPositionSnapshot,
@@ -12,7 +11,7 @@ import {
 const WSOL = "So11111111111111111111111111111111111111112";
 const FIVE_MINUTES_MS = 5 * 60_000;
 const FIVE_MINUTES_SECONDS = 5 * 60;
-const m = createSolardMeasure("lp-agent");
+const m = createMeasure("slrd:lp-agent", { maxResultLength: 1600 });
 const AGENT_POLICY_VERSION = 14;
 const DEFAULT_MAX_BREAKOUT_BINS = 50;
 
@@ -1597,7 +1596,7 @@ async function main(): Promise<void> {
 
   // Strategy scripts are long-lived applications, not ordinary quiet SDK calls.
   // Use measure-fn as the runtime console so each RPC/strategy phase is visible.
-  configureSolardMeasure({ silent: false });
+  configure({ silent: false });
   m.measureSync(
     {
       start: () => `agent policy v${AGENT_POLICY_VERSION}`,

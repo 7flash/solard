@@ -14,6 +14,8 @@ import {
   ExecutionSchema,
   GroupSchema,
   GroupWalletSchema,
+  HistoryReplayCoverageSchema,
+  HistoryReplayItemSchema,
   PositionSchema,
   SettingSchema,
   TokenSchema,
@@ -65,6 +67,8 @@ export function openDatabase(input?: string): SolardDatabase {
       agents: AgentSchema,
       alts: AltSchema,
       watches: WatchSchema,
+      historyReplayItems: HistoryReplayItemSchema,
+      historyReplayCoverage: HistoryReplayCoverageSchema,
       settings: SettingSchema,
     },
     {
@@ -82,6 +86,8 @@ export function openDatabase(input?: string): SolardDatabase {
         agents: [["name"]],
         alts: [["address"]],
         watches: [["kind", "address"]],
+        historyReplayItems: [["replayKey"]],
+        historyReplayCoverage: [["mint"]],
         settings: [["key"]],
       },
       indexes: {
@@ -93,6 +99,8 @@ export function openDatabase(input?: string): SolardDatabase {
         claims: ["walletAddress", "mint", "status"],
         groupWallets: ["groupName", "walletAddress"],
         watches: ["kind", "address", "isActive"],
+        historyReplayItems: ["mint", "slot", "signature", "kind"],
+        historyReplayCoverage: ["mint", "finalizedThroughSlot"],
       },
     },
   ) as SolardDatabase;

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { configure, createMeasure } from "measure-fn";
 import {
   existsSync,
   mkdirSync,
@@ -8,8 +9,6 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
-  configureSolardMeasure,
-  createSolardMeasure,
   createTraderSolard,
   executeJupiterSwap,
   quoteJupiterSwap,
@@ -25,8 +24,8 @@ import {
 
 const WSOL = "So11111111111111111111111111111111111111112";
 
-configureSolardMeasure({ silent: false });
-const m = createSolardMeasure("value-band-agent");
+configure({ silent: false });
+const m = createMeasure("slrd:value-band-agent", { maxResultLength: 1600 });
 
 type Flags = Map<string, string>;
 type SwapVenue = "jupiter" | "raydium";

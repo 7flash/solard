@@ -46,6 +46,7 @@ export type WalletAssetPortfolio = {
 
 export type WalletAssetPortfolioOptions = {
   walletRefs?: string[];
+  excludeWalletRefs?: string[];
   includeZero?: boolean;
   commitment?: Commitment;
   concurrency?: number;
@@ -200,9 +201,18 @@ export async function loadWalletAssetPortfolio(
         ),
       )
     : null;
-  const wallets = selectedAddresses
-    ? allWallets.filter((wallet) => selectedAddresses.has(wallet.address))
-    : allWallets;
+  const excludedAddresses = options.excludeWalletRefs?.length
+    ? new Set(
+        options.excludeWalletRefs.map((ref) =>
+          slrd.resolveWallet(ref).address.toBase58(),
+        ),
+      )
+    : null;
+  const wallets = allWallets.filter(
+    (wallet) =>
+      (!selectedAddresses || selectedAddresses.has(wallet.address)) &&
+      (!excludedAddresses || !excludedAddresses.has(wallet.address)),
+  );
 
   const balances = new Map<string, bigint>();
   const connection = slrd.connection();

@@ -11,6 +11,10 @@ export type ClaimContext = {
   token: TokenRow;
   user: PublicKey;
 };
+export type ClaimPayout = {
+  address: PublicKey;
+  shareBps?: number | null;
+};
 export type ClaimPlan = {
   source: string;
   quoteAsset: QuoteAsset;
@@ -18,6 +22,7 @@ export type ClaimPlan = {
   estimatedClaimRaw: bigint;
   /** Amount of the estimate that the signing wallet may spend immediately in this transaction. */
   spendableByUserRaw: bigint;
+  payouts?: ClaimPayout[];
   meta?: Record<string, unknown>;
 };
 

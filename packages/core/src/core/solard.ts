@@ -25,7 +25,26 @@ import {
 import {
   subscribeTokenEvents as openTokenEventStream,
   type SubscribeTokenEventsOptions,
+  type TokenEventSubscription,
 } from "../events/token-events.ts";
+import {
+  historyTokenEvents as openTokenEventHistory,
+  type TokenEventHistory,
+  type TokenEventHistoryOptions,
+} from "../events/token-event-history.ts";
+import {
+  mergeReplayEventSubscriptions,
+  mergeReplayHistories,
+  replayCoverageThroughSlot,
+  replayTokenHistory,
+  subscribeReplayEvents,
+  type MergedReplayEventStream,
+  type ReplayEventSubscription,
+  type ReplayEventsOptions,
+  type ReplayHistory,
+  type ReplayItem,
+  type ReplayOptions,
+} from "../history/replay.ts";
 import { simulatePlanned } from "../chain/simulate.ts";
 import {
   SOL_ASSET,
@@ -100,11 +119,36 @@ import {
   type TransferManyAllocation,
 } from "../tx/transfer-batch.ts";
 import {
+  durableTransferManyStatus,
+  executeDurableTransferMany,
+  resumeDurableTransferMany,
+  type DurableTransferManyResumeOptions,
+} from "../tx/durable-transfer-many.ts";
+import {
   executeHolderRewardDistribution,
+  getHolderRewardDistributionAudit,
+  getHolderRewardDistributionState,
   planHolderRewardDistribution,
+  requestHolderRewardDistributionStop,
   type ExecuteHolderRewardDistributionOptions,
+  type HolderRewardDistributionAudit,
+  type HolderRewardDistributionPlan,
+  type HolderRewardDistributionState,
   type HolderRewardPlanOptions,
+  type HolderRewardStopResult,
 } from "../rewards/holder-distributor.ts";
+import {
+  claimCreatorRewards,
+  getCreatorRewardClaimState,
+  type ClaimCreatorRewardsOptions,
+  type CreatorRewardClaimResult,
+  type DurableCreatorRewardClaimState,
+} from "../rewards/creator-claim.ts";
+import {
+  historyCreatorRewards,
+  type CreatorRewardHistory,
+  type CreatorRewardHistoryOptions,
+} from "../rewards/creator-reward-history.ts";
 import type {
   BatchSendReceipt,
   PlannedTransaction,
@@ -125,6 +169,11 @@ import {
 import { trace } from "../core/trace.ts";
 import { MeteoraDlmmService } from "../venues/meteora/index.ts";
 import { GmgnReadService } from "../data/gmgn.ts";
+import { PumpPairService } from "../launches/pump/pairs.ts";
+import {
+  generateMintKeypairWithSuffix,
+  type VanityMintOptions,
+} from "../launches/pump/vanity-mint.ts";
 
 const m = measure("sdk");
 const BUNDLE_TRANSACTION_LIMIT = 5;
@@ -185,6 +234,34 @@ function isPumpSwap6040SimulationError(error: unknown): boolean {
   );
 }
 
+export type SolardEventsApi = {
+  (
+    tokenRef: TokenRef,
+    options?: ReplayEventsOptions,
+  ): Promise<ReplayEventSubscription>;
+  merge: (
+    streams: readonly ReplayEventSubscription[],
+  ) => MergedReplayEventStream;
+  subscribeToken: (
+    tokenRef: TokenRef,
+    options?: SubscribeTokenEventsOptions,
+  ) => Promise<TokenEventSubscription>;
+  history: (
+    tokenRef: TokenRef,
+    options?: TokenEventHistoryOptions,
+  ) => Promise<TokenEventHistory>;
+};
+
+export type SolardHistoryApi = {
+  replay: (
+    tokenRef: TokenRef,
+    options?: ReplayOptions,
+  ) => Promise<ReplayHistory>;
+  merge: (
+    histories: readonly (ReplayHistory | Iterable<ReplayItem>)[],
+  ) => ReplayItem[];
+};
+
 export class Solard implements ComposerHost {
   readonly db: SolardDatabase;
   readonly wallets: WalletRepo;
@@ -197,6 +274,33 @@ export class Solard implements ComposerHost {
   readonly watcher: SolardWatcher;
   readonly meteora: MeteoraDlmmService;
   readonly gmgn: GmgnReadService;
+  readonly pump: PumpPairService;
+  readonly events: SolardEventsApi;
+  readonly history: SolardHistoryApi;
+  readonly rewards: {
+    claim: (
+      tokenRef: TokenRef,
+      wallet: WalletRef,
+      options?: ClaimCreatorRewardsOptions,
+    ) => Promise<CreatorRewardClaimResult>;
+    claimStatus: (id: string) => DurableCreatorRewardClaimState | null;
+    history: (
+      tokenRef: TokenRef,
+      options?: CreatorRewardHistoryOptions,
+    ) => Promise<CreatorRewardHistory>;
+    planDistribution: (
+      options: HolderRewardPlanOptions,
+    ) => Promise<HolderRewardDistributionPlan>;
+    distribute: (
+      options: ExecuteHolderRewardDistributionOptions,
+    ) => Promise<HolderRewardDistributionState>;
+    stop: (tokenRef: TokenRef) => HolderRewardStopResult;
+    status: (tokenRef: TokenRef) => HolderRewardDistributionState | null;
+    audit: (
+      tokenRef: TokenRef,
+      holder?: string | PublicKey,
+    ) => HolderRewardDistributionAudit | null;
+  };
   readonly venues = new VenueRegistry();
   readonly claimSources = new ClaimSourceRegistry();
   readonly launches = new LaunchSourceRegistry();
@@ -231,6 +335,43 @@ export class Solard implements ComposerHost {
       walletAddress: (ref) => this.resolveWallet(ref).address,
     });
     this.gmgn = new GmgnReadService();
+    this.pump = new PumpPairService(() => this.connection());
+    this.events = Object.assign(
+      (tokenRef: TokenRef, eventOptions: ReplayEventsOptions = {}) =>
+        this.replayEvents(tokenRef, eventOptions),
+      {
+        merge: (streams: readonly ReplayEventSubscription[]) =>
+          mergeReplayEventSubscriptions(streams),
+        subscribeToken: (
+          tokenRef: TokenRef,
+          eventOptions: SubscribeTokenEventsOptions = {},
+        ) => this.subscribeTokenEvents(tokenRef, eventOptions),
+        history: (
+          tokenRef: TokenRef,
+          eventOptions: TokenEventHistoryOptions = {},
+        ) => this.historyTokenEvents(tokenRef, eventOptions),
+      },
+    );
+    this.history = {
+      replay: (tokenRef, replayOptions = {}) =>
+        this.replayHistory(tokenRef, replayOptions),
+      merge: (histories) => mergeReplayHistories(histories),
+    };
+    this.rewards = {
+      claim: (tokenRef, wallet, rewardOptions = {}) =>
+        this.claimRewards(tokenRef, wallet, rewardOptions),
+      claimStatus: (id) => getCreatorRewardClaimState(this, id),
+      history: (tokenRef, rewardOptions = {}) =>
+        this.historyCreatorRewards(tokenRef, rewardOptions),
+      planDistribution: (rewardOptions) =>
+        this.planHolderRewards(rewardOptions),
+      distribute: (rewardOptions) =>
+        this.distributeHolderRewards(rewardOptions),
+      stop: (tokenRef) => requestHolderRewardDistributionStop(this, tokenRef),
+      status: (tokenRef) => getHolderRewardDistributionState(this, tokenRef),
+      audit: (tokenRef, holder) =>
+        getHolderRewardDistributionAudit(this, tokenRef, holder),
+    };
     for (const venue of options.venues ?? []) this.venues.register(venue);
     for (const source of options.claimSources ?? [])
       this.claimSources.register(source);
@@ -297,6 +438,28 @@ export class Solard implements ComposerHost {
 
   createWallet(name?: string): WalletInfo {
     return this.wallets.create(name);
+  }
+  async createVanityWallet(
+    name: string | undefined,
+    options: VanityMintOptions,
+  ): Promise<{
+    wallet: WalletInfo;
+    suffix: string;
+    attempts: number;
+    elapsedMs: number;
+    ratePerSecond: number;
+    lastMint: string;
+  }> {
+    const generated = await generateMintKeypairWithSuffix(options);
+    const wallet = this.wallets.createFromKeypair(generated.mint, name);
+    return {
+      wallet,
+      suffix: generated.suffix,
+      attempts: generated.attempts,
+      elapsedMs: generated.elapsedMs,
+      ratePerSecond: generated.ratePerSecond,
+      lastMint: generated.lastMint,
+    };
   }
   importWallet(
     privateKey: string,
@@ -1244,9 +1407,15 @@ export class Solard implements ComposerHost {
     wallet: WalletRef,
     options: { via?: SenderId } = {},
   ) {
-    return await this.tx(wallet)
-      .claimFees(token)
-      .send({ via: options.via ?? "rpc", kind: "claim" });
+    return (await this.claimRewards(token, wallet, { via: options.via }))
+      .receipt;
+  }
+  async claimRewards(
+    token: TokenRef,
+    wallet: WalletRef,
+    options: ClaimCreatorRewardsOptions = {},
+  ): Promise<CreatorRewardClaimResult> {
+    return await claimCreatorRewards(this, token, wallet, options);
   }
 
   /** Complete on-chain holder snapshot. Use this, not websocket deltas, for payouts. */
@@ -1271,6 +1440,73 @@ export class Solard implements ComposerHost {
       connection: this.connection(),
       token,
       options,
+    });
+  }
+
+  async historyTokenEvents(
+    tokenRef: TokenRef,
+    options: TokenEventHistoryOptions = {},
+  ) {
+    const token = this.resolveToken(tokenRef);
+    return await openTokenEventHistory({
+      connection: this.connection(),
+      token,
+      options,
+    });
+  }
+
+  async historyCreatorRewards(
+    tokenRef: TokenRef,
+    options: CreatorRewardHistoryOptions = {},
+  ) {
+    const token = this.resolveToken(tokenRef);
+    return await historyCreatorRewards({
+      connection: this.connection(),
+      token,
+      options,
+    });
+  }
+
+  private async resolveReplayToken(ref: TokenRef): Promise<TokenRow> {
+    try {
+      return this.resolveToken(ref);
+    } catch (error) {
+      if (ref instanceof PublicKey) return await this.addToken(ref.toBase58());
+      if (typeof ref === "string") {
+        try {
+          return await this.addToken(new PublicKey(ref.trim()).toBase58());
+        } catch {
+          throw error;
+        }
+      }
+      throw error;
+    }
+  }
+
+  async replayHistory(
+    tokenRef: TokenRef,
+    options: ReplayOptions = {},
+  ): Promise<ReplayHistory> {
+    const token = await this.resolveReplayToken(tokenRef);
+    return await replayTokenHistory({
+      connection: this.connection(),
+      database: this.db,
+      token,
+      options,
+    });
+  }
+
+  async replayEvents(
+    tokenRef: TokenRef,
+    options: ReplayEventsOptions = {},
+  ): Promise<ReplayEventSubscription> {
+    const token = await this.resolveReplayToken(tokenRef);
+    const initialThroughSlot = replayCoverageThroughSlot(this.db, token.mint);
+    return await subscribeReplayEvents({
+      mint: token.mint,
+      initialThroughSlot,
+      options,
+      replay: (replayOptions) => this.replayHistory(token.mint, replayOptions),
     });
   }
 
@@ -1319,8 +1555,13 @@ export class Solard implements ComposerHost {
     });
   }
 
-  /** Build/sign/send every packed transfer batch sequentially. */
+  /**
+   * Crash-safe arbitrary payout execution. A stable id is mandatory. The economic
+   * allocation set is persisted before signing, and each signed transaction plus
+   * its allocation ids are persisted before broadcast.
+   */
   async sendTransferMany(args: {
+    id: string;
     wallet: WalletRef;
     asset: "SOL" | string | PublicKey | QuoteAsset;
     allocations: TransferManyAllocation[];
@@ -1330,20 +1571,33 @@ export class Solard implements ComposerHost {
     maxRecipientsPerTransaction?: number;
     skipSimulation?: boolean;
     skipPreflight?: boolean;
-  }): Promise<BatchSendReceipt> {
-    const plan = await this.planTransferMany(args);
-    const signer = this.signer(args.wallet);
-    const receipts: SendReceipt[] = [];
-    for (const batch of plan.batches) {
-      const compiled = await this.compile(signer, batch.draft);
-      receipts.push(
-        await this.sendPlan(compiled, args.via ?? "rpc", "transfer-many", {
-          skipSimulation: args.skipSimulation,
-          skipPreflight: args.skipPreflight,
-        }),
-      );
-    }
-    return { sender: String(args.via ?? "rpc"), mode: "parallel", receipts };
+  }) {
+    const asset = await this.transferAsset(args.asset);
+    return await executeDurableTransferMany(this, {
+      id: args.id,
+      wallet: args.wallet,
+      asset,
+      allocations: args.allocations,
+      via: args.via,
+      cuLimit: args.cuLimit,
+      priorityMicroLamports: args.priorityMicroLamports,
+      maxRecipientsPerTransaction: args.maxRecipientsPerTransaction,
+      skipSimulation: args.skipSimulation,
+      skipPreflight: args.skipPreflight,
+    });
+  }
+
+  /** Read the locally persisted state for a stable transfer-many id. */
+  getTransferManyStatus(id: string) {
+    return durableTransferManyStatus(this, id);
+  }
+
+  /** Reconcile/resume a durable transfer-many id without re-supplying allocations. */
+  async resumeTransferMany(
+    id: string,
+    options: DurableTransferManyResumeOptions = {},
+  ) {
+    return await resumeDurableTransferMany(this, id, options);
   }
 
   async planHolderRewards(options: HolderRewardPlanOptions) {

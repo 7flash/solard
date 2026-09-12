@@ -1,12 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { Buffer } from "buffer";
 import { NATIVE_MINT } from "@solana/spl-token";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, VersionedTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
 
-import {
-  snapshotTokenHolders,
-  type TokenHolderSnapshot,
-} from "../chain/holders.ts";
 import { readMint, readTokenAmount } from "../chain/state.ts";
 import { SOL_ASSET, type QuoteAsset } from "../core/amounts.ts";
 import type { TokenRef, WalletRef } from "../core/refs.ts";
@@ -18,27 +15,71 @@ import {
 } from "../tx/transfer-batch.ts";
 import type { SendReceipt, SenderId } from "../tx/types.ts";
 
-const STATE_PREFIX = "holder-reward-distribution:v1:";
+const STATE_PREFIX = "holder-reward-distribution:v4:";
+const RUN_PREFIX = "holder-reward-run:v1:";
+const DEFAULT_CANDIDATE_RECIPIENTS = 64;
+const PENDING_POLL_MS = 1_000;
 
-export type HolderRewardAllocation = {
-  id: string;
-  owner: string;
-  holderAmountRaw: string;
-  rewardAmountRaw: string;
-  paid: boolean;
+type RawIntegerInput = bigint | string;
+
+export type HolderRewardEntitlementInput = {
+  wallet: string | PublicKey;
+  entitledRaw: RawIntegerInput;
+};
+
+export type HolderRewardEntitlementSnapshotInput =
+  | HolderRewardEntitlementInput[]
+  | {
+      recipients: HolderRewardEntitlementInput[];
+      totalEntitledRaw?: RawIntegerInput;
+      observedAtMs?: number | null;
+    };
+
+export type HolderRewardRecipientState = {
+  wallet: string;
+  entitledRaw: string;
+  confirmedPaidRaw: string;
+};
+
+export type HolderRewardAllocation = HolderRewardRecipientState;
+
+export type HolderRewardPayment = {
+  wallet: string;
+  amountRaw: string;
 };
 
 export type HolderRewardPendingTransaction = {
-  kind: "claim" | "distribution";
+  kind: "distribution";
   signature: string;
+  sender: string;
+  recentBlockhash: string;
   lastValidBlockHeight: number;
-  allocationIds: string[];
+  payments: HolderRewardPayment[];
+  signedTransactionBase64: string;
+  broadcastAttempts: number;
+  lastBroadcastAtMs: number | null;
   createdAtMs: number;
 };
 
+export type HolderRewardSnapshotState = {
+  hash: string;
+  totalEntitledRaw: string;
+  recipientCount: number;
+  observedAtMs: number | null;
+  acceptedAtMs: number;
+};
+
+export type HolderRewardEntitlementEvent = {
+  snapshotHash: string;
+  wallet: string;
+  previousEntitledRaw: string;
+  entitledRaw: string;
+  deltaRaw: string;
+  acceptedAtMs: number;
+};
+
 export type HolderRewardDistributionState = {
-  version: 1;
-  id: string;
+  version: 4;
   tokenMint: string;
   sourceWallet: string;
   rewardAsset: {
@@ -47,93 +88,269 @@ export type HolderRewardDistributionState = {
     tokenProgram: string;
     decimals: number;
   };
-  status: "claiming" | "planned" | "distributing" | "complete";
-  claimFirst: boolean;
-  claimSignature: string | null;
-  claimBeforeRaw: string | null;
-  rewardAmountRaw: string | null;
-  reserveRaw: string;
-  snapshot: {
-    slot: number;
-    observedAtMs: number;
-    holderCount: number;
-    eligibleHolderCount: number;
-    eligibleTotalRaw: string;
-    excludedTotalRaw: string;
-  } | null;
-  allocations: HolderRewardAllocation[];
+  status:
+    | "ready"
+    | "distributing"
+    | "complete"
+    | "stopped"
+    | "funding-required"
+    | "uncertain";
+  recipients: HolderRewardRecipientState[];
+  snapshots: HolderRewardSnapshotState[];
+  entitlementEvents: HolderRewardEntitlementEvent[];
   pending: HolderRewardPendingTransaction | null;
   receipts: Array<{
-    kind: "claim" | "distribution";
+    kind: "distribution";
     signature: string;
-    allocationIds: string[];
+    sender: string;
+    payments: HolderRewardPayment[];
     slot: number | null;
     feeLamports: number | null;
     confirmedAtMs: number;
   }>;
+  reserveRaw: string;
+  lastError: string | null;
+  uncertainReason: string | null;
   createdAtMs: number;
   updatedAtMs: number;
+};
+
+export type HolderRewardOutstandingRecipient = {
+  wallet: string;
+  entitledRaw: bigint;
+  confirmedPaidRaw: bigint;
+  outstandingRaw: bigint;
 };
 
 export type HolderRewardPlanOptions = {
   token: TokenRef;
   wallet: WalletRef;
-  /** Explicit reward asset. Defaults to the token's quote mint. */
   rewardMint?: string | PublicKey;
-  /** Amount to distribute when claimFirst=false. */
-  amountRaw?: bigint;
-  /** Inspect/claim Pump creator rewards first and distribute the actual wallet delta. */
-  claimFirst?: boolean;
+  snapshot: HolderRewardEntitlementSnapshotInput;
   reserveRaw?: bigint;
-  excludeOwners?: Iterable<string | PublicKey>;
-  minimumHolderRaw?: bigint;
   maxRecipientsPerTransaction?: number;
 };
 
 export type HolderRewardDistributionPlan = {
-  version: 1;
-  id: string;
+  version: 4;
   tokenMint: string;
   sourceWallet: string;
-  claimFirst: boolean;
   rewardAsset: HolderRewardDistributionState["rewardAsset"];
-  rewardAmountRaw: bigint;
+  snapshotHash: string;
+  totalEntitledRaw: bigint;
+  totalConfirmedPaidRaw: bigint;
+  totalOutstandingRaw: bigint;
+  sourceBalanceRaw: bigint;
+  availableRaw: bigint;
   reserveRaw: bigint;
-  snapshot: TokenHolderSnapshot;
-  allocations: Array<{
-    id: string;
-    owner: string;
-    holderAmountRaw: bigint;
-    rewardAmountRaw: bigint;
-  }>;
-  undistributedRemainderRaw: bigint;
-  transferPlan: PackedTransferPlan;
+  outstanding: HolderRewardOutstandingRecipient[];
+  nextPayments: Array<{ id: string; recipient: string; amountRaw: bigint }>;
+  transferPlan: PackedTransferPlan | null;
+  pending: HolderRewardPendingTransaction | null;
 };
 
 export type ExecuteHolderRewardDistributionOptions = HolderRewardPlanOptions & {
-  /** Stable application/epoch id. Required for live idempotent execution. */
-  id: string;
   via?: SenderId;
   skipSimulation?: boolean;
   skipPreflight?: boolean;
 };
 
-function stateKey(id: string): string {
-  return `${STATE_PREFIX}${id}`;
+export type HolderRewardRecipientAudit = {
+  wallet: string;
+  entitledRaw: string;
+  confirmedPaidRaw: string;
+  outstandingRaw: string;
+  entitlementEvents: HolderRewardEntitlementEvent[];
+  payments: Array<{
+    signature: string;
+    amountRaw: string;
+    slot: number | null;
+    confirmedAtMs: number;
+  }>;
+};
+
+export type HolderRewardDistributionAudit = {
+  version: 4;
+  tokenMint: string;
+  sourceWallet: string;
+  rewardAsset: HolderRewardDistributionState["rewardAsset"];
+  status: HolderRewardDistributionState["status"];
+  totalEntitledRaw: string;
+  totalConfirmedPaidRaw: string;
+  totalOutstandingRaw: string;
+  pending: HolderRewardPendingTransaction | null;
+  snapshots: HolderRewardSnapshotState[];
+  recipients: HolderRewardRecipientAudit[];
+  receipts: HolderRewardDistributionState["receipts"];
+  lastError: string | null;
+  uncertainReason: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type HolderRewardRunState = {
+  version: 1;
+  tokenMint: string;
+  runId: string;
+  pid: number;
+  startedAtMs: number;
+  heartbeatAtMs: number;
+  stopRequested: boolean;
+};
+
+export type HolderRewardStopResult = {
+  tokenMint: string;
+  running: boolean;
+  stopRequested: boolean;
+  staleLockCleared: boolean;
+  runId: string | null;
+  pid: number | null;
+};
+
+type NormalizedSnapshot = {
+  recipients: Array<{ wallet: string; entitledRaw: bigint }>;
+  totalEntitledRaw: bigint;
+  observedAtMs: number | null;
+  hash: string;
+};
+
+type ReconcileOutcome =
+  | { kind: "confirmed"; receipt: SendReceipt | null }
+  | { kind: "failed"; error: string | null }
+  | { kind: "seen-pending" }
+  | { kind: "not-found"; currentBlockHeight: number };
+
+function rawInteger(value: RawIntegerInput, label: string): bigint {
+  if (typeof value === "bigint") {
+    if (value < 0n) throw new Error(`${label} cannot be negative`);
+    return value;
+  }
+  const text = String(value).trim();
+  if (!/^\d+$/.test(text)) throw new Error(`${label} must be a raw integer`);
+  return BigInt(text);
+}
+
+function stateKey(tokenMint: string): string {
+  return `${STATE_PREFIX}${tokenMint}`;
+}
+
+function runKey(tokenMint: string): string {
+  return `${RUN_PREFIX}${tokenMint}`;
+}
+
+function readSetting(slrd: Solard, key: string): string | null {
+  const row = slrd.db.settings.select().where({ key }).first() as
+    { value?: string } | undefined;
+  return row?.value ?? null;
+}
+
+function writeSetting(slrd: Solard, key: string, value: string): void {
+  const now = Date.now();
+  const row = slrd.db.settings.select().where({ key }).first() as
+    { id?: number } | undefined;
+  if (row) {
+    slrd.db.settings.update({ value, updatedAtMs: now }).where({ key }).exec();
+  } else {
+    slrd.db.settings.insert({ key, value, updatedAtMs: now });
+  }
+}
+
+function cloneState(
+  state: HolderRewardDistributionState,
+): HolderRewardDistributionState {
+  return JSON.parse(JSON.stringify(state)) as HolderRewardDistributionState;
+}
+
+function migrateLegacyState(
+  slrd: Solard,
+  tokenMint: string,
+): HolderRewardDistributionState | null {
+  const rows = slrd.db.settings.select().all() as Array<{
+    key: string;
+    value: string;
+  }>;
+  const matches = rows
+    .filter((row) => row.key.startsWith("holder-reward-distribution:v3:"))
+    .map((row) => {
+      try {
+        return JSON.parse(row.value) as any;
+      } catch {
+        return null;
+      }
+    })
+    .filter(
+      (row): row is any => row?.version === 3 && row.tokenMint === tokenMint,
+    );
+  if (!matches.length) return null;
+  if (matches.length > 1) {
+    throw new Error(
+      `Token ${tokenMint} has multiple legacy reward distribution states. ` +
+        "They cannot be merged automatically into the single per-token distribution state.",
+    );
+  }
+  const legacy = matches[0]!;
+  const state: HolderRewardDistributionState = {
+    version: 4,
+    tokenMint,
+    sourceWallet: String(legacy.sourceWallet),
+    rewardAsset: legacy.rewardAsset,
+    status:
+      legacy.status === "complete" ||
+      legacy.status === "distributing" ||
+      legacy.status === "funding-required" ||
+      legacy.status === "uncertain"
+        ? legacy.status
+        : "ready",
+    recipients: Array.isArray(legacy.recipients)
+      ? legacy.recipients.map((row: any) => ({
+          wallet: String(row.wallet),
+          entitledRaw: String(row.entitledRaw),
+          confirmedPaidRaw: String(row.confirmedPaidRaw),
+        }))
+      : [],
+    snapshots: Array.isArray(legacy.snapshots)
+      ? legacy.snapshots.map((row: any) => ({
+          hash: String(row.hash),
+          totalEntitledRaw: String(
+            row.totalEntitledRaw ?? row.totalClaimedRaw ?? "0",
+          ),
+          recipientCount: Number(row.recipientCount ?? 0),
+          observedAtMs:
+            row.observedAtMs == null ? null : Number(row.observedAtMs),
+          acceptedAtMs: Number(row.acceptedAtMs ?? Date.now()),
+        }))
+      : [],
+    entitlementEvents: Array.isArray(legacy.entitlementEvents)
+      ? legacy.entitlementEvents.map((row: any) => ({
+          snapshotHash: String(row.snapshotHash ?? "legacy"),
+          wallet: String(row.wallet),
+          previousEntitledRaw: String(row.previousEntitledRaw),
+          entitledRaw: String(row.entitledRaw),
+          deltaRaw: String(row.deltaRaw),
+          acceptedAtMs: Number(row.acceptedAtMs ?? Date.now()),
+        }))
+      : [],
+    pending: legacy.pending ?? null,
+    receipts: Array.isArray(legacy.receipts) ? legacy.receipts : [],
+    reserveRaw: String(legacy.reserveRaw ?? "0"),
+    lastError: legacy.lastError ?? null,
+    uncertainReason: legacy.uncertainReason ?? null,
+    createdAtMs: Number(legacy.createdAtMs ?? Date.now()),
+    updatedAtMs: Number(legacy.updatedAtMs ?? Date.now()),
+  };
+  writeState(slrd, state);
+  return state;
 }
 
 function readState(
   slrd: Solard,
-  id: string,
+  tokenMint: string,
 ): HolderRewardDistributionState | null {
-  const row = slrd.db.settings
-    .select()
-    .where({ key: stateKey(id) })
-    .first() as { value?: string } | undefined;
-  if (!row?.value) return null;
-  const parsed = JSON.parse(row.value) as HolderRewardDistributionState;
-  if (parsed.version !== 1 || parsed.id !== id)
-    throw new Error(`Unsupported holder reward state for ${id}`);
+  const raw = readSetting(slrd, stateKey(tokenMint));
+  if (!raw) return migrateLegacyState(slrd, tokenMint);
+  const parsed = JSON.parse(raw) as HolderRewardDistributionState;
+  if (parsed.version !== 4 || parsed.tokenMint !== tokenMint)
+    throw new Error(`Unsupported holder reward state for token ${tokenMint}`);
   return parsed;
 }
 
@@ -142,29 +359,255 @@ function writeState(
   state: HolderRewardDistributionState,
 ): HolderRewardDistributionState {
   state.updatedAtMs = Date.now();
-  const value = JSON.stringify(state);
-  const row = slrd.db.settings
-    .select()
-    .where({ key: stateKey(state.id) })
-    .first() as { value?: string; updatedAtMs?: number } | undefined;
-  if (row) {
-    row.value = value;
-    row.updatedAtMs = state.updatedAtMs;
-  } else {
-    slrd.db.settings.insert({
-      key: stateKey(state.id),
-      value,
-      updatedAtMs: state.updatedAtMs,
-    });
-  }
+  writeSetting(slrd, stateKey(state.tokenMint), JSON.stringify(state));
   return state;
+}
+
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code ?? "")
+        : "";
+    return code === "EPERM";
+  }
+}
+
+function readRun(slrd: Solard, tokenMint: string): HolderRewardRunState | null {
+  const raw = readSetting(slrd, runKey(tokenMint));
+  if (!raw) return null;
+  const parsed = JSON.parse(raw) as HolderRewardRunState;
+  return parsed.version === 1 && parsed.tokenMint === tokenMint ? parsed : null;
+}
+
+function deleteRunIfMatches(
+  slrd: Solard,
+  tokenMint: string,
+  runId: string,
+): boolean {
+  const key = runKey(tokenMint);
+  const raw = readSetting(slrd, key);
+  if (!raw) return false;
+  const current = JSON.parse(raw) as HolderRewardRunState;
+  if (current.runId !== runId) return false;
+  slrd.db.settings.delete().where({ key, value: raw }).exec();
+  return true;
+}
+
+function acquireRun(slrd: Solard, tokenMint: string): HolderRewardRunState {
+  const key = runKey(tokenMint);
+  const existingRaw = readSetting(slrd, key);
+  if (existingRaw) {
+    const existing = JSON.parse(existingRaw) as HolderRewardRunState;
+    if (processAlive(existing.pid)) {
+      throw new Error(
+        `Reward distribution is already running for token ${tokenMint} ` +
+          `(pid=${existing.pid}, run=${existing.runId}). Stop it first with: ` +
+          `slrd rewards stop ${tokenMint}`,
+      );
+    }
+    slrd.db.settings.delete().where({ key, value: existingRaw }).exec();
+  }
+
+  const now = Date.now();
+  const run: HolderRewardRunState = {
+    version: 1,
+    tokenMint,
+    runId: randomUUID(),
+    pid: process.pid,
+    startedAtMs: now,
+    heartbeatAtMs: now,
+    stopRequested: false,
+  };
+  try {
+    slrd.db.settings.insert({
+      key,
+      value: JSON.stringify(run),
+      updatedAtMs: now,
+    });
+    return run;
+  } catch {
+    const winner = readRun(slrd, tokenMint);
+    if (winner) {
+      throw new Error(
+        `Reward distribution is already running for token ${tokenMint} ` +
+          `(pid=${winner.pid}, run=${winner.runId}). Stop it first with: ` +
+          `slrd rewards stop ${tokenMint}`,
+      );
+    }
+    throw new Error(
+      `Could not acquire reward distribution lock for ${tokenMint}`,
+    );
+  }
+}
+
+function heartbeatRun(
+  slrd: Solard,
+  run: HolderRewardRunState,
+): HolderRewardRunState {
+  const current = readRun(slrd, run.tokenMint);
+  if (!current || current.runId !== run.runId) {
+    throw new Error(
+      `Reward distribution lock for ${run.tokenMint} was lost while the distribution was running`,
+    );
+  }
+  current.heartbeatAtMs = Date.now();
+  writeSetting(slrd, runKey(run.tokenMint), JSON.stringify(current));
+  return current;
+}
+
+function stopRequested(slrd: Solard, run: HolderRewardRunState): boolean {
+  return heartbeatRun(slrd, run).stopRequested;
+}
+
+export function requestHolderRewardDistributionStop(
+  slrd: Solard,
+  tokenRef: TokenRef,
+): HolderRewardStopResult {
+  const tokenMint = slrd.resolveToken(tokenRef).mint;
+  const key = runKey(tokenMint);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const raw = readSetting(slrd, key);
+    if (!raw) {
+      return {
+        tokenMint,
+        running: false,
+        stopRequested: false,
+        staleLockCleared: false,
+        runId: null,
+        pid: null,
+      };
+    }
+    const current = JSON.parse(raw) as HolderRewardRunState;
+    if (!processAlive(current.pid)) {
+      slrd.db.settings.delete().where({ key, value: raw }).exec();
+      return {
+        tokenMint,
+        running: false,
+        stopRequested: false,
+        staleLockCleared: true,
+        runId: current.runId,
+        pid: current.pid,
+      };
+    }
+    current.stopRequested = true;
+    current.heartbeatAtMs = Date.now();
+    slrd.db.settings
+      .update({
+        value: JSON.stringify(current),
+        updatedAtMs: current.heartbeatAtMs,
+      })
+      .where({ key, value: raw })
+      .exec();
+    const verified = readRun(slrd, tokenMint);
+    if (verified?.runId === current.runId && verified.stopRequested) {
+      return {
+        tokenMint,
+        running: true,
+        stopRequested: true,
+        staleLockCleared: false,
+        runId: current.runId,
+        pid: current.pid,
+      };
+    }
+  }
+  throw new Error(
+    `Could not request stop for reward distribution ${tokenMint}`,
+  );
+}
+
+export function getHolderRewardDistributionRun(
+  slrd: Solard,
+  tokenRef: TokenRef,
+): HolderRewardRunState | null {
+  const tokenMint = slrd.resolveToken(tokenRef).mint;
+  const run = readRun(slrd, tokenMint);
+  if (!run) return null;
+  if (!processAlive(run.pid)) {
+    deleteRunIfMatches(slrd, tokenMint, run.runId);
+    return null;
+  }
+  return run;
 }
 
 export function getHolderRewardDistributionState(
   slrd: Solard,
-  id: string,
+  tokenRef: TokenRef,
 ): HolderRewardDistributionState | null {
-  return readState(slrd, id);
+  const tokenMint = slrd.resolveToken(tokenRef).mint;
+  return readState(slrd, tokenMint);
+}
+
+export function getHolderRewardDistributionAudit(
+  slrd: Solard,
+  tokenRef: TokenRef,
+  holderInput?: string | PublicKey,
+): HolderRewardDistributionAudit | null {
+  const state = getHolderRewardDistributionState(slrd, tokenRef);
+  if (!state) return null;
+  const holder =
+    holderInput == null
+      ? null
+      : holderInput instanceof PublicKey
+        ? holderInput.toBase58()
+        : new PublicKey(String(holderInput).trim()).toBase58();
+  const currentTotals = totals(state);
+  const recipients = state.recipients
+    .filter((row) => holder == null || row.wallet === holder)
+    .map((row): HolderRewardRecipientAudit => {
+      const entitledRaw = BigInt(row.entitledRaw);
+      const confirmedPaidRaw = BigInt(row.confirmedPaidRaw);
+      return {
+        wallet: row.wallet,
+        entitledRaw: row.entitledRaw,
+        confirmedPaidRaw: row.confirmedPaidRaw,
+        outstandingRaw: (entitledRaw - confirmedPaidRaw).toString(),
+        entitlementEvents: state.entitlementEvents
+          .filter((event) => event.wallet === row.wallet)
+          .map((event) => ({ ...event })),
+        payments: state.receipts.flatMap((receipt) =>
+          receipt.payments
+            .filter((payment) => payment.wallet === row.wallet)
+            .map((payment) => ({
+              signature: receipt.signature,
+              amountRaw: payment.amountRaw,
+              slot: receipt.slot,
+              confirmedAtMs: receipt.confirmedAtMs,
+            })),
+        ),
+      };
+    });
+  return {
+    version: 4,
+    tokenMint: state.tokenMint,
+    sourceWallet: state.sourceWallet,
+    rewardAsset: { ...state.rewardAsset },
+    status: state.status,
+    totalEntitledRaw: currentTotals.totalEntitledRaw.toString(),
+    totalConfirmedPaidRaw: currentTotals.totalConfirmedPaidRaw.toString(),
+    totalOutstandingRaw: currentTotals.totalOutstandingRaw.toString(),
+    pending: state.pending
+      ? {
+          ...state.pending,
+          payments: state.pending.payments.map((row) => ({ ...row })),
+        }
+      : null,
+    snapshots: state.snapshots.map((row) => ({ ...row })),
+    recipients,
+    receipts: state.receipts.map((receipt) => ({
+      ...receipt,
+      payments: receipt.payments.map((row) => ({ ...row })),
+    })),
+    lastError: state.lastError,
+    uncertainReason: state.uncertainReason,
+    createdAtMs: state.createdAtMs,
+    updatedAtMs: state.updatedAtMs,
+  };
 }
 
 function assetState(
@@ -189,6 +632,18 @@ function assetFromState(
         tokenProgram: new PublicKey(value.tokenProgram),
         decimals: value.decimals,
       };
+}
+
+function sameAssetState(
+  left: HolderRewardDistributionState["rewardAsset"],
+  right: HolderRewardDistributionState["rewardAsset"],
+): boolean {
+  return (
+    left.kind === right.kind &&
+    left.mint === right.mint &&
+    left.tokenProgram === right.tokenProgram &&
+    left.decimals === right.decimals
+  );
 }
 
 async function resolveRewardAsset(
@@ -227,172 +682,281 @@ async function assetBalance(
   );
 }
 
-function planId(args: {
-  tokenMint: string;
-  sourceWallet: string;
-  rewardMint: string;
-  rewardAmountRaw: bigint;
-  snapshotSlot: number;
-}): string {
-  return createHash("sha256")
-    .update(
-      [
-        "holder-reward-v1",
-        args.tokenMint,
-        args.sourceWallet,
-        args.rewardMint,
-        args.rewardAmountRaw.toString(),
-        String(args.snapshotSlot),
-      ].join(":"),
-    )
-    .digest("hex")
-    .slice(0, 24);
+function normalizeSnapshot(
+  input: HolderRewardEntitlementSnapshotInput,
+): NormalizedSnapshot {
+  const inputRecipients = Array.isArray(input) ? input : input.recipients;
+  if (!Array.isArray(inputRecipients))
+    throw new Error("snapshot recipients must be an array");
+  const recipients = inputRecipients.map((row, index) => {
+    if (!row) throw new Error(`snapshot recipient ${index + 1} is required`);
+    const wallet =
+      row.wallet instanceof PublicKey
+        ? row.wallet.toBase58()
+        : new PublicKey(String(row.wallet).trim()).toBase58();
+    return {
+      wallet,
+      entitledRaw: rawInteger(
+        row.entitledRaw,
+        `snapshot.recipients[${index}].entitledRaw`,
+      ),
+    };
+  });
+  const unique = new Set(recipients.map((row) => row.wallet));
+  if (unique.size !== recipients.length)
+    throw new Error("snapshot.recipients contains duplicate wallets");
+  recipients.sort((left, right) => left.wallet.localeCompare(right.wallet));
+  const derivedTotal = recipients.reduce(
+    (sum, row) => sum + row.entitledRaw,
+    0n,
+  );
+  const totalInput = Array.isArray(input) ? undefined : input.totalEntitledRaw;
+  const totalEntitledRaw =
+    totalInput == null
+      ? derivedTotal
+      : rawInteger(totalInput, "snapshot.totalEntitledRaw");
+  if (totalEntitledRaw !== derivedTotal) {
+    throw new Error(
+      `snapshot.totalEntitledRaw ${totalEntitledRaw} does not equal the sum of recipient entitlements ${derivedTotal}`,
+    );
+  }
+  const observedInput = Array.isArray(input) ? null : input.observedAtMs;
+  const observedAtMs = observedInput == null ? null : Number(observedInput);
+  if (
+    observedAtMs != null &&
+    (!Number.isFinite(observedAtMs) || observedAtMs < 0)
+  )
+    throw new Error("snapshot.observedAtMs must be a non-negative number");
+  const canonical = JSON.stringify({
+    recipients: recipients.map((row) => ({
+      wallet: row.wallet,
+      entitledRaw: row.entitledRaw.toString(),
+    })),
+    totalEntitledRaw: totalEntitledRaw.toString(),
+    observedAtMs,
+  });
+  return {
+    recipients,
+    totalEntitledRaw,
+    observedAtMs,
+    hash: createHash("sha256").update(canonical).digest("hex"),
+  };
 }
 
-function allocationsFromSnapshot(
-  snapshot: TokenHolderSnapshot,
-  rewardAmountRaw: bigint,
-): {
-  allocations: HolderRewardDistributionPlan["allocations"];
-  remainderRaw: bigint;
+function totals(state: HolderRewardDistributionState): {
+  totalEntitledRaw: bigint;
+  totalConfirmedPaidRaw: bigint;
+  totalOutstandingRaw: bigint;
 } {
-  if (snapshot.eligibleTotalRaw <= 0n)
-    throw new Error("Holder snapshot has no eligible token balance to reward");
-  const allocations: HolderRewardDistributionPlan["allocations"] = [];
-  let distributed = 0n;
-  for (let index = 0; index < snapshot.holders.length; index += 1) {
-    const holder = snapshot.holders[index]!;
-    const reward =
-      (rewardAmountRaw * holder.amountRaw) / snapshot.eligibleTotalRaw;
-    if (reward <= 0n) continue;
-    distributed += reward;
-    allocations.push({
-      id: `holder-${index + 1}`,
-      owner: holder.owner,
-      holderAmountRaw: holder.amountRaw,
-      rewardAmountRaw: reward,
+  let totalEntitledRaw = 0n;
+  let totalConfirmedPaidRaw = 0n;
+  for (const row of state.recipients) {
+    totalEntitledRaw += BigInt(row.entitledRaw);
+    totalConfirmedPaidRaw += BigInt(row.confirmedPaidRaw);
+  }
+  return {
+    totalEntitledRaw,
+    totalConfirmedPaidRaw,
+    totalOutstandingRaw: totalEntitledRaw - totalConfirmedPaidRaw,
+  };
+}
+
+function outstandingRecipients(
+  state: HolderRewardDistributionState,
+): HolderRewardOutstandingRecipient[] {
+  const rows: HolderRewardOutstandingRecipient[] = [];
+  for (const row of state.recipients) {
+    const entitledRaw = BigInt(row.entitledRaw);
+    const confirmedPaidRaw = BigInt(row.confirmedPaidRaw);
+    if (confirmedPaidRaw > entitledRaw) {
+      throw new Error(
+        `Reward state corruption for ${row.wallet}: confirmed paid exceeds entitlement`,
+      );
+    }
+    const outstandingRaw = entitledRaw - confirmedPaidRaw;
+    if (outstandingRaw <= 0n) continue;
+    rows.push({
+      wallet: row.wallet,
+      entitledRaw,
+      confirmedPaidRaw,
+      outstandingRaw,
     });
   }
-  if (!allocations.length)
-    throw new Error(
-      "Reward amount is too small to allocate at least one raw unit",
-    );
-  return { allocations, remainderRaw: rewardAmountRaw - distributed };
+  rows.sort((left, right) => {
+    if (left.outstandingRaw > right.outstandingRaw) return -1;
+    if (left.outstandingRaw < right.outstandingRaw) return 1;
+    return left.wallet.localeCompare(right.wallet);
+  });
+  return rows;
 }
 
-async function buildPlanFromAmount(args: {
+function refreshStatus(state: HolderRewardDistributionState): void {
+  if (state.status === "uncertain") return;
+  if (state.pending) {
+    state.status = "distributing";
+    return;
+  }
+  state.status = outstandingRecipients(state).length ? "ready" : "complete";
+}
+
+function applySnapshot(
+  state: HolderRewardDistributionState,
+  snapshot: NormalizedSnapshot,
+): void {
+  const alreadyAccepted = state.snapshots.find(
+    (row) => row.hash === snapshot.hash,
+  );
+  if (alreadyAccepted) return;
+
+  const snapshotWallets = new Set(snapshot.recipients.map((row) => row.wallet));
+  const missingExisting = state.recipients
+    .map((row) => row.wallet)
+    .filter((wallet) => !snapshotWallets.has(wallet));
+  if (missingExisting.length) {
+    throw new Error(
+      `Cumulative reward snapshot must include every previously entitled wallet; missing ${missingExisting.join(", ")}`,
+    );
+  }
+
+  const nextRecipients = state.recipients.map((row) => ({ ...row }));
+  const byWallet = new Map(nextRecipients.map((row) => [row.wallet, row]));
+  const acceptedAtMs = Date.now();
+  const events: HolderRewardEntitlementEvent[] = [];
+
+  for (const input of snapshot.recipients) {
+    const existing = byWallet.get(input.wallet);
+    const previous = existing ? BigInt(existing.entitledRaw) : 0n;
+    if (input.entitledRaw < previous) {
+      throw new Error(
+        `Cumulative entitlement for ${input.wallet} cannot decrease from ${previous} to ${input.entitledRaw}`,
+      );
+    }
+    if (!existing) {
+      const row: HolderRewardRecipientState = {
+        wallet: input.wallet,
+        entitledRaw: input.entitledRaw.toString(),
+        confirmedPaidRaw: "0",
+      };
+      nextRecipients.push(row);
+      byWallet.set(input.wallet, row);
+    } else {
+      existing.entitledRaw = input.entitledRaw.toString();
+    }
+    const deltaRaw = input.entitledRaw - previous;
+    if (deltaRaw > 0n) {
+      events.push({
+        snapshotHash: snapshot.hash,
+        wallet: input.wallet,
+        previousEntitledRaw: previous.toString(),
+        entitledRaw: input.entitledRaw.toString(),
+        deltaRaw: deltaRaw.toString(),
+        acceptedAtMs,
+      });
+    }
+  }
+
+  nextRecipients.sort((left, right) => left.wallet.localeCompare(right.wallet));
+  const totalEntitledRaw = nextRecipients.reduce(
+    (sum, row) => sum + BigInt(row.entitledRaw),
+    0n,
+  );
+  if (totalEntitledRaw !== snapshot.totalEntitledRaw) {
+    throw new Error(
+      `Cumulative holder entitlements ${totalEntitledRaw} do not match snapshot total ${snapshot.totalEntitledRaw}`,
+    );
+  }
+  const totalConfirmedPaidRaw = nextRecipients.reduce(
+    (sum, row) => sum + BigInt(row.confirmedPaidRaw),
+    0n,
+  );
+  if (totalConfirmedPaidRaw > totalEntitledRaw) {
+    throw new Error(
+      `Reward state corruption: confirmed paid ${totalConfirmedPaidRaw} exceeds entitlement ${totalEntitledRaw}`,
+    );
+  }
+
+  state.recipients = nextRecipients;
+  state.entitlementEvents.push(...events);
+  state.snapshots.push({
+    hash: snapshot.hash,
+    totalEntitledRaw: snapshot.totalEntitledRaw.toString(),
+    recipientCount: snapshot.recipients.length,
+    observedAtMs: snapshot.observedAtMs,
+    acceptedAtMs,
+  });
+  state.lastError = null;
+  state.uncertainReason = null;
+  refreshStatus(state);
+}
+
+function paymentCandidates(
+  rows: HolderRewardOutstandingRecipient[],
+  availableRaw: bigint,
+  recipientLimit = DEFAULT_CANDIDATE_RECIPIENTS,
+): TransferManyAllocation[] {
+  let remaining = availableRaw;
+  const allocations: TransferManyAllocation[] = [];
+  const limit = Math.max(1, Math.trunc(recipientLimit));
+  for (
+    let index = 0;
+    index < rows.length && remaining > 0n && allocations.length < limit;
+    index += 1
+  ) {
+    const row = rows[index]!;
+    const amountRaw =
+      row.outstandingRaw < remaining ? row.outstandingRaw : remaining;
+    if (amountRaw <= 0n) continue;
+    allocations.push({
+      id: `outstanding-${index + 1}`,
+      recipient: row.wallet,
+      amountRaw,
+    });
+    remaining -= amountRaw;
+  }
+  return allocations;
+}
+
+async function ensureState(args: {
   slrd: Solard;
   tokenMint: string;
   sourceWallet: string;
   rewardAsset: QuoteAsset;
-  rewardAmountRaw: bigint;
   reserveRaw: bigint;
-  excludeOwners?: Iterable<string | PublicKey>;
-  minimumHolderRaw?: bigint;
-  maxRecipientsPerTransaction?: number;
-  id?: string;
-}): Promise<HolderRewardDistributionPlan> {
-  if (args.rewardAmountRaw <= 0n)
-    throw new Error("Reward amount must be positive");
-  const token = args.slrd.resolveToken(args.tokenMint);
-  const snapshot = await snapshotTokenHolders(
-    args.slrd.connection(),
-    token.mint,
-    {
-      token,
-      excludeOwners: args.excludeOwners,
-      minimumRaw: args.minimumHolderRaw,
-    },
-  );
-  const { allocations, remainderRaw } = allocationsFromSnapshot(
-    snapshot,
-    args.rewardAmountRaw,
-  );
-  const transferPlan = await packTransferMany({
-    connection: args.slrd.connection(),
-    payer: args.sourceWallet,
-    asset: args.rewardAsset,
-    allocations: allocations.map((row): TransferManyAllocation => ({
-      id: row.id,
-      recipient: row.owner,
-      amountRaw: row.rewardAmountRaw,
-    })),
-    altAddresses: args.slrd.alts.list().map((row) => row.address),
-    priorityMicroLamports: 0,
-    maxRecipientsPerTransaction: args.maxRecipientsPerTransaction,
-  });
-  const id =
-    args.id ??
-    planId({
-      tokenMint: token.mint,
-      sourceWallet: args.sourceWallet,
-      rewardMint: args.rewardAsset.mint.toBase58(),
-      rewardAmountRaw: args.rewardAmountRaw,
-      snapshotSlot: snapshot.slot,
-    });
-  return {
-    version: 1,
-    id,
-    tokenMint: token.mint,
-    sourceWallet: args.sourceWallet,
-    claimFirst: false,
-    rewardAsset: assetState(args.rewardAsset),
-    rewardAmountRaw: args.rewardAmountRaw,
-    reserveRaw: args.reserveRaw,
-    snapshot,
-    allocations,
-    undistributedRemainderRaw: remainderRaw,
-    transferPlan,
-  };
-}
-
-/** Read-only plan. claimFirst uses the amount currently estimated as spendable by this wallet. */
-export async function planHolderRewardDistribution(
-  slrd: Solard,
-  options: HolderRewardPlanOptions,
-): Promise<HolderRewardDistributionPlan> {
-  const token = slrd.resolveToken(options.token);
-  const source = slrd.resolveWallet(options.wallet).address;
-  const reserveRaw = options.reserveRaw ?? 0n;
-  if (reserveRaw < 0n) throw new Error("reserveRaw cannot be negative");
-
-  let rewardAsset: QuoteAsset;
-  let rewardAmountRaw: bigint;
-  if (options.claimFirst) {
-    const claim = await slrd.resolveClaim(token, source);
-    if (claim.spendableByUserRaw <= reserveRaw) {
+}): Promise<HolderRewardDistributionState> {
+  const existing = readState(args.slrd, args.tokenMint);
+  const rewardAsset = assetState(args.rewardAsset);
+  if (existing) {
+    if (existing.sourceWallet !== args.sourceWallet) {
       throw new Error(
-        `Claim is not spendable by ${source.toBase58()} after reserve. ` +
-          `The Pump beneficiary must be the distribution wallet (or use a Fairfun distributor PDA).`,
+        `Token ${args.tokenMint} reward distribution already belongs to source wallet ${existing.sourceWallet}, not ${args.sourceWallet}`,
       );
     }
-    rewardAsset = claim.quoteAsset;
-    rewardAmountRaw = claim.spendableByUserRaw - reserveRaw;
-  } else {
-    rewardAsset = await resolveRewardAsset(
-      slrd,
-      token.mint,
-      options.rewardMint,
-    );
-    if (options.amountRaw == null)
-      throw new Error("amountRaw is required when claimFirst=false");
-    if (options.amountRaw <= reserveRaw)
-      throw new Error("Reward amount does not exceed reserveRaw");
-    rewardAmountRaw = options.amountRaw - reserveRaw;
+    if (!sameAssetState(existing.rewardAsset, rewardAsset)) {
+      throw new Error(
+        `Token ${args.tokenMint} reward distribution already uses reward mint ${existing.rewardAsset.mint}`,
+      );
+    }
+    existing.reserveRaw = args.reserveRaw.toString();
+    return existing;
   }
-
-  const plan = await buildPlanFromAmount({
-    slrd,
-    tokenMint: token.mint,
-    sourceWallet: source.toBase58(),
+  const now = Date.now();
+  return {
+    version: 4,
+    tokenMint: args.tokenMint,
+    sourceWallet: args.sourceWallet,
     rewardAsset,
-    rewardAmountRaw,
-    reserveRaw,
-    excludeOwners: options.excludeOwners,
-    minimumHolderRaw: options.minimumHolderRaw,
-    maxRecipientsPerTransaction: options.maxRecipientsPerTransaction,
-  });
-  return { ...plan, claimFirst: options.claimFirst === true };
+    status: "complete",
+    recipients: [],
+    snapshots: [],
+    entitlementEvents: [],
+    pending: null,
+    receipts: [],
+    reserveRaw: args.reserveRaw.toString(),
+    lastError: null,
+    uncertainReason: null,
+    createdAtMs: now,
+    updatedAtMs: now,
+  };
 }
 
 function signedPlanSignature(plan: {
@@ -407,29 +971,100 @@ function signedPlanSignature(plan: {
 async function reconcileSignature(
   slrd: Solard,
   pending: HolderRewardPendingTransaction,
-): Promise<"confirmed" | "failed" | "pending"> {
+): Promise<ReconcileOutcome> {
   const statuses = await slrd
     .connection()
     .getSignatureStatuses([pending.signature], {
       searchTransactionHistory: true,
     });
   const status = statuses.value[0];
-  if (status?.err) return "failed";
+  if (status?.err) return { kind: "failed", error: JSON.stringify(status.err) };
   if (
     status?.confirmationStatus === "confirmed" ||
     status?.confirmationStatus === "finalized" ||
     status?.confirmations === null
-  )
-    return "confirmed";
-
-  // A second proof path catches RPCs where signature-status history lags.
+  ) {
+    const receipt = await slrd.confirmSignature(
+      pending.signature,
+      pending.sender,
+    );
+    return receipt.status === "failed"
+      ? { kind: "failed", error: receipt.error ?? null }
+      : { kind: "confirmed", receipt };
+  }
+  if (status) return { kind: "seen-pending" };
   const tx = await slrd.connection().getParsedTransaction(pending.signature, {
     commitment: "confirmed",
     maxSupportedTransactionVersion: 0,
   });
-  if (tx?.meta?.err) return "failed";
-  if (tx?.meta) return "confirmed";
-  return "pending";
+  if (tx?.meta?.err)
+    return { kind: "failed", error: JSON.stringify(tx.meta.err) };
+  if (tx?.meta) return { kind: "confirmed", receipt: null };
+  const currentBlockHeight = await slrd
+    .connection()
+    .getBlockHeight("confirmed");
+  return { kind: "not-found", currentBlockHeight };
+}
+
+function signedTransactionBase64(transaction: VersionedTransaction): string {
+  return Buffer.from(transaction.serialize()).toString("base64");
+}
+
+function decodeSignedTransaction(base64: string): VersionedTransaction {
+  return VersionedTransaction.deserialize(Buffer.from(base64, "base64"));
+}
+
+async function broadcastPersistedTransaction(args: {
+  slrd: Solard;
+  state: HolderRewardDistributionState;
+  pending: HolderRewardPendingTransaction;
+  via?: SenderId;
+  skipPreflight?: boolean;
+}): Promise<void> {
+  const sender = String(args.via ?? args.pending.sender ?? "rpc");
+  args.pending.sender = sender;
+  args.pending.broadcastAttempts += 1;
+  args.pending.lastBroadcastAtMs = Date.now();
+  args.state.lastError = null;
+  writeState(args.slrd, args.state);
+  const transaction = decodeSignedTransaction(
+    args.pending.signedTransactionBase64,
+  );
+  const returned = await args.slrd.senders.resolve(sender).send({
+    connection: args.slrd.connection(),
+    transaction,
+    options: { skipPreflight: args.skipPreflight },
+  });
+  if (returned !== args.pending.signature) {
+    args.state.status = "uncertain";
+    args.state.uncertainReason = `Sender returned signature ${returned}, but persisted reward transaction signature is ${args.pending.signature}`;
+    args.state.lastError = args.state.uncertainReason;
+    writeState(args.slrd, args.state);
+    throw new Error(args.state.uncertainReason);
+  }
+}
+
+function applyConfirmedPayments(
+  state: HolderRewardDistributionState,
+  payments: HolderRewardPayment[],
+): void {
+  const byWallet = new Map(state.recipients.map((row) => [row.wallet, row]));
+  for (const payment of payments) {
+    const row = byWallet.get(payment.wallet);
+    if (!row)
+      throw new Error(
+        `Reward state corruption: payment recipient ${payment.wallet} has no entitlement row`,
+      );
+    const next = BigInt(row.confirmedPaidRaw) + BigInt(payment.amountRaw);
+    const entitled = BigInt(row.entitledRaw);
+    if (next > entitled) {
+      throw new Error(
+        `Reward state corruption for ${payment.wallet}: confirmed payment would exceed entitlement`,
+      );
+    }
+    row.confirmedPaidRaw = next.toString();
+  }
+  refreshStatus(state);
 }
 
 function recordReceipt(
@@ -438,314 +1073,357 @@ function recordReceipt(
   receipt: SendReceipt | null,
 ): void {
   state.receipts.push({
-    kind: pending.kind,
+    kind: "distribution",
     signature: pending.signature,
-    allocationIds: [...pending.allocationIds],
+    sender: pending.sender,
+    payments: pending.payments.map((row) => ({ ...row })),
     slot: receipt?.slot ?? null,
     feeLamports: receipt?.feeLamports ?? null,
     confirmedAtMs: Date.now(),
   });
 }
 
-async function initializeDistributionAfterClaim(args: {
+async function buildPlan(args: {
   slrd: Solard;
   state: HolderRewardDistributionState;
-  excludeOwners?: Iterable<string | PublicKey>;
-  minimumHolderRaw?: bigint;
-}): Promise<void> {
-  const amountRaw = BigInt(args.state.rewardAmountRaw ?? "0");
-  if (amountRaw <= 0n) {
-    args.state.status = "complete";
-    writeState(args.slrd, args.state);
-    return;
+  snapshotHash: string;
+  maxRecipientsPerTransaction?: number;
+}): Promise<HolderRewardDistributionPlan> {
+  const rewardAsset = assetFromState(args.state.rewardAsset);
+  const source = new PublicKey(args.state.sourceWallet);
+  const sourceBalanceRaw = await assetBalance(args.slrd, source, rewardAsset);
+  const reserveRaw = BigInt(args.state.reserveRaw);
+  const availableRaw =
+    sourceBalanceRaw > reserveRaw ? sourceBalanceRaw - reserveRaw : 0n;
+  const outstanding = outstandingRecipients(args.state);
+  const currentTotals = totals(args.state);
+  let nextPayments: HolderRewardDistributionPlan["nextPayments"] = [];
+  let transferPlan: PackedTransferPlan | null = null;
+  if (
+    !args.state.pending &&
+    args.state.status !== "uncertain" &&
+    outstanding.length &&
+    availableRaw > 0n
+  ) {
+    const allocations = paymentCandidates(
+      outstanding,
+      availableRaw,
+      args.maxRecipientsPerTransaction ?? DEFAULT_CANDIDATE_RECIPIENTS,
+    );
+    if (allocations.length) {
+      transferPlan = await packTransferMany({
+        connection: args.slrd.connection(),
+        payer: source,
+        asset: rewardAsset,
+        allocations,
+        altAddresses: args.slrd.alts.list().map((row) => row.address),
+        priorityMicroLamports: 0,
+        maxRecipientsPerTransaction: args.maxRecipientsPerTransaction,
+      });
+      nextPayments =
+        transferPlan.batches[0]?.allocations.map((row) => ({
+          id: row.id,
+          recipient: row.recipient,
+          amountRaw: row.amountRaw,
+        })) ?? [];
+    }
   }
-  const token = args.slrd.resolveToken(args.state.tokenMint);
-  const snapshot = await snapshotTokenHolders(
-    args.slrd.connection(),
-    token.mint,
-    {
-      token,
-      excludeOwners: args.excludeOwners,
-      minimumRaw: args.minimumHolderRaw,
-    },
-  );
-  const { allocations } = allocationsFromSnapshot(snapshot, amountRaw);
-  args.state.snapshot = {
-    slot: snapshot.slot,
-    observedAtMs: snapshot.observedAtMs,
-    holderCount: snapshot.holderCount,
-    eligibleHolderCount: snapshot.eligibleHolderCount,
-    eligibleTotalRaw: snapshot.eligibleTotalRaw.toString(),
-    excludedTotalRaw: snapshot.excludedTotalRaw.toString(),
+  return {
+    version: 4,
+    tokenMint: args.state.tokenMint,
+    sourceWallet: args.state.sourceWallet,
+    rewardAsset: args.state.rewardAsset,
+    snapshotHash: args.snapshotHash,
+    totalEntitledRaw: currentTotals.totalEntitledRaw,
+    totalConfirmedPaidRaw: currentTotals.totalConfirmedPaidRaw,
+    totalOutstandingRaw: currentTotals.totalOutstandingRaw,
+    sourceBalanceRaw,
+    availableRaw,
+    reserveRaw,
+    outstanding,
+    nextPayments,
+    transferPlan,
+    pending: args.state.pending,
   };
-  args.state.allocations = allocations.map((row) => ({
-    id: row.id,
-    owner: row.owner,
-    holderAmountRaw: row.holderAmountRaw.toString(),
-    rewardAmountRaw: row.rewardAmountRaw.toString(),
-    paid: false,
-  }));
-  args.state.status = "planned";
-  writeState(args.slrd, args.state);
 }
 
-/**
- * Idempotent claim -> snapshot -> batched distribution executor.
- *
- * A stable caller-supplied id is mandatory. Before every broadcast the signed
- * transaction signature and exact allocation ids are persisted. On restart we
- * reconcile that signature before any new payment can be built, preventing a
- * crash between landing and local bookkeeping from double-paying holders.
- */
+export async function planHolderRewardDistribution(
+  slrd: Solard,
+  options: HolderRewardPlanOptions,
+): Promise<HolderRewardDistributionPlan> {
+  const token = slrd.resolveToken(options.token);
+  const source = slrd.resolveWallet(options.wallet).address;
+  const reserveRaw = options.reserveRaw ?? 0n;
+  if (reserveRaw < 0n) throw new Error("reserveRaw cannot be negative");
+  const rewardAsset = await resolveRewardAsset(
+    slrd,
+    token.mint,
+    options.rewardMint,
+  );
+  const current = await ensureState({
+    slrd,
+    tokenMint: token.mint,
+    sourceWallet: source.toBase58(),
+    rewardAsset,
+    reserveRaw,
+  });
+  const preview = cloneState(current);
+  const snapshot = normalizeSnapshot(options.snapshot);
+  applySnapshot(preview, snapshot);
+  return await buildPlan({
+    slrd,
+    state: preview,
+    snapshotHash: snapshot.hash,
+    maxRecipientsPerTransaction: options.maxRecipientsPerTransaction,
+  });
+}
+
+async function waitForPending(args: {
+  slrd: Solard;
+  state: HolderRewardDistributionState;
+  run: HolderRewardRunState;
+  via?: SenderId;
+  skipPreflight?: boolean;
+}): Promise<"confirmed" | "stopped"> {
+  const pending = args.state.pending;
+  if (!pending)
+    throw new Error("Internal reward state error: no pending transaction");
+
+  while (true) {
+    if (stopRequested(args.slrd, args.run)) {
+      args.state.status = "stopped";
+      writeState(args.slrd, args.state);
+      return "stopped";
+    }
+
+    const outcome = await reconcileSignature(args.slrd, pending);
+    if (outcome.kind === "confirmed") {
+      applyConfirmedPayments(args.state, pending.payments);
+      recordReceipt(args.state, pending, outcome.receipt);
+      args.state.pending = null;
+      args.state.lastError = null;
+      args.state.uncertainReason = null;
+      refreshStatus(args.state);
+      writeState(args.slrd, args.state);
+      return "confirmed";
+    }
+    if (outcome.kind === "failed") {
+      args.state.pending = null;
+      args.state.status = "ready";
+      args.state.lastError =
+        outcome.error ?? "Reward transaction failed on-chain";
+      args.state.uncertainReason = null;
+      writeState(args.slrd, args.state);
+      throw new Error(args.state.lastError);
+    }
+    if (outcome.kind === "not-found") {
+      if (outcome.currentBlockHeight > pending.lastValidBlockHeight) {
+        args.state.status = "uncertain";
+        args.state.uncertainReason =
+          `Reward transaction ${pending.signature} was not found after blockhash expiry ` +
+          `(current=${outcome.currentBlockHeight}, lastValid=${pending.lastValidBlockHeight}). ` +
+          "No replacement payment will be built until that signature is resolved.";
+        args.state.lastError = args.state.uncertainReason;
+        writeState(args.slrd, args.state);
+        throw new Error(args.state.uncertainReason);
+      }
+      if (
+        pending.broadcastAttempts === 0 ||
+        pending.lastBroadcastAtMs == null ||
+        Date.now() - pending.lastBroadcastAtMs >= PENDING_POLL_MS
+      ) {
+        await broadcastPersistedTransaction({
+          slrd: args.slrd,
+          state: args.state,
+          pending,
+          via: args.via,
+          skipPreflight: args.skipPreflight,
+        });
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, PENDING_POLL_MS));
+  }
+}
+
+async function driveDistribution(args: {
+  slrd: Solard;
+  state: HolderRewardDistributionState;
+  run: HolderRewardRunState;
+  wallet: WalletRef;
+  via?: SenderId;
+  maxRecipientsPerTransaction?: number;
+  skipSimulation?: boolean;
+  skipPreflight?: boolean;
+}): Promise<HolderRewardDistributionState> {
+  const source = args.slrd.resolveWallet(args.wallet).address;
+  if (source.toBase58() !== args.state.sourceWallet) {
+    throw new Error(
+      `Token ${args.state.tokenMint} reward distribution belongs to source wallet ${args.state.sourceWallet}, not ${source.toBase58()}`,
+    );
+  }
+  const rewardAsset = assetFromState(args.state.rewardAsset);
+  const reserveRaw = BigInt(args.state.reserveRaw);
+
+  if (args.state.pending) {
+    const result = await waitForPending({
+      slrd: args.slrd,
+      state: args.state,
+      run: args.run,
+      via: args.via,
+      skipPreflight: args.skipPreflight,
+    });
+    if (result === "stopped") return args.state;
+  }
+
+  while (true) {
+    if (stopRequested(args.slrd, args.run)) {
+      args.state.status = "stopped";
+      writeState(args.slrd, args.state);
+      return args.state;
+    }
+
+    const outstanding = outstandingRecipients(args.state);
+    if (!outstanding.length) {
+      args.state.status = "complete";
+      args.state.lastError = null;
+      writeState(args.slrd, args.state);
+      return args.state;
+    }
+
+    const balanceRaw = await assetBalance(args.slrd, source, rewardAsset);
+    const availableRaw = balanceRaw > reserveRaw ? balanceRaw - reserveRaw : 0n;
+    if (availableRaw <= 0n) {
+      args.state.status = "funding-required";
+      const remaining = totals(args.state).totalOutstandingRaw;
+      args.state.lastError =
+        `Reward distribution for ${args.state.tokenMint} still owes ${remaining} raw units, ` +
+        `but source wallet ${args.state.sourceWallet} has no distributable ${args.state.rewardAsset.mint} balance.`;
+      writeState(args.slrd, args.state);
+      throw new Error(args.state.lastError);
+    }
+
+    const allocations = paymentCandidates(
+      outstanding,
+      availableRaw,
+      args.maxRecipientsPerTransaction ?? DEFAULT_CANDIDATE_RECIPIENTS,
+    );
+    const packed = await packTransferMany({
+      connection: args.slrd.connection(),
+      payer: source,
+      asset: rewardAsset,
+      allocations,
+      altAddresses: args.slrd.alts.list().map((row) => row.address),
+      priorityMicroLamports: 0,
+      maxRecipientsPerTransaction: args.maxRecipientsPerTransaction,
+    });
+    const next = packed.batches[0];
+    if (!next)
+      throw new Error(
+        "No transfer batch could be built for outstanding rewards",
+      );
+
+    const compiled = await args.slrd.compile(
+      args.slrd.signer(args.wallet),
+      next.draft,
+    );
+    if (!args.skipSimulation) {
+      const simulation = await args.slrd.simulatePlan(compiled);
+      if (!simulation.success) {
+        throw new Error(
+          `Reward distribution simulation failed: ${JSON.stringify(simulation.error)}\n${simulation.logs.join("\n")}`,
+        );
+      }
+    }
+
+    if (stopRequested(args.slrd, args.run)) {
+      args.state.status = "stopped";
+      writeState(args.slrd, args.state);
+      return args.state;
+    }
+
+    const signature = signedPlanSignature(compiled);
+    const pending: HolderRewardPendingTransaction = {
+      kind: "distribution",
+      signature,
+      sender: String(args.via ?? "rpc"),
+      recentBlockhash: compiled.recentBlockhash,
+      lastValidBlockHeight: compiled.lastValidBlockHeight,
+      payments: next.allocations.map((row) => ({
+        wallet: row.recipient,
+        amountRaw: row.amountRaw.toString(),
+      })),
+      signedTransactionBase64: signedTransactionBase64(compiled.transaction),
+      broadcastAttempts: 0,
+      lastBroadcastAtMs: null,
+      createdAtMs: Date.now(),
+    };
+    args.state.status = "distributing";
+    args.state.pending = pending;
+    args.state.lastError = null;
+    args.state.uncertainReason = null;
+    writeState(args.slrd, args.state);
+
+    if (stopRequested(args.slrd, args.run)) {
+      args.state.status = "stopped";
+      writeState(args.slrd, args.state);
+      return args.state;
+    }
+
+    await broadcastPersistedTransaction({
+      slrd: args.slrd,
+      state: args.state,
+      pending,
+      via: args.via,
+      skipPreflight: args.skipPreflight,
+    });
+
+    const result = await waitForPending({
+      slrd: args.slrd,
+      state: args.state,
+      run: args.run,
+      via: args.via,
+      skipPreflight: args.skipPreflight,
+    });
+    if (result === "stopped") return args.state;
+  }
+}
+
 export async function executeHolderRewardDistribution(
   slrd: Solard,
   options: ExecuteHolderRewardDistributionOptions,
 ): Promise<HolderRewardDistributionState> {
-  const id = options.id.trim();
-  if (!id) throw new Error("A stable distribution id is required");
   const token = slrd.resolveToken(options.token);
-  const wallet = slrd.resolveWallet(options.wallet);
-  const source = wallet.address;
-  const reserveRaw = options.reserveRaw ?? 0n;
-  if (reserveRaw < 0n) throw new Error("reserveRaw cannot be negative");
-
-  let state = readState(slrd, id);
-  if (state) {
-    if (
-      state.tokenMint !== token.mint ||
-      state.sourceWallet !== source.toBase58()
-    ) {
-      throw new Error(
-        `Distribution id ${id} already belongs to another token/source wallet`,
-      );
-    }
-  } else if (options.claimFirst) {
-    const claim = await slrd.resolveClaim(token, source);
-    if (claim.spendableByUserRaw <= 0n) {
-      throw new Error(
-        `Pump claim output is not spendable by ${source.toBase58()}. ` +
-          `Use the configured beneficiary as --wallet, or a Fairfun distributor PDA for unattended payouts.`,
-      );
-    }
-    const beforeRaw = await assetBalance(slrd, source, claim.quoteAsset);
-    state = writeState(slrd, {
-      version: 1,
-      id,
-      tokenMint: token.mint,
-      sourceWallet: source.toBase58(),
-      rewardAsset: assetState(claim.quoteAsset),
-      status: "claiming",
-      claimFirst: true,
-      claimSignature: null,
-      claimBeforeRaw: beforeRaw.toString(),
-      rewardAmountRaw: null,
-      reserveRaw: reserveRaw.toString(),
-      snapshot: null,
-      allocations: [],
-      pending: null,
-      receipts: [],
-      createdAtMs: Date.now(),
-      updatedAtMs: Date.now(),
-    });
-  } else {
+  const run = acquireRun(slrd, token.mint);
+  try {
+    const source = slrd.resolveWallet(options.wallet).address;
+    const reserveRaw = options.reserveRaw ?? 0n;
+    if (reserveRaw < 0n) throw new Error("reserveRaw cannot be negative");
     const rewardAsset = await resolveRewardAsset(
       slrd,
       token.mint,
       options.rewardMint,
     );
-    if (options.amountRaw == null || options.amountRaw <= reserveRaw)
-      throw new Error("A positive amountRaw above reserveRaw is required");
-    const amountRaw = options.amountRaw - reserveRaw;
-    const balance = await assetBalance(slrd, source, rewardAsset);
-    if (balance < amountRaw)
-      throw new Error(
-        `Reward wallet balance ${balance} is below requested distribution ${amountRaw}`,
-      );
-    const plan = await buildPlanFromAmount({
+    const state = await ensureState({
       slrd,
       tokenMint: token.mint,
       sourceWallet: source.toBase58(),
       rewardAsset,
-      rewardAmountRaw: amountRaw,
       reserveRaw,
-      excludeOwners: options.excludeOwners,
-      minimumHolderRaw: options.minimumHolderRaw,
-      maxRecipientsPerTransaction: options.maxRecipientsPerTransaction,
-      id,
     });
-    state = writeState(slrd, {
-      version: 1,
-      id,
-      tokenMint: token.mint,
-      sourceWallet: source.toBase58(),
-      rewardAsset: plan.rewardAsset,
-      status: "planned",
-      claimFirst: false,
-      claimSignature: null,
-      claimBeforeRaw: null,
-      rewardAmountRaw: plan.rewardAmountRaw.toString(),
-      reserveRaw: reserveRaw.toString(),
-      snapshot: {
-        slot: plan.snapshot.slot,
-        observedAtMs: plan.snapshot.observedAtMs,
-        holderCount: plan.snapshot.holderCount,
-        eligibleHolderCount: plan.snapshot.eligibleHolderCount,
-        eligibleTotalRaw: plan.snapshot.eligibleTotalRaw.toString(),
-        excludedTotalRaw: plan.snapshot.excludedTotalRaw.toString(),
-      },
-      allocations: plan.allocations.map((row) => ({
-        id: row.id,
-        owner: row.owner,
-        holderAmountRaw: row.holderAmountRaw.toString(),
-        rewardAmountRaw: row.rewardAmountRaw.toString(),
-        paid: false,
-      })),
-      pending: null,
-      receipts: [],
-      createdAtMs: Date.now(),
-      updatedAtMs: Date.now(),
-    });
-  }
-
-  // Reconcile any transaction whose signature was persisted before a prior process exited.
-  if (state.pending) {
-    const outcome = await reconcileSignature(slrd, state.pending);
-    if (outcome === "pending") {
-      throw new Error(
-        `Distribution ${id} is waiting for transaction ${state.pending.signature}; ` +
-          "no new transfer will be submitted until its outcome is known.",
-      );
-    }
-    if (outcome === "confirmed") {
-      if (state.pending.kind === "claim") {
-        state.claimSignature = state.pending.signature;
-      } else {
-        const paid = new Set(state.pending.allocationIds);
-        for (const allocation of state.allocations)
-          if (paid.has(allocation.id)) allocation.paid = true;
-      }
-      recordReceipt(state, state.pending, null);
-    }
-    // Failed on-chain transactions did not move reward funds and may be rebuilt.
-    state.pending = null;
+    const snapshot = normalizeSnapshot(options.snapshot);
+    applySnapshot(state, snapshot);
     writeState(slrd, state);
-  }
-
-  if (state.status === "claiming") {
-    if (!state.claimSignature) {
-      const claimTx = await slrd.tx(options.wallet).claimFees(token).build();
-      const signature = signedPlanSignature(claimTx);
-      state.pending = {
-        kind: "claim",
-        signature,
-        lastValidBlockHeight: claimTx.lastValidBlockHeight,
-        allocationIds: [],
-        createdAtMs: Date.now(),
-      };
-      writeState(slrd, state);
-      const receipt = await slrd.sendPlan(
-        claimTx,
-        options.via ?? "rpc",
-        `holder-reward:${id}:claim`,
-        {
-          skipSimulation: options.skipSimulation,
-          skipPreflight: options.skipPreflight,
-        },
-      );
-      if (receipt.status !== "confirmed") {
-        throw new Error(
-          `Reward claim ${signature} did not confirm: ${receipt.error ?? receipt.status}`,
-        );
-      }
-      state.claimSignature = signature;
-      recordReceipt(state, state.pending, receipt);
-      state.pending = null;
-      writeState(slrd, state);
-    }
-
-    const rewardAsset = assetFromState(state.rewardAsset);
-    const afterRaw = await assetBalance(slrd, source, rewardAsset);
-    const beforeRaw = BigInt(state.claimBeforeRaw ?? "0");
-    const delta = afterRaw - beforeRaw;
-    const usable = delta - BigInt(state.reserveRaw);
-    if (usable <= 0n) {
-      throw new Error(
-        `Claim ${state.claimSignature} confirmed but produced no distributable wallet delta after reserve`,
-      );
-    }
-    state.rewardAmountRaw = usable.toString();
-    await initializeDistributionAfterClaim({
+    return await driveDistribution({
       slrd,
       state,
-      excludeOwners: options.excludeOwners,
-      minimumHolderRaw: options.minimumHolderRaw,
-    });
-  }
-
-  while (state.status !== "complete") {
-    const remaining = state.allocations.filter((row) => !row.paid);
-    if (!remaining.length) {
-      state.status = "complete";
-      writeState(slrd, state);
-      break;
-    }
-    const rewardAsset = assetFromState(state.rewardAsset);
-    const packed = await packTransferMany({
-      connection: slrd.connection(),
-      payer: source,
-      asset: rewardAsset,
-      allocations: remaining.map((row) => ({
-        id: row.id,
-        recipient: row.owner,
-        amountRaw: BigInt(row.rewardAmountRaw),
-      })),
-      altAddresses: slrd.alts.list().map((row) => row.address),
-      priorityMicroLamports: 0,
+      run,
+      wallet: options.wallet,
+      via: options.via,
       maxRecipientsPerTransaction: options.maxRecipientsPerTransaction,
+      skipSimulation: options.skipSimulation,
+      skipPreflight: options.skipPreflight,
     });
-    const next = packed.batches[0];
-    if (!next)
-      throw new Error("No transfer batch could be built for unpaid holders");
-    const compiled = await slrd.compile(
-      slrd.signer(options.wallet),
-      next.draft,
-    );
-    const signature = signedPlanSignature(compiled);
-    const allocationIds = next.allocations.map((row) => row.id);
-    state.status = "distributing";
-    state.pending = {
-      kind: "distribution",
-      signature,
-      lastValidBlockHeight: compiled.lastValidBlockHeight,
-      allocationIds,
-      createdAtMs: Date.now(),
-    };
-    writeState(slrd, state);
-
-    const receipt = await slrd.sendPlan(
-      compiled,
-      options.via ?? "rpc",
-      `holder-reward:${id}:distribution`,
-      {
-        skipSimulation: options.skipSimulation,
-        skipPreflight: options.skipPreflight,
-      },
-    );
-    if (receipt.status !== "confirmed") {
-      throw new Error(
-        `Reward distribution transaction ${signature} did not confirm: ${receipt.error ?? receipt.status}`,
-      );
-    }
-    const paid = new Set(allocationIds);
-    for (const allocation of state.allocations)
-      if (paid.has(allocation.id)) allocation.paid = true;
-    recordReceipt(state, state.pending, receipt);
-    state.pending = null;
-    state.status = state.allocations.every((row) => row.paid)
-      ? "complete"
-      : "distributing";
-    writeState(slrd, state);
+  } finally {
+    deleteRunIfMatches(slrd, token.mint, run.runId);
   }
-
-  return state;
 }

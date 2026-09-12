@@ -1,6 +1,6 @@
 {
   "name": "@solard/cli",
-  "version": "0.2.13",
+  "version": "0.2.16",
   "description": "Command-line interface for the Solard SDK.",
   "type": "module",
   "main": "./src/index.ts",
@@ -18,9 +18,10 @@
     "bun": ">=1.1.0"
   },
   "dependencies": {
-    "@solard/sdk": "0.2.13",
+    "@solard/sdk": "0.2.16",
     "bs58": "^6.0.0",
-    "@solana/web3.js": "^1.98.4"
+    "@solana/web3.js": "^1.98.4",
+    "measure-fn": "5.2.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ../../tsconfig.json"

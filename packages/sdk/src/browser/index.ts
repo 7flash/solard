@@ -21,6 +21,11 @@ export {
 export { BrowserKeyVault, KeypairBrowserSigner } from "./wallet.ts";
 export { buildLocalPumpBuy, buildLocalPumpSell } from "./pump.ts";
 export {
+  getSupportedPumpPairs,
+  PumpPairService,
+} from "@solard/core/launches/pump/pairs.ts";
+export type { PumpSupportedPair } from "@solard/core/launches/pump/pairs.ts";
+export {
   PUMP_USDC_MINT,
   buildPumpExternalDeployment,
   resolvePumpQuoteAsset,
@@ -39,9 +44,12 @@ export type {
 } from "@solard/core/chain/holders.ts";
 export { subscribeTokenEvents } from "@solard/core/events/token-events.ts";
 export type {
+  SolardTokenCreateEvent,
   SolardTokenEvent,
   SolardTokenSwapEvent,
   SolardTokenTransferEvent,
+  SolardTokenTransferMovement,
+  SolardTokenTransferSource,
   SubscribeTokenEventsOptions,
   TokenEventSubscription,
 } from "@solard/core/events/token-events.ts";
