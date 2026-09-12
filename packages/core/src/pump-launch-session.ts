@@ -468,16 +468,16 @@ export async function waitForPumpLaunchFireAcknowledged(
   );
 }
 
-export function markPumpDeploymentBroadcast(
+export function markPumpDeploymentSubmitted(
   sessionId: string,
   signature: string,
 ): PumpLaunchSessionDbRow {
   return updateSessionFields(
     sessionId,
     {
-      status: "deployment-broadcast",
+      status: "deployment-submitted",
 
-      deploymentStatus: "broadcast",
+      deploymentStatus: "submitted",
 
       deploymentSignature: signature,
 

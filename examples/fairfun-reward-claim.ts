@@ -57,7 +57,7 @@ async function main(): Promise<void> {
     } catch {
       await slrd.addToken(token);
     }
-    const result = await slrd.rewards.claim(token, wallet, {
+    const result = await slrd.claims.creatorFees.claim(token, wallet, {
       id,
       basis: basis(basisPath),
       via: flags.get("sender") ?? "rpc",

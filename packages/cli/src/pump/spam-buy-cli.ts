@@ -13,7 +13,7 @@ import {
   type PumpSpamBuyRunResult,
   type PumpSpamBuySettings,
   type SenderId,
-} from "@solard/sdk";
+} from "@solard/core";
 import {
   bigintFlag,
   enabled,

@@ -1,4 +1,4 @@
-import type { VenuePreference } from "@solard/sdk";
+import type { VenuePreference } from "@solard/core";
 
 export type TradeCommandFlags = ReadonlyMap<string, string>;
 

@@ -400,7 +400,7 @@ async function runBuyerLoop(args: {
 
       if (!active) throw new Error("Buyer plan was not built");
 
-      const submitted: SubmittedPlan = await args.slrd.broadcastPlan(
+      const submitted: SubmittedPlan = await args.slrd.submitPlan(
         active,
         settings.sender,
         `cli:spam-buy:pump:${args.buyer.address}`,

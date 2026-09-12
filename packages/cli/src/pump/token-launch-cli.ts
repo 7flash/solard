@@ -44,7 +44,7 @@ import {
   type TokenMetadata,
   type TraderSubmitMode,
   type VanityMintPoolReservation,
-} from "@solard/sdk";
+} from "@solard/core";
 
 export type Flags = Map<string, string[]>;
 
@@ -1697,7 +1697,7 @@ export async function runPumpTokenLaunchFromArgs(
       spam,
       kind: `cli:launch:pump:${input.alias}`,
       reporter: report,
-      beforeDeploymentBroadcast:
+      beforeDeploymentSubmission:
         armedEndpoints.length > 0
           ? async () => {
               await releaseArmedBuyerEndpoints({
@@ -1709,7 +1709,7 @@ export async function runPumpTokenLaunchFromArgs(
               });
             }
           : undefined,
-      onDeploymentBroadcastFailure:
+      onDeploymentSubmissionFailure:
         armedEndpoints.length > 0
           ? async (error) => {
               await abortArmedBuyerEndpoints({

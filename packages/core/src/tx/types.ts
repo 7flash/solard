@@ -73,7 +73,7 @@ export type SendReceipt = {
   signature: string;
   slot: number | null;
   sender: string;
-  status: "broadcast" | "confirmed" | "failed";
+  status: "submitted" | "confirmed" | "failed";
   /** Actual fee charged by the cluster, populated after transaction metadata is available. */
   feeLamports?: number;
   /** Actual compute units consumed, populated when returned by transaction metadata. */

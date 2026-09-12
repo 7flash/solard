@@ -15,7 +15,7 @@ import {
   tokenAmount,
   type Solard,
   type TradeAsset,
-} from "@solard/sdk";
+} from "@solard/core";
 
 type Flags = Map<string, string>;
 type Emit = (value: string) => void;

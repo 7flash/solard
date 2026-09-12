@@ -5,7 +5,7 @@ import {
   buildPumpExternalDeployment,
   createTraderSolard,
   type PumpExternalDeploymentBuild,
-} from "@solard/sdk";
+} from "@solard/core";
 
 export type ExternalPumpFlags = Map<string, string>;
 

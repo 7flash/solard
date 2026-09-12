@@ -71,8 +71,8 @@ export type DurableCreatorRewardClaimPending = {
   recentBlockhash: string;
   lastValidBlockHeight: number;
   signedTransactionBase64: string;
-  broadcastAttempts: number;
-  lastBroadcastAtMs: number | null;
+  submissionAttempts: number;
+  lastSubmittedAtMs: number | null;
   createdAtMs: number;
 };
 
@@ -89,7 +89,7 @@ export type DurableCreatorRewardClaimState = {
     shareBps: number | null;
   }>;
   basis: RewardEntitlementBasis | null;
-  status: "prepared" | "broadcast" | "confirmed" | "failed" | "uncertain";
+  status: "prepared" | "submitted" | "confirmed" | "failed" | "uncertain";
   pending: DurableCreatorRewardClaimPending | null;
   checkpoint: CreatorRewardClaimCheckpoint | null;
   lastError: string | null;
@@ -162,10 +162,36 @@ function readClaimState(
 ): DurableCreatorRewardClaimState | null {
   const raw = settingValue(slrd, claimStateKey(id));
   if (!raw) return null;
-  const state = JSON.parse(raw) as DurableCreatorRewardClaimState;
+  const state = JSON.parse(raw) as Omit<
+    DurableCreatorRewardClaimState,
+    "status" | "pending"
+  > & {
+    status: DurableCreatorRewardClaimState["status"] | "broadcast";
+    pending:
+      | (Omit<
+          DurableCreatorRewardClaimPending,
+          "submissionAttempts" | "lastSubmittedAtMs"
+        > & {
+          submissionAttempts?: number;
+          lastSubmittedAtMs?: number | null;
+          broadcastAttempts?: number;
+          lastBroadcastAtMs?: number | null;
+        })
+      | null;
+  };
   if (state.version !== 1 || state.id !== id)
     throw new Error(`Unsupported creator reward claim state for ${id}`);
-  return state;
+  if (state.status === "broadcast") state.status = "submitted";
+  if (state.pending) {
+    const pending = state.pending;
+    if (!Number.isFinite(pending.submissionAttempts))
+      pending.submissionAttempts = pending.broadcastAttempts ?? 0;
+    if (!("lastSubmittedAtMs" in pending))
+      pending.lastSubmittedAtMs = pending.lastBroadcastAtMs ?? null;
+    delete pending.broadcastAttempts;
+    delete pending.lastBroadcastAtMs;
+  }
+  return state as unknown as DurableCreatorRewardClaimState;
 }
 
 function writeClaimState(
@@ -502,7 +528,7 @@ function provisionalResult(
       signature: pending.signature,
       slot: null,
       sender: pending.sender,
-      status: "broadcast",
+      status: "submitted",
     },
     claimSignature: pending.signature,
     claimSlot: null,
@@ -652,7 +678,7 @@ function validateExistingState(args: {
   return state.basis;
 }
 
-async function rebroadcastPending(args: {
+async function resubmitPending(args: {
   slrd: Solard;
   state: DurableCreatorRewardClaimState;
   skipPreflight?: boolean;
@@ -660,10 +686,10 @@ async function rebroadcastPending(args: {
   const pending = args.state.pending;
   if (!pending)
     throw new Error(`Claim ${args.state.id} has no pending transaction`);
-  pending.broadcastAttempts += 1;
-  pending.lastBroadcastAtMs = Date.now();
+  pending.submissionAttempts += 1;
+  pending.lastSubmittedAtMs = Date.now();
   pending.sender = pending.sender || "rpc";
-  args.state.status = "broadcast";
+  args.state.status = "submitted";
   args.state.lastError = null;
   writeClaimState(args.slrd, args.state);
   const returned = await args.slrd.senders.resolve(pending.sender).send({
@@ -730,7 +756,7 @@ async function resumeDurableCreatorRewardClaim(args: {
   }
 
   if (outcome.kind === "seen-pending") {
-    state.status = "broadcast";
+    state.status = "submitted";
     writeClaimState(slrd, state);
     return provisionalResult(state);
   }
@@ -747,7 +773,7 @@ async function resumeDurableCreatorRewardClaim(args: {
   }
 
   try {
-    await rebroadcastPending({
+    await resubmitPending({
       slrd,
       state,
       skipPreflight: args.skipPreflight,
@@ -889,8 +915,8 @@ export async function claimCreatorRewards(
         recentBlockhash: compiled.recentBlockhash,
         lastValidBlockHeight: compiled.lastValidBlockHeight,
         signedTransactionBase64: signedTransactionBase64(compiled.transaction),
-        broadcastAttempts: 0,
-        lastBroadcastAtMs: null,
+        submissionAttempts: 0,
+        lastSubmittedAtMs: null,
         createdAtMs: now,
       },
       checkpoint: null,
@@ -900,14 +926,14 @@ export async function claimCreatorRewards(
       updatedAtMs: now,
     });
 
-    state.pending!.broadcastAttempts += 1;
-    state.pending!.lastBroadcastAtMs = Date.now();
-    state.status = "broadcast";
+    state.pending!.submissionAttempts += 1;
+    state.pending!.lastSubmittedAtMs = Date.now();
+    state.status = "submitted";
     writeClaimState(slrd, state);
 
     let submission;
     try {
-      submission = await slrd.broadcastPlan(
+      submission = await slrd.submitPlan(
         compiled,
         via,
         `creator-reward-claim:${id}`,
@@ -928,7 +954,7 @@ export async function claimCreatorRewards(
       writeClaimState(slrd, state);
       throw new Error(state.uncertainReason);
     }
-    const receipt = await slrd.confirmSubmitted(submission);
+    const receipt = await slrd.confirmSubmission(submission);
     if (receipt.status === "confirmed") {
       const exact = await finalizeConfirmedClaim({
         slrd,

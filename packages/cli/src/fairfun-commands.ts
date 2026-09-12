@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import { PublicKey } from "@solana/web3.js";
-import type { HolderRewardEntitlementSnapshotInput, Solard } from "@solard/sdk";
+import type { Solard } from "@solard/core";
+
+type FairfunEntitlementSnapshot = {
+  recipients: Array<{ wallet: string; entitledRaw: string }>;
+  totalEntitledRaw?: string;
+  observedAtMs: number | null;
+};
 
 export type FairfunCliFlags = Map<string, string>;
 type Emit = (value: string) => void;
@@ -115,9 +121,7 @@ function allocationsFile(
   });
 }
 
-function rewardSnapshotFile(
-  path: string,
-): HolderRewardEntitlementSnapshotInput {
+function rewardSnapshotFile(path: string): FairfunEntitlementSnapshot {
   const parsed = JSON.parse(readFileSync(path, "utf8")) as any;
   const rows = Array.isArray(parsed) ? parsed : parsed?.recipients;
   if (!Array.isArray(rows))
@@ -492,18 +496,17 @@ export async function handleFairfunCommand(args: {
       emit(json({ type: "coverage", replay: history.coverage }) + "\n");
       return true;
     }
-    const transfers = history.items.filter((item) => item.trx !== "claim_v2");
-    const claims = history.items.filter((item) => item.trx === "claim_v2");
+    const transfers = history.items.filter((item) => item.trx !== "claim");
+    const claims = history.items.filter((item) => item.trx === "claim");
     emit(
       `REPLAY HISTORY  ${history.mint}\n` +
-        `recipient=${history.coverage.recipient ?? "-"} authoritative=${history.coverage.authoritative} transfers=${transfers.length} claims=${claims.length} finalizedThroughSlot=${history.coverage.finalizedThroughSlot}\n\n`,
+        `recipient=${"-"} authoritative=${history.coverage.complete} transfers=${transfers.length} claims=${claims.length} finalizedThroughSlot=${history.coverage.throughSlot}\n\n`,
     );
     for (const item of history.items) {
       const event = item.raw;
-      if (event.type === "creator-reward-claim") {
-        const payout = item.payouts.get(event.recipient) ?? event.amountRaw;
+      if (event.type === "claim") {
         emit(
-          `${new Date(event.blockTimeMs ?? event.observedAtMs).toISOString()}  CLAIM ${payout} ${item.quoteMint ?? event.quoteMint} attribution=${item.claimAttribution ?? event.attribution} slot=${item.slot} tx=${item.transactionIndex ?? "?"} sig=${item.signature}\n`,
+          `${new Date(event.blockTimeMs ?? event.observedAtMs).toISOString()}  CLAIM ${event.payout.amountRaw} ${event.payout.assetMint} attribution=${event.attribution} slot=${item.slot} tx=${item.transactionIndex ?? "?"} sig=${item.signature}\n`,
         );
       } else {
         emit(
@@ -522,7 +525,7 @@ export async function handleFairfunCommand(args: {
     const ref = values[1];
     if (!ref) throw new Error("Usage: slrd rewards status <token|ca>");
     const token = await ensureToken(slrd, ref);
-    emit(json(slrd.rewards.status(token.mint)) + "\n");
+    emit(json(slrd.distributions.status(`fairfun:${token.mint}`)) + "\n");
     return true;
   }
 
@@ -533,7 +536,20 @@ export async function handleFairfunCommand(args: {
         "Usage: slrd rewards audit <token|ca> [--holder <wallet>]",
       );
     const token = await ensureToken(slrd, ref);
-    emit(json(slrd.rewards.audit(token.mint, flag(flags, "holder"))) + "\n");
+    const state = slrd.distributions.status(`fairfun:${token.mint}`);
+    const holder = flag(flags, "holder");
+    emit(
+      json(
+        holder && state
+          ? {
+              ...state,
+              recipients: state.recipients.filter(
+                (row) => row.recipient === holder,
+              ),
+            }
+          : state,
+      ) + "\n",
+    );
     return true;
   }
 
@@ -541,8 +557,9 @@ export async function handleFairfunCommand(args: {
     const ref = values[1];
     if (!ref) throw new Error("Usage: slrd rewards stop <token|ca>");
     const token = await ensureToken(slrd, ref);
-    emit(json(slrd.rewards.stop(token.mint)) + "\n");
-    return true;
+    throw new Error(
+      `Distribution ${`fairfun:${token.mint}`} has no process-level stop state; stop the supervising process instead.`,
+    );
   }
 
   if (command === "rewards" && values[0] === "distribute") {
@@ -556,22 +573,24 @@ export async function handleFairfunCommand(args: {
     const token = await ensureToken(slrd, ref);
     const snapshot = rewardSnapshotFile(snapshotPath);
     const common = {
-      token: token.mint,
-      wallet,
-      rewardMint: flag(flags, "reward-mint"),
-      snapshot,
+      id: flag(flags, "id") ?? `fairfun:${token.mint}`,
+      from: wallet,
+      asset: flag(flags, "reward-mint") ?? token.quoteMint ?? "SOL",
+      entitlements: snapshot.recipients.map((row) => ({
+        recipient: row.wallet,
+        entitledRaw: row.entitledRaw,
+      })),
       reserveRaw: raw(flag(flags, "reserve-raw"), "--reserve-raw") ?? 0n,
       maxRecipientsPerTransaction: positiveInteger(flag(flags, "max-per-tx")),
     };
     if (!bool(flags, "live")) {
-      const plan = await slrd.rewards.planDistribution(common);
+      const plan = await slrd.distributions.plan(common);
       emit(
         json({
           live: false,
-          version: plan.version,
-          tokenMint: plan.tokenMint,
+          id: plan.id,
           sourceWallet: plan.sourceWallet,
-          rewardAsset: plan.rewardAsset,
+          asset: plan.asset,
           totalEntitledRaw: plan.totalEntitledRaw,
           totalConfirmedPaidRaw: plan.totalConfirmedPaidRaw,
           totalOutstandingRaw: plan.totalOutstandingRaw,
@@ -580,21 +599,15 @@ export async function handleFairfunCommand(args: {
           reserveRaw: plan.reserveRaw,
           outstanding: plan.outstanding,
           pending: plan.pending,
-          nextBatch: plan.transferPlan?.batches[0]
-            ? {
-                recipients: plan.transferPlan.batches[0].allocations.length,
-                totalRaw: plan.transferPlan.batches[0].totalRaw,
-                serializedSize:
-                  plan.transferPlan.batches[0].estimatedSerializedSize,
-                payments: plan.nextPayments,
-              }
+          nextBatch: plan.nextPayments.length
+            ? { payments: plan.nextPayments }
             : null,
         }) + "\n",
       );
       return true;
     }
     requireLiveGate();
-    const state = await slrd.rewards.distribute({
+    const state = await slrd.distributions.execute({
       ...common,
       via: flag(flags, "sender") ?? "rpc",
       skipSimulation: bool(flags, "skip-simulation"),

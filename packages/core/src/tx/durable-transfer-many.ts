@@ -28,8 +28,8 @@ export type DurableTransferManyPending = {
   lastValidBlockHeight: number;
   allocationIds: string[];
   signedTransactionBase64: string;
-  broadcastAttempts: number;
-  lastBroadcastAtMs: number | null;
+  submissionAttempts: number;
+  lastSubmittedAtMs: number | null;
   createdAtMs: number;
 };
 
@@ -135,10 +135,34 @@ export function getDurableTransferManyState(
     .where({ key: stateKey(id) })
     .first() as { value?: string } | undefined;
   if (!row?.value) return null;
-  const parsed = JSON.parse(row.value) as DurableTransferManyState;
+  const parsed = JSON.parse(row.value) as Omit<
+    DurableTransferManyState,
+    "pending"
+  > & {
+    pending:
+      | (Omit<
+          DurableTransferManyPending,
+          "submissionAttempts" | "lastSubmittedAtMs"
+        > & {
+          submissionAttempts?: number;
+          lastSubmittedAtMs?: number | null;
+          broadcastAttempts?: number;
+          lastBroadcastAtMs?: number | null;
+        })
+      | null;
+  };
   if (parsed.version !== 1 || parsed.id !== id)
     throw new Error(`Unsupported durable transfer-many state for ${id}`);
-  return parsed;
+  if (parsed.pending) {
+    const pending = parsed.pending;
+    if (!Number.isFinite(pending.submissionAttempts))
+      pending.submissionAttempts = pending.broadcastAttempts ?? 0;
+    if (!("lastSubmittedAtMs" in pending))
+      pending.lastSubmittedAtMs = pending.lastBroadcastAtMs ?? null;
+    delete pending.broadcastAttempts;
+    delete pending.lastBroadcastAtMs;
+  }
+  return parsed as unknown as DurableTransferManyState;
 }
 
 function assetState(asset: QuoteAsset): DurableTransferManyState["asset"] {
@@ -301,7 +325,7 @@ async function reconcilePending(
   return { kind: "not-found", currentBlockHeight };
 }
 
-async function persistBeforeBroadcast(args: {
+async function persistBeforeSubmission(args: {
   slrd: Solard;
   state: DurableTransferManyState;
   allocationIds: string[];
@@ -317,8 +341,8 @@ async function persistBeforeBroadcast(args: {
     lastValidBlockHeight: args.compiled.lastValidBlockHeight,
     allocationIds: [...args.allocationIds],
     signedTransactionBase64: signedTransactionBase64(transaction),
-    broadcastAttempts: 0,
-    lastBroadcastAtMs: null,
+    submissionAttempts: 0,
+    lastSubmittedAtMs: null,
     createdAtMs: Date.now(),
   };
   args.state.status = "distributing";
@@ -329,7 +353,7 @@ async function persistBeforeBroadcast(args: {
   return pending;
 }
 
-async function broadcastPersistedTransaction(args: {
+async function submitPersistedTransaction(args: {
   slrd: Solard;
   state: DurableTransferManyState;
   pending: DurableTransferManyPending;
@@ -338,11 +362,11 @@ async function broadcastPersistedTransaction(args: {
 }): Promise<string> {
   const sender = String(args.via ?? args.pending.sender ?? "rpc");
   args.pending.sender = sender;
-  args.pending.broadcastAttempts += 1;
-  args.pending.lastBroadcastAtMs = Date.now();
+  args.pending.submissionAttempts += 1;
+  args.pending.lastSubmittedAtMs = Date.now();
   args.state.lastError = null;
   // Persist the attempt marker before the network call as well. A process crash
-  // can therefore never make a broadcast look like an unsent local batch.
+  // can therefore never make a submission look like an unsent local batch.
   writeState(args.slrd, args.state);
 
   const transaction = decodeSignedTransaction(
@@ -407,7 +431,7 @@ async function buildNextPending(args: {
     }
   }
 
-  return await persistBeforeBroadcast({
+  return await persistBeforeSubmission({
     slrd: args.slrd,
     state: args.state,
     allocationIds: next.allocations.map((row) => row.id),
@@ -470,7 +494,7 @@ async function drive(args: {
       // Not found but the exact signed transaction is still valid. Re-broadcasting
       // these exact bytes is safe: it has the same signature and cannot double-pay.
       try {
-        await broadcastPersistedTransaction({
+        await submitPersistedTransaction({
           slrd: args.slrd,
           state: args.state,
           pending,
@@ -506,7 +530,7 @@ async function drive(args: {
         throw new Error(args.state.lastError);
       } else {
         args.state.status = "distributing";
-        args.state.lastError = `Transaction ${pending.signature} broadcast but not yet confirmed`;
+        args.state.lastError = `Transaction ${pending.signature} submitted but not yet confirmed`;
         writeState(args.slrd, args.state);
         return args.state;
       }
@@ -533,7 +557,7 @@ async function drive(args: {
     if (!pending) break;
 
     try {
-      await broadcastPersistedTransaction({
+      await submitPersistedTransaction({
         slrd: args.slrd,
         state: args.state,
         pending,
@@ -576,7 +600,7 @@ async function drive(args: {
     // durable state and stop. A later resume reconciles or re-broadcasts the same
     // bytes; it never creates a replacement while this signature is unresolved.
     args.state.status = "distributing";
-    args.state.lastError = `Transaction ${pending.signature} broadcast but not yet confirmed`;
+    args.state.lastError = `Transaction ${pending.signature} submitted but not yet confirmed`;
     writeState(args.slrd, args.state);
     return args.state;
   }
@@ -593,10 +617,10 @@ async function drive(args: {
  *
  * Invariants:
  * - economic allocation ids/amounts are persisted before the first signature exists;
- * - each signed transaction + its exact allocation ids are persisted before broadcast;
+ * - each signed transaction + its exact allocation ids are persisted before submission;
  * - only one batch may be unresolved at a time;
  * - restart/retry reconciles that exact signature first;
- * - while still valid, only the exact same signed bytes may be re-broadcast;
+ * - while still valid, only the exact same signed bytes may be resubmitted;
  * - after an ambiguous expiry the state becomes `uncertain` and no replacement is built.
  */
 export async function executeDurableTransferMany(

@@ -2,20 +2,26 @@ import type { Connection, PublicKey } from "@solana/web3.js";
 
 import type { SolardDatabase, TokenRow } from "../db/schema.ts";
 import {
+  historyCanonicalEvents,
   historyCreatorRewards,
-  historyRewardReplay,
-  type HistoricalCreatorRewardClaimEvent,
-  type HistoricalRewardReplayEvent,
-} from "../rewards/creator-reward-history.ts";
+} from "../events/claim-history.ts";
+import type {
+  SolardCanonicalEvent,
+  SolardClaimEvent,
+} from "../events/canonical-events.ts";
+import { createRawTransactionCachingConnection } from "../events/raw-transaction-cache.ts";
 
-export const REPLAY_PARSER_VERSION = "neutral-replay-v3";
+const REPLAY_PARSER_VERSION = "neutral-replay-v4";
 const REPLAY_OVERLAP_SLOTS = 2_000;
 
 export type ReplayTransaction =
-  "mint" | "burn" | "transfer" | "change_owner" | "claim_v2";
+  "mint" | "burn" | "transfer" | "change_owner" | "claim";
 
-export type ReplayClaimAttribution =
-  "exact-token" | "creator-aggregate-ambiguous";
+export type ReplayPayout = {
+  assetMint: string;
+  recipient: string;
+  amountRaw: bigint;
+};
 
 export type ReplayItem = {
   id: string;
@@ -29,13 +35,21 @@ export type ReplayItem = {
   trx: ReplayTransaction;
   beforeBalance: ReadonlyMap<string, bigint>;
   postBalance: ReadonlyMap<string, bigint>;
-  payouts: ReadonlyMap<string, bigint>;
-  quoteMint: string | null;
-  claimAttribution: ReplayClaimAttribution | null;
-  raw: HistoricalRewardReplayEvent;
+  payouts: readonly ReplayPayout[];
+  raw: SolardCanonicalEvent;
 };
 
 export type ReplayCoverage = {
+  version: 1;
+  mint: string;
+  fromCreation: boolean;
+  throughSlot: number;
+  complete: boolean;
+  warnings: string[];
+  updatedAtMs: number;
+};
+
+type ReplayCoverageState = {
   version: 1;
   mint: string;
   parserVersion: string;
@@ -43,16 +57,13 @@ export type ReplayCoverage = {
   originalCreator: string | null;
   creationSlot: number | null;
   finalizedThroughSlot: number;
+  attemptedThroughSlot: number;
   authoritative: boolean;
   tokenBalancesAuthoritative: boolean;
   creatorRewardsAuthoritative: boolean;
   complete: boolean;
   warnings: string[];
   updatedAtMs: number;
-};
-
-type ReplayCoverageState = ReplayCoverage & {
-  attemptedThroughSlot: number;
 };
 
 export type ReplayHistory = Iterable<ReplayItem> & {
@@ -99,7 +110,7 @@ type StoredReplayRow = {
   postBalanceRaw: string | null;
   payoutsJson: string;
   quoteMint: string | null;
-  claimAttribution: ReplayClaimAttribution | null;
+  claimAttribution: string | null;
   parserVersion: string;
   observedAtMs: number;
   updatedAtMs: number;
@@ -160,21 +171,19 @@ function parseBalanceMap(value: string | null): Map<string, bigint> {
   return new Map(rows.map(([address, amount]) => [address, BigInt(amount)]));
 }
 
-function replayKey(mint: string, event: HistoricalRewardReplayEvent): string {
+function replayKey(mint: string, event: SolardCanonicalEvent): string {
   return `${mint}:${event.id}`;
 }
 
-function replayTransaction(
-  event: HistoricalRewardReplayEvent,
-): ReplayTransaction {
-  if (event.type === "creator-reward-claim") return "claim_v2";
+function replayTransaction(event: SolardCanonicalEvent): ReplayTransaction {
+  if (event.type === "claim") return "claim";
   if (event.movement === "change-owner") return "change_owner";
   return event.movement;
 }
 
 function compareRawEvents(
-  left: HistoricalRewardReplayEvent,
-  right: HistoricalRewardReplayEvent,
+  left: SolardCanonicalEvent,
+  right: SolardCanonicalEvent,
 ): number {
   return (
     left.slot - right.slot ||
@@ -195,7 +204,7 @@ function applyBalanceDelta(args: {
   post: Map<string, bigint>;
   owner: string | null;
   delta: bigint;
-  event: HistoricalRewardReplayEvent;
+  event: SolardCanonicalEvent;
 }): void {
   if (!args.owner || args.delta === 0n) return;
   const current = args.balances.get(args.owner) ?? 0n;
@@ -213,15 +222,12 @@ function applyBalanceDelta(args: {
 
 export function normalizeReplayEvent(
   mint: string,
-  event: HistoricalRewardReplayEvent,
+  event: SolardCanonicalEvent,
   balances: Map<string, bigint> = new Map(),
 ): ReplayItem {
   const beforeBalance = new Map<string, bigint>();
   const postBalance = new Map<string, bigint>();
-  const claim =
-    event.type === "creator-reward-claim"
-      ? (event as HistoricalCreatorRewardClaimEvent)
-      : null;
+  const claim = event.type === "claim" ? (event as SolardClaimEvent) : null;
 
   if (event.type === "transfer") {
     if (event.movement === "mint") {
@@ -281,7 +287,7 @@ export function normalizeReplayEvent(
   }
 
   return {
-    id: replayKey(mint, event),
+    id: event.id,
     mint,
     signature: event.signature,
     slot: event.slot,
@@ -293,22 +299,18 @@ export function normalizeReplayEvent(
     trx: replayTransaction(event),
     beforeBalance,
     postBalance,
-    payouts: new Map(
-      claim ? [[claim.recipient, claim.amountRaw] as const] : [],
-    ),
-    quoteMint: claim?.quoteMint ?? null,
-    claimAttribution: claim?.attribution ?? null,
+    payouts: claim ? [{ ...claim.payout }] : [],
     raw: event,
   };
 }
 
 export function normalizeReplayEvents(
   mint: string,
-  events: readonly HistoricalRewardReplayEvent[],
+  events: readonly SolardCanonicalEvent[],
   seed: ReadonlyMap<string, bigint> = new Map(),
 ): ReplayItem[] {
   const balances = new Map(seed);
-  const unique = new Map<string, HistoricalRewardReplayEvent>();
+  const unique = new Map<string, SolardCanonicalEvent>();
   for (const event of events) unique.set(replayKey(mint, event), event);
   return [...unique.values()]
     .sort(compareRawEvents)
@@ -334,7 +336,7 @@ export function compareReplayItems(
 
 function rowFromItem(item: ReplayItem): Omit<StoredReplayRow, "id"> {
   return {
-    replayKey: item.id,
+    replayKey: replayKey(item.mint, item.raw),
     mint: item.mint,
     signature: item.signature,
     slot: item.slot,
@@ -346,9 +348,9 @@ function rowFromItem(item: ReplayItem): Omit<StoredReplayRow, "id"> {
     trxJson: json(item.raw),
     beforeBalanceRaw: mapJson(item.beforeBalance),
     postBalanceRaw: mapJson(item.postBalance),
-    payoutsJson: mapJson(item.payouts),
-    quoteMint: item.quoteMint,
-    claimAttribution: item.claimAttribution,
+    payoutsJson: json(item.payouts),
+    quoteMint: null,
+    claimAttribution: null,
     parserVersion: REPLAY_PARSER_VERSION,
     observedAtMs: item.raw.observedAtMs,
     updatedAtMs: Date.now(),
@@ -356,8 +358,9 @@ function rowFromItem(item: ReplayItem): Omit<StoredReplayRow, "id"> {
 }
 
 function itemFromRow(row: StoredReplayRow): ReplayItem {
+  const raw = parseJson<SolardCanonicalEvent>(row.trxJson);
   return {
-    id: row.replayKey,
+    id: raw.id,
     mint: row.mint,
     signature: row.signature,
     slot: row.slot,
@@ -368,10 +371,8 @@ function itemFromRow(row: StoredReplayRow): ReplayItem {
     trx: row.kind as ReplayTransaction,
     beforeBalance: parseBalanceMap(row.beforeBalanceRaw),
     postBalance: parseBalanceMap(row.postBalanceRaw),
-    payouts: parseBalanceMap(row.payoutsJson),
-    quoteMint: row.quoteMint,
-    claimAttribution: row.claimAttribution,
-    raw: parseJson<HistoricalRewardReplayEvent>(row.trxJson),
+    payouts: parseJson<ReplayPayout[]>(row.payoutsJson),
+    raw,
   };
 }
 
@@ -449,21 +450,23 @@ function publicCoverage(
   coverage: ReplayCoverageState,
   attemptWarnings: readonly string[] = [],
 ): ReplayCoverage {
-  const { attemptedThroughSlot, ...stored } = coverage;
-  const caughtUp = stored.finalizedThroughSlot >= attemptedThroughSlot;
-  const warnings = [...stored.warnings, ...attemptWarnings];
+  const caughtUp =
+    coverage.finalizedThroughSlot >= coverage.attemptedThroughSlot;
+  const warnings = [...coverage.warnings, ...attemptWarnings];
   if (!caughtUp) {
     warnings.push(
-      `Verified replay stops at slot ${stored.finalizedThroughSlot}; latest attempted finalized head is ${attemptedThroughSlot}.`,
+      `Verified replay stops at slot ${coverage.finalizedThroughSlot}; latest attempted finalized head is ${coverage.attemptedThroughSlot}.`,
     );
   }
   return {
-    ...stored,
-    authoritative: stored.authoritative && caughtUp,
-    tokenBalancesAuthoritative: stored.tokenBalancesAuthoritative && caughtUp,
-    creatorRewardsAuthoritative: stored.creatorRewardsAuthoritative && caughtUp,
-    complete: stored.complete && caughtUp,
+    version: 1,
+    mint: coverage.mint,
+    fromCreation:
+      coverage.creationSlot != null && coverage.finalizedThroughSlot > 0,
+    throughSlot: coverage.finalizedThroughSlot,
+    complete: coverage.complete && caughtUp,
     warnings: [...new Set(warnings)],
+    updatedAtMs: coverage.updatedAtMs,
   };
 }
 
@@ -553,6 +556,7 @@ function commitReplay(args: {
   items: readonly ReplayItem[];
   coverage: ReplayCoverageState;
   replaceFromSlot?: number;
+  beforeCoverageCommit?: () => void;
 }): void {
   args.database.transaction(() => {
     if (args.replaceFromSlot != null) {
@@ -565,7 +569,28 @@ function commitReplay(args: {
         .exec();
     }
     persistItemsUnlocked(args.database, args.items);
+    args.beforeCoverageCommit?.();
     saveCoverage(args.database, args.coverage);
+  });
+}
+
+export function commitReplayForTest(args: {
+  database: SolardDatabase;
+  items: readonly ReplayItem[];
+  coverage: ReplayCoverageState;
+  replaceFromSlot?: number;
+  crashBeforeCoverage?: boolean;
+}): void {
+  commitReplay({
+    database: args.database,
+    items: args.items,
+    coverage: args.coverage,
+    replaceFromSlot: args.replaceFromSlot,
+    beforeCoverageCommit: args.crashBeforeCoverage
+      ? () => {
+          throw new Error("injected replay commit crash");
+        }
+      : undefined,
   });
 }
 
@@ -603,7 +628,7 @@ function requestedRecipient(options: ReplayOptions): string | null {
 }
 
 function tokenTailSafe(
-  replay: Awaited<ReturnType<typeof historyRewardReplay>>,
+  replay: Awaited<ReturnType<typeof historyCanonicalEvents>>,
 ): boolean {
   const coverage = replay.tokenHistory.coverage;
   return (
@@ -632,14 +657,12 @@ function claimCoverageSafe(
 }
 
 function claimTailSafe(
-  replay: Awaited<ReturnType<typeof historyRewardReplay>>,
+  replay: Awaited<ReturnType<typeof historyCanonicalEvents>>,
 ): boolean {
   return claimCoverageSafe(replay.claimHistory.coverage);
 }
 
-function replayFactsSafe(
-  events: readonly HistoricalRewardReplayEvent[],
-): boolean {
+function replayFactsSafe(events: readonly SolardCanonicalEvent[]): boolean {
   return events.every(
     (event) =>
       event.blockTimeMs != null &&
@@ -648,7 +671,7 @@ function replayFactsSafe(
   );
 }
 
-function stableReplayFact(event: HistoricalRewardReplayEvent): string {
+function stableReplayFact(event: SolardCanonicalEvent): string {
   return JSON.stringify(event, (key, value) => {
     if (key === "observedAtMs" || key === "source") return undefined;
     return typeof value === "bigint"
@@ -657,7 +680,7 @@ function stableReplayFact(event: HistoricalRewardReplayEvent): string {
   });
 }
 
-function replayWindowMatches(
+export function replayWindowMatches(
   previous: readonly ReplayItem[],
   next: readonly ReplayItem[],
 ): boolean {
@@ -671,9 +694,7 @@ function replayWindowMatches(
   return true;
 }
 
-function replayFactWarnings(
-  events: readonly HistoricalRewardReplayEvent[],
-): string[] {
+function replayFactWarnings(events: readonly SolardCanonicalEvent[]): string[] {
   const missingTimestamp = events.filter(
     (event) => event.blockTimeMs == null,
   ).length;
@@ -694,6 +715,75 @@ function replayFactWarnings(
   return warnings;
 }
 
+async function rebuildReplayFromRawCache(args: {
+  connection: Connection;
+  database: SolardDatabase;
+  token: TokenRow;
+  coverage: ReplayCoverageState;
+  recipient?: string | PublicKey;
+}): Promise<ReplayHistory | null> {
+  if (args.coverage.finalizedThroughSlot <= 0) return null;
+  const connection = createRawTransactionCachingConnection({
+    connection: args.connection,
+    database: args.database,
+    network: false,
+  });
+  try {
+    const replay = await historyCanonicalEvents({
+      connection,
+      token: args.token,
+      options: {
+        recipient: args.recipient ?? args.coverage.recipient ?? undefined,
+        provider: "rpc",
+        fromSlot: args.coverage.creationSlot ?? undefined,
+        toSlot: args.coverage.finalizedThroughSlot,
+        exactOrdering: true,
+        verifyCurrentBalances: false,
+        commitment: "finalized",
+      },
+    });
+    const tokenSafe =
+      replay.tokenHistory.coverage.exhausted &&
+      !replay.tokenHistory.coverage.truncated &&
+      replay.tokenHistory.coverage.parseErrors === 0 &&
+      (replay.tokenHistory.coverage.ordering === "transaction" ||
+        replay.tokenHistory.events.length === 0);
+    const claimsSafe = claimCoverageSafe(replay.claimHistory.coverage);
+    const factsSafe = replayFactsSafe(replay.events);
+    if (!tokenSafe || !claimsSafe || !factsSafe) return null;
+    const nextCoverage: ReplayCoverageState = {
+      ...args.coverage,
+      parserVersion: REPLAY_PARSER_VERSION,
+      recipient: replay.recipient,
+      originalCreator:
+        replay.claimHistory.coverage.originalCreator ??
+        args.coverage.originalCreator,
+      creationSlot:
+        args.coverage.creationSlot ??
+        replay.claimHistory.coverage.creationSlot ??
+        replay.tokenHistory.coverage.firstEventSlot,
+      attemptedThroughSlot: Math.max(
+        args.coverage.attemptedThroughSlot,
+        args.coverage.finalizedThroughSlot,
+      ),
+      updatedAtMs: Date.now(),
+    };
+    commitReplay({
+      database: args.database,
+      items: normalizeReplayEvents(args.token.mint, replay.events),
+      coverage: nextCoverage,
+      replaceFromSlot: 0,
+    });
+    return historyResult(
+      args.token.mint,
+      loadItems(args.database, args.token.mint),
+      nextCoverage,
+    );
+  } catch {
+    return null;
+  }
+}
+
 async function replayTokenHistoryUnlocked(args: {
   connection: Connection;
   database: SolardDatabase;
@@ -702,22 +792,42 @@ async function replayTokenHistoryUnlocked(args: {
 }): Promise<ReplayHistory> {
   const options = args.options ?? {};
   const mint = args.token.mint;
-  const head = await args.connection.getSlot("finalized");
+  const connection = createRawTransactionCachingConnection({
+    connection: args.connection,
+    database: args.database,
+    network: true,
+  });
+  const head = await connection.getSlot("finalized");
   let coverage = loadCoverage(args.database, mint);
   const desiredRecipient = requestedRecipient(options);
 
+  if (coverage && coverage.parserVersion !== REPLAY_PARSER_VERSION) {
+    const rebuilt = await rebuildReplayFromRawCache({
+      connection: args.connection,
+      database: args.database,
+      token: args.token,
+      coverage,
+      recipient: options.recipient,
+    });
+    if (rebuilt && head <= rebuilt.coverage.throughSlot) return rebuilt;
+    coverage = loadCoverage(args.database, mint);
+    if (coverage?.parserVersion !== REPLAY_PARSER_VERSION) {
+      clearReplay(args.database, mint);
+      coverage = null;
+    }
+  }
   if (
     coverage &&
-    (coverage.parserVersion !== REPLAY_PARSER_VERSION ||
-      (desiredRecipient != null && coverage.recipient !== desiredRecipient))
+    desiredRecipient != null &&
+    coverage.recipient !== desiredRecipient
   ) {
     clearReplay(args.database, mint);
     coverage = null;
   }
 
   if (!coverage || coverage.finalizedThroughSlot <= 0) {
-    const replay = await historyRewardReplay({
-      connection: args.connection,
+    const replay = await historyCanonicalEvents({
+      connection,
       token: args.token,
       options: {
         recipient: options.recipient ?? coverage?.recipient ?? undefined,
@@ -785,21 +895,22 @@ async function replayTokenHistoryUnlocked(args: {
     return historyResult(mint, loadItems(args.database, mint), coverage);
   }
 
+  const durableCoverage = coverage;
   const fromSlot = Math.max(
     0,
-    coverage.creationSlot ?? 0,
-    coverage.finalizedThroughSlot - REPLAY_OVERLAP_SLOTS + 1,
+    durableCoverage.creationSlot ?? 0,
+    durableCoverage.finalizedThroughSlot - REPLAY_OVERLAP_SLOTS + 1,
   );
   const prefix = loadItemsBefore(args.database, mint, fromSlot);
   const seed = balancesFromItems(prefix);
-  const token = coverage.originalCreator
-    ? { ...args.token, creator: coverage.originalCreator }
+  const token = durableCoverage.originalCreator
+    ? { ...args.token, creator: durableCoverage.originalCreator }
     : args.token;
-  const replay = await historyRewardReplay({
-    connection: args.connection,
+  const replay = await historyCanonicalEvents({
+    connection,
     token,
     options: {
-      recipient: options.recipient ?? coverage.recipient ?? undefined,
+      recipient: options.recipient ?? durableCoverage.recipient ?? undefined,
       provider: options.provider,
       fromSlot,
       toSlot: head,
@@ -811,7 +922,7 @@ async function replayTokenHistoryUnlocked(args: {
     },
   });
 
-  let claimEvents: readonly HistoricalCreatorRewardClaimEvent[] = replay.claims;
+  let claimEvents: readonly SolardClaimEvent[] = replay.claims;
   let claimCoverage = replay.claimHistory.coverage;
   let claimWarnings = claimCoverage.warnings;
   let claimPreservesAuthoritative = claimCoverageSafe(claimCoverage);
@@ -820,10 +931,10 @@ async function replayTokenHistoryUnlocked(args: {
   );
   if (needsClaimRebuild) {
     const claimHistory = await historyCreatorRewards({
-      connection: args.connection,
+      connection,
       token,
       options: {
-        recipient: options.recipient ?? coverage.recipient ?? undefined,
+        recipient: options.recipient ?? durableCoverage.recipient ?? undefined,
         toSlot: head,
         maxPages: options.claimMaxPages,
         exactOrdering: true,
@@ -838,10 +949,7 @@ async function replayTokenHistoryUnlocked(args: {
       claimCoverageSafe(claimCoverage);
   }
 
-  const events: HistoricalRewardReplayEvent[] = [
-    ...replay.transfers,
-    ...claimEvents,
-  ];
+  const events: SolardCanonicalEvent[] = [...replay.transfers, ...claimEvents];
   const factsSafe = replayFactsSafe(events);
   const rangeSafe =
     tokenTailSafe(replay) && claimCoverageSafe(claimCoverage) && factsSafe;
@@ -856,7 +964,10 @@ async function replayTokenHistoryUnlocked(args: {
   if (!rangeSafe) {
     const attemptedCoverage: ReplayCoverageState = {
       ...coverage,
-      attemptedThroughSlot: Math.max(coverage.attemptedThroughSlot, head),
+      attemptedThroughSlot: Math.max(
+        durableCoverage.attemptedThroughSlot,
+        head,
+      ),
       updatedAtMs: Date.now(),
     };
     coverage = attemptedCoverage;
@@ -873,10 +984,10 @@ async function replayTokenHistoryUnlocked(args: {
 
   const items = normalizeReplayEvents(mint, events, seed);
   const previousOverlap = loadItemsFrom(args.database, mint, fromSlot).filter(
-    (item) => item.slot <= coverage.finalizedThroughSlot,
+    (item) => item.slot <= durableCoverage.finalizedThroughSlot,
   );
   const nextOverlap = items.filter(
-    (item) => item.slot <= coverage.finalizedThroughSlot,
+    (item) => item.slot <= durableCoverage.finalizedThroughSlot,
   );
   if (!replayWindowMatches(previousOverlap, nextOverlap)) {
     clearReplay(args.database, mint);
@@ -885,24 +996,24 @@ async function replayTokenHistoryUnlocked(args: {
     );
   }
   const tokenBalancesAuthoritative =
-    coverage.tokenBalancesAuthoritative && tokenTailSafe(replay);
+    durableCoverage.tokenBalancesAuthoritative && tokenTailSafe(replay);
   const creatorRewardsAuthoritative =
-    coverage.creatorRewardsAuthoritative && claimPreservesAuthoritative;
+    durableCoverage.creatorRewardsAuthoritative && claimPreservesAuthoritative;
   coverage = {
-    ...coverage,
+    ...durableCoverage,
     finalizedThroughSlot: head,
-    attemptedThroughSlot: Math.max(coverage.attemptedThroughSlot, head),
+    attemptedThroughSlot: Math.max(durableCoverage.attemptedThroughSlot, head),
     authoritative:
-      coverage.authoritative &&
+      durableCoverage.authoritative &&
       tokenBalancesAuthoritative &&
       creatorRewardsAuthoritative &&
       factsSafe,
     tokenBalancesAuthoritative,
     creatorRewardsAuthoritative,
-    complete: coverage.complete && rangeSafe,
+    complete: durableCoverage.complete && rangeSafe,
     warnings: [
       ...new Set([
-        ...coverage.warnings,
+        ...durableCoverage.warnings,
         ...replay.tokenHistory.coverage.warnings,
         ...claimWarnings,
         ...replayFactWarnings(events),
@@ -946,17 +1057,7 @@ export async function replayTokenHistory(args: {
 }
 
 function mergeIdentity(item: ReplayItem): string {
-  if (item.trx !== "claim_v2") return item.id;
-  const recipient = [...item.payouts.keys()].sort().join(",");
-  return [
-    "claim",
-    item.signature,
-    item.transactionIndex ?? "?",
-    item.instructionIndex ?? "?",
-    item.innerInstructionIndex ?? "?",
-    recipient,
-    item.quoteMint ?? "?",
-  ].join(":");
+  return item.id;
 }
 
 export function mergeReplayHistories(
@@ -1003,10 +1104,10 @@ export async function subscribeReplayEvents(args: {
   const initial = await args.replay(baseOptions);
   let through =
     args.initialThroughSlot == null
-      ? initial.coverage.finalizedThroughSlot
+      ? initial.coverage.throughSlot
       : args.initialThroughSlot;
   let watermark = through;
-  const initialTargetWatermark = initial.coverage.finalizedThroughSlot;
+  const initialTargetWatermark = initial.coverage.throughSlot;
   const pending = initial.items.filter(
     (item) => item.slot > through && item.slot <= initialTargetWatermark,
   );
@@ -1030,7 +1131,7 @@ export async function subscribeReplayEvents(args: {
           await abortableDelay(pollMs, controller.signal);
           if (controller.signal.aborted) break;
           const next = await args.replay(baseOptions);
-          const targetWatermark = next.coverage.finalizedThroughSlot;
+          const targetWatermark = next.coverage.throughSlot;
           for (const item of next.items) {
             if (item.slot > through && item.slot <= targetWatermark) yield item;
           }

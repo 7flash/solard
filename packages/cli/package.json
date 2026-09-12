@@ -18,7 +18,7 @@
     "bun": ">=1.1.0"
   },
   "dependencies": {
-    "@solard/sdk": "0.2.16",
+    "@solard/core": "0.2.16",
     "bs58": "^6.0.0",
     "@solana/web3.js": "^1.98.4",
     "measure-fn": "5.2.0"

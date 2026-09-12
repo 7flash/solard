@@ -34,7 +34,7 @@ export const TokenSchema = z.object({
 export const ExecutionSchema = z.object({
   signature: z.string().nullable().default(null),
   kind: z.string(),
-  status: z.enum(["planned", "simulated", "broadcast", "confirmed", "failed"]),
+  status: z.enum(["planned", "simulated", "submitted", "confirmed", "failed"]),
   walletAddress: z.string(),
   mint: z.string().nullable().default(null),
   sender: z.string().nullable().default(null),
@@ -95,7 +95,7 @@ export const ClaimSchema = z.object({
   estimatedClaimRaw: z.string(),
   claimedRaw: z.string().nullable().default(null),
   signature: z.string().nullable().default(null),
-  status: z.enum(["planned", "broadcast", "confirmed", "failed"]),
+  status: z.enum(["planned", "submitted", "confirmed", "failed"]),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
 });
@@ -138,6 +138,33 @@ export const WatchSchema = z.object({
   isActive: z.number().default(1),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
+});
+
+export const RawTransactionSchema = z.object({
+  signature: z.string(),
+  slot: z.number(),
+  blockTimeMs: z.number().nullable().default(null),
+  confidence: z.enum(["confirmed", "finalized"]),
+  transactionJson: z.string(),
+  fetchedAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
+export const HistoryDiscoverySchema = z.object({
+  discoveryKey: z.string(),
+  scope: z.string(),
+  signature: z.string(),
+  slot: z.number(),
+  errJson: z.string().nullable().default(null),
+  blockTimeMs: z.number().nullable().default(null),
+  confirmationStatus: z.string().nullable().default(null),
+  discoveredAtMs: z.number(),
+});
+
+export const HistoryBlockSchema = z.object({
+  slot: z.number(),
+  signaturesJson: z.string(),
+  fetchedAtMs: z.number(),
 });
 
 export const HistoryReplayItemSchema = z.object({
@@ -201,6 +228,15 @@ export type GroupWalletRow = z.infer<typeof GroupWalletSchema> & { id: number };
 export type AgentRow = z.infer<typeof AgentSchema> & { id: number };
 export type AltRow = z.infer<typeof AltSchema> & { id: number };
 export type WatchRow = z.infer<typeof WatchSchema> & { id: number };
+export type RawTransactionRow = z.infer<typeof RawTransactionSchema> & {
+  id: number;
+};
+export type HistoryDiscoveryRow = z.infer<typeof HistoryDiscoverySchema> & {
+  id: number;
+};
+export type HistoryBlockRow = z.infer<typeof HistoryBlockSchema> & {
+  id: number;
+};
 export type HistoryReplayItemRow = z.infer<typeof HistoryReplayItemSchema> & {
   id: number;
 };
@@ -223,6 +259,9 @@ export type SolardDatabase = Database<{
   agents: typeof AgentSchema;
   alts: typeof AltSchema;
   watches: typeof WatchSchema;
+  rawTransactions: typeof RawTransactionSchema;
+  historyDiscovery: typeof HistoryDiscoverySchema;
+  historyBlocks: typeof HistoryBlockSchema;
   historyReplayItems: typeof HistoryReplayItemSchema;
   historyReplayCoverage: typeof HistoryReplayCoverageSchema;
   settings: typeof SettingSchema;

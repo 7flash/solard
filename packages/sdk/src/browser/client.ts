@@ -9,28 +9,29 @@ import {
 import {
   buildPumpExternalDeployment,
   type PumpLaunchPairInput,
-} from "@solard/core/launches/pump/external-deployment.ts";
+} from "@solard/core";
 
 import {
   snapshotTokenHolders,
   type TokenHolderSnapshotOptions,
-} from "@solard/core/chain/holders.ts";
-import { readMint } from "@solard/core/chain/state.ts";
+} from "@solard/core";
+import { readMint } from "@solard/core";
 import {
   subscribeTokenEvents,
   type SubscribeTokenEventsOptions,
   type TokenEventSubscription,
-} from "@solard/core/events/token-events.ts";
-import type { TokenRow } from "@solard/core/db/schema.ts";
-import { PumpCurveVenue } from "@solard/core/venues/pump/pump-curve-venue.ts";
-import { PumpSwapVenue } from "@solard/core/venues/pump/pumpswap-venue.ts";
-import { VenueRegistry } from "@solard/core/venues/route-resolver.ts";
-import { PumpPairService } from "@solard/core/launches/pump/pairs.ts";
+} from "@solard/core";
+import type { TokenRow } from "@solard/core";
+import { PumpCurveVenue } from "@solard/core";
+import { PumpSwapVenue } from "@solard/core";
+import { VenueRegistry } from "@solard/core";
+import { PumpPairService } from "@solard/core";
 
 import { BrowserSolardStore, defaultBrowserStorage } from "./storage.ts";
 import { buildLocalPumpBuy, buildLocalPumpSell } from "./pump.ts";
 import type {
-  BrowserBroadcastResult,
+  BrowserConfirmedTransaction,
+  BrowserTransactionSubmission,
   BrowserPortfolio,
   BrowserPumpDeploymentBuild,
   BrowserPumpDeploymentResult,
@@ -344,14 +345,14 @@ export class BrowserSolard {
     };
   }
 
-  async signAndBroadcast(
+  async submitTransaction(
     transaction: VersionedTransaction,
     strategy: {
       blockhash: string;
       lastValidBlockHeight: number;
       skipPreflight?: boolean;
     },
-  ): Promise<BrowserBroadcastResult> {
+  ): Promise<BrowserTransactionSubmission> {
     const signed = await this.signer().signTransaction(transaction);
     if (!(signed instanceof VersionedTransaction))
       throw new Error("Browser wallet did not return a VersionedTransaction.");
@@ -363,30 +364,48 @@ export class BrowserSolard {
         maxRetries: 0,
       },
     );
-    const confirmation = await this.connection.confirmTransaction(
-      {
-        signature,
-        blockhash: strategy.blockhash,
-        lastValidBlockHeight: strategy.lastValidBlockHeight,
-      },
-      "confirmed",
-    );
-    if (confirmation.value.err)
-      throw new Error(
-        `Transaction ${signature} failed: ${JSON.stringify(confirmation.value.err)}`,
-      );
     return {
       signature,
-      confirmed: true,
       blockhash: strategy.blockhash,
       lastValidBlockHeight: strategy.lastValidBlockHeight,
     };
   }
 
+  async confirmSubmission(
+    submission: BrowserTransactionSubmission,
+  ): Promise<BrowserConfirmedTransaction> {
+    const confirmation = await this.connection.confirmTransaction(
+      {
+        signature: submission.signature,
+        blockhash: submission.blockhash,
+        lastValidBlockHeight: submission.lastValidBlockHeight,
+      },
+      "confirmed",
+    );
+    if (confirmation.value.err)
+      throw new Error(
+        `Transaction ${submission.signature} failed: ${JSON.stringify(confirmation.value.err)}`,
+      );
+    return { ...submission, status: "confirmed" };
+  }
+
+  private async submitAndConfirm(
+    transaction: VersionedTransaction,
+    strategy: {
+      blockhash: string;
+      lastValidBlockHeight: number;
+      skipPreflight?: boolean;
+    },
+  ): Promise<BrowserConfirmedTransaction> {
+    return await this.confirmSubmission(
+      await this.submitTransaction(transaction, strategy),
+    );
+  }
+
   async sendSol(
     destinationRef: string,
     amountSol: string | number,
-  ): Promise<BrowserBroadcastResult> {
+  ): Promise<BrowserConfirmedTransaction> {
     const wallet = this.signer();
     const destination = new PublicKey(
       this.store.resolveDestination(destinationRef),
@@ -406,7 +425,7 @@ export class BrowserSolard {
         }),
       ],
     }).compileToV0Message();
-    return await this.signAndBroadcast(
+    return await this.submitAndConfirm(
       new VersionedTransaction(message),
       latest,
     );
@@ -451,7 +470,7 @@ export class BrowserSolard {
     skipPreflight?: boolean;
   }): Promise<BrowserPumpDeploymentResult> {
     const build = await this.buildPumpDeployment(args);
-    const receipt = await this.signAndBroadcast(build.transaction, {
+    const receipt = await this.submitAndConfirm(build.transaction, {
       blockhash: build.blockhash,
       lastValidBlockHeight: build.lastValidBlockHeight,
       skipPreflight: args.skipPreflight,
@@ -511,7 +530,7 @@ export class BrowserSolard {
     skipPreflight?: boolean;
   }): Promise<BrowserTradeResult> {
     const build = await this.buildBuy(args);
-    const receipt = await this.signAndBroadcast(build.transaction, {
+    const receipt = await this.submitAndConfirm(build.transaction, {
       blockhash: build.blockhash,
       lastValidBlockHeight: build.lastValidBlockHeight,
       skipPreflight: args.skipPreflight,
@@ -536,7 +555,7 @@ export class BrowserSolard {
     skipPreflight?: boolean;
   }): Promise<BrowserTradeResult> {
     const build = await this.buildSell(args);
-    const receipt = await this.signAndBroadcast(build.transaction, {
+    const receipt = await this.submitAndConfirm(build.transaction, {
       blockhash: build.blockhash,
       lastValidBlockHeight: build.lastValidBlockHeight,
       skipPreflight: args.skipPreflight,

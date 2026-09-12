@@ -3,7 +3,7 @@ import {
   createTraderSolard,
   getTokenHistoryCoverage,
   loadTokenHistoryTrades,
-} from "@solard/sdk";
+} from "@solard/core";
 
 const mint = process.argv[2];
 if (!mint)

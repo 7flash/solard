@@ -20,6 +20,7 @@ import {
   TOKEN_2022_ID,
   SPL_TOKEN_PROGRAM_ID,
 } from "../venues/pump/constants.ts";
+import { reduceTokenAccountTransaction } from "./token-account-reducer.ts";
 
 export type SolardTokenEventConfidence = "confirmed" | "finalized";
 
@@ -160,119 +161,6 @@ class AsyncQueue<T> implements AsyncIterable<T> {
   }
 }
 
-function accountKeys(tx: ParsedTransactionWithMeta): string[] {
-  return tx.transaction.message.accountKeys.map((row) => row.pubkey.toBase58());
-}
-
-type TokenAccountBalance = {
-  preOwner: string | null;
-  postOwner: string | null;
-  preRaw: bigint;
-  postRaw: bigint;
-};
-
-function tokenAccountBalances(
-  tx: ParsedTransactionWithMeta,
-  mint: string,
-): Map<string, TokenAccountBalance> {
-  const keys = accountKeys(tx);
-  const out = new Map<string, TokenAccountBalance>();
-  for (const row of tx.meta?.preTokenBalances ?? []) {
-    if (row.mint !== mint) continue;
-    const address = keys[row.accountIndex];
-    if (!address) continue;
-    const current = out.get(address) ?? {
-      preOwner: null,
-      postOwner: null,
-      preRaw: 0n,
-      postRaw: 0n,
-    };
-    current.preOwner = typeof row.owner === "string" ? row.owner : null;
-    current.preRaw = BigInt(row.uiTokenAmount.amount);
-    out.set(address, current);
-  }
-  for (const row of tx.meta?.postTokenBalances ?? []) {
-    if (row.mint !== mint) continue;
-    const address = keys[row.accountIndex];
-    if (!address) continue;
-    const current = out.get(address) ?? {
-      preOwner: null,
-      postOwner: null,
-      preRaw: 0n,
-      postRaw: 0n,
-    };
-    current.postOwner = typeof row.owner === "string" ? row.owner : null;
-    current.postRaw = BigInt(row.uiTokenAmount.amount);
-    out.set(address, current);
-  }
-  return out;
-}
-
-function parsedInstructionRows(tx: ParsedTransactionWithMeta): Array<{
-  instruction: ParsedInstruction;
-  ordinal: string;
-}> {
-  const rows: Array<{ instruction: ParsedInstruction; ordinal: string }> = [];
-  const add = (
-    instruction: ParsedInstruction | PartiallyDecodedInstruction,
-    ordinal: string,
-  ) => {
-    if ("parsed" in instruction) rows.push({ instruction, ordinal });
-  };
-  tx.transaction.message.instructions.forEach((ix, index) =>
-    add(ix, `${index}`),
-  );
-  for (const inner of tx.meta?.innerInstructions ?? []) {
-    inner.instructions.forEach((ix, index) =>
-      add(ix, `${inner.index}.${index}`),
-    );
-  }
-  return rows;
-}
-
-function ordinalParts(ordinal: string): {
-  instructionIndex: number | null;
-  innerInstructionIndex: number | null;
-} {
-  const [top, inner] = ordinal.split(".");
-  const instructionIndex = Number(top);
-  const innerInstructionIndex = inner == null ? null : Number(inner);
-  return {
-    instructionIndex: Number.isInteger(instructionIndex)
-      ? instructionIndex
-      : null,
-    innerInstructionIndex:
-      innerInstructionIndex != null && Number.isInteger(innerInstructionIndex)
-        ? innerInstructionIndex
-        : null,
-  };
-}
-
-function rawAmount(info: Record<string, unknown>): bigint | null {
-  const tokenAmount =
-    info.tokenAmount && typeof info.tokenAmount === "object"
-      ? (info.tokenAmount as Record<string, unknown>)
-      : null;
-  const raw = tokenAmount?.amount ?? info.amount;
-  return typeof raw === "string" && /^\d+$/.test(raw) ? BigInt(raw) : null;
-}
-
-function rawFee(info: Record<string, unknown>): bigint {
-  const parse = (value: unknown): bigint | null => {
-    if (typeof value === "string" && /^\d+$/.test(value)) return BigInt(value);
-    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
-      return BigInt(value);
-    return null;
-  };
-  const direct = parse(info.feeAmount);
-  if (direct != null) return direct;
-  if (info.feeAmount && typeof info.feeAmount === "object") {
-    const nested = parse((info.feeAmount as Record<string, unknown>).amount);
-    if (nested != null) return nested;
-  }
-  return 0n;
-}
-
 export function parseTokenTransferEvents(args: {
   tx: ParsedTransactionWithMeta;
   signature: string;
@@ -280,197 +168,9 @@ export function parseTokenTransferEvents(args: {
   decimals: number;
   confidence: SolardTokenEventConfidence;
   source?: SolardTokenTransferSource;
+  strict?: boolean;
 }): SolardTokenTransferEvent[] {
-  if (!args.tx.meta || args.tx.meta.err) return [];
-  const balances = tokenAccountBalances(args.tx, args.mint);
-  const output: SolardTokenTransferEvent[] = [];
-  const tokenPrograms = new Set([
-    SPL_TOKEN_PROGRAM_ID.toBase58(),
-    TOKEN_2022_ID.toBase58(),
-  ]);
-  const source = args.source ?? "live-rpc";
-
-  for (const { instruction, ordinal } of parsedInstructionRows(args.tx)) {
-    if (!tokenPrograms.has(instruction.programId.toBase58())) continue;
-    const parsed = instruction.parsed as
-      { type?: unknown; info?: Record<string, unknown> } | undefined;
-    const instructionType = String(parsed?.type ?? "");
-    const info = parsed?.info ?? {};
-    const directMint = typeof info.mint === "string" ? info.mint : null;
-    const order = ordinalParts(ordinal);
-    const authority =
-      typeof info.authority === "string"
-        ? info.authority
-        : typeof info.owner === "string"
-          ? info.owner
-          : null;
-
-    if (/^transfer(?:Checked|CheckedWithFee)?$/i.test(instructionType)) {
-      const sourceTokenAccount =
-        typeof info.source === "string" ? info.source : null;
-      const destinationTokenAccount =
-        typeof info.destination === "string" ? info.destination : null;
-      if (!sourceTokenAccount || !destinationTokenAccount) continue;
-      const inferredMint =
-        directMint ??
-        (balances.has(sourceTokenAccount) ||
-        balances.has(destinationTokenAccount)
-          ? args.mint
-          : null);
-      if (inferredMint !== args.mint) continue;
-      const amountRaw = rawAmount(info);
-      if (amountRaw == null || amountRaw <= 0n) continue;
-      const sourceBalance = balances.get(sourceTokenAccount);
-      const destinationBalance = balances.get(destinationTokenAccount);
-      const tokenAmount =
-        info.tokenAmount && typeof info.tokenAmount === "object"
-          ? (info.tokenAmount as Record<string, unknown>)
-          : null;
-      output.push({
-        id: `${args.signature}:transfer:${ordinal}`,
-        type: "transfer",
-        mint: args.mint,
-        signature: args.signature,
-        slot: args.tx.slot,
-        observedAtMs: Date.now(),
-        blockTimeMs:
-          args.tx.blockTime == null ? null : args.tx.blockTime * 1_000,
-        confidence: args.confidence,
-        movement: "transfer",
-        source,
-        sourceTokenAccount,
-        destinationTokenAccount,
-        sourceOwner:
-          sourceBalance?.preOwner ?? sourceBalance?.postOwner ?? null,
-        destinationOwner:
-          destinationBalance?.postOwner ?? destinationBalance?.preOwner ?? null,
-        authority,
-        amountRaw,
-        feeRaw: rawFee(info),
-        decimals:
-          typeof tokenAmount?.decimals === "number"
-            ? tokenAmount.decimals
-            : args.decimals,
-        instructionType,
-        transactionIndex: null,
-        ...order,
-      });
-      continue;
-    }
-
-    if (/^mintTo(?:Checked)?$/i.test(instructionType)) {
-      const destinationTokenAccount =
-        typeof info.account === "string"
-          ? info.account
-          : typeof info.destination === "string"
-            ? info.destination
-            : null;
-      if (!destinationTokenAccount || directMint !== args.mint) continue;
-      const amountRaw = rawAmount(info);
-      if (amountRaw == null || amountRaw <= 0n) continue;
-      const destinationBalance = balances.get(destinationTokenAccount);
-      output.push({
-        id: `${args.signature}:mint:${ordinal}`,
-        type: "transfer",
-        mint: args.mint,
-        signature: args.signature,
-        slot: args.tx.slot,
-        observedAtMs: Date.now(),
-        blockTimeMs:
-          args.tx.blockTime == null ? null : args.tx.blockTime * 1_000,
-        confidence: args.confidence,
-        movement: "mint",
-        source,
-        sourceTokenAccount: null,
-        destinationTokenAccount,
-        sourceOwner: null,
-        destinationOwner:
-          destinationBalance?.postOwner ?? destinationBalance?.preOwner ?? null,
-        authority,
-        amountRaw,
-        feeRaw: 0n,
-        decimals: args.decimals,
-        instructionType,
-        transactionIndex: null,
-        ...order,
-      });
-      continue;
-    }
-
-    if (/^burn(?:Checked)?$/i.test(instructionType)) {
-      const sourceTokenAccount =
-        typeof info.account === "string"
-          ? info.account
-          : typeof info.source === "string"
-            ? info.source
-            : null;
-      if (!sourceTokenAccount || directMint !== args.mint) continue;
-      const amountRaw = rawAmount(info);
-      if (amountRaw == null || amountRaw <= 0n) continue;
-      const sourceBalance = balances.get(sourceTokenAccount);
-      output.push({
-        id: `${args.signature}:burn:${ordinal}`,
-        type: "transfer",
-        mint: args.mint,
-        signature: args.signature,
-        slot: args.tx.slot,
-        observedAtMs: Date.now(),
-        blockTimeMs:
-          args.tx.blockTime == null ? null : args.tx.blockTime * 1_000,
-        confidence: args.confidence,
-        movement: "burn",
-        source,
-        sourceTokenAccount,
-        destinationTokenAccount: null,
-        sourceOwner:
-          sourceBalance?.preOwner ?? sourceBalance?.postOwner ?? null,
-        destinationOwner: null,
-        authority,
-        amountRaw,
-        feeRaw: 0n,
-        decimals: args.decimals,
-        instructionType,
-        transactionIndex: null,
-        ...order,
-      });
-      continue;
-    }
-
-    if (/^setAuthority$/i.test(instructionType)) {
-      const account = typeof info.account === "string" ? info.account : null;
-      const authorityType = String(info.authorityType ?? "").toLowerCase();
-      if (!account || !authorityType.includes("owner")) continue;
-      const balance = balances.get(account);
-      if (!balance || balance.preOwner === balance.postOwner) continue;
-      const amountRaw = balance.postRaw || balance.preRaw;
-      if (amountRaw <= 0n) continue;
-      output.push({
-        id: `${args.signature}:change-owner:${ordinal}`,
-        type: "transfer",
-        mint: args.mint,
-        signature: args.signature,
-        slot: args.tx.slot,
-        observedAtMs: Date.now(),
-        blockTimeMs:
-          args.tx.blockTime == null ? null : args.tx.blockTime * 1_000,
-        confidence: args.confidence,
-        movement: "change-owner",
-        source,
-        sourceTokenAccount: account,
-        destinationTokenAccount: account,
-        sourceOwner: balance.preOwner,
-        destinationOwner: balance.postOwner,
-        authority,
-        amountRaw,
-        feeRaw: 0n,
-        decimals: args.decimals,
-        instructionType,
-        transactionIndex: null,
-        ...order,
-      });
-    }
-  }
-  return output;
+  return reduceTokenAccountTransaction(args).events;
 }
 
 function ownerMintDelta(
@@ -551,6 +251,9 @@ function swapEvents(args: {
   const quoteMint = args.token.quoteMint ?? NATIVE_MINT.toBase58();
   const nativePair = quoteMint === NATIVE_MINT.toBase58();
   return parsed.trades.map((trade, index) => {
+    const venue = trade.history.venue;
+    if (venue !== "pump-curve" && venue !== "pumpswap")
+      throw new Error(`Unexpected Pump history venue ${venue}`);
     const tokenAmountRaw = BigInt(
       trade.history.ownerTokenDeltaRaw.replace("-", ""),
     );
@@ -579,7 +282,7 @@ function swapEvents(args: {
       observedAtMs: Date.now(),
       blockTimeMs: trade.tradedAtMs,
       confidence: args.confidence,
-      venue: trade.history.venue,
+      venue,
       side: trade.side,
       trader: trade.owner,
       tokenAmountRaw,

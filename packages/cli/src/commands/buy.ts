@@ -7,7 +7,7 @@ import {
   sol,
   type SenderId,
   type Solard,
-} from "@solard/sdk";
+} from "@solard/core";
 
 import { resolveTradeTargets, type TradeTargets } from "./trade-targets.ts";
 import { summarizeTradeRoute, type TradeRouteSummary } from "./trade-result.ts";

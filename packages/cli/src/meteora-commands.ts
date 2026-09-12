@@ -5,7 +5,7 @@ import {
   type MeteoraStrategy,
   type MeteoraTimeframe,
   type Solard,
-} from "@solard/sdk";
+} from "@solard/core";
 
 const WSOL = "So11111111111111111111111111111111111111112";
 

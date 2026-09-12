@@ -15,7 +15,7 @@ import {
   RaydiumService,
   type JupiterSwapQuote,
   type RaydiumSwapQuote,
-} from "@solard/sdk";
+} from "@solard/core";
 import {
   normalizeValueBandPolicy,
   type ValueBandBuyMode,

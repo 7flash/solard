@@ -21,7 +21,7 @@ import {
   simulateRegistryTokenLiquidation,
   wrappedSolAta,
   type TokenRow,
-} from "@solard/sdk";
+} from "@solard/core";
 
 import { handleMeteoraCommand } from "./meteora-commands.ts";
 import { handleAccountingCommand } from "./accounting-commands.ts";
@@ -324,7 +324,7 @@ function commandNeedsSigningVault(
 }
 
 async function storedWalletCount(): Promise<number> {
-  const { createTraderSolard } = await import("@solard/sdk");
+  const { createTraderSolard } = await import("@solard/core");
   const probe = createTraderSolard();
   try {
     return (probe.db.wallets.select().all() as unknown[]).length;
@@ -650,7 +650,7 @@ async function main() {
       listVanityMintPool,
       releaseVanityMintReservation,
       saveMintKeypairFile,
-    } = await import("@solard/sdk");
+    } = await import("@solard/core");
 
     if (values[0] === "pool") {
       const action = values[1] ?? "list";
@@ -828,13 +828,13 @@ async function main() {
       process.env.JITO_BLOCK_ENGINE_URL ??
       "https://mainnet.block-engine.jito.wtf"
     ).replace(/\/$/, "");
-    const { getJitoTipAccounts } = await import("@solard/sdk");
+    const { getJitoTipAccounts } = await import("@solard/core");
     const tipAccounts = await getJitoTipAccounts(endpoint);
     emit(json({ endpoint, tipAccounts }) + "\n");
     return;
   }
   if (command === "metadata" && values[0] === "upload") {
-    const { uploadPumpMetadata } = await import("@solard/sdk");
+    const { uploadPumpMetadata } = await import("@solard/core");
     const uploaded = await uploadPumpMetadata(
       {
         imagePath: need(flags, "image"),
@@ -860,9 +860,9 @@ async function main() {
   }
   const [{ sol, formatRaw }, { shortKey }, { createTraderSolard }] =
     await Promise.all([
-      import("@solard/sdk"),
-      import("@solard/sdk"),
-      import("@solard/sdk"),
+      import("@solard/core"),
+      import("@solard/core"),
+      import("@solard/core"),
     ]);
   const slrd = createTraderSolard();
   try {
@@ -1621,7 +1621,7 @@ async function main() {
           throw new Error(
             "Provide --uri <metadata_uri> or --image <local_path> --description <text>",
           );
-        const { uploadPumpMetadata } = await import("@solard/sdk");
+        const { uploadPumpMetadata } = await import("@solard/core");
         uploadedMetadata = await uploadPumpMetadata(
           {
             imagePath: need(flags, "image"),
@@ -2463,7 +2463,7 @@ async function main() {
         const id = values[1];
         if (!id)
           throw new Error("Usage: slrd rewards claim-status <stable-claim-id>");
-        emit(json(slrd.rewards.claimStatus(id)) + "\n");
+        emit(json(slrd.claims.creatorFees.status(id)) + "\n");
         return;
       }
 
@@ -2500,7 +2500,7 @@ async function main() {
               parsed.observedAtMs == null ? null : Number(parsed.observedAtMs),
           };
         }
-        const result = await slrd.rewards.claim(tokenRef, wallet, {
+        const result = await slrd.claims.creatorFees.claim(tokenRef, wallet, {
           id: flags.get("id"),
           basis,
           via: flags.get("sender") ?? "rpc",

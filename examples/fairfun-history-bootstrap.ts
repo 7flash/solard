@@ -49,23 +49,19 @@ function holderState(balances: Map<string, bigint>) {
 }
 
 function checkpoint(item: ReplayItem, balances: Map<string, bigint>) {
-  if (item.trx !== "claim_v2") {
-    throw new Error("Replay checkpoint requires a creator reward claim");
-  }
-  const recipient = [...item.payouts.keys()][0];
-  if (!recipient)
-    throw new Error(`Missing payout recipient for ${item.signature}`);
-  const payout = item.payouts.get(recipient);
-  if (payout == null) {
-    throw new Error(`Missing persisted payout for ${item.signature}`);
+  const event = item.raw;
+  if (event.type !== "claim") {
+    throw new Error("Replay checkpoint requires a claim event");
   }
   return {
+    id: event.id,
     signature: item.signature,
     slot: item.slot,
     transactionIndex: item.transactionIndex,
-    amountRaw: payout.toString(),
-    quoteMint: item.quoteMint,
-    attribution: item.claimAttribution,
+    amountRaw: event.payout.amountRaw.toString(),
+    assetMint: event.payout.assetMint,
+    recipient: event.payout.recipient,
+    attribution: event.attribution,
     holdersAtClaim: holderState(balances),
   };
 }
@@ -86,22 +82,22 @@ export async function runFairfunHistoryBootstrap(
         provider,
       }),
     );
-    if (!history.coverage.authoritative) {
+    if (!history.coverage.complete) {
       throw new Error(
-        `Historical Fairfun replay is not authoritative: ${history.coverage.warnings.join(" ") || "coverage incomplete"}`,
+        `Historical Fairfun replay is incomplete: ${history.coverage.warnings.join(" ") || "coverage incomplete"}`,
       );
     }
     const balances = new Map<string, bigint>();
     const claims: ReturnType<typeof checkpoint>[] = [];
     for (const item of history) {
       applyReplayBalance(balances, item);
-      if (item.trx === "claim_v2") claims.push(checkpoint(item, balances));
+      if (item.trx === "claim") claims.push(checkpoint(item, balances));
     }
     process.stdout.write(
       `${JSON.stringify(
         {
           mint: history.mint,
-          rewardRecipient: history.coverage.recipient,
+          throughSlot: history.coverage.throughSlot,
           coverage: history.coverage,
           claims,
           currentHolders: holderState(balances),

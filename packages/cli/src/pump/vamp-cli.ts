@@ -9,7 +9,7 @@ import {
   uploadPumpMetadata,
   type MetadataUploaderId,
   type PumpVampSourceMetadata,
-} from "@solard/sdk";
+} from "@solard/core";
 
 import {
   first,

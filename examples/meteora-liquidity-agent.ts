@@ -6,7 +6,7 @@ import {
   type MeteoraPositionSnapshot,
   type MeteoraStrategy,
   type Solard,
-} from "@solard/sdk";
+} from "@solard/core";
 
 const WSOL = "So11111111111111111111111111111111111111112";
 const FIVE_MINUTES_MS = 5 * 60_000;

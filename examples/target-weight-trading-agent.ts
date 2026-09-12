@@ -7,7 +7,7 @@ import {
   type MarketPrice,
   type TargetWeightCandle,
   type TargetWeightPolicy,
-} from "@solard/sdk";
+} from "@solard/core";
 
 const FIVE_MINUTES_MS = 300_000;
 const m = createMeasure("slrd:target-weight-agent", { maxResultLength: 1600 });

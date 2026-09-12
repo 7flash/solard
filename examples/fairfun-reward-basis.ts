@@ -1,7 +1,31 @@
 #!/usr/bin/env bun
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { hashRewardEntitlementBasis } from "@solard/sdk";
+import { createHash } from "node:crypto";
+
+function canonicalJson(value: unknown): string {
+  if (value == null || typeof value === "boolean" || typeof value === "string")
+    return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new Error("payload contains a non-finite number");
+    return JSON.stringify(value);
+  }
+  if (typeof value === "bigint") return JSON.stringify(value.toString());
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object") {
+    const row = value as Record<string, unknown>;
+    return `{${Object.keys(row)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(row[key])}`)
+      .join(",")}}`;
+  }
+  throw new Error(`unsupported payload value: ${typeof value}`);
+}
+
+function hashEntitlementBasis(payload: unknown): string {
+  return createHash("sha256").update(canonicalJson(payload)).digest("hex");
+}
 
 type Flags = Map<string, string>;
 
@@ -38,7 +62,7 @@ async function main(): Promise<void> {
       {
         id,
         slot,
-        hash: hashRewardEntitlementBasis(payload),
+        hash: hashEntitlementBasis(payload),
         observedAtMs: Date.now(),
       },
       null,

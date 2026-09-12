@@ -1,4 +1,4 @@
-import type { Solard } from "@solard/sdk";
+import type { Solard } from "@solard/core";
 import type { TradeCommandFlags } from "./trade-venue.ts";
 
 export type TradeTargets = {

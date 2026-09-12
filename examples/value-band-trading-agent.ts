@@ -18,7 +18,7 @@ import {
   createTraderSolard,
   executeJupiterSwap,
   quoteJupiterSwap,
-} from "@solard/sdk";
+} from "@solard/core";
 
 type Flags = Map<string, string>;
 const SOL = NATIVE_MINT.toBase58();

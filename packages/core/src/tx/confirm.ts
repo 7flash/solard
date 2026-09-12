@@ -58,5 +58,5 @@ export async function confirmSignature(
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  return { signature, slot: null, sender, status: "broadcast" };
+  return { signature, slot: null, sender, status: "submitted" };
 }

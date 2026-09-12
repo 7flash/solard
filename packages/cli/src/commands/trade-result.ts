@@ -1,4 +1,8 @@
-import type { TradeAsset, TradeRoute, TradeRouteResolution } from "@solard/sdk";
+import type {
+  TradeAsset,
+  TradeRoute,
+  TradeRouteResolution,
+} from "@solard/core";
 
 export type TradeRouteSummary = {
   route: TradeRoute;

@@ -1,3 +1,4 @@
+import type { PumpExternalDeploymentBuild } from "@solard/core";
 import type {
   PublicKey,
   Transaction,
@@ -55,11 +56,14 @@ export type BrowserPortfolio = {
   tokenBalances: BrowserTokenBalance[];
 };
 
-export type BrowserBroadcastResult = {
+export type BrowserTransactionSubmission = {
   signature: string;
-  confirmed: boolean;
   blockhash: string;
   lastValidBlockHeight: number;
+};
+
+export type BrowserConfirmedTransaction = BrowserTransactionSubmission & {
+  status: "confirmed";
 };
 
 export type BrowserTradeSide = "buy" | "sell";
@@ -79,7 +83,7 @@ export type BrowserTradeBuild = {
   serializedSize: number;
 };
 
-export type BrowserTradeResult = BrowserBroadcastResult & {
+export type BrowserTradeResult = BrowserConfirmedTransaction & {
   side: BrowserTradeSide;
   venue: string;
   mint: string;
@@ -97,10 +101,9 @@ export type BrowserSolardOptions = {
   rpcMaxRps?: number;
   fetch?: typeof globalThis.fetch;
 };
-export type BrowserPumpDeploymentBuild =
-  import("@solard/core/launches/pump/external-deployment.ts").PumpExternalDeploymentBuild;
+export type BrowserPumpDeploymentBuild = PumpExternalDeploymentBuild;
 
-export type BrowserPumpDeploymentResult = BrowserBroadcastResult & {
+export type BrowserPumpDeploymentResult = BrowserConfirmedTransaction & {
   mint: string;
   beneficiary: string;
   quoteMint: string;

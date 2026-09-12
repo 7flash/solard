@@ -169,7 +169,7 @@ async function settleSubmittedPlan(
       status?.confirmationStatus === "confirmed" ||
       status?.confirmationStatus === "finalized"
     ) {
-      const receipt = await slrd.confirmSubmitted(submission, 5_000);
+      const receipt = await slrd.confirmSubmission(submission, 5_000);
       if (receipt.status !== "confirmed") {
         throw new Error(
           `Program-buffer close ${submission.signature} ended with status=${receipt.status}${receipt.error ? `: ${receipt.error}` : ""}.`,
@@ -206,7 +206,7 @@ async function sendStrictClose(
   row: RegistryProgramBuffer,
 ): Promise<SendReceipt> {
   const plan = await buildClosePlan(slrd, row);
-  const submission = await slrd.broadcastPlan(
+  const submission = await slrd.submitPlan(
     plan,
     "rpc",
     "registry-program-buffer-close",

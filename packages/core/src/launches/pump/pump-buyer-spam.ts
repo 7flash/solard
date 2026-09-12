@@ -429,7 +429,7 @@ export async function spamPumpBuyer(args: {
       }
 
       try {
-        active = await args.slrd.broadcastPlan(
+        active = await args.slrd.submitPlan(
           plan,
           args.options.sender,
           `cli:pump:standalone-buyer:${args.index}:attempt:${failedTransactions + broadcastErrors + 1}`,
@@ -477,7 +477,7 @@ export async function spamPumpBuyer(args: {
           report?.("pump standalone buyer status retry", {
             index: args.index,
             wallet: args.buyer.address,
-            signature: active.signature,
+            signature: active?.signature ?? null,
             error: errorText(error),
           });
         }
@@ -545,17 +545,19 @@ export async function spamPumpBuyer(args: {
           report?.("pump standalone buyer expiry check retry", {
             index: args.index,
             wallet: args.buyer.address,
-            signature: active.signature,
+            signature: active?.signature ?? null,
             error: errorText(error),
           });
         }
       }
 
+      const activeSubmission = active;
+      if (!activeSubmission) continue;
       try {
         await resendSubmitted({
           slrd: args.slrd,
           sender: args.options.sender,
-          active,
+          active: activeSubmission,
         });
         resends++;
       } catch (error) {
@@ -563,7 +565,7 @@ export async function spamPumpBuyer(args: {
         report?.("pump standalone buyer resend retry", {
           index: args.index,
           wallet: args.buyer.address,
-          signature: active.signature,
+          signature: activeSubmission.signature,
           processed,
           broadcastErrors,
           error: errorText(error),

@@ -12,7 +12,7 @@ import {
   type HistoricalResearchBatchResult,
   type HistoricalResearchStrategy,
   type HistoricalResearchToken,
-} from "@solard/sdk";
+} from "@solard/core";
 
 type Flags = Map<string, string>;
 type Emit = (value: string) => void;

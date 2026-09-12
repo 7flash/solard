@@ -6,6 +6,7 @@ import {
 } from "../chain/holders.ts";
 import { readMint } from "../chain/state.ts";
 import type { TokenRow } from "../db/schema.ts";
+import { recordDiscoveredSignatures } from "./raw-transaction-cache.ts";
 import {
   parseTokenTransferEvents,
   type SolardTokenEventConfidence,
@@ -451,7 +452,10 @@ async function solscanHistory(args: {
   currentSnapshot: TokenHolderSnapshot | null;
 }): Promise<TokenEventHistory> {
   const mint = new PublicKey(args.token.mint).toBase58();
-  const mintInfo = await readMint(args.connection, new PublicKey(mint));
+  const mintInfo =
+    typeof args.token.decimals === "number"
+      ? { decimals: args.token.decimals }
+      : await readMint(args.connection, new PublicKey(mint));
   const warnings: string[] = [];
   let providerMeta: SolscanTokenMeta = {
     createdAtMs: null,
@@ -579,6 +583,11 @@ async function solscanHistory(args: {
     page += 1;
   }
 
+  recordDiscoveredSignatures(
+    args.connection,
+    mint,
+    indexed.map((row) => ({ signature: row.signature, slot: row.slot })),
+  );
   const parsed = await parseIndexedTransactions({
     connection: args.connection,
     mint,
@@ -690,7 +699,10 @@ async function rpcHistory(args: {
   snapshotSlot: number | null;
 }): Promise<TokenEventHistory> {
   const mint = new PublicKey(args.token.mint);
-  const mintInfo = await readMint(args.connection, mint);
+  const mintInfo =
+    typeof args.token.decimals === "number"
+      ? { decimals: args.token.decimals }
+      : await readMint(args.connection, mint);
   const maxPages =
     args.options.maxPages == null
       ? null

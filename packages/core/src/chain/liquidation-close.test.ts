@@ -65,7 +65,7 @@ function fixture(mode: FixtureMode) {
     tokens: { list: () => [] },
     tokenAccounts: async () => (exists ? [account] : []),
     tx: () => composer,
-    broadcastPlan: async (plan: any, sender: string) => {
+    submitPlan: async (plan: any, sender: string) => {
       broadcasts += 1;
       if (mode === "account-not-found-once" && broadcasts === 1) {
         throw new Error('Simulation failed: "AccountNotFound"');
@@ -100,7 +100,7 @@ function fixture(mode: FixtureMode) {
         signature,
         slot: null,
         sender,
-        status: "broadcast" as const,
+        status: "submitted" as const,
       };
     },
     senders: {
@@ -171,12 +171,12 @@ describe("registry liquidation empty-account closure", () => {
     });
     expect(result).toHaveLength(1);
     expect(result[0]?.error).toBeUndefined();
-    expect(result[0]?.receipt?.status).toBe("broadcast");
+    expect(result[0]?.receipt?.status).toBe("submitted");
     expect(stats().exists).toBe(false);
     expect(stats().priorityMicroLamports).toBe(10_000);
   });
 
-  test("rebroadcasts the same unresolved close instead of declaring broadcast a failure", async () => {
+  test("rebroadcasts the same unresolved close instead of declaring submission a failure", async () => {
     const { slrd, plan, stats } = fixture("broadcast-then-close");
     const result = await executeRegistryTokenLiquidation(slrd, plan, {
       delayMs: 0,
@@ -288,7 +288,7 @@ test("rereads an unsellable token account after AccountNotFound, verifies zero, 
       };
       return composer;
     },
-    broadcastPlan: async (built: any, sender: string) => {
+    submitPlan: async (built: any, sender: string) => {
       exists = false;
       return {
         signature: Keypair.generate().publicKey.toBase58(),

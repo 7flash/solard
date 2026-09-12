@@ -6,7 +6,7 @@ import {
   transferTokenIxs,
   type SenderId,
   type Solard,
-} from "@solard/sdk";
+} from "@solard/core";
 
 import { resolveDestinationRef } from "../refs.ts";
 

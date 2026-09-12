@@ -1,4 +1,4 @@
-import { findExternalContact } from "@solard/sdk";
+import { findExternalContact } from "@solard/core";
 
 export type ResolvedDestinationRef = {
   input: string;

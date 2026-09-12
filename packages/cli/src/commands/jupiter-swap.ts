@@ -11,7 +11,7 @@ import {
   type JupiterSwapQuote,
   type Solard,
   type TradeAsset,
-} from "@solard/sdk";
+} from "@solard/core";
 
 export type JupiterSwapCliFlags = ReadonlyMap<string, string>;
 

@@ -1567,7 +1567,7 @@ async function spamDependentBuy(args: {
 
       try {
         await args.sendLimiter?.wait(args.lane.sender);
-        active = await args.slrd.broadcastPlan(
+        active = await args.slrd.submitPlan(
           freshPlan,
           args.lane.sender,
           `${args.kind}:attempt:${failedAttempts + preReadyFailures + broadcastErrors + 1}`,
@@ -1632,7 +1632,7 @@ async function spamDependentBuy(args: {
     } else {
       const state = await signatureState(args.slrd, active.signature);
       if (state === "success") {
-        const receipt = await args.slrd.confirmSubmitted(active, 15_000);
+        const receipt = await args.slrd.confirmSubmission(active, 15_000);
         return {
           role: "trader",
           address: args.participant.address,
@@ -1730,7 +1730,7 @@ async function spamDependentBuy(args: {
   }
 
   if (active) {
-    const receipt = await args.slrd.confirmSubmitted(active, 5_000);
+    const receipt = await args.slrd.confirmSubmission(active, 5_000);
     if (receipt.status === "confirmed") {
       return {
         role: "trader",
@@ -1772,7 +1772,7 @@ async function broadcastLaunchWithRetry(args: {
     attempts += 1;
     try {
       await args.sendLimiter.wait(args.sender);
-      const submitted = await args.slrd.broadcastPlan(
+      const submitted = await args.slrd.submitPlan(
         args.plan,
         args.sender,
         `${args.kind}:attempt:${attempts}`,
@@ -1873,7 +1873,7 @@ export async function executeArmedPumpBuyers(args: {
               participant.execution?.maxFailedAttempts ??
               args.spam.maxFailedAttempts,
           },
-          // FIRE is deliberately before deployment broadcast. No signature gate.
+          // FIRE is deliberately before deployment submission. No signature gate.
           startMode: "blind-spam-after-submit",
           prepared: args.prepared,
           buildReadyPlan: async () => {
@@ -2619,10 +2619,10 @@ export async function executePumpTokenLaunch(args: {
   spam: SpamSubmitOptions;
   kind: string;
   reporter?: LaunchReporter;
-  /** Runs immediately before the first deployment broadcast attempt. */
-  beforeDeploymentBroadcast?: () => Promise<void>;
-  /** Runs only when deployment could not be broadcast. */
-  onDeploymentBroadcastFailure?: (error: unknown) => Promise<void>;
+  /** Runs immediately before the first deployment submission attempt. */
+  beforeDeploymentSubmission?: () => Promise<void>;
+  /** Runs only when deployment could not be submitted. */
+  onDeploymentSubmissionFailure?: (error: unknown) => Promise<void>;
 }): Promise<PumpTokenLaunchResult> {
   const submitMode = normalizeTraderSubmitMode(args.traderSubmitMode);
 
@@ -2820,11 +2820,11 @@ export async function executePumpTokenLaunch(args: {
     args.reporter,
   );
   try {
-    if (args.beforeDeploymentBroadcast) {
+    if (args.beforeDeploymentSubmission) {
       args.reporter?.("pump armed buyer release before deployment", {
         mint: args.prepared.deployment.mint.publicKey.toBase58(),
       });
-      await args.beforeDeploymentBroadcast();
+      await args.beforeDeploymentSubmission();
     }
 
     let launch: SubmittedPlan;
@@ -2840,12 +2840,12 @@ export async function executePumpTokenLaunch(args: {
         reporter: args.reporter,
       });
     } catch (error) {
-      await args.onDeploymentBroadcastFailure?.(error);
+      await args.onDeploymentSubmissionFailure?.(error);
       throw error;
     }
 
     if (submitMode === "after-deploy-confirmed") {
-      const launchReceipt = await args.slrd.confirmSubmitted(launch);
+      const launchReceipt = await args.slrd.confirmSubmission(launch);
       if (launchReceipt.status !== "confirmed") {
         throw new Error(
           `Token create + creator initial buy did not confirm: ${launchReceipt.status}`,
@@ -2967,7 +2967,7 @@ export async function executePumpTokenLaunch(args: {
       }),
     );
 
-    const launchReceipt = await args.slrd.confirmSubmitted(launch);
+    const launchReceipt = await args.slrd.confirmSubmission(launch);
     const traderReceipts: TraderReceiptOutcome[] = settled.map((item, index) =>
       item.status === "fulfilled"
         ? {

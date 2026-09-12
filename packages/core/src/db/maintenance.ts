@@ -22,4 +22,19 @@ export function ensureSolardDatabaseRuntimeObjects(db: SolardDatabase): void {
       "UPDATE historyReplayCoverage SET attemptedThroughSlot = finalizedThroughSlot WHERE attemptedThroughSlot < finalizedThroughSlot",
     );
   } catch {}
+  normalizeTransactionLifecycleRows(db);
+}
+
+export function normalizeTransactionLifecycleRows(db: SolardDatabase): void {
+  const raw = db as unknown as RawDb;
+  try {
+    raw.exec?.(
+      "UPDATE executions SET status = 'submitted' WHERE status = 'broadcast'",
+    );
+  } catch {}
+  try {
+    raw.exec?.(
+      "UPDATE claims SET status = 'submitted' WHERE status = 'broadcast'",
+    );
+  } catch {}
 }

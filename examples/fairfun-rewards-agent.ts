@@ -1,9 +1,12 @@
 import { configure, createMeasure } from "measure-fn";
 import { readFileSync } from "node:fs";
-import {
-  createTraderSolard,
-  type HolderRewardEntitlementSnapshotInput,
-} from "@solard/sdk";
+import { createTraderSolard } from "@solard/sdk";
+
+type FairfunEntitlementSnapshot = {
+  recipients: Array<{ wallet: string; entitledRaw: string }>;
+  totalEntitledRaw?: string;
+  observedAtMs: number | null;
+};
 
 configure({ silent: true });
 const m = createMeasure("slrd:fairfun-rewards-agent", {
@@ -32,7 +35,7 @@ function required(flags: Flags, key: string): string {
   return value;
 }
 
-function snapshot(path: string): HolderRewardEntitlementSnapshotInput {
+function snapshot(path: string): FairfunEntitlementSnapshot {
   const parsed = JSON.parse(readFileSync(path, "utf8")) as any;
   const rows = Array.isArray(parsed) ? parsed : parsed?.recipients;
   if (!Array.isArray(rows))
@@ -71,17 +74,20 @@ export async function runFairfunRewardsAgent(
   const slrd = createTraderSolard();
   try {
     const common = {
-      token,
-      wallet,
-      rewardMint: flags.get("reward-mint"),
-      snapshot: input,
+      id: flags.get("id") ?? `fairfun:${token}`,
+      from: wallet,
+      asset: flags.get("reward-mint") ?? "SOL",
+      entitlements: input.recipients.map((row) => ({
+        recipient: row.wallet,
+        entitledRaw: row.entitledRaw,
+      })),
       reserveRaw: BigInt(flags.get("reserve-raw") ?? "0"),
       maxRecipientsPerTransaction: flags.get("max-per-tx")
         ? Number(flags.get("max-per-tx"))
         : undefined,
     };
     if (!live) {
-      const plan = await m("plan", () => slrd.rewards.planDistribution(common));
+      const plan = await m("plan", () => slrd.distributions.plan(common));
       process.stdout.write(
         `${JSON.stringify(plan, (_, value) => (typeof value === "bigint" ? value.toString() : value), 2)}\n`,
       );
@@ -90,7 +96,7 @@ export async function runFairfunRewardsAgent(
     if (!liveGate())
       throw new Error("--live requires SOLARD_ENABLE_LIVE_TRADES=1");
     const state = await m("distribute", () =>
-      slrd.rewards.distribute({
+      slrd.distributions.execute({
         ...common,
         via: flags.get("sender") ?? "rpc",
       }),

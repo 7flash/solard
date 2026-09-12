@@ -9,7 +9,7 @@ import {
   type TargetWeightPolicy,
   type TokenAthDipProfitBacktestResult,
   type TokenTargetWeightBacktestResult,
-} from "@solard/sdk";
+} from "@solard/core";
 
 type Flags = Map<string, string>;
 type Emit = (value: string) => void;

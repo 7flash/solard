@@ -59,7 +59,6 @@ export type {
 } from "./chain/token-history.ts";
 export type { SolardRpcStats } from "./chain/connection.ts";
 export {
-  REPLAY_PARSER_VERSION,
   compareReplayItems,
   mergeReplayEventSubscriptions,
   mergeReplayHistories,
@@ -69,13 +68,13 @@ export {
 } from "./history/replay.ts";
 export type {
   MergedReplayEventStream,
-  ReplayClaimAttribution,
   ReplayCoverage,
   ReplayEventSubscription,
   ReplayEventsOptions,
   ReplayHistory,
   ReplayItem,
   ReplayOptions,
+  ReplayPayout,
   ReplayTransaction,
 } from "./history/replay.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
@@ -125,33 +124,6 @@ export type {
   DurableTransferManyExecuteOptions,
   DurableTransferManyResumeOptions,
 } from "./tx/durable-transfer-many.ts";
-export {
-  executeHolderRewardDistribution,
-  getHolderRewardDistributionAudit,
-  getHolderRewardDistributionRun,
-  getHolderRewardDistributionState,
-  planHolderRewardDistribution,
-  requestHolderRewardDistributionStop,
-} from "./rewards/holder-distributor.ts";
-export type {
-  HolderRewardAllocation,
-  HolderRewardEntitlementEvent,
-  HolderRewardEntitlementInput,
-  HolderRewardEntitlementSnapshotInput,
-  HolderRewardOutstandingRecipient,
-  HolderRewardPayment,
-  HolderRewardPendingTransaction,
-  HolderRewardRecipientAudit,
-  HolderRewardRecipientState,
-  HolderRewardSnapshotState,
-  HolderRewardDistributionAudit,
-  HolderRewardDistributionState,
-  HolderRewardPlanOptions,
-  HolderRewardDistributionPlan,
-  HolderRewardRunState,
-  HolderRewardStopResult,
-  ExecuteHolderRewardDistributionOptions,
-} from "./rewards/holder-distributor.ts";
 export {
   claimCreatorRewards,
   confirmedCreatorRewardTransaction,
@@ -695,3 +667,65 @@ export {
   publicPumpMetadataUrl,
 } from "./launches/pump/vamp.ts";
 export type { PumpVampSourceMetadata } from "./launches/pump/vamp.ts";
+export {
+  normalizeTargetWeightPolicy,
+  planTargetWeightRebalance,
+  targetWeightGapPct,
+} from "./strategy/target-weight.ts";
+export type {
+  TargetWeightCandle,
+  TargetWeightGapMode,
+  TargetWeightGapPolicy,
+  TargetWeightPolicy,
+  TargetWeightRebalancePlan,
+} from "./strategy/target-weight.ts";
+export { simulateTargetWeightStrategy } from "./backtest/target-weight-sim.ts";
+export type {
+  TargetWeightBacktestExecution,
+  TargetWeightBacktestResult,
+  TargetWeightBacktestSummary,
+  TargetWeightDecision,
+} from "./backtest/target-weight-sim.ts";
+export {
+  backtestTargetWeightToken,
+  backtestTargetWeightTokenWithDependencies,
+} from "./backtest/token-backtest.ts";
+export type { TokenTargetWeightBacktestResult } from "./backtest/token-backtest.ts";
+export {
+  runHistoricalStrategyBatch,
+  summarizeHistoricalResearchRuns,
+} from "./backtest/research-batch.ts";
+export type {
+  HistoricalResearchBatchOptions,
+  HistoricalResearchBatchResult,
+  HistoricalResearchFailure,
+  HistoricalResearchRun,
+  HistoricalResearchStrategy,
+  HistoricalResearchStrategySummary,
+  HistoricalResearchToken,
+  HistoricalResearchTokenSkip,
+} from "./backtest/research-batch.ts";
+export { backfillRaydiumTokenHistory } from "./chain/token-history/raydium-backfill.ts";
+export {
+  reduceTokenAccountTransaction,
+  UnsupportedTokenAccountingSemanticsError,
+} from "./events/token-account-reducer.ts";
+export type { TokenAccountReducerResult } from "./events/token-account-reducer.ts";
+export type {
+  SolardCanonicalEvent,
+  SolardClaimAttribution,
+  SolardClaimEvent,
+} from "./events/canonical-events.ts";
+export {
+  executeCumulativeDistribution,
+  getCumulativeDistributionState,
+  planCumulativeDistribution,
+} from "./distributions/cumulative.ts";
+export type {
+  CumulativeDistributionExecuteOptions,
+  CumulativeDistributionInput,
+  CumulativeDistributionPlan,
+  CumulativeDistributionRecipient,
+  CumulativeDistributionState,
+  CumulativeEntitlement,
+} from "./distributions/cumulative.ts";

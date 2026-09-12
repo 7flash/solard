@@ -115,7 +115,7 @@ async function confirmNewPassword(): Promise<string> {
 
 async function validateAllStoredWallets(password: string): Promise<void> {
   setMasterKey(password);
-  const { createTraderSolard } = await import("@solard/sdk");
+  const { createTraderSolard } = await import("@solard/core");
   const probe = createTraderSolard();
   try {
     const integrity = probe.wallets.integrity();

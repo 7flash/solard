@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { createTraderSolard, quoteJupiterTokenToSol } from "@solard/sdk";
+import { createTraderSolard, quoteJupiterTokenToSol } from "@solard/core";
 
 const DEFAULT_XSOL = "4sWNB8zGWHkh6UnmwiEtzNxL4XrN7uK9tosbESbJFfVs";
 type Flags = Map<string, string>;

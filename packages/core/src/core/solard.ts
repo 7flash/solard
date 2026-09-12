@@ -125,18 +125,14 @@ import {
   type DurableTransferManyResumeOptions,
 } from "../tx/durable-transfer-many.ts";
 import {
-  executeHolderRewardDistribution,
-  getHolderRewardDistributionAudit,
-  getHolderRewardDistributionState,
-  planHolderRewardDistribution,
-  requestHolderRewardDistributionStop,
-  type ExecuteHolderRewardDistributionOptions,
-  type HolderRewardDistributionAudit,
-  type HolderRewardDistributionPlan,
-  type HolderRewardDistributionState,
-  type HolderRewardPlanOptions,
-  type HolderRewardStopResult,
-} from "../rewards/holder-distributor.ts";
+  executeCumulativeDistribution,
+  getCumulativeDistributionState,
+  planCumulativeDistribution,
+  type CumulativeDistributionExecuteOptions,
+  type CumulativeDistributionInput,
+  type CumulativeDistributionPlan,
+  type CumulativeDistributionState,
+} from "../distributions/cumulative.ts";
 import {
   claimCreatorRewards,
   getCreatorRewardClaimState,
@@ -277,29 +273,24 @@ export class Solard implements ComposerHost {
   readonly pump: PumpPairService;
   readonly events: SolardEventsApi;
   readonly history: SolardHistoryApi;
-  readonly rewards: {
-    claim: (
-      tokenRef: TokenRef,
-      wallet: WalletRef,
-      options?: ClaimCreatorRewardsOptions,
-    ) => Promise<CreatorRewardClaimResult>;
-    claimStatus: (id: string) => DurableCreatorRewardClaimState | null;
-    history: (
-      tokenRef: TokenRef,
-      options?: CreatorRewardHistoryOptions,
-    ) => Promise<CreatorRewardHistory>;
-    planDistribution: (
-      options: HolderRewardPlanOptions,
-    ) => Promise<HolderRewardDistributionPlan>;
-    distribute: (
-      options: ExecuteHolderRewardDistributionOptions,
-    ) => Promise<HolderRewardDistributionState>;
-    stop: (tokenRef: TokenRef) => HolderRewardStopResult;
-    status: (tokenRef: TokenRef) => HolderRewardDistributionState | null;
-    audit: (
-      tokenRef: TokenRef,
-      holder?: string | PublicKey,
-    ) => HolderRewardDistributionAudit | null;
+  readonly claims: {
+    creatorFees: {
+      claim: (
+        tokenRef: TokenRef,
+        wallet: WalletRef,
+        options?: ClaimCreatorRewardsOptions,
+      ) => Promise<CreatorRewardClaimResult>;
+      status: (id: string) => DurableCreatorRewardClaimState | null;
+    };
+  };
+  readonly distributions: {
+    plan: (
+      options: CumulativeDistributionInput,
+    ) => Promise<CumulativeDistributionPlan>;
+    execute: (
+      options: CumulativeDistributionExecuteOptions,
+    ) => Promise<CumulativeDistributionState>;
+    status: (id: string) => CumulativeDistributionState | null;
   };
   readonly venues = new VenueRegistry();
   readonly claimSources = new ClaimSourceRegistry();
@@ -357,20 +348,19 @@ export class Solard implements ComposerHost {
         this.replayHistory(tokenRef, replayOptions),
       merge: (histories) => mergeReplayHistories(histories),
     };
-    this.rewards = {
-      claim: (tokenRef, wallet, rewardOptions = {}) =>
-        this.claimRewards(tokenRef, wallet, rewardOptions),
-      claimStatus: (id) => getCreatorRewardClaimState(this, id),
-      history: (tokenRef, rewardOptions = {}) =>
-        this.historyCreatorRewards(tokenRef, rewardOptions),
-      planDistribution: (rewardOptions) =>
-        this.planHolderRewards(rewardOptions),
-      distribute: (rewardOptions) =>
-        this.distributeHolderRewards(rewardOptions),
-      stop: (tokenRef) => requestHolderRewardDistributionStop(this, tokenRef),
-      status: (tokenRef) => getHolderRewardDistributionState(this, tokenRef),
-      audit: (tokenRef, holder) =>
-        getHolderRewardDistributionAudit(this, tokenRef, holder),
+    this.claims = {
+      creatorFees: {
+        claim: (tokenRef, wallet, claimOptions = {}) =>
+          this.claimCreatorFees(tokenRef, wallet, claimOptions),
+        status: (id) => getCreatorRewardClaimState(this, id),
+      },
+    };
+    this.distributions = {
+      plan: (distributionOptions) =>
+        planCumulativeDistribution(this, distributionOptions),
+      execute: (distributionOptions) =>
+        executeCumulativeDistribution(this, distributionOptions),
+      status: (id) => getCumulativeDistributionState(this, id),
     };
     for (const venue of options.venues ?? []) this.venues.register(venue);
     for (const source of options.claimSources ?? [])
@@ -914,7 +904,7 @@ export class Solard implements ComposerHost {
       options,
     );
   }
-  async broadcast(
+  async submit(
     tx: SolardTransaction,
     options: {
       wallet: WalletRef;
@@ -923,8 +913,13 @@ export class Solard implements ComposerHost {
       skipSimulation?: boolean;
       skipPreflight?: boolean;
     },
-  ): Promise<SendReceipt> {
-    return await this.send(tx, options);
+  ): Promise<SubmittedPlan> {
+    return await this.submitPlan(
+      await this.compile(this.signer(options.wallet), tx.snapshot()),
+      options.via ?? "rpc",
+      options.kind,
+      options,
+    );
   }
   async sendBatchPlans(
     plans: PlannedTransaction[],
@@ -1088,7 +1083,7 @@ export class Solard implements ComposerHost {
     }
   }
 
-  async broadcastPlan(
+  async submitPlan(
     plan: PlannedTransaction,
     via: SenderId,
     kind = "transaction",
@@ -1142,7 +1137,7 @@ export class Solard implements ComposerHost {
               skipPreflight: options.skipPreflight ?? true,
             },
           });
-          this.executions.update(execution, { signature, status: "broadcast" });
+          this.executions.update(execution, { signature, status: "submitted" });
           return {
             signature,
             sender: String(via),
@@ -1182,7 +1177,7 @@ export class Solard implements ComposerHost {
     return receipt;
   }
 
-  async confirmSubmitted(
+  async confirmSubmission(
     submission: SubmittedPlan,
     timeoutMs = 30_000,
   ): Promise<SendReceipt> {
@@ -1267,8 +1262,8 @@ export class Solard implements ComposerHost {
     kind = "transaction",
     options: SendOptions = {},
   ): Promise<SendReceipt> {
-    const submission = await this.broadcastPlan(plan, via, kind, options);
-    return await this.confirmSubmitted(submission);
+    const submission = await this.submitPlan(plan, via, kind, options);
+    return await this.confirmSubmission(submission);
   }
 
   async buy(
@@ -1407,10 +1402,10 @@ export class Solard implements ComposerHost {
     wallet: WalletRef,
     options: { via?: SenderId } = {},
   ) {
-    return (await this.claimRewards(token, wallet, { via: options.via }))
+    return (await this.claimCreatorFees(token, wallet, { via: options.via }))
       .receipt;
   }
-  async claimRewards(
+  async claimCreatorFees(
     token: TokenRef,
     wallet: WalletRef,
     options: ClaimCreatorRewardsOptions = {},
@@ -1600,14 +1595,16 @@ export class Solard implements ComposerHost {
     return await resumeDurableTransferMany(this, id, options);
   }
 
-  async planHolderRewards(options: HolderRewardPlanOptions) {
-    return await planHolderRewardDistribution(this, options);
+  async planDistribution(options: CumulativeDistributionInput) {
+    return await planCumulativeDistribution(this, options);
   }
 
-  async distributeHolderRewards(
-    options: ExecuteHolderRewardDistributionOptions,
-  ) {
-    return await executeHolderRewardDistribution(this, options);
+  async executeDistribution(options: CumulativeDistributionExecuteOptions) {
+    return await executeCumulativeDistribution(this, options);
+  }
+
+  distributionStatus(id: string) {
+    return getCumulativeDistributionState(this, id);
   }
 
   listAgents() {

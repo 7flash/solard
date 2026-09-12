@@ -1,4 +1,4 @@
-import type { Solard } from "@solard/sdk";
+import type { Solard } from "@solard/core";
 import {
   analyzeTokenHistory,
   analyzeTokenHistoryForensicsFromStore,
@@ -10,7 +10,7 @@ import {
   type BackfillTokenHistoryOptions,
   type TokenHistoryCoverage,
   type TokenHistoryTrade,
-} from "@solard/sdk";
+} from "@solard/core";
 
 export type TokenHistoryCliFlags = Map<string, string>;
 

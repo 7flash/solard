@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { NATIVE_MINT } from "@solana/spl-token";
 import { PublicKey, type ParsedTransactionWithMeta } from "@solana/web3.js";
 import { createMeasure } from "measure-fn";
-import { createTraderSolard } from "@solard/sdk";
+import { createTraderSolard } from "@solard/core";
 
 type Flags = Map<string, string>;
 type Trade = {

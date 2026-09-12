@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import {
   createSolardMeasureCollector,
   type SolardMeasureEvent,
-} from "@solard/sdk";
+} from "@solard/core";
 
 export type MeasureFileSink = {
   path: string;

@@ -12,7 +12,7 @@ import {
   loadTokenHistoryTrades,
   quoteJupiterSwap,
   TokenHistoryError,
-} from "@solard/sdk";
+} from "@solard/core";
 import { simulateValueBandStrategy } from "../packages/core/src/backtest/value-band-sim.ts";
 
 const WSOL = "So11111111111111111111111111111111111111112";

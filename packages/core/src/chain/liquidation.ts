@@ -231,7 +231,7 @@ async function burnUnsellableMint(
         let after = (await slrd.tokenAccounts(action.walletAddress)).find(
           (account) => account.address === current.address,
         );
-        if (after && after.amountRaw > 0n && receipt.status === "broadcast") {
+        if (after && after.amountRaw > 0n && receipt.status === "submitted") {
           receipt = await slrd.confirmSignature(
             receipt.signature,
             receipt.sender,
@@ -322,7 +322,7 @@ function broadcastReceipt(submission: SubmittedPlan): SendReceipt {
     signature: submission.signature,
     slot: null,
     sender: submission.sender,
-    status: "broadcast",
+    status: "submitted",
   };
 }
 
@@ -334,11 +334,15 @@ function isExpiredSubmissionError(message: string): boolean {
 
 async function cleanupPriorityMicroLamports(slrd: Solard): Promise<number> {
   try {
-    const rows = await slrd.connection().getRecentPrioritizationFees();
+    const rows = (await slrd
+      .connection()
+      .getRecentPrioritizationFees()) as Array<{
+      prioritizationFee: number;
+    }>;
     const fees = rows
-      .map((row) => row.prioritizationFee)
-      .filter((value) => Number.isSafeInteger(value) && value >= 0)
-      .sort((left, right) => left - right);
+      .map((row: { prioritizationFee: number }) => row.prioritizationFee)
+      .filter((value: number) => Number.isSafeInteger(value) && value >= 0)
+      .sort((left: number, right: number) => left - right);
     if (!fees.length) return 10_000;
     const index = Math.min(
       fees.length - 1,
@@ -463,7 +467,7 @@ async function reconcilePendingClose(
     pending,
     harvest: pending.harvest,
     reason:
-      "close broadcast is still unconfirmed; the same signed transaction was rebroadcast",
+      "close submission is still unconfirmed; the same signed transaction was rebroadcast",
   };
 }
 
@@ -528,7 +532,7 @@ async function closeEmptyAccountRobust(
       current.tokenProgram ?? action.tokenProgram!,
     );
     try {
-      const submission = await slrd.broadcastPlan(
+      const submission = await slrd.submitPlan(
         await composer.build(),
         via,
         harvest
