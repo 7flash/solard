@@ -79,6 +79,8 @@ export type {
 } from "./history/replay.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
 export type {
+  MarketHistory,
+  MarketHistoryOptions,
   SolardEventsApi,
   SolardHistoryApi,
   SolardOptions,
@@ -348,6 +350,7 @@ export type {
   TokenEventHistoryBalanceVerification,
   TokenEventHistoryCoverage,
   TokenEventHistoryOptions,
+  TokenEventHistoryProgress,
   TokenEventHistoryProvider,
 } from "./events/token-event-history.ts";
 export { readMint } from "./chain/state.ts";

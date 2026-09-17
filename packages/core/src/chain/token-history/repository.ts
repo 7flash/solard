@@ -1,12 +1,13 @@
 import { createSolardMeasure } from "../../core/log.ts";
 import { measuredSync } from "../../core/measured.ts";
+import { openDatabase } from "../../db/database.ts";
 import {
-  db,
   TokenHistoryCandle1sSchema,
-  TokenTradeSchema,
+  TokenHistoryTradeSchema,
+  type SolardDatabase,
   type TokenHistoryCandle1sRow,
-  type TokenTrade,
-} from "../../db.ts";
+  type TokenHistoryTradeRow,
+} from "../../db/schema.ts";
 import { TokenHistoryError } from "./errors.ts";
 import { compareTokenHistoryTrades } from "./ordering.ts";
 import type {
@@ -20,7 +21,8 @@ const m = createSolardMeasure("history:db");
 const HISTORY_STATUS_PREFIX = "token-history:";
 const PERSIST_BATCH_SIZE = 250;
 
-type HistoryDatabase = typeof db;
+type HistoryDatabase = SolardDatabase;
+type TokenTrade = Omit<TokenHistoryTradeRow, "id">;
 
 export type PersistTokenHistoryResult = {
   inserted: number;
@@ -131,11 +133,11 @@ function toDomainTrade(row: TokenTrade): TokenHistoryTrade {
 
 function toStoredTrade(row: TokenHistoryTrade): TokenTrade {
   const { history: _history, ...stored } = row;
-  return TokenTradeSchema.parse(stored) as TokenTrade;
+  return TokenHistoryTradeSchema.parse(stored) as TokenTrade;
 }
 
 export class SqliteTokenHistoryRepository implements TokenHistoryRepository {
-  constructor(private readonly database: HistoryDatabase = db) {}
+  constructor(private readonly database: HistoryDatabase) {}
 
   loadTrades(mintInput: string): TokenHistoryTrade[] {
     const mint = requiredMint(mintInput);
@@ -195,13 +197,13 @@ export class SqliteTokenHistoryRepository implements TokenHistoryRepository {
       m,
       "load coverage",
       () => {
-        const row = this.database.processStatus
+        const row = this.database.settings
           .select()
-          .where({ name: `${HISTORY_STATUS_PREFIX}${mint}` })
-          .get() as { dataJson?: string } | null;
-        if (!row?.dataJson) return null;
+          .where({ key: `${HISTORY_STATUS_PREFIX}${mint}` })
+          .get() as { value?: string } | null;
+        if (!row?.value) return null;
         try {
-          const parsed = JSON.parse(row.dataJson) as {
+          const parsed = JSON.parse(row.value) as {
             coverage?: TokenHistoryCoverage;
           };
           return parsed.coverage ?? null;
@@ -384,34 +386,21 @@ export class SqliteTokenHistoryRepository implements TokenHistoryRepository {
       m,
       "save coverage",
       () => {
-        const row = {
-          name: `${HISTORY_STATUS_PREFIX}${coverage.mint}`,
-          kind: "token-history-backfill",
-          status: coverage.complete
-            ? "complete"
-            : coverage.fromCreation
-              ? "partial"
-              : "incomplete",
-          heartbeatAtMs: coverage.updatedAtMs,
-          pid: process.pid,
-          buildId: null,
-          error: null,
-          dataJson: JSON.stringify({ coverage }),
-          updatedAtMs: coverage.updatedAtMs,
-        };
-        this.database.processStatus.upsert(row, {
-          on: "name",
-          merge: (table) => ({
-            kind: table.excluded("kind"),
-            status: table.excluded("status"),
-            heartbeatAtMs: table.max("heartbeatAtMs", 0),
-            pid: table.excluded("pid"),
-            buildId: table.excludedIfNotNull("buildId"),
-            error: table.excluded("error"),
-            dataJson: table.excluded("dataJson"),
-            updatedAtMs: table.max("updatedAtMs", 0),
-          }),
-        });
+        const key = `${HISTORY_STATUS_PREFIX}${coverage.mint}`;
+        this.database.settings.upsert(
+          {
+            key,
+            value: JSON.stringify({ coverage }),
+            updatedAtMs: coverage.updatedAtMs,
+          },
+          {
+            on: "key",
+            merge: (table) => ({
+              value: table.excluded("value"),
+              updatedAtMs: table.excluded("updatedAtMs"),
+            }),
+          },
+        );
         return coverage;
       },
       (row) => ({
@@ -423,7 +412,29 @@ export class SqliteTokenHistoryRepository implements TokenHistoryRepository {
   }
 }
 
-export const defaultTokenHistoryRepository = new SqliteTokenHistoryRepository();
+let defaultRepository: SqliteTokenHistoryRepository | null = null;
+
+function defaultRepositoryInstance(): SqliteTokenHistoryRepository {
+  if (!defaultRepository)
+    defaultRepository = new SqliteTokenHistoryRepository(openDatabase());
+  return defaultRepository;
+}
+
+export const defaultTokenHistoryRepository: TokenHistoryRepository = {
+  loadTrades: (mint) => defaultRepositoryInstance().loadTrades(mint),
+  loadCandles1s: (mint) => defaultRepositoryInstance().loadCandles1s(mint),
+  countTrades: (mint) => defaultRepositoryInstance().countTrades(mint),
+  getCoverage: (mint) => defaultRepositoryInstance().getCoverage(mint),
+  replaceTrades: (mint) => defaultRepositoryInstance().replaceTrades(mint),
+  replaceCandles1s: (mint) =>
+    defaultRepositoryInstance().replaceCandles1s(mint),
+  persistTrades: (rows, onProgress) =>
+    defaultRepositoryInstance().persistTrades(rows, onProgress),
+  persistCandles1s: (rows) =>
+    defaultRepositoryInstance().persistCandles1s(rows),
+  saveCoverage: (coverage) =>
+    defaultRepositoryInstance().saveCoverage(coverage),
+};
 
 // Compatibility façade for existing callers.
 export const loadTokenHistoryTrades = (mint: string) =>

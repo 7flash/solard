@@ -10,8 +10,9 @@ import type {
   SolardClaimEvent,
 } from "../events/canonical-events.ts";
 import { createRawTransactionCachingConnection } from "../events/raw-transaction-cache.ts";
+import type { TokenEventHistoryProgress } from "../events/token-event-history.ts";
 
-const REPLAY_PARSER_VERSION = "neutral-replay-v4";
+const REPLAY_PARSER_VERSION = "neutral-replay-v5";
 const REPLAY_OVERLAP_SLOTS = 2_000;
 
 export type ReplayTransaction =
@@ -77,6 +78,7 @@ export type ReplayOptions = {
   provider?: "auto" | "solscan" | "rpc";
   maxPages?: number;
   claimMaxPages?: number;
+  onProgress?: (progress: TokenEventHistoryProgress) => void;
 };
 
 export type ReplayEventsOptions = ReplayOptions & {
@@ -834,6 +836,7 @@ async function replayTokenHistoryUnlocked(args: {
         provider: options.provider,
         maxPages: options.maxPages,
         claimMaxPages: options.claimMaxPages,
+        onProgress: options.onProgress,
         exactOrdering: true,
         verifyCurrentBalances: true,
         commitment: "finalized",
@@ -916,6 +919,7 @@ async function replayTokenHistoryUnlocked(args: {
       toSlot: head,
       maxPages: options.maxPages,
       claimMaxPages: options.claimMaxPages,
+      onProgress: options.onProgress,
       exactOrdering: true,
       verifyCurrentBalances: false,
       commitment: "finalized",

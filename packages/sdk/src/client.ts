@@ -7,6 +7,8 @@ import {
   type CumulativeDistributionPlan,
   type CumulativeDistributionState,
   type HumanAmount,
+  type MarketHistory,
+  type MarketHistoryOptions,
   type MarketPrice,
   type MergedReplayEventStream,
   type ReplayEventSubscription,
@@ -14,6 +16,8 @@ import {
   type ReplayItem,
   type ReplayOptions,
   type ReplayEventsOptions,
+  type TokenHolderSnapshot,
+  type TokenHolderSnapshotOptions,
   type TokenRef,
   type WalletRef,
 } from "@solard/core";
@@ -26,6 +30,10 @@ export type SolardOptions = {
 
 export type SolardHistoryApi = {
   replay(token: TokenRef, options?: ReplayOptions): Promise<ReplayHistory>;
+  market(
+    token: TokenRef,
+    options?: MarketHistoryOptions,
+  ): Promise<MarketHistory>;
   merge(
     histories: readonly (ReplayHistory | Iterable<ReplayItem>)[],
   ): ReplayItem[];
@@ -73,6 +81,10 @@ export type Solard = {
   addToken: ReturnType<typeof createCoreSolard>["addToken"];
   resolveToken: ReturnType<typeof createCoreSolard>["resolveToken"];
   tokenAccounts: ReturnType<typeof createCoreSolard>["tokenAccounts"];
+  snapshotHolders(
+    token: TokenRef,
+    options?: Omit<TokenHolderSnapshotOptions, "token">,
+  ): Promise<TokenHolderSnapshot>;
   walletBalances: ReturnType<typeof createCoreSolard>["walletBalances"];
   samplePrice(token: TokenRef): Promise<MarketPrice>;
   buy(
@@ -88,6 +100,7 @@ export function createSolard(options: SolardOptions = {}): Solard {
   const core = createCoreSolard(options);
   const history: SolardHistoryApi = Object.freeze({
     replay: (token, replayOptions) => core.history.replay(token, replayOptions),
+    market: (token, marketOptions) => core.history.market(token, marketOptions),
     merge: core.history.merge,
   });
   const events = Object.assign(
@@ -117,6 +130,7 @@ export function createSolard(options: SolardOptions = {}): Solard {
     addToken: core.addToken.bind(core),
     resolveToken: core.resolveToken.bind(core),
     tokenAccounts: core.tokenAccounts.bind(core),
+    snapshotHolders: core.snapshotHolders.bind(core),
     walletBalances: core.walletBalances.bind(core),
     samplePrice: core.samplePrice.bind(core),
     buy: core.buy.bind(core),

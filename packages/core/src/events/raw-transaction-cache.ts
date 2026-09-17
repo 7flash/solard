@@ -179,6 +179,177 @@ function cacheDiscovery(args: {
   });
 }
 
+export type CachedTokenAccountIncarnation = {
+  slot: number;
+  signature: string;
+};
+
+export type CachedHistoricalTokenAccount = {
+  address: string;
+  initializedAtSlot: number | null;
+  initializedBySignature: string | null;
+  incarnations?: CachedTokenAccountIncarnation[];
+};
+
+function normalizeIncarnations(
+  account: Pick<
+    CachedHistoricalTokenAccount,
+    "initializedAtSlot" | "initializedBySignature"
+  > & { incarnations?: readonly CachedTokenAccountIncarnation[] },
+): CachedTokenAccountIncarnation[] {
+  const bySignature = new Map<string, CachedTokenAccountIncarnation>();
+  for (const row of account.incarnations ?? []) {
+    if (!Number.isInteger(row.slot) || row.slot < 0 || !row.signature) continue;
+    const current = bySignature.get(row.signature);
+    if (!current || row.slot < current.slot) {
+      bySignature.set(row.signature, {
+        slot: row.slot,
+        signature: row.signature,
+      });
+    }
+  }
+  if (account.initializedAtSlot != null && account.initializedBySignature) {
+    const current = bySignature.get(account.initializedBySignature);
+    if (!current || account.initializedAtSlot < current.slot) {
+      bySignature.set(account.initializedBySignature, {
+        slot: account.initializedAtSlot,
+        signature: account.initializedBySignature,
+      });
+    }
+  }
+  return [...bySignature.values()].sort(
+    (a, b) => a.slot - b.slot || a.signature.localeCompare(b.signature),
+  );
+}
+
+function parseIncarnations(
+  value: string | null | undefined,
+): CachedTokenAccountIncarnation[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const slot = (row as { slot?: unknown }).slot;
+      const signature = (row as { signature?: unknown }).signature;
+      return typeof slot === "number" &&
+        Number.isInteger(slot) &&
+        slot >= 0 &&
+        typeof signature === "string" &&
+        signature
+        ? [{ slot, signature }]
+        : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function recordHistoricalTokenAccounts(
+  connection: Connection,
+  mint: string,
+  accounts: readonly CachedHistoricalTokenAccount[],
+): void {
+  const database = connectionDatabases.get(connection as unknown as object);
+  if (!database || accounts.length === 0) return;
+  const now = Date.now();
+  database.transaction(() => {
+    for (const account of accounts) {
+      const accountKey = `${mint}:${account.address}`;
+      const existing = database.historyTokenAccounts
+        .select()
+        .where({ accountKey })
+        .first() as
+        | {
+            initializedAtSlot?: number | null;
+            initializedBySignature?: string | null;
+            incarnationsJson?: string | null;
+          }
+        | undefined;
+      const incarnations = normalizeIncarnations({
+        initializedAtSlot: account.initializedAtSlot,
+        initializedBySignature: account.initializedBySignature,
+        incarnations: [
+          ...parseIncarnations(existing?.incarnationsJson),
+          ...(account.incarnations ?? []),
+        ],
+      });
+      if (
+        existing?.initializedAtSlot != null &&
+        existing.initializedBySignature
+      ) {
+        incarnations.push(
+          ...normalizeIncarnations({
+            initializedAtSlot: existing.initializedAtSlot,
+            initializedBySignature: existing.initializedBySignature,
+            incarnations: [],
+          }).filter(
+            (row) =>
+              !incarnations.some((item) => item.signature === row.signature),
+          ),
+        );
+        incarnations.sort(
+          (a, b) => a.slot - b.slot || a.signature.localeCompare(b.signature),
+        );
+      }
+      const first = incarnations[0] ?? null;
+      database.historyTokenAccounts.upsert(
+        {
+          accountKey,
+          mint,
+          address: account.address,
+          initializedAtSlot: first?.slot ?? null,
+          initializedBySignature: first?.signature ?? null,
+          incarnationsJson: JSON.stringify(incarnations),
+          discoveredAtMs: now,
+          updatedAtMs: now,
+        },
+        {
+          on: "accountKey",
+          merge: (table: any) => ({
+            initializedAtSlot: table.excluded("initializedAtSlot"),
+            initializedBySignature: table.excluded("initializedBySignature"),
+            incarnationsJson: table.excluded("incarnationsJson"),
+            updatedAtMs: table.max("updatedAtMs", 0),
+          }),
+        },
+      );
+    }
+  });
+}
+
+export function cachedHistoricalTokenAccounts(
+  connection: Connection,
+  mint: string,
+): CachedHistoricalTokenAccount[] {
+  const database = connectionDatabases.get(connection as unknown as object);
+  if (!database) return [];
+  return (
+    database.historyTokenAccounts.select().where({ mint }).all() as Array<{
+      address: string;
+      initializedAtSlot: number | null;
+      initializedBySignature: string | null;
+      incarnationsJson?: string | null;
+    }>
+  )
+    .map((row) => {
+      const incarnations = normalizeIncarnations({
+        initializedAtSlot: row.initializedAtSlot,
+        initializedBySignature: row.initializedBySignature,
+        incarnations: parseIncarnations(row.incarnationsJson),
+      });
+      return {
+        address: row.address,
+        initializedAtSlot: incarnations[0]?.slot ?? row.initializedAtSlot,
+        initializedBySignature:
+          incarnations[0]?.signature ?? row.initializedBySignature,
+        incarnations,
+      };
+    })
+    .sort((a, b) => a.address.localeCompare(b.address));
+}
+
 export function recordDiscoveredSignatures(
   connection: Connection,
   scope: string | PublicKey,

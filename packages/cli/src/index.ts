@@ -122,7 +122,7 @@ function friendlyCliError(error: unknown): string | null {
   if (code === "MISSING_CONFIG" && error.message.includes("SLRD_MASTER_KEY")) {
     return `${error.message}\n\nEnter the wallet password interactively, or set SLRD_MASTER_KEY for automation/CI.`;
   }
-  return null;
+  return error.message.trim() || error.name;
 }
 function duration(value: string | undefined, fallbackMs: number): number {
   if (!value) return fallbackMs;
@@ -323,6 +323,14 @@ function commandNeedsSigningVault(
   return false;
 }
 
+function sweepUsage(): string {
+  return (
+    "Usage: slrd sweep --to <contact|wallet|address> --below <SOL> " +
+    "[--wallets <a,b,...>] [--keep <wallet=SOL,...>] [--simulate | --live] [--json]\n" +
+    "Compatibility: slrd sweep sol --to <destination> --max-balance-sol <SOL>"
+  );
+}
+
 async function storedWalletCount(): Promise<number> {
   const { createTraderSolard } = await import("@solard/core");
   const probe = createTraderSolard();
@@ -401,8 +409,9 @@ Backtesting
 Transfers and consolidation
   slrd transfer <contact|wallet|address> --wallet <source-wallet> --sol <amount> [--simulate-only]
   slrd transfer <contact|wallet|address> --wallet <source-wallet> --token <USDC|mint> --amount <ui> [--simulate-only]
-  slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--max-balance-sol <SOL>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]
-                                                        Without --wallets, sweep considers all stored signing wallets
+  slrd sweep --to <contact|wallet|address> --below <SOL> [--wallets <a,b,...>] [--keep <wallet=SOL,...>] [--simulate | --live] [--json]
+                                                        Sweeps stored wallets strictly below the threshold; preview is the default
+  slrd sweep sol ...                                    Compatibility alias; --max-balance-sol remains accepted
 
 Token liquidation
   slrd liquidate tokens [--except <token|mint>] [--wallets <a,b,...>] [--except-wallet <wallet>] [--except-wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--burn-unsellable] [--simulate | --live]
@@ -2073,12 +2082,42 @@ async function main() {
       return;
     }
 
-    if (command === "sweep" && values[0] === "sol") {
-      const destinationInput = flags.get("to") ?? values[1];
-      if (!destinationInput || destinationInput === "true") {
+    if (command === "sweep") {
+      const legacySolSyntax = values[0]?.toLowerCase() === "sol";
+      const positionalDestination = legacySolSyntax ? values[1] : values[0];
+      const extraValues = legacySolSyntax ? values.slice(2) : values.slice(1);
+      if (extraValues.length > 0) {
         throw new Error(
-          "Usage: slrd sweep sol --to <contact|wallet|address> [--wallets <a,b,...>] [--max-balance-sol <SOL>] [--exclude-group <group>] [--exclude-prefix <prefix>] [--keep <wallet=SOL,...>] [--keep-if-tokens <SOL> | --keep-if-token <token>=<SOL>] [--simulate | --live] [--json]",
+          `${sweepUsage()}\nUnexpected argument: ${extraValues[0]}`,
         );
+      }
+
+      const destinationInput = flags.get("to") ?? positionalDestination;
+      if (!destinationInput || destinationInput === "true") {
+        throw new Error(sweepUsage());
+      }
+
+      const below = flags.get("below");
+      const maxBalance = flags.get("max-balance-sol");
+      if (below === "true") {
+        throw new Error(`--below requires a SOL amount.\n${sweepUsage()}`);
+      }
+      if (maxBalance === "true") {
+        throw new Error(
+          `--max-balance-sol requires a SOL amount.\n${sweepUsage()}`,
+        );
+      }
+      if (
+        below != null &&
+        maxBalance != null &&
+        maxBalance !== "true" &&
+        below !== maxBalance
+      ) {
+        throw new Error("Use either --below or --max-balance-sol, not both.");
+      }
+      const maxBalanceSol = below ?? maxBalance;
+      if (!legacySolSyntax && maxBalanceSol == null) {
+        throw new Error(`--below is required for slrd sweep.\n${sweepUsage()}`);
       }
 
       const destination = resolveDestinationRef(slrd, destinationInput);
@@ -2120,17 +2159,8 @@ async function main() {
           "Use either --keep-if-tokens or --keep-if-token, not both",
         );
       }
-
-      const sweepMode = flags.has("live")
-        ? "LIVE"
-        : flags.has("simulate")
-          ? "SIMULATE"
-          : "PLAN";
-      if (!flags.has("json")) {
-        emit(`SWEEP ${sweepMode}  to=${destination.address}\n`);
-        emit(
-          `RPC      hard limit ${process.env.SLRD_RPC_MAX_RPS ?? "5"} req/s\n`,
-        );
+      if (flags.has("simulate") && flags.has("live")) {
+        throw new Error("Use either --simulate or --live, not both");
       }
 
       const options = {
@@ -2138,7 +2168,7 @@ async function main() {
         excludeGroups,
         excludePrefixes,
         includeWallets: includeWallets.length ? includeWallets : undefined,
-        maxBalanceSol: flags.get("max-balance-sol"),
+        maxBalanceSol,
         keepSolByWallet,
         defaultKeepSol: flags.get("default-keep-sol") ?? "0",
         keepSolIfTokens: flags.get("keep-if-tokens"),
@@ -2152,34 +2182,34 @@ async function main() {
           Math.trunc(int(flags, "rpc-delay-ms", 75) ?? 75),
         ),
         delayMs: int(flags, "delay-ms", 0) ?? 0,
-        onProgress: flags.has("json")
-          ? undefined
-          : (event: any) => {
-              if (event.stage === "plan-start") {
-                emit(`PLAN     ${event.wallets} candidate wallets\n`);
-              } else if (event.stage === "plan-ready") {
-                emit(
-                  `PLAN     ${event.sendWallets}/${event.wallets} will send, ` +
-                    `${formatRaw(event.totalSendLamports, 9)} SOL total\n`,
-                );
-              } else if (event.stage === "wallet-start") {
-                emit(
-                  `SEND     ${event.index}/${event.total}  @${event.row.walletName}  ` +
-                    `${formatRaw(event.row.sendLamports, 9)} SOL\n`,
-                );
-              } else if (event.stage === "wallet-done") {
-                emit(
-                  `OK       ${event.index}/${event.total}  @${event.row.walletName}\n`,
-                );
-              } else if (event.stage === "wallet-error") {
-                emit(
-                  `FAIL     ${event.index}/${event.total}  @${event.row.walletName}  ` +
-                    `${event.error}\n`,
-                );
+        onProgress:
+          !flags.has("json") && flags.has("live")
+            ? (event: any) => {
+                if (event.stage === "wallet-start") {
+                  emit(
+                    `SEND ${event.index}/${event.total}  @${event.row.walletName}  ` +
+                      `${formatRaw(event.row.sendLamports, 9)} SOL\n`,
+                  );
+                } else if (event.stage === "wallet-done") {
+                  emit(
+                    `OK   ${event.index}/${event.total}  @${event.row.walletName}\n`,
+                  );
+                } else if (event.stage === "wallet-error") {
+                  emit(
+                    `FAIL ${event.index}/${event.total}  @${event.row.walletName}  ` +
+                      `${event.error}\n`,
+                  );
+                }
               }
-            },
+            : undefined,
       };
       const plan = await planRegistrySolSweep(slrd, options);
+      const sendRows = plan.rows.filter((row) => row.sendLamports > 0n);
+      const destinationLabel = destination.contactName
+        ? `${destination.contactName} (${plan.destination})`
+        : destination.walletName
+          ? `${destination.walletName} (${plan.destination})`
+          : plan.destination;
 
       const printablePlan = {
         mode: flags.has("live")
@@ -2193,6 +2223,7 @@ async function main() {
           contact: destination.contactName ?? null,
           wallet: destination.walletName ?? null,
         },
+        belowSol: maxBalanceSol ?? null,
         totalSendSol: formatRaw(plan.totalSendLamports, 9),
         rows: plan.rows.map((row) => ({
           wallet: row.walletName,
@@ -2216,34 +2247,31 @@ async function main() {
           return;
         }
 
+        emit(`SWEEP SOL -> ${destinationLabel}\n`);
+        if (maxBalanceSol != null) emit(`Threshold: < ${maxBalanceSol} SOL\n`);
         emit(
-          `SWEEP PLAN  to=${plan.destination}  ` +
-            `send=${formatRaw(plan.totalSendLamports, 9)} SOL  ` +
-            `wallets=${plan.rows.filter((row) => row.sendLamports > 0n).length}/${plan.rows.length}\n`,
+          `Scanned: ${plan.rows.length}  Send: ${sendRows.length}  ` +
+            `Skipped: ${plan.rows.length - sendRows.length}  ` +
+            `Total: ${formatRaw(plan.totalSendLamports, 9)} SOL\n`,
         );
 
         for (const row of plan.rows) {
           if (row.sendLamports <= 0n && !flags.has("show-skipped")) continue;
-          emit(
-            `${row.sendLamports > 0n ? "SEND" : "SKIP"}  ` +
-              `@${row.walletName.padEnd(18)} ` +
-              `balance=${formatRaw(row.balanceLamports, 9).padStart(12)}  ` +
-              `keep=${formatRaw(row.keepLamports, 9).padStart(5)}  ` +
-              `send=${formatRaw(row.sendLamports, 9).padStart(12)}` +
-              `${row.reserveReason === "specific-token" ? "  keep-token=yes" : ""}` +
-              `${row.skippedReason ? `  ${row.skippedReason}` : ""}\n`,
-          );
+          if (row.sendLamports > 0n) {
+            emit(
+              `  @${row.walletName}  ${formatRaw(row.balanceLamports, 9)} -> ` +
+                `${formatRaw(row.sendLamports, 9)} SOL\n`,
+            );
+          } else {
+            emit(
+              `  @${row.walletName}  ${formatRaw(row.balanceLamports, 9)}  ` +
+                `SKIP ${row.skippedReason ?? "not-sendable"}\n`,
+            );
+          }
         }
 
-        emit(
-          `\n${OWL} plan only; no signer was decrypted and nothing was submitted. ` +
-            `Use --json for full details, then --simulate or --live.\n`,
-        );
+        emit(`\nPreview only. Add --simulate to verify or --live to send.\n`);
         return;
-      }
-
-      if (flags.has("simulate") && flags.has("live")) {
-        throw new Error("Use either --simulate or --live, not both");
       }
 
       if (flags.has("simulate")) {
@@ -2254,18 +2282,19 @@ async function main() {
           const failed = results.filter(
             (result) => result.error || result.simulation?.success === false,
           ).length;
+          emit(`SWEEP SIMULATION -> ${destinationLabel}\n`);
           emit(
-            `SWEEP SIMULATION  attempted=${results.length}  ` +
-              `ok=${results.length - failed}  failed=${failed}  ` +
-              `to=${plan.destination}\n`,
+            `Attempted: ${results.length}  OK: ${results.length - failed}  ` +
+              `Failed: ${failed}  Total: ${formatRaw(plan.totalSendLamports, 9)} SOL\n`,
           );
           for (const result of results) {
             if (!result.error && result.simulation?.success !== false) continue;
             emit(
-              `FAIL  @${result.row.walletName}  ` +
+              `  FAIL @${result.row.walletName}  ` +
                 `${result.error ?? "simulation failed"}\n`,
             );
           }
+          emit("No transactions submitted.\n");
         }
         return;
       }
@@ -2277,14 +2306,14 @@ async function main() {
         const failed = receipts.filter((result) =>
           Boolean(result.error),
         ).length;
+        emit(`SWEEP COMPLETE -> ${destinationLabel}\n`);
         emit(
-          `SWEEP LIVE  attempted=${receipts.length}  ` +
-            `ok=${receipts.length - failed}  failed=${failed}  ` +
-            `to=${plan.destination}\n`,
+          `Attempted: ${receipts.length}  OK: ${receipts.length - failed}  ` +
+            `Failed: ${failed}  Planned total: ${formatRaw(plan.totalSendLamports, 9)} SOL\n`,
         );
         for (const result of receipts) {
           if (!result.error) continue;
-          emit(`FAIL  @${result.row.walletName}  ${result.error}\n`);
+          emit(`  FAIL @${result.row.walletName}  ${result.error}\n`);
         }
       }
       return;
@@ -2742,7 +2771,9 @@ async function main() {
       );
       return;
     }
-    throw new Error(`Unknown command: ${command}\n\n${help()}`);
+    throw new Error(
+      `Unknown command: ${command}. Run "slrd help" for available commands.`,
+    );
   } finally {
     slrd.close();
   }

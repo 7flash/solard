@@ -76,6 +76,49 @@ export const BalanceSchema = z.object({
 });
 
 /** Venue-observed market price samples used by the SDK's price/watch APIs. */
+export const TokenHistoryTradeSchema = z.object({
+  eventKey: z.string(),
+  mint: z.string(),
+  signature: z.string(),
+  slot: z.number().default(0),
+  owner: z.string().nullable().default(null),
+  side: z.enum(["buy", "sell", "unknown"]).default("unknown"),
+  tokenDeltaUi: z.number().default(0),
+  solDeltaUi: z.number().default(0),
+  priceSol: z.number().nullable().default(null),
+  priceUsd: z.number().nullable().default(null),
+  marketCapUsd: z.number().nullable().default(null),
+  confidence: z
+    .enum(["processed", "confirmed", "finalized", "dropped"])
+    .default("processed"),
+  source: z.string().default("unknown"),
+  rawJson: z.string().default("{}"),
+  tradedAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
+export const TokenHistoryCandle1sSchema = z.object({
+  candleKey: z.string(),
+  mint: z.string(),
+  bucketAtMs: z.number(),
+  openPriceSol: z.number(),
+  highPriceSol: z.number(),
+  lowPriceSol: z.number(),
+  closePriceSol: z.number(),
+  volumeSol: z.number().default(0),
+  volumeToken: z.number().default(0),
+  buyVolumeSol: z.number().default(0),
+  sellVolumeSol: z.number().default(0),
+  buys: z.number().default(0),
+  sells: z.number().default(0),
+  trades: z.number().default(0),
+  firstSignature: z.string(),
+  lastSignature: z.string(),
+  firstSlot: z.number().default(0),
+  lastSlot: z.number().default(0),
+  updatedAtMs: z.number(),
+});
+
 export const PriceSampleSchema = z.object({
   mint: z.string(),
   venue: z.string(),
@@ -167,6 +210,17 @@ export const HistoryBlockSchema = z.object({
   fetchedAtMs: z.number(),
 });
 
+export const HistoryTokenAccountSchema = z.object({
+  accountKey: z.string(),
+  mint: z.string(),
+  address: z.string(),
+  initializedAtSlot: z.number().nullable().default(null),
+  initializedBySignature: z.string().nullable().default(null),
+  incarnationsJson: z.string().default("[]"),
+  discoveredAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+
 export const HistoryReplayItemSchema = z.object({
   replayKey: z.string(),
   mint: z.string(),
@@ -221,6 +275,12 @@ export type ExecutionActionRow = z.infer<typeof ExecutionActionSchema> & {
 };
 export type PositionRow = z.infer<typeof PositionSchema> & { id: number };
 export type BalanceRow = z.infer<typeof BalanceSchema> & { id: number };
+export type TokenHistoryTradeRow = z.infer<typeof TokenHistoryTradeSchema> & {
+  id: number;
+};
+export type TokenHistoryCandle1sRow = z.infer<
+  typeof TokenHistoryCandle1sSchema
+> & { id: number };
 export type PriceSampleRow = z.infer<typeof PriceSampleSchema> & { id: number };
 export type ClaimRow = z.infer<typeof ClaimSchema> & { id: number };
 export type GroupRow = z.infer<typeof GroupSchema> & { id: number };
@@ -237,6 +297,9 @@ export type HistoryDiscoveryRow = z.infer<typeof HistoryDiscoverySchema> & {
 export type HistoryBlockRow = z.infer<typeof HistoryBlockSchema> & {
   id: number;
 };
+export type HistoryTokenAccountRow = z.infer<
+  typeof HistoryTokenAccountSchema
+> & { id: number };
 export type HistoryReplayItemRow = z.infer<typeof HistoryReplayItemSchema> & {
   id: number;
 };
@@ -253,6 +316,8 @@ export type SolardDatabase = Database<{
   positions: typeof PositionSchema;
   balances: typeof BalanceSchema;
   priceSamples: typeof PriceSampleSchema;
+  tokenHistoryTradesV1: typeof TokenHistoryTradeSchema;
+  tokenHistoryCandles1sV1: typeof TokenHistoryCandle1sSchema;
   claims: typeof ClaimSchema;
   groups: typeof GroupSchema;
   groupWallets: typeof GroupWalletSchema;
@@ -262,6 +327,7 @@ export type SolardDatabase = Database<{
   rawTransactions: typeof RawTransactionSchema;
   historyDiscovery: typeof HistoryDiscoverySchema;
   historyBlocks: typeof HistoryBlockSchema;
+  historyTokenAccounts: typeof HistoryTokenAccountSchema;
   historyReplayItems: typeof HistoryReplayItemSchema;
   historyReplayCoverage: typeof HistoryReplayCoverageSchema;
   settings: typeof SettingSchema;

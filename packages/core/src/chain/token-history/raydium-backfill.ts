@@ -8,7 +8,10 @@ import {
 import { readMint } from "../state.ts";
 import { buildSparseTokenHistoryCandles1s } from "./candles.ts";
 import { systemTokenHistoryClock } from "./clock.ts";
-import { defaultTokenHistoryRepository } from "./repository.ts";
+import {
+  defaultTokenHistoryRepository,
+  type TokenHistoryRepository,
+} from "./repository.ts";
 import { SolanaTokenHistoryRpc } from "./rpc.ts";
 import { normalizeTokenHistoryRpcOptions } from "./service.ts";
 import { parseRaydiumHistoryTransaction } from "./raydium-parser.ts";
@@ -150,6 +153,7 @@ export async function backfillRaydiumTokenHistory(
   connection: Connection,
   mintInput: string,
   input: BackfillTokenHistoryOptions & { maxRaydiumPools?: number } = {},
+  repository: TokenHistoryRepository = defaultTokenHistoryRepository,
 ): Promise<TokenHistoryCoverage> {
   const mint = new PublicKey(mintInput.trim());
   const mintText = mint.toBase58();
@@ -161,7 +165,7 @@ export async function backfillRaydiumTokenHistory(
   const rpcOptions = normalizeTokenHistoryRpcOptions(input);
   const rpc = new SolanaTokenHistoryRpc(connection);
 
-  if (input.replace) defaultTokenHistoryRepository.replaceTrades(mintText);
+  if (input.replace) repository.replaceTrades(mintText);
 
   const scans = [] as Array<{
     address: string;
@@ -219,14 +223,13 @@ export async function backfillRaydiumTokenHistory(
     }
   }
 
-  const persisted = defaultTokenHistoryRepository.persistTrades(
-    trades,
-    (progress) => input.onProgress?.({ phase: "store", ...progress }),
+  const persisted = repository.persistTrades(trades, (progress) =>
+    input.onProgress?.({ phase: "store", ...progress }),
   );
-  const allTrades = defaultTokenHistoryRepository.loadTrades(mintText);
+  const allTrades = repository.loadTrades(mintText);
   const candles = buildSparseTokenHistoryCandles1s(allTrades, parsedAtMs);
-  defaultTokenHistoryRepository.replaceCandles1s(mintText);
-  defaultTokenHistoryRepository.persistCandles1s(candles);
+  repository.replaceCandles1s(mintText);
+  repository.persistCandles1s(candles);
   input.onProgress?.({
     phase: "candles",
     trades: allTrades.length,
@@ -276,7 +279,7 @@ export async function backfillRaydiumTokenHistory(
     failedTransactions: fetched.failedTransactions,
     skippedNoTimestamp,
     skippedAmbiguous,
-    storedTrades: defaultTokenHistoryRepository.countTrades(mintText),
+    storedTrades: repository.countTrades(mintText),
     storedCandles1s: candles.length,
     insertedTrades: persisted.inserted,
     updatedTrades: persisted.updated,
@@ -294,6 +297,6 @@ export async function backfillRaydiumTokenHistory(
       skippedNoTimestamp === 0,
     updatedAtMs: systemTokenHistoryClock.nowMs(),
   };
-  defaultTokenHistoryRepository.saveCoverage(coverage);
+  repository.saveCoverage(coverage);
   return coverage;
 }

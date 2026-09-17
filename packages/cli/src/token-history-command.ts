@@ -2,11 +2,8 @@ import type { Solard } from "@solard/core";
 import {
   analyzeTokenHistory,
   analyzeTokenHistoryForensicsFromStore,
-  backfillTokenHistory,
-  backfillRaydiumTokenHistory,
   getTokenHistoryCoverage,
   loadTokenHistoryTrades,
-  TokenHistoryError,
   type BackfillTokenHistoryOptions,
   type TokenHistoryCoverage,
   type TokenHistoryTrade,
@@ -212,34 +209,15 @@ async function runBackfill(args: {
       }
     },
   };
-  let result: TokenHistoryCoverage;
-  try {
-    result = await backfillTokenHistory(
-      args.slrd.connection(),
-      args.mint,
-      backfillOptions,
-    );
-  } catch (error) {
-    if (
-      !(error instanceof TokenHistoryError) ||
-      error.code !== "UNSUPPORTED_TOKEN"
-    )
-      throw error;
-    progress(
-      "VENUE  Pump history unsupported; trying Raydium/LaunchLab discovery",
-    );
-    result = await backfillRaydiumTokenHistory(
-      args.slrd.connection(),
-      args.mint,
-      {
-        ...backfillOptions,
-        maxRaydiumPools: Math.max(
-          1,
-          Math.trunc(numberFlag(args.flags, "raydium-pools", 8) ?? 8),
-        ),
-      },
-    );
-  }
+  const market = await args.slrd.history.market(args.mint, {
+    ...backfillOptions,
+    backfill: true,
+    maxRaydiumPools: Math.max(
+      1,
+      Math.trunc(numberFlag(args.flags, "raydium-pools", 8) ?? 8),
+    ),
+  });
+  const result: TokenHistoryCoverage = market.coverage;
   if (jsonMode) {
     args.emit(`${json(result)}\n`);
     return;

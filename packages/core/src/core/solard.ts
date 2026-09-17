@@ -23,6 +23,16 @@ import {
   type TokenHolderSnapshotOptions,
 } from "../chain/holders.ts";
 import {
+  backfillTokenHistory,
+  type BackfillTokenHistoryOptions,
+  type TokenHistoryBackfillProgress,
+  type TokenHistoryCandle1s,
+  type TokenHistoryCoverage,
+} from "../chain/token-history.ts";
+import { backfillRaydiumTokenHistory } from "../chain/token-history/raydium-backfill.ts";
+import { SqliteTokenHistoryRepository } from "../chain/token-history/repository.ts";
+import { TokenHistoryError } from "../chain/token-history/errors.ts";
+import {
   subscribeTokenEvents as openTokenEventStream,
   type SubscribeTokenEventsOptions,
   type TokenEventSubscription,
@@ -248,11 +258,31 @@ export type SolardEventsApi = {
   ) => Promise<TokenEventHistory>;
 };
 
+export type MarketHistoryOptions = Omit<
+  BackfillTokenHistoryOptions,
+  "onProgress"
+> & {
+  backfill?: boolean;
+  maxRaydiumPools?: number;
+  onProgress?: (progress: TokenHistoryBackfillProgress) => void;
+};
+
+export type MarketHistory = {
+  mint: string;
+  quoteMint: string;
+  coverage: TokenHistoryCoverage;
+  candles1s: readonly TokenHistoryCandle1s[];
+};
+
 export type SolardHistoryApi = {
   replay: (
     tokenRef: TokenRef,
     options?: ReplayOptions,
   ) => Promise<ReplayHistory>;
+  market: (
+    tokenRef: TokenRef,
+    options?: MarketHistoryOptions,
+  ) => Promise<MarketHistory>;
   merge: (
     histories: readonly (ReplayHistory | Iterable<ReplayItem>)[],
   ) => ReplayItem[];
@@ -346,6 +376,8 @@ export class Solard implements ComposerHost {
     this.history = {
       replay: (tokenRef, replayOptions = {}) =>
         this.replayHistory(tokenRef, replayOptions),
+      market: (tokenRef, marketOptions = {}) =>
+        this.marketHistory(tokenRef, marketOptions),
       merge: (histories) => mergeReplayHistories(histories),
     };
     this.claims = {
@@ -1460,6 +1492,55 @@ export class Solard implements ComposerHost {
       token,
       options,
     });
+  }
+
+  private async marketHistory(
+    tokenRef: TokenRef,
+    options: MarketHistoryOptions = {},
+  ): Promise<MarketHistory> {
+    const token = await this.resolveReplayToken(tokenRef);
+    const repository = new SqliteTokenHistoryRepository(this.db);
+    let coverage = repository.getCoverage(token.mint);
+    const shouldBackfill =
+      options.backfill !== false &&
+      (!coverage?.complete || options.replace === true);
+    if (shouldBackfill) {
+      const {
+        backfill: _backfill,
+        maxRaydiumPools,
+        ...backfillOptions
+      } = options;
+      try {
+        coverage = await backfillTokenHistory(
+          this.connection(),
+          token.mint,
+          backfillOptions,
+          repository,
+        );
+      } catch (error) {
+        if (
+          !(error instanceof TokenHistoryError) ||
+          error.code !== "UNSUPPORTED_TOKEN"
+        )
+          throw error;
+        coverage = await backfillRaydiumTokenHistory(
+          this.connection(),
+          token.mint,
+          { ...backfillOptions, maxRaydiumPools },
+          repository,
+        );
+      }
+    }
+    if (!coverage)
+      throw new Error(
+        `Market history for ${token.mint} has not been backfilled`,
+      );
+    return {
+      mint: token.mint,
+      quoteMint: coverage.quoteMint,
+      coverage,
+      candles1s: repository.loadCandles1s(token.mint),
+    };
   }
 
   private async resolveReplayToken(ref: TokenRef): Promise<TokenRow> {

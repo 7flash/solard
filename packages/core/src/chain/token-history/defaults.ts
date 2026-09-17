@@ -3,7 +3,10 @@ import { type Connection, type PublicKey } from "@solana/web3.js";
 import { readMint } from "../state.ts";
 import { PumpCurveVenue } from "../../venues/pump/pump-curve-venue.ts";
 import { systemTokenHistoryClock } from "./clock.ts";
-import { defaultTokenHistoryRepository } from "./repository.ts";
+import {
+  defaultTokenHistoryRepository,
+  type TokenHistoryRepository,
+} from "./repository.ts";
 import { SolanaTokenHistoryRpc } from "./rpc.ts";
 import { runTokenHistoryBackfill } from "./service.ts";
 import type {
@@ -15,13 +18,14 @@ export async function backfillTokenHistory(
   connection: Connection,
   mintInput: string,
   input: BackfillTokenHistoryOptions = {},
+  repository: TokenHistoryRepository = defaultTokenHistoryRepository,
 ): Promise<TokenHistoryCoverage> {
   const venue = new PumpCurveVenue();
   return runTokenHistoryBackfill(
     {
       clock: systemTokenHistoryClock,
       rpc: new SolanaTokenHistoryRpc(connection),
-      repository: defaultTokenHistoryRepository,
+      repository,
       loadMint: (mint: PublicKey) => readMint(connection, mint),
       inspectMarket: async (mint: PublicKey) => {
         const row = await venue.inspectToken(connection, mint);
