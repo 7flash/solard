@@ -64,6 +64,37 @@ function requiredMint(mintInput: string): string {
   return mint;
 }
 
+function parsedPumpSwapFees(
+  value: unknown,
+): TokenHistoryRaw["pumpSwapFees"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.source !== "anchor-event") return undefined;
+  const text = (key: string): string | null =>
+    raw[key] == null ? null : String(raw[key]);
+  const required = [
+    "quoteMint",
+    "userQuoteAmountRaw",
+    "lpFeeQuoteRaw",
+    "protocolFeeQuoteRaw",
+  ] as const;
+  if (required.some((key) => !text(key))) return undefined;
+  const eventCount = Number(raw.eventCount ?? 0);
+  if (!Number.isInteger(eventCount) || eventCount <= 0) return undefined;
+  return {
+    source: "anchor-event",
+    eventCount,
+    quoteMint: text("quoteMint")!,
+    userQuoteAmountRaw: text("userQuoteAmountRaw")!,
+    lpFeeQuoteRaw: text("lpFeeQuoteRaw")!,
+    protocolFeeQuoteRaw: text("protocolFeeQuoteRaw")!,
+    creatorFeeQuoteRaw: text("creatorFeeQuoteRaw"),
+    cashbackQuoteRaw: text("cashbackQuoteRaw"),
+    buybackFeeQuoteRaw: text("buybackFeeQuoteRaw"),
+    holderRewardsQuoteRaw: text("holderRewardsQuoteRaw"),
+  };
+}
+
 function parseHistoryRaw(rawJson: string): TokenHistoryRaw {
   try {
     const raw = JSON.parse(rawJson) as Partial<TokenHistoryRaw>;
@@ -104,6 +135,7 @@ function parseHistoryRaw(rawJson: string): TokenHistoryRaw {
         Number.isFinite(raw.marketCapSol)
           ? raw.marketCapSol
           : null,
+      pumpSwapFees: parsedPumpSwapFees(raw.pumpSwapFees),
     };
   } catch {
     return {

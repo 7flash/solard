@@ -48,6 +48,7 @@ export type {
   TokenHistoryCommitment,
   TokenHistoryConfidence,
   TokenHistoryCoverage,
+  PumpSwapFeeBreakdown,
   TokenHistoryRaw,
   TokenHistoryRepository,
   TokenHistoryRpc,

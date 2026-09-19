@@ -79,6 +79,7 @@ export type {
   TokenHistoryOwnedEntry,
   TokenHistoryOwnerPnl,
   TokenHistoryPeriodSummary,
+  PumpSwapFeeBreakdown,
   TokenHistoryBackfillProgress,
   TokenHistoryCandle1s,
   TokenHistoryClock,

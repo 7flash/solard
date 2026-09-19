@@ -41,6 +41,10 @@ export const AMM_BUY_EXACT_QUOTE_IN_D8 = Buffer.from([
   198, 46, 21, 82, 180, 217, 232, 112,
 ]);
 export const AMM_SELL_D8 = Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]);
+export const AMM_BUY_EVENT_D8 = Buffer.from([
+  103, 244, 82, 31, 44, 245, 119, 119,
+]);
+export const AMM_SELL_EVENT_D8 = Buffer.from([62, 47, 55, 10, 165, 3, 220, 42]);
 export const PUMP_FEE_CONFIG_SEED = Buffer.from([
   1, 86, 224, 246, 147, 102, 90, 207, 68, 219, 21, 104, 191, 23, 91, 170, 81,
   137, 203, 151, 245, 210, 255, 59, 101, 93, 43, 182, 253, 109, 24, 176,

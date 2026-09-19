@@ -42,6 +42,16 @@ export type SolardTokenSwapEvent = {
   quoteDecimals: number;
   quoteAmountRaw: bigint | null;
   priceQuotePerToken: number | null;
+  fees: {
+    source: "anchor-event";
+    userQuoteAmountRaw: bigint;
+    lpFeeQuoteRaw: bigint;
+    protocolFeeQuoteRaw: bigint;
+    creatorFeeQuoteRaw: bigint | null;
+    cashbackQuoteRaw: bigint | null;
+    buybackFeeQuoteRaw: bigint | null;
+    holderRewardsQuoteRaw: bigint | null;
+  } | null;
 };
 
 export type SolardTokenCreateEvent = {
@@ -273,6 +283,7 @@ function swapEvents(args: {
       quoteAmountRaw == null
         ? null
         : Number(quoteAmountRaw) / 10 ** args.quoteDecimals;
+    const exactFees = trade.history.pumpSwapFees;
     return {
       id: `${trade.eventKey}:live:${index}`,
       type: "swap",
@@ -292,6 +303,30 @@ function swapEvents(args: {
       quoteAmountRaw,
       priceQuotePerToken:
         quoteUi != null && tokenUi > 0 ? quoteUi / tokenUi : null,
+      fees: exactFees
+        ? {
+            source: exactFees.source,
+            userQuoteAmountRaw: BigInt(exactFees.userQuoteAmountRaw),
+            lpFeeQuoteRaw: BigInt(exactFees.lpFeeQuoteRaw),
+            protocolFeeQuoteRaw: BigInt(exactFees.protocolFeeQuoteRaw),
+            creatorFeeQuoteRaw:
+              exactFees.creatorFeeQuoteRaw == null
+                ? null
+                : BigInt(exactFees.creatorFeeQuoteRaw),
+            cashbackQuoteRaw:
+              exactFees.cashbackQuoteRaw == null
+                ? null
+                : BigInt(exactFees.cashbackQuoteRaw),
+            buybackFeeQuoteRaw:
+              exactFees.buybackFeeQuoteRaw == null
+                ? null
+                : BigInt(exactFees.buybackFeeQuoteRaw),
+            holderRewardsQuoteRaw:
+              exactFees.holderRewardsQuoteRaw == null
+                ? null
+                : BigInt(exactFees.holderRewardsQuoteRaw),
+          }
+        : null,
     };
   });
 }

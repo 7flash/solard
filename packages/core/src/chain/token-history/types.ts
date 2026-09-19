@@ -10,6 +10,19 @@ export type TokenHistoryCommitment = "confirmed" | "finalized";
 export type TokenHistoryConfidence =
   "processed" | "confirmed" | "finalized" | "dropped";
 
+export type PumpSwapFeeBreakdown = {
+  source: "anchor-event";
+  eventCount: number;
+  quoteMint: string;
+  userQuoteAmountRaw: string;
+  lpFeeQuoteRaw: string;
+  protocolFeeQuoteRaw: string;
+  creatorFeeQuoteRaw: string | null;
+  cashbackQuoteRaw: string | null;
+  buybackFeeQuoteRaw: string | null;
+  holderRewardsQuoteRaw: string | null;
+};
+
 export type TokenHistoryRaw = {
   parserVersion: string;
   venue: TokenHistoryVenue;
@@ -28,6 +41,7 @@ export type TokenHistoryRaw = {
     "native-wsol-corrected" | "instruction-input-fallback" | "missing";
   excludedExternalTransfersLamports: string;
   marketCapSol: number | null;
+  pumpSwapFees?: PumpSwapFeeBreakdown;
 };
 
 /**

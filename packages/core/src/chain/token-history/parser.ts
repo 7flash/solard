@@ -6,8 +6,10 @@ import { Buffer } from "buffer";
 import { parsePumpCreateData } from "../../pump/parsers/pump-create.ts";
 import {
   AMM_BUY_D8,
+  AMM_BUY_EVENT_D8,
   AMM_BUY_EXACT_QUOTE_IN_D8,
   AMM_SELL_D8,
+  AMM_SELL_EVENT_D8,
   BUY_EXACT_QUOTE_IN_V2_D8,
   CREATE_V2_D8,
   PUMP_AMM_PROGRAM_ID,
@@ -15,13 +17,14 @@ import {
   SELL_V2_D8,
 } from "../../venues/pump/constants.ts";
 import type {
+  PumpSwapFeeBreakdown,
   TokenHistoryRaw,
   TokenHistorySide,
   TokenHistoryTrade,
   TokenHistoryVenue,
 } from "./types.ts";
 
-const HISTORY_PARSER_VERSION = "pump-history-v1";
+const HISTORY_PARSER_VERSION = "pump-history-v2-fees";
 const LEGACY_CREATE_D8 = Buffer.from([24, 30, 200, 40, 5, 28, 7, 119]);
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -31,6 +34,8 @@ type ClassifiedInstruction = {
   kind: string;
   user: string;
   mint: string;
+  pool: string | null;
+  quoteMint: string | null;
   index: number;
   data: Buffer;
   protectedNativeDestinations: string[];
@@ -118,6 +123,306 @@ function startsWith(data: Buffer, discriminator: Buffer): boolean {
   );
 }
 
+type PumpSwapFeeEvent = {
+  side: "buy" | "sell";
+  pool: string;
+  user: string;
+  userQuoteAmountRaw: bigint;
+  lpFeeQuoteRaw: bigint;
+  protocolFeeQuoteRaw: bigint;
+  creatorFeeQuoteRaw: bigint | null;
+  cashbackQuoteRaw: bigint | null;
+  buybackFeeQuoteRaw: bigint | null;
+  holderRewardsQuoteRaw: bigint | null;
+};
+
+class EventCursor {
+  private offset: number;
+  constructor(
+    private readonly data: Buffer,
+    offset = 0,
+  ) {
+    this.offset = offset;
+  }
+  remaining(): number {
+    return this.data.length - this.offset;
+  }
+  skip(bytes: number): void {
+    if (this.remaining() < bytes) throw new Error("truncated PumpSwap event");
+    this.offset += bytes;
+  }
+  u64(): bigint {
+    if (this.remaining() < 8) throw new Error("truncated PumpSwap u64");
+    const value = this.data.readBigUInt64LE(this.offset);
+    this.offset += 8;
+    return value;
+  }
+  i64(): bigint {
+    if (this.remaining() < 8) throw new Error("truncated PumpSwap i64");
+    const value = this.data.readBigInt64LE(this.offset);
+    this.offset += 8;
+    return value;
+  }
+  bool(): boolean {
+    if (this.remaining() < 1) throw new Error("truncated PumpSwap bool");
+    return this.data[this.offset++]! !== 0;
+  }
+  pubkey(): string {
+    if (this.remaining() < 32) throw new Error("truncated PumpSwap pubkey");
+    const value = bs58.encode(
+      this.data.subarray(this.offset, this.offset + 32),
+    );
+    this.offset += 32;
+    return value;
+  }
+  string(): string {
+    if (this.remaining() < 4) throw new Error("truncated PumpSwap string");
+    const length = this.data.readUInt32LE(this.offset);
+    this.offset += 4;
+    if (this.remaining() < length)
+      throw new Error("truncated PumpSwap string body");
+    const value = this.data
+      .subarray(this.offset, this.offset + length)
+      .toString("utf8");
+    this.offset += length;
+    return value;
+  }
+}
+
+function optionalTail<T>(read: () => T): T | null {
+  try {
+    return read();
+  } catch {
+    return null;
+  }
+}
+
+function parsePumpSwapBuyEvent(data: Buffer): PumpSwapFeeEvent | null {
+  if (!startsWith(data, AMM_BUY_EVENT_D8)) return null;
+  try {
+    const cursor = new EventCursor(data, AMM_BUY_EVENT_D8.length);
+    cursor.i64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    const lpFeeQuoteRaw = cursor.u64();
+    cursor.u64();
+    const protocolFeeQuoteRaw = cursor.u64();
+    cursor.u64();
+    const userQuoteAmountRaw = cursor.u64();
+    const pool = cursor.pubkey();
+    const user = cursor.pubkey();
+    cursor.pubkey();
+    cursor.pubkey();
+    cursor.pubkey();
+    cursor.pubkey();
+
+    let creatorFeeQuoteRaw: bigint | null = null;
+    let cashbackQuoteRaw: bigint | null = null;
+    let buybackFeeQuoteRaw: bigint | null = null;
+    let holderRewardsQuoteRaw: bigint | null = null;
+    if (cursor.remaining() >= 48) {
+      optionalTail(() => {
+        cursor.pubkey();
+        cursor.u64();
+        creatorFeeQuoteRaw = cursor.u64();
+        cursor.bool();
+        cursor.u64();
+        cursor.u64();
+        cursor.u64();
+        cursor.i64();
+        cursor.u64();
+        cursor.string();
+        cursor.u64();
+        cashbackQuoteRaw = cursor.u64();
+        cursor.u64();
+        buybackFeeQuoteRaw = cursor.u64();
+        cursor.skip(16);
+        cursor.bool();
+        cursor.u64();
+        cursor.u64();
+        holderRewardsQuoteRaw = cursor.u64();
+      });
+    }
+    return {
+      side: "buy",
+      pool,
+      user,
+      userQuoteAmountRaw,
+      lpFeeQuoteRaw,
+      protocolFeeQuoteRaw,
+      creatorFeeQuoteRaw,
+      cashbackQuoteRaw,
+      buybackFeeQuoteRaw,
+      holderRewardsQuoteRaw,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parsePumpSwapSellEvent(data: Buffer): PumpSwapFeeEvent | null {
+  if (!startsWith(data, AMM_SELL_EVENT_D8)) return null;
+  try {
+    const cursor = new EventCursor(data, AMM_SELL_EVENT_D8.length);
+    cursor.i64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    cursor.u64();
+    const lpFeeQuoteRaw = cursor.u64();
+    cursor.u64();
+    const protocolFeeQuoteRaw = cursor.u64();
+    cursor.u64();
+    const userQuoteAmountRaw = cursor.u64();
+    const pool = cursor.pubkey();
+    const user = cursor.pubkey();
+    cursor.pubkey();
+    cursor.pubkey();
+    cursor.pubkey();
+    cursor.pubkey();
+
+    let creatorFeeQuoteRaw: bigint | null = null;
+    let cashbackQuoteRaw: bigint | null = null;
+    let buybackFeeQuoteRaw: bigint | null = null;
+    let holderRewardsQuoteRaw: bigint | null = null;
+    if (cursor.remaining() >= 48) {
+      optionalTail(() => {
+        cursor.pubkey();
+        cursor.u64();
+        creatorFeeQuoteRaw = cursor.u64();
+        cursor.u64();
+        cashbackQuoteRaw = cursor.u64();
+        cursor.u64();
+        buybackFeeQuoteRaw = cursor.u64();
+        cursor.skip(16);
+        cursor.bool();
+        cursor.u64();
+        cursor.u64();
+        holderRewardsQuoteRaw = cursor.u64();
+      });
+    }
+    return {
+      side: "sell",
+      pool,
+      user,
+      userQuoteAmountRaw,
+      lpFeeQuoteRaw,
+      protocolFeeQuoteRaw,
+      creatorFeeQuoteRaw,
+      cashbackQuoteRaw,
+      buybackFeeQuoteRaw,
+      holderRewardsQuoteRaw,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function pumpSwapFeeEvents(tx: ParsedTransactionWithMeta): PumpSwapFeeEvent[] {
+  const logs = tx.meta?.logMessages ?? [];
+  const stack: string[] = [];
+  const out: PumpSwapFeeEvent[] = [];
+  for (const line of logs) {
+    const invoke = /^Program (\S+) invoke \[(\d+)\]$/.exec(line);
+    if (invoke) {
+      const depth = Number(invoke[2]);
+      stack.length = Math.max(0, depth - 1);
+      stack.push(invoke[1]!);
+      continue;
+    }
+    const done = /^Program (\S+) (?:success|failed:.*)$/.exec(line);
+    if (done) {
+      const index = stack.lastIndexOf(done[1]!);
+      if (index >= 0) stack.length = index;
+      continue;
+    }
+    if (stack.at(-1) !== PUMP_AMM_PROGRAM_ID.toBase58()) continue;
+    const prefix = "Program data: ";
+    if (!line.startsWith(prefix)) continue;
+    try {
+      const data = Buffer.from(line.slice(prefix.length), "base64");
+      const parsed =
+        parsePumpSwapBuyEvent(data) ?? parsePumpSwapSellEvent(data);
+      if (parsed) out.push(parsed);
+    } catch {
+      // Ignore malformed logs. Exact fee data is omitted rather than estimated.
+    }
+  }
+  return out;
+}
+
+function sumRequired(
+  rows: readonly PumpSwapFeeEvent[],
+  field: "userQuoteAmountRaw" | "lpFeeQuoteRaw" | "protocolFeeQuoteRaw",
+): bigint {
+  return rows.reduce((sum, row) => sum + row[field], 0n);
+}
+
+function sumOptional(
+  rows: readonly PumpSwapFeeEvent[],
+  field:
+    | "creatorFeeQuoteRaw"
+    | "cashbackQuoteRaw"
+    | "buybackFeeQuoteRaw"
+    | "holderRewardsQuoteRaw",
+): bigint | null {
+  let total = 0n;
+  for (const row of rows) {
+    const value = row[field];
+    if (value == null) return null;
+    total += value;
+  }
+  return total;
+}
+
+function pumpSwapFeeBreakdown(
+  group: readonly ClassifiedInstruction[],
+  events: readonly PumpSwapFeeEvent[],
+): PumpSwapFeeBreakdown | undefined {
+  const first = group[0];
+  if (!first || first.venue !== "pumpswap" || !first.pool || !first.quoteMint)
+    return undefined;
+  const pools = new Set(group.map((row) => row.pool).filter(Boolean));
+  const quoteMints = new Set(group.map((row) => row.quoteMint).filter(Boolean));
+  if (quoteMints.size !== 1) return undefined;
+  const matching = events.filter(
+    (event) =>
+      event.side === first.side &&
+      event.user === first.user &&
+      pools.has(event.pool),
+  );
+  if (matching.length !== group.length) return undefined;
+  return {
+    source: "anchor-event",
+    eventCount: matching.length,
+    quoteMint: first.quoteMint,
+    userQuoteAmountRaw: sumRequired(matching, "userQuoteAmountRaw").toString(),
+    lpFeeQuoteRaw: sumRequired(matching, "lpFeeQuoteRaw").toString(),
+    protocolFeeQuoteRaw: sumRequired(
+      matching,
+      "protocolFeeQuoteRaw",
+    ).toString(),
+    creatorFeeQuoteRaw:
+      sumOptional(matching, "creatorFeeQuoteRaw")?.toString() ?? null,
+    cashbackQuoteRaw:
+      sumOptional(matching, "cashbackQuoteRaw")?.toString() ?? null,
+    buybackFeeQuoteRaw:
+      sumOptional(matching, "buybackFeeQuoteRaw")?.toString() ?? null,
+    holderRewardsQuoteRaw:
+      sumOptional(matching, "holderRewardsQuoteRaw")?.toString() ?? null,
+  };
+}
+
 function collectInstructions(tx: ParsedTransactionWithMeta): Array<{
   value: unknown;
   index: number;
@@ -159,6 +464,8 @@ function classifyInstruction(
         kind: "buy_exact_quote_in_v2",
         user,
         mint,
+        pool: null,
+        quoteMint: NATIVE_MINT.toBase58(),
         index,
         data,
         protectedNativeDestinations: [accounts[15]!].filter(Boolean),
@@ -171,6 +478,8 @@ function classifyInstruction(
         kind: "sell_v2",
         user,
         mint,
+        pool: null,
+        quoteMint: NATIVE_MINT.toBase58(),
         index,
         data,
         protectedNativeDestinations: [accounts[15]!].filter(Boolean),
@@ -190,6 +499,8 @@ function classifyInstruction(
         kind: "buy_exact_quote_in",
         user,
         mint,
+        pool: accounts[0] ?? null,
+        quoteMint: accounts[4] ?? null,
         index,
         data,
         protectedNativeDestinations: [accounts[6]!].filter(Boolean),
@@ -202,6 +513,8 @@ function classifyInstruction(
         kind: "buy",
         user,
         mint,
+        pool: accounts[0] ?? null,
+        quoteMint: accounts[4] ?? null,
         index,
         data,
         protectedNativeDestinations: [accounts[6]!].filter(Boolean),
@@ -214,6 +527,8 @@ function classifyInstruction(
         kind: "sell",
         user,
         mint,
+        pool: accounts[0] ?? null,
+        quoteMint: accounts[4] ?? null,
         index,
         data,
         protectedNativeDestinations: [accounts[6]!].filter(Boolean),
@@ -491,6 +806,7 @@ export function parsePumpHistoryTransaction(args: {
   if (!tx.meta || tx.meta.err) return { trades: [], ambiguous: 0 };
   if (tx.blockTime == null) return { trades: [], ambiguous: 0 };
 
+  const feeEvents = pumpSwapFeeEvents(tx);
   const classified = collectInstructions(tx)
     .map(({ value, index }) => classifyInstruction(value, index, args.mint))
     .filter((item): item is ClassifiedInstruction => item != null);
@@ -562,6 +878,7 @@ export function parsePumpHistoryTransaction(args: {
     const priceSol = tokenUi > 0 && solUi > 0 ? solUi / tokenUi : null;
     const marketCapSol =
       priceSol != null && args.supplyUi > 0 ? priceSol * args.supplyUi : null;
+    const exactPumpSwapFees = pumpSwapFeeBreakdown(group, feeEvents);
     const raw: TokenHistoryRaw = {
       parserVersion: HISTORY_PARSER_VERSION,
       venue: first.venue,
@@ -581,6 +898,7 @@ export function parsePumpHistoryTransaction(args: {
       excludedExternalTransfersLamports:
         economics.excludedExternalTransfers.toString(),
       marketCapSol,
+      ...(exactPumpSwapFees ? { pumpSwapFees: exactPumpSwapFees } : {}),
     };
     const eventKey = [
       "token-history-v1",
