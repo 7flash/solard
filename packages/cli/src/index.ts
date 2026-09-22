@@ -279,6 +279,8 @@ function commandNeedsSigningVault(
     if (values[0] === "resume") return true;
     return flags.has("live");
   }
+  if (command === "reclaim") return flags.has("live") || flags.has("simulate");
+  if (command === "unwrap" && values[0] === "wsol") return true;
   if (
     [
       "import",
@@ -382,12 +384,12 @@ Vanity mints
   launch/vamp: add --mint-pool pump [--mint-pool-address <address>] to consume a pooled mint
 
 Launch discovery
-  slrd launch watch [--venue pump,raydium-launchlab] [--min-mcap 5000] [--candle 30s] [--green-candles 5] [--track-ttl 30m] [--max-tracked 500] [--json]
-                                                        RPC/WebSocket launch watcher; after crossing the threshold, alert on closed green-candle streaks
+  slrd launch watch [--venue pump,raydium-launchlab] [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--max-tracked 500] [--rpc-rps 5] [--rpc-read-rps 2] [--standard-ws] [--show-new] [--trades] [--json]
+                                                        Discover new launches, ignore Pump Mayhem by default, notify on first $5k cross and each +20% notified ATH step
 
 Pump discovery
   slrd pump pairs [--json]                              Read Pump-supported quote mints from the on-chain Global account
-  slrd pump watch [--min-mcap 5000] [--candle 30s] [--green-candles 5] [--json]
+  slrd pump watch [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--max-tracked 500] [--show-new] [--trades] [--json]
                                                         Compatibility alias for: slrd launch watch --venue pump
 
 Metadata and launching
@@ -421,7 +423,7 @@ Transfers and consolidation
   slrd sweep sol ...                                    Compatibility alias; --max-balance-sol remains accepted
 
 Token liquidation
-  slrd liquidate tokens [--except <token|mint>] [--wallets <a,b,...>] [--except-wallet <wallet>] [--except-wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--burn-unsellable] [--simulate | --live]
+  slrd liquidate tokens [--except <token|mint>] [--wallets <a,b,...>] [--except-wallet <wallet>] [--except-wallets <a,b,...>] [--slippage-bps 1500] [--no-jupiter] [--burn-unsellable] [--rounds 3] [--simulate | --live]
                                                         Sell all supported tokens unless protected with --except; excluded wallets are not scanned or touched
 
 RPC
@@ -442,7 +444,12 @@ Trading
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
   slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
-  slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--continue-on-error] [--simulate-only]
+  slrd unwrap-wsol (--all-wallets | --wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--simulate-only]
+                                                        Close every owned WSOL token account, including non-ATA WSOL accounts
+  slrd reclaim inspect --all-wallets                    List Loader-v3 buffers/programs controlled by stored wallets
+  slrd reclaim buffers --all-wallets [--simulate | --live]
+  slrd reclaim programs --all-wallets [--simulate | --live --confirm-program-close]
+  slrd reclaim all --all-wallets [--simulate | --live --confirm-program-close]
   slrd claim <token|ca> --wallet <wallet> [--sender rpc|helius|jito]
   slrd transfer-many --wallet <wallet> (--token <mint>|--sol) --file <allocations.json> [--id <stable-id> --live]
   slrd transfer-many status <stable-id>
@@ -907,6 +914,12 @@ async function main() {
       return;
     }
 
+    if (command === "reclaim") {
+      const { runReclaimCommand } = await import("./reclaim-command.ts");
+      await runReclaimCommand({ slrd, values, flags, emit });
+      return;
+    }
+
     if (command === "meteora") {
       await handleMeteoraCommand({ slrd, values, flags, emit });
       return;
@@ -1340,7 +1353,7 @@ async function main() {
         try {
           const tx = await connection.getTransaction(entry.signature, {
             commitment: "confirmed",
-            maxSupportedTransactionVersion: 0,
+            maxSupportedTransactionVersion: 1,
           });
           const fee = tx?.meta?.fee;
           const payer = txAccountKeys(tx)[0] ?? "";
@@ -1488,7 +1501,7 @@ async function main() {
         for (let attempt = 1; attempt <= enrichAttempts; attempt += 1) {
           const tx = await connection.getTransaction(signature, {
             commitment,
-            maxSupportedTransactionVersion: 0,
+            maxSupportedTransactionVersion: 1,
           });
           if (tx) return tx;
           if (attempt < enrichAttempts) {
@@ -1777,7 +1790,7 @@ async function main() {
         try {
           const tx = await connection.getTransaction(entry.signature, {
             commitment: "confirmed",
-            maxSupportedTransactionVersion: 0,
+            maxSupportedTransactionVersion: 1,
           });
           if (!tx?.meta) {
             rows.push({
@@ -2253,7 +2266,6 @@ async function main() {
         : flags.has("simulate")
           ? "SIMULATE"
           : "PLAN";
-
       emit(`LIQUIDATE ${mode}\n`);
       for (const ref of except) {
         const mint = resolveTokenMintForPolicy(slrd, ref);
@@ -2319,6 +2331,15 @@ async function main() {
             emit(
               `ROUTE    ${event.index}/${event.total}  ${shortKey(event.mint)}\n`,
             );
+          } else if (event.stage === "consolidation-start") {
+            showAction("MOVE", event.index, event.total, event.action);
+            emit(
+              `         consolidate ${event.accounts} non-ATA account(s), raw=${event.amountRaw.toString()} -> ATA\n`,
+            );
+          } else if (event.stage === "consolidation-done") {
+            emit(
+              `MOVED    ${event.index}/${event.total}  @${event.action.walletName}  ${shortKey(event.action.mint)}  accounts=${event.accounts} signatures=${event.signatures.length}\n`,
+            );
           } else if (event.stage === "action-start") {
             showAction(
               flags.has("simulate") ? "SIM " : "DO  ",
@@ -2342,12 +2363,19 @@ async function main() {
         },
       };
 
-      const plan = await planRegistryTokenLiquidation(slrd, options);
-      emit(
-        `PLAN     native=${plan.totals.sell}  jupiter=${plan.totals.jupiterSell}  ` +
-          `unwrap=${plan.totals.unwrapWsol}  close-empty-now=${plan.totals.closeEmpty}  ` +
-          `keep=${plan.totals.keepProtected}  unsupported=${plan.totals.skipUnsupported}\n`,
-      );
+      const emitPlan = (
+        plan: Awaited<ReturnType<typeof planRegistryTokenLiquidation>>,
+        prefix = "PLAN    ",
+      ) => {
+        emit(
+          `${prefix} native=${plan.totals.sell}  jupiter=${plan.totals.jupiterSell}  ` +
+            `unwrap=${plan.totals.unwrapWsol}  close-empty-now=${plan.totals.closeEmpty}  ` +
+            `keep=${plan.totals.keepProtected}  unsupported=${plan.totals.skipUnsupported}\n`,
+        );
+      };
+
+      let plan = await planRegistryTokenLiquidation(slrd, options);
+      emitPlan(plan);
 
       if (!flags.has("simulate") && !flags.has("live")) {
         const actionable = plan.actions.filter(
@@ -2402,9 +2430,43 @@ async function main() {
         return;
       }
 
-      const results = flags.has("simulate")
-        ? await simulateRegistryTokenLiquidation(slrd, plan, options)
-        : await executeRegistryTokenLiquidation(slrd, plan, options);
+      let results: Awaited<ReturnType<typeof executeRegistryTokenLiquidation>> =
+        [];
+      let finalPlan = plan;
+
+      if (flags.has("simulate")) {
+        results = await simulateRegistryTokenLiquidation(slrd, plan, options);
+      } else {
+        const maxRounds = Math.max(
+          1,
+          Math.min(6, int(flags, "rounds", 3) ?? 3),
+        );
+        for (let round = 1; round <= maxRounds; round += 1) {
+          if (round > 1) {
+            emit(`RESCAN   liquidation round ${round}/${maxRounds}\n`);
+            emitPlan(plan, "PLAN-R  ");
+          }
+          results.push(
+            ...(await executeRegistryTokenLiquidation(slrd, plan, options)),
+          );
+          finalPlan = await planRegistryTokenLiquidation(slrd, options);
+          const retryable = finalPlan.actions.filter(
+            (action) =>
+              action.amountRaw > 0n &&
+              (action.kind === "sell" ||
+                action.kind === "jupiter-sell" ||
+                action.kind === "unwrap-wsol" ||
+                (options.burnUnsellable && action.kind === "skip-unsupported")),
+          );
+          if (!retryable.length) break;
+          if (round < maxRounds) {
+            emit(
+              `RESIDUAL ${retryable.length} positive holding(s) appeared/remain after round ${round}; rescanning and retrying\n`,
+            );
+            plan = finalPlan;
+          }
+        }
+      }
 
       const failed = results.filter((result) => Boolean(result.error)).length;
       const succeeded = results.filter((result) => !result.error);
@@ -2423,12 +2485,39 @@ async function main() {
       const reclaimedRentLamports = succeeded
         .filter((result) => result.action.kind === "close-empty")
         .reduce((sum, result) => sum + (result.action.rentLamports ?? 0n), 0n);
+
+      const residual = flags.has("live")
+        ? finalPlan.actions.filter(
+            (action) =>
+              action.amountRaw > 0n &&
+              action.kind !== "keep-protected" &&
+              action.kind !== "close-empty",
+          )
+        : [];
+
       emit(
         `DONE     ok=${succeeded.length}  failed=${failed}  ` +
           `native-sold=${soldNative}  jupiter-sold=${soldJupiter}  ` +
           `unwrapped=${unwrapped}  closed-empty=${closedEmpty}  ` +
+          `residual=${residual.length}  ` +
           `reclaimed-rent≈${(Number(reclaimedRentLamports) / 1e9).toFixed(6)} SOL\n`,
       );
+
+      if (residual.length) {
+        for (const action of residual.slice(0, 12)) {
+          const label = action.symbol ?? action.name ?? shortKey(action.mint);
+          emit(
+            `REMAIN   @${action.walletName}  ${label}  ${action.amountUi}  ` +
+              `${action.mint}${action.reason ? `  ${action.reason}` : ""}\n`,
+          );
+        }
+        if (residual.length > 12)
+          emit(`REMAIN   ... ${residual.length - 12} more holding(s)\n`);
+        emit(
+          `INCOMPLETE positive unprotected token balances remain after the final fresh scan\n`,
+        );
+        process.exitCode = 1;
+      }
       return;
     }
 
@@ -2746,150 +2835,183 @@ async function main() {
       command === "unwrap-wsol" ||
       (command === "unwrap" && values[0] === "wsol")
     ) {
-      const targets = targetWallets(
-        slrd,
-        flags,
-        "Usage: slrd unwrap-wsol (--wallet <wallet> | --wallets <w1,w2> | --group <group>).",
-      );
+      const allWallets = flags.has("all-wallets");
+      const explicitSelectors = [
+        Boolean(flags.get("wallet")),
+        csv(flags.get("wallets")).length > 0,
+        Boolean(flags.get("group")),
+      ].filter(Boolean).length;
+      if (allWallets && explicitSelectors > 0)
+        throw new Error(
+          "Use --all-wallets or a specific wallet selector, not both.",
+        );
+      const targets = allWallets
+        ? {
+            mode: "all-wallets" as const,
+            refs: slrd.wallets.list().map((wallet) => wallet.name),
+          }
+        : targetWallets(
+            slrd,
+            flags,
+            "Usage: slrd unwrap-wsol (--all-wallets | --wallet <wallet> | --wallets <w1,w2> | --group <group>).",
+          );
       const destination = flags.get("destination");
       if (destination && targets.refs.length !== 1)
         throw new Error(
           "--destination is only supported with a single --wallet unwrap.",
         );
-      const unwrapOptions = {
-        via: flags.get("sender") ?? "rpc",
-        destination,
-        skipMissing: flags.has("ignore-missing") || flags.has("skip-missing"),
-        skipSimulation: flags.has("skip-simulation"),
-        skipPreflight:
-          flags.has("skip-preflight") || flags.has("skip-simulation"),
-      };
-
-      const multiWallet = targets.refs.length > 1;
+      const skipMissing =
+        allWallets || flags.has("ignore-missing") || flags.has("skip-missing");
+      const via = flags.get("sender") ?? "rpc";
+      const skipSimulation = flags.has("skip-simulation");
+      const skipPreflight = flags.has("skip-preflight") || skipSimulation;
       const failFast = flags.has("fail-fast");
+      const results: Array<Record<string, unknown>> = [];
 
-      // Multi-wallet/group unwrap is resilient by default. Do not let one
-      // undecryptable wallet prevent unrelated wallets from recovering WSOL.
-      // With --ignore-missing, probe the WSOL ATA using only the public wallet
-      // address BEFORE asking the vault to decrypt the signer.
-      if (multiWallet && !failFast) {
-        const results: Array<Record<string, unknown>> = [];
-
-        for (const walletRef of targets.refs) {
-          const resolved = slrd.resolveWallet(walletRef);
-          const address = resolved.address.toBase58();
-          const label = resolved.row?.name ? `@${resolved.row.name}` : address;
-
-          if (unwrapOptions.skipMissing) {
-            const wsolAccount = wrappedSolAta(resolved.address);
-            const account = await slrd
-              .connection()
-              .getAccountInfo(wsolAccount, "confirmed");
-
-            if (!account) {
-              results.push({
-                wallet: walletRef,
-                address,
-                ok: true,
-                skipped: "missing-wsol",
-                wsolAccount: wsolAccount.toBase58(),
-              });
-              continue;
-            }
-          }
-
-          try {
-            if (flags.has("simulate-only")) {
-              const plan = await slrd
-                .tx(walletRef)
-                .unwrapWsol({ skipMissing: unwrapOptions.skipMissing })
-                .build();
-              const simulation = await slrd.simulatePlan(plan);
-              results.push({
-                wallet: walletRef,
-                address,
-                ok: simulation.success,
-                mode: "simulation",
-                simulation,
-              });
-            } else {
-              const receipt = await slrd.unwrapWsol(walletRef, unwrapOptions);
-              results.push({
-                wallet: walletRef,
-                address,
-                ok: true,
-                receipt,
-              });
-            }
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : String(error);
+      for (const walletRef of targets.refs) {
+        const resolved = slrd.resolveWallet(walletRef);
+        const address = resolved.address.toBase58();
+        const label = resolved.row?.name ? `@${resolved.row.name}` : address;
+        try {
+          const accounts = (await slrd.tokenAccounts(address)).filter(
+            (account) => account.mint === NATIVE_SOL_MINT,
+          );
+          if (!accounts.length) {
+            if (!skipMissing && targets.refs.length === 1)
+              throw new Error(`No WSOL token accounts exist for ${address}`);
             results.push({
               wallet: walletRef,
               address,
-              ok: false,
-              error: message,
+              ok: true,
+              skipped: "missing-wsol",
             });
-            process.stderr.write(
-              `${OWL} unwrap-wsol ${label} (${address}) failed: ${message}\n`,
-            );
+            continue;
           }
-        }
 
-        const succeeded = results.filter(
-          (row) => row.ok === true && !row.skipped,
-        ).length;
-        const skipped = results.filter((row) => Boolean(row.skipped)).length;
-        const failed = results.filter((row) => row.ok === false).length;
-
-        emit(
-          json({
-            mode: flags.has("simulate-only")
-              ? "wallet-by-wallet-simulation"
-              : "wallet-by-wallet",
-            target: targets,
-            summary: {
-              total: results.length,
-              succeeded,
-              skipped,
-              failed,
-            },
-            results,
-          }) + "\n",
-        );
-        return;
-      }
-
-      // Single-wallet unwrap remains fail-fast. --fail-fast also preserves the
-      // old batch behavior for callers that explicitly want all-or-nothing.
-      if (flags.has("simulate-only")) {
-        const plans =
-          targets.refs.length === 1
-            ? [
-                await slrd
-                  .tx(targets.refs[0]!)
-                  .unwrapWsol({
+          let closed = 0;
+          let unwrappedRaw = 0n;
+          const accountResults: Array<Record<string, unknown>> = [];
+          for (const account of accounts) {
+            if (account.closeAuthority && account.closeAuthority !== address) {
+              const error = `WSOL account ${account.address} has close authority ${account.closeAuthority}`;
+              accountResults.push({
+                account: account.address,
+                ok: false,
+                error,
+              });
+              if (failFast) throw new Error(error);
+              continue;
+            }
+            try {
+              const composer = slrd
+                .tx(walletRef)
+                .closeTokenAccountAddress(
+                  account.address,
+                  account.tokenProgram,
+                  {
                     destination,
-                    skipMissing: unwrapOptions.skipMissing,
-                  })
-                  .build(),
-              ]
-            : await slrd
-                .composeMany(targets.refs)
-                .unwrapWsol({ skipMissing: unwrapOptions.skipMissing })
-                .build();
-        const results = await Promise.all(
-          plans.map((plan) => slrd.simulatePlan(plan)),
-        );
-        emit(json({ mode: "simulation", target: targets, results }) + "\n");
-        return;
+                  },
+                );
+              if (flags.has("simulate-only")) {
+                const plan = await composer.build();
+                const simulation = await slrd.simulatePlan(plan);
+                if (!simulation.success) throw new Error("simulation failed");
+                accountResults.push({
+                  account: account.address,
+                  amountRaw: account.amountRaw,
+                  ok: true,
+                  mode: "simulation",
+                  simulation,
+                });
+              } else {
+                const receipt = await composer.send({
+                  via,
+                  kind: "unwrap-wsol:account",
+                  skipSimulation,
+                  skipPreflight,
+                });
+                const { PublicKey } = await import("@solana/web3.js");
+                let closedOnChain = false;
+                for (let attempt = 0; attempt < 6; attempt += 1) {
+                  const current = await slrd
+                    .connection()
+                    .getAccountInfo(
+                      new PublicKey(account.address),
+                      "confirmed",
+                    );
+                  if (!current || current.lamports === 0) {
+                    closedOnChain = true;
+                    break;
+                  }
+                  if (attempt < 5)
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                }
+                if (!closedOnChain)
+                  throw new Error(
+                    `WSOL account ${account.address} still exists after close`,
+                  );
+                accountResults.push({
+                  account: account.address,
+                  amountRaw: account.amountRaw,
+                  ok: true,
+                  receipt,
+                });
+              }
+              closed += 1;
+              unwrappedRaw += BigInt(account.amountRaw);
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              accountResults.push({
+                account: account.address,
+                ok: false,
+                error: message,
+              });
+              if (failFast) throw error;
+            }
+          }
+          const failedAccounts = accountResults.filter(
+            (row) => row.ok === false,
+          ).length;
+          results.push({
+            wallet: walletRef,
+            address,
+            ok: failedAccounts === 0,
+            closed,
+            failedAccounts,
+            unwrappedRaw,
+            accounts: accountResults,
+          });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          results.push({
+            wallet: walletRef,
+            address,
+            ok: false,
+            error: message,
+          });
+          process.stderr.write(
+            `${OWL} unwrap-wsol ${label} (${address}) failed: ${message}\n`,
+          );
+          if (failFast) throw error;
+        }
       }
 
-      const receipts =
-        targets.refs.length === 1
-          ? await slrd.unwrapWsol(targets.refs[0]!, unwrapOptions)
-          : await slrd.unwrapWsolMany(targets.refs, unwrapOptions);
-      emit(json(receipts) + "\n");
+      const succeeded = results.filter(
+        (row) => row.ok === true && !row.skipped,
+      ).length;
+      const skipped = results.filter((row) => Boolean(row.skipped)).length;
+      const failed = results.filter((row) => row.ok === false).length;
+      emit(
+        json({
+          mode: flags.has("simulate-only") ? "simulation" : "live",
+          target: targets,
+          summary: { total: results.length, succeeded, skipped, failed },
+          results,
+        }) + "\n",
+      );
+      if (failed) process.exitCode = 1;
       return;
     }
     if (command === "rewards") {

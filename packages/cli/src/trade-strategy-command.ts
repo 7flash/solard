@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { configure, createMeasure } from "measure-fn";
 import {
   Connection,
   PublicKey,
@@ -71,6 +72,7 @@ export type TradeStrategyContext<State = Record<string, unknown>> = {
   position(): Promise<StrategyPosition>;
   samplePrice(): Promise<{ price: number; venue: string }>;
   log(message: string, data?: unknown): void;
+  notify(message: string, data?: unknown): void;
   stop(reason?: string): void;
 };
 
@@ -131,6 +133,53 @@ function integerFlag(flags: Flags, key: string, fallback: number): number {
   if (!Number.isInteger(value) || value <= 0)
     throw new Error(`--${key} must be a positive integer`);
   return value;
+}
+
+function rpcReadRate(flags: Flags): { hard: number; read: number } {
+  const raw = flag(flags, "rpc-rps") ?? process.env.SLRD_RPC_MAX_RPS ?? "5";
+  const hardValue = Number(raw);
+  if (!Number.isFinite(hardValue) || hardValue <= 0)
+    throw new Error(`Invalid RPC rate: ${raw}`);
+  const hard = Math.max(1, Math.floor(hardValue));
+  const defaultRead = hard > 2 ? Math.min(3, hard - 2) : 1;
+  const readRaw = flag(flags, "rpc-read-rps");
+  const readValue = readRaw == null ? defaultRead : Number(readRaw);
+  if (!Number.isFinite(readValue) || readValue <= 0)
+    throw new Error(`Invalid --rpc-read-rps: ${readRaw}`);
+  return { hard, read: Math.max(1, Math.min(hard, Math.floor(readValue))) };
+}
+
+class RpcPacer {
+  private tail: Promise<unknown> = Promise.resolve();
+  private nextAt = 0;
+  private pending = 0;
+
+  constructor(readonly rps: number) {}
+
+  get queued(): number {
+    return this.pending;
+  }
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    this.pending += 1;
+    const step = Math.ceil(1_000 / this.rps);
+    const execute = async () => {
+      const wait = Math.max(0, this.nextAt - Date.now());
+      if (wait > 0) await sleep(wait);
+      this.nextAt = Math.max(this.nextAt, Date.now()) + step;
+      try {
+        return await fn();
+      } finally {
+        this.pending -= 1;
+      }
+    };
+    const result = this.tail.then(execute, execute);
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 }
 
 function required(flags: Flags, key: string): string {
@@ -887,6 +936,29 @@ export async function runTradeStrategyCommand(args: {
     );
   }
   const json = args.flags.has("json");
+  configure({
+    silent: false,
+    logger(_event: unknown, next?: () => void) {
+      next?.();
+    },
+  });
+  const m = createMeasure("slrd:trade-strategy", { maxResultLength: 1600 });
+  const report = <T extends Record<string, unknown>>(
+    label: string,
+    value: T,
+  ): T => {
+    if (json) {
+      args.emit(`${JSON.stringify({ type: label, ...value })}\n`);
+      return value;
+    }
+    return m.sync(
+      {
+        start: () => label,
+        end: (result: T) => result,
+      },
+      () => value,
+    );
+  };
   const continueOnError = args.flags.has("continue-on-error");
   const slippageBps = Math.max(
     1,
@@ -903,6 +975,8 @@ export async function runTradeStrategyCommand(args: {
     Math.trunc(numberFlag(args.flags, "heartbeat-ms", 15_000)),
   );
   const url = rpcUrl(args.flags);
+  const rate = rpcReadRate(args.flags);
+  const pacer = new RpcPacer(rate.read);
   const strategy = await loadStrategy(path);
   const state = await initialState(strategy);
   const strategyParams = params(args.flags);
@@ -925,9 +999,8 @@ export async function runTradeStrategyCommand(args: {
   try {
     const mint = await ensureToken(slrd, tokenRef);
     const walletAddress = slrd.resolveWallet(walletRef).address.toBase58();
-    const supply = await connection.getTokenSupply(
-      new PublicKey(mint),
-      "confirmed",
+    const supply = await pacer.run(() =>
+      connection.getTokenSupply(new PublicKey(mint), "confirmed"),
     );
     const decimals = supply.value.decimals;
     const supplyUi = Number(supply.value.uiAmountString ?? "0");
@@ -942,23 +1015,24 @@ export async function runTradeStrategyCommand(args: {
       launchlabProbeSol,
     );
 
-    const emitEvent = (value: unknown) => {
-      if (json) args.emit(`${JSON.stringify(value)}\n`);
-    };
-
     const log = (message: string, data?: unknown) => {
-      const event = {
-        type: "strategy-log",
+      report("strategy log", {
         at: new Date().toISOString(),
         strategy: strategy.name ?? path,
         message,
         ...(data === undefined ? {} : { data }),
-      };
-      if (json) emitEvent(event);
-      else
-        args.emit(
-          `${event.at} STRATEGY ${message}${data === undefined ? "" : ` ${JSON.stringify(data)}`}\n`,
-        );
+      });
+    };
+
+    const notify = (message: string, data?: unknown) => {
+      if (!args.flags.has("no-bell") && !json) process.stderr.write("\x07");
+      report("strategy notification", {
+        at: new Date().toISOString(),
+        strategy: strategy.name ?? path,
+        mint,
+        message,
+        ...(data === undefined ? {} : { data }),
+      });
     };
 
     const context = {
@@ -995,11 +1069,7 @@ export async function runTradeStrategyCommand(args: {
           tokenDeltaRaw: result.tokenDeltaRaw?.toString() ?? null,
           solDeltaLamports: result.solDeltaLamports?.toString() ?? null,
         };
-        if (json) emitEvent(event);
-        else
-          args.emit(
-            `${event.at} ${result.live ? "EXEC" : "DRY"} BUY sol=${input.sol} venue=${result.venue ?? "pending"} sig=${result.signature ?? "-"}${input.reason ? ` reason=${input.reason}` : ""}\n`,
-          );
+        report("strategy execution", { ...event, side: "buy" });
         return result;
       },
       async sell(input: { percent: number; reason?: string }) {
@@ -1011,16 +1081,13 @@ export async function runTradeStrategyCommand(args: {
           tokenDeltaRaw: result.tokenDeltaRaw?.toString() ?? null,
           solDeltaLamports: result.solDeltaLamports?.toString() ?? null,
         };
-        if (json) emitEvent(event);
-        else
-          args.emit(
-            `${event.at} ${result.live ? "EXEC" : "DRY"} SELL percent=${input.percent} venue=${result.venue ?? "pending"} sig=${result.signature ?? "-"}${input.reason ? ` reason=${input.reason}` : ""}\n`,
-          );
+        report("strategy execution", { ...event, side: "sell" });
         return result;
       },
       position: () => executor.position(),
       samplePrice: () => executor.samplePrice(),
       log,
+      notify,
       stop(reason?: string) {
         stopped = true;
         stopReason = reason?.trim() || "strategy requested stop";
@@ -1049,9 +1116,10 @@ export async function runTradeStrategyCommand(args: {
       queue.push(signature);
       queuePeak = Math.max(queuePeak, queue.length);
       if (queue.length === 100 || queue.length % 500 === 0) {
-        process.stderr.write(
-          `strategy warning: transaction queue=${queue.length}; RPC/callback processing is behind live trades\n`,
-        );
+        report("strategy queue warning", {
+          queue: queue.length,
+          message: "RPC/callback processing is behind live trades",
+        });
       }
     };
 
@@ -1067,9 +1135,10 @@ export async function runTradeStrategyCommand(args: {
         );
         subscriptions.set(address, id);
       } catch (error) {
-        process.stderr.write(
-          `strategy subscription error ${address}: ${errorText(error)}\n`,
-        );
+        report("strategy subscription error", {
+          address,
+          error: errorText(error),
+        });
       }
     };
 
@@ -1090,10 +1159,12 @@ export async function runTradeStrategyCommand(args: {
     ): Promise<ParsedTransactionWithMeta | null> => {
       for (let attempt = 0; attempt < 8 && !stopped; attempt += 1) {
         try {
-          const tx = await connection.getParsedTransaction(signature, {
-            commitment: "confirmed",
-            maxSupportedTransactionVersion: 0,
-          });
+          const tx = await pacer.run(() =>
+            connection.getParsedTransaction(signature, {
+              commitment: "confirmed",
+              maxSupportedTransactionVersion: 1,
+            }),
+          );
           if (tx) return tx;
         } catch {
           rpcErrors += 1;
@@ -1112,12 +1183,12 @@ export async function runTradeStrategyCommand(args: {
         try {
           await strategy.onError(context, error, trade);
         } catch (handlerError) {
-          process.stderr.write(
-            `strategy onError failed: ${errorText(handlerError)}\n`,
-          );
+          report("strategy onError failure", {
+            error: errorText(handlerError),
+          });
         }
       }
-      process.stderr.write(`strategy callback error: ${errorText(error)}\n`);
+      report("strategy callback error", { error: errorText(error) });
       if (!continueOnError) {
         stopped = true;
         stopReason = `callback error: ${errorText(error)}`;
@@ -1151,8 +1222,7 @@ export async function runTradeStrategyCommand(args: {
           tradeCount += 1;
           lastTrade = trade;
           if (json) {
-            emitEvent({
-              type: "trade",
+            report("trade", {
               ...trade,
               tokenAmountRaw: trade.tokenAmountRaw.toString(),
             });
@@ -1169,20 +1239,17 @@ export async function runTradeStrategyCommand(args: {
     await refreshSolUsd();
     await refreshAddresses();
 
-    if (!json) {
-      args.emit(
-        `🦉 strategy=${strategy.name ?? path} token=${mint} wallet=${walletRef} mode=${live ? "LIVE" : "DRY"} event=each-trade subscriptions=${subscriptions.size} — Ctrl+C to stop\n`,
-      );
-    } else {
-      emitEvent({
-        type: "strategy-start",
-        strategy: strategy.name ?? path,
-        mint,
-        wallet: walletRef,
-        walletAddress,
-        live,
-      });
-    }
+    report("strategy ready", {
+      strategy: strategy.name ?? path,
+      mint,
+      wallet: walletRef,
+      walletAddress,
+      live,
+      subscriptions: subscriptions.size,
+      event: "each-trade",
+      rpcReadRps: rate.read,
+      rpcHardRps: rate.hard,
+    });
 
     if (strategy.onStart) {
       try {
@@ -1207,9 +1274,18 @@ export async function runTradeStrategyCommand(args: {
     }, 30_000);
     const solUsdTimer = setInterval(() => void refreshSolUsd(), 30_000);
     const heartbeatTimer = setInterval(() => {
-      process.stderr.write(
-        `strategy trades=${tradeCount} queue=${queue.length} queuePeak=${queuePeak} subscriptions=${subscriptions.size} callbackErrors=${callbackErrors} rpcErrors=${rpcErrors} executionVenue=${executor.venue ?? "unresolved"}\n`,
-      );
+      report("strategy heartbeat", {
+        trades: tradeCount,
+        queue: queue.length,
+        queuePeak,
+        subscriptions: subscriptions.size,
+        callbackErrors,
+        rpcErrors,
+        rpcQueue: pacer.queued,
+        rpcReadRps: rate.read,
+        rpcHardRps: rate.hard,
+        executionVenue: executor.venue ?? "unresolved",
+      });
     }, heartbeatMs);
 
     try {
@@ -1229,24 +1305,17 @@ export async function runTradeStrategyCommand(args: {
         try {
           await strategy.onStop(context, stopReason);
         } catch (error) {
-          process.stderr.write(`strategy onStop failed: ${errorText(error)}\n`);
+          report("strategy onStop failure", { error: errorText(error) });
         }
       }
-      if (json) {
-        emitEvent({
-          type: "strategy-stop",
-          strategy: strategy.name ?? path,
-          reason: stopReason,
-          trades: tradeCount,
-          queuePeak,
-          callbackErrors,
-          rpcErrors,
-        });
-      } else {
-        args.emit(
-          `strategy stopped reason=${stopReason} trades=${tradeCount} queuePeak=${queuePeak} callbackErrors=${callbackErrors} rpcErrors=${rpcErrors}\n`,
-        );
-      }
+      report("strategy stopped", {
+        strategy: strategy.name ?? path,
+        reason: stopReason,
+        trades: tradeCount,
+        queuePeak,
+        callbackErrors,
+        rpcErrors,
+      });
     }
   } finally {
     slrd.close();

@@ -1,8 +1,12 @@
 import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotentInstruction,
   createBurnCheckedInstruction,
   createHarvestWithheldTokensToMintInstruction,
+  createTransferCheckedInstruction,
+  getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 
@@ -83,6 +87,23 @@ export type RegistryTokenLiquidationProgress =
       mint: string;
     }
   | {
+      stage: "consolidation-start";
+      index: number;
+      total: number;
+      action: RegistryTokenLiquidationAction;
+      accounts: number;
+      amountRaw: bigint;
+    }
+  | {
+      stage: "consolidation-done";
+      index: number;
+      total: number;
+      action: RegistryTokenLiquidationAction;
+      accounts: number;
+      amountRaw: bigint;
+      signatures: string[];
+    }
+  | {
       stage: "action-start";
       index: number;
       total: number;
@@ -160,6 +181,170 @@ async function associatedSellableAmount(
   return accounts
     .filter((account) => account.isAssociated)
     .reduce((sum, account) => sum + account.amountRaw, 0n);
+}
+
+async function consolidateMintToAssociated(
+  slrd: Solard,
+  action: RegistryTokenLiquidationAction,
+  via: SenderId,
+  progress?: {
+    index: number;
+    total: number;
+    onProgress?: RegistryTokenLiquidationOptions["onProgress"];
+  },
+): Promise<SendReceipt[]> {
+  const signer = slrd.signer(action.walletAddress);
+  const receipts: SendReceipt[] = [];
+  const priorityMicroLamports = await cleanupPriorityMicroLamports(slrd);
+  const initialAccounts = await liveMintAccounts(
+    slrd,
+    action.walletAddress,
+    action.mint,
+  );
+  const initialSecondary = initialAccounts.filter(
+    (account) => !account.isAssociated,
+  );
+  const initialAmountRaw = initialSecondary.reduce(
+    (sum, account) => sum + account.amountRaw,
+    0n,
+  );
+  if (initialSecondary.length) {
+    progress?.onProgress?.({
+      stage: "consolidation-start",
+      index: progress.index,
+      total: progress.total,
+      action,
+      accounts: initialSecondary.length,
+      amountRaw: initialAmountRaw,
+    });
+  }
+
+  for (let sweep = 0; sweep < 3; sweep += 1) {
+    const accounts = await liveMintAccounts(
+      slrd,
+      action.walletAddress,
+      action.mint,
+    );
+    const secondary = accounts.filter((account) => !account.isAssociated);
+    if (!secondary.length) {
+      if (initialSecondary.length) {
+        progress?.onProgress?.({
+          stage: "consolidation-done",
+          index: progress.index,
+          total: progress.total,
+          action,
+          accounts: initialSecondary.length,
+          amountRaw: initialAmountRaw,
+          signatures: receipts.map((receipt) => receipt.signature),
+        });
+      }
+      return receipts;
+    }
+
+    for (const candidate of secondary) {
+      const current = (await slrd.tokenAccounts(action.walletAddress)).find(
+        (account) => account.address === candidate.address,
+      );
+      if (!current || current.amountRaw <= 0n || current.isAssociated) continue;
+      if (current.mint !== action.mint) {
+        throw new Error(
+          `Refusing consolidation because token account ${current.address} now contains mint ${current.mint}, expected ${action.mint}`,
+        );
+      }
+
+      const mint = new PublicKey(action.mint);
+      const tokenProgram = new PublicKey(current.tokenProgram);
+      const destination = getAssociatedTokenAddressSync(
+        mint,
+        signer.publicKey,
+        false,
+        tokenProgram,
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+      );
+      const composer = slrd.tx(action.walletAddress).priorityFee({
+        cuLimit: 100_000,
+        microLamports: priorityMicroLamports,
+      });
+      composer.add(
+        createAssociatedTokenAccountIdempotentInstruction(
+          signer.publicKey,
+          destination,
+          signer.publicKey,
+          mint,
+          tokenProgram,
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+        ),
+        {
+          kind: "create-associated-token-account",
+          mint,
+          meta: { reason: "registry-liquidation-consolidation" },
+        },
+      );
+      composer.add(
+        createTransferCheckedInstruction(
+          new PublicKey(current.address),
+          mint,
+          destination,
+          signer.publicKey,
+          current.amountRaw,
+          current.decimals,
+          [],
+          tokenProgram,
+        ),
+        {
+          kind: "transfer-token",
+          mint,
+          recipient: signer.publicKey,
+          meta: {
+            reason: "registry-liquidation-consolidation",
+            sourceAccount: current.address,
+            destinationAccount: destination.toBase58(),
+            amountRaw: current.amountRaw.toString(),
+          },
+        },
+      );
+
+      const submitted = await composer.send({
+        via,
+        kind: "registry-token-liquidation:consolidate",
+        skipSimulation: false,
+        skipPreflight: false,
+      });
+      const receipt = await settledSendReceipt(slrd, submitted);
+      receipts.push(receipt);
+
+      let remaining = (await slrd.tokenAccounts(action.walletAddress)).find(
+        (account) => account.address === current.address,
+      );
+      for (
+        let attempt = 0;
+        remaining && remaining.amountRaw > 0n && attempt < 5;
+        attempt += 1
+      ) {
+        await pause(400);
+        remaining = (await slrd.tokenAccounts(action.walletAddress)).find(
+          (account) => account.address === current.address,
+        );
+      }
+      if (remaining && remaining.amountRaw > 0n) {
+        throw new Error(
+          `Token-account consolidation did not settle for ${current.address}: ${remaining.amountRaw.toString()} raw token units remain`,
+        );
+      }
+    }
+  }
+
+  const remaining = (
+    await liveMintAccounts(slrd, action.walletAddress, action.mint)
+  ).filter((account) => !account.isAssociated);
+  if (remaining.length) {
+    throw new Error(
+      `Unable to consolidate all secondary token accounts for ${action.mint}: ${remaining
+        .map((account) => `${account.address}=${account.amountRaw.toString()}`)
+        .join(", ")}`,
+    );
+  }
+  return receipts;
 }
 
 type MintLiquidationBalance = {
@@ -282,7 +467,7 @@ function incompleteLiquidationError(
       `(ATA=${balance.associatedRaw.toString()}, non-ATA=${balance.nonAssociatedRaw.toString()}). ` +
       `Accounts: ${mintLiquidationBalanceText(balance)}. ` +
       (balance.nonAssociatedRaw > 0n
-        ? "Native/Jupiter sells spend the associated token account only; move the balance into the ATA or re-run with --burn-unsellable if destroying the unprotected residual is intended."
+        ? "Automatic consolidation could not move every secondary token account into the ATA; the residual was preserved."
         : "The sell transaction did not settle the full associated-token-account balance."),
   );
 }
@@ -876,6 +1061,22 @@ export async function planRegistryTokenLiquidation(
     distinctMints: portfolio.distinctTokenCount,
   });
 
+  const incompleteScans = portfolio.rows.filter(
+    (row) => !row.tokenScanComplete,
+  );
+  if (incompleteScans.length) {
+    const detail = incompleteScans
+      .slice(0, 8)
+      .map(
+        (row) =>
+          `@${row.walletName}: ${row.tokenScanErrors.join("; ") || "token scan incomplete"}`,
+      )
+      .join(" | ");
+    throw new Error(
+      `Liquidation token scan incomplete for ${incompleteScans.length} wallet(s); refusing to build a partial liquidation plan. ${detail}`,
+    );
+  }
+
   const routeDelayMs = Math.max(0, options.routeDelayMs ?? 100);
   const mintRoutes = new Map<
     string,
@@ -1238,6 +1439,11 @@ export async function executeRegistryTokenLiquidation(
 
     try {
       if (action.kind === "sell" || action.kind === "jupiter-sell") {
+        await consolidateMintToAssociated(slrd, action, via, {
+          index: index + 1,
+          total: primary.length,
+          onProgress: options.onProgress,
+        });
         let result: RegistryTokenLiquidationResult | null = null;
         let signature: string | null = null;
         let routeError: unknown = null;
