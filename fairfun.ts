@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 import {
   existsSync,
   mkdirSync,
@@ -8,44 +9,61 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { Connection } from "@solana/web3.js";
-import { configure, createMeasure } from "measure-fn";
+import { NATIVE_MINT } from "@solana/spl-token";
+import { Connection, PublicKey } from "@solana/web3.js";
 import {
   getTokenHistoryCoverage,
   loadTokenHistoryTrades,
-  parsePumpHistoryTransaction,
   subscribeTokenEvents,
+  type SolardTokenSwapEvent,
   type TokenHistoryTrade,
 } from "@solard/core";
 import {
   createSolard,
   type CumulativeEntitlement,
-  type MarketHistory,
+  type ReplayHistory,
   type ReplayItem,
   type Solard,
   type TokenRow,
 } from "@solard/sdk";
 
-configure({ silent: false });
-const measure = createMeasure("slrd:fairfun", { maxResultLength: 1600 });
-
-const MINUTE_MS = 60_000;
-const PRICE_SCALE_DIGITS = 24;
-const PRICE_SCALE = 10n ** BigInt(PRICE_SCALE_DIGITS);
+type FeeContributionMode = "total" | "creator" | "protocol" | "lp";
+type DistributionKind = "reward" | "bonus";
 
 type TokenConfig = {
   mint: string;
+
+  // Ordinary reward deposits. Each finalized observed deposit is allocated
+  // by current eligible token balance.
   treasury: string;
   distributionId?: string;
+
+  // Optional protocol/fee-gravity bonus vault. Keep this separate from
+  // `treasury`, otherwise FairFun cannot know which economics a deposit uses.
+  bonusTreasury?: string;
+  bonusDistributionId?: string;
+
   quoteMint?: string;
   quoteSymbol?: string;
-  gravityStartAtMs?: number;
+
+  // Which exact PumpSwap buy-fee component becomes active fee basis.
+  // "total" = LP + protocol + creator. Holder-reward/cashback fields are not
+  // added again because they can represent routing of creator-fee economics.
+  feeContribution?: FeeContributionMode;
+
   excludedOwners?: string[];
   reserveRaw?: string;
+  bonusReserveRaw?: string;
+
   autoDistributeRaw?: string;
+  autoDistributeBonusRaw?: string;
+
   treasuryPollMs?: number;
-  livePriceGraceMs?: number;
-  rewardWeight?: "gravity" | "pumpswap-buy-quote";
+  holderPollMs?: number;
+  pricePollMs?: number;
+
+  // Fail closed when historical PumpSwap buys exist without an exact fee event.
+  requireExactPumpSwapFees?: boolean;
 };
 
 type HttpConfig = {
@@ -63,14 +81,18 @@ type Config = {
   dbPath?: string;
   sender?: string;
   http?: HttpConfig;
-  chartWindowMinutes?: number;
   tokens: TokenConfig[];
 };
 
 type TokenCheckpoint = {
-  rewardStartedAtMs: number;
+  rewardTreasuryBalanceRaw?: string;
+  bonusTreasuryBalanceRaw?: string;
+  rewardEntitlements: Record<string, string>;
+  bonusEntitlements: Record<string, string>;
+
+  // Compatibility with the previous FairFun checkpoint.
   treasuryBalanceRaw?: string;
-  entitlements: Record<string, string>;
+  entitlements?: Record<string, string>;
 };
 
 type Checkpoint = {
@@ -78,40 +100,28 @@ type Checkpoint = {
   tokens: Record<string, TokenCheckpoint>;
 };
 
-type GravityRow = {
-  gravityQ: bigint;
-  remainder: bigint;
-};
-
 type RuntimeToken = {
   base: TokenRow;
-  baseSymbol: string;
   quoteMint: string;
   quoteSymbol: string;
   quoteDecimals: number;
   quoteKind: "native-sol" | "spl-token";
-  treasuryAddress: string;
-  distributionId: string;
+  rewardTreasuryAddress: string;
+  bonusTreasuryAddress: string | null;
+  rewardDistributionId: string;
+  bonusDistributionId: string | null;
   asset: "SOL" | string;
-  initialPriceText: string;
-  initialPriceQ: bigint;
-  initialPriceAtMs: number;
-  rewardWeight: "gravity" | "pumpswap-buy-quote";
+  feeContribution: FeeContributionMode;
 };
 
-type ChartPoint = {
-  atMs: number;
-  priceQ: bigint;
-  gravityQ: bigint;
-};
-
-type PumpSwapContribution = {
-  buyQuoteRaw: bigint;
-  sellQuoteRaw: bigint;
-  boughtTokenRaw: bigint;
-  soldTokenRaw: bigint;
-  buys: number;
-  sells: number;
+type FeeInventoryRow = {
+  balanceRaw: bigint;
+  activeFeeBasisRaw: bigint;
+  feeGravityRawMs: bigint;
+  lastAtMs: number;
+  exactBuyFeesRaw: bigint;
+  exactBuyQuoteRaw: bigint;
+  buyCount: number;
 };
 
 type PublicHolder = {
@@ -119,28 +129,41 @@ type PublicHolder = {
   tokenAccounts: string[];
   balanceRaw: string;
   balance: string;
-  value: string;
-  gravity: string;
-  gravitySharePct: number;
-  verifiedPumpSwapBuyQuoteRaw: string;
-  verifiedPumpSwapBuyQuote: string;
-  verifiedPumpSwapBuySharePct: number;
-  verifiedPumpSwapBoughtTokenRaw: string;
-  verifiedPumpSwapBuys: number;
-  verifiedPumpSwapSellQuoteRaw: string;
-  verifiedPumpSwapSellQuote: string;
-  verifiedPumpSwapSoldTokenRaw: string;
-  verifiedPumpSwapSells: number;
-  earnedRaw: string;
-  earned: string;
-  paidRaw: string;
-  paid: string;
-  outstandingRaw: string;
-  outstanding: string;
-  claimableRaw: string;
-  claimable: string;
-  now: boolean;
+
+  activeFeeBasisRaw: string;
+  activeFeeBasis: string;
+  feeGravityRawMs: string;
+  feeGravityQuoteMinutes: string;
+  feeGravitySharePct: number;
+
+  exactPumpSwapBuyFeesRaw: string;
+  exactPumpSwapBuyFees: string;
+  exactPumpSwapBuyQuoteRaw: string;
+  exactPumpSwapBuyQuote: string;
+  exactPumpSwapBuys: number;
+
+  rewardEarnedRaw: string;
+  rewardPaidRaw: string;
+  rewardOutstandingRaw: string;
+
+  bonusEarnedRaw: string;
+  bonusPaidRaw: string;
+  bonusOutstandingRaw: string;
 };
+
+const NATIVE_SOL_MINT = NATIVE_MINT.toBase58();
+
+function emit(value: unknown): void {
+  process.stdout.write(
+    `${JSON.stringify(value, (_, item) =>
+      typeof item === "bigint" ? item.toString() : item,
+    )}\n`,
+  );
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function parseArgs(argv: string[]): Map<string, string> {
   const out = new Map<string, string>();
@@ -163,13 +186,9 @@ function required(flags: Map<string, string>, key: string): string {
 }
 
 function loadConfig(path: string): Config {
-  const parsed = JSON.parse(readFileSync(resolve(path), "utf8")) as Config;
-  if (parsed.version !== 1)
-    throw new Error(
-      `Unsupported config version ${String((parsed as any).version)}`,
-    );
-  if (!Array.isArray(parsed.tokens) || parsed.tokens.length === 0)
-    throw new Error("Config must contain at least one token");
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as Config;
+  if (parsed.version !== 1) throw new Error("FairFun config version must be 1");
+  if (!parsed.tokens?.length) throw new Error("Config contains no tokens");
   return parsed;
 }
 
@@ -177,68 +196,18 @@ function loadCheckpoint(path: string): Checkpoint {
   if (!existsSync(path)) return { version: 1, tokens: {} };
   const parsed = JSON.parse(readFileSync(path, "utf8")) as Checkpoint;
   if (parsed.version !== 1)
-    throw new Error(
-      `Unsupported checkpoint version ${String((parsed as any).version)}`,
-    );
+    throw new Error(`Unsupported checkpoint version ${String(parsed.version)}`);
   return parsed;
 }
 
-function saveCheckpoint(path: string, checkpoint: Checkpoint): void {
+function saveCheckpoint(path: string, value: Checkpoint): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(checkpoint, null, 2)}\n`, "utf8");
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   renameSync(temp, path);
 }
 
-function floorMinute(ms: number): number {
-  return Math.floor(ms / MINUTE_MS) * MINUTE_MS;
-}
-
-function ceilMinute(ms: number): number {
-  return Math.ceil(ms / MINUTE_MS) * MINUTE_MS;
-}
-
-function decimalToScaled(
-  input: string | number,
-  digits = PRICE_SCALE_DIGITS,
-): bigint {
-  let text = String(input).trim().toLowerCase();
-  if (!text) throw new Error("Empty decimal");
-  let sign = 1n;
-  if (text.startsWith("-")) {
-    sign = -1n;
-    text = text.slice(1);
-  } else if (text.startsWith("+")) text = text.slice(1);
-  const exponentIndex = text.indexOf("e");
-  let exponent = 0;
-  if (exponentIndex >= 0) {
-    exponent = Number(text.slice(exponentIndex + 1));
-    text = text.slice(0, exponentIndex);
-    if (!Number.isInteger(exponent))
-      throw new Error(`Invalid decimal exponent ${input}`);
-  }
-  const [wholeRaw, fractionRaw = ""] = text.split(".", 2);
-  const whole = wholeRaw || "0";
-  if (!/^\d+$/.test(whole) || !/^\d*$/.test(fractionRaw))
-    throw new Error(`Invalid decimal ${input}`);
-  let digitsText = `${whole}${fractionRaw}`.replace(/^0+(?=\d)/, "") || "0";
-  let decimalPlaces = fractionRaw.length - exponent;
-  if (decimalPlaces < 0) {
-    digitsText += "0".repeat(-decimalPlaces);
-    decimalPlaces = 0;
-  }
-  const targetShift = digits - decimalPlaces;
-  if (targetShift >= 0)
-    return sign * BigInt(digitsText) * 10n ** BigInt(targetShift);
-  const divisor = 10n ** BigInt(-targetShift);
-  const raw = BigInt(digitsText);
-  const quotient = raw / divisor;
-  const remainder = raw % divisor;
-  const rounded = remainder * 2n >= divisor ? quotient + 1n : quotient;
-  return sign * rounded;
-}
-
-function formatScaled(value: bigint, decimals: number): string {
+function formatRaw(value: bigint, decimals: number): string {
   const sign = value < 0n ? "-" : "";
   const raw = value < 0n ? -value : value;
   const unit = 10n ** BigInt(decimals);
@@ -250,184 +219,36 @@ function formatScaled(value: bigint, decimals: number): string {
   return `${sign}${whole}${fraction ? `.${fraction}` : ""}`;
 }
 
-function percent(numerator: bigint, denominator: bigint): number {
+function pct(numerator: bigint, denominator: bigint): number {
   if (numerator <= 0n || denominator <= 0n) return 0;
-  const scaled = (numerator * 1_000_000n) / denominator;
-  return Number(scaled) / 10_000;
+  return Number((numerator * 1_000_000n) / denominator) / 10_000;
 }
 
-function priceChangePct(current: bigint, previous: bigint): number | null {
-  if (current <= 0n || previous <= 0n) return null;
-  const scaled = ((current - previous) * 1_000_000n) / previous;
-  return Number(scaled) / 10_000;
+function replayAtMs(item: ReplayItem): number {
+  if (item.timestampSec == null)
+    throw new Error(`Replay item ${item.id} has no block timestamp`);
+  return item.timestampSec * 1_000;
 }
 
-function shortAddress(value: unknown): string {
-  const text = String(value ?? "");
-  return text.length <= 14 ? text : `${text.slice(0, 6)}…${text.slice(-4)}`;
+function liveGate(): boolean {
+  return [
+    process.env.SOLARD_ENABLE_LIVE_TRADES,
+    process.env.SLRD_ENABLE_LIVE_TRADES,
+  ].some((value) => /^(1|true|yes)$/i.test(value?.trim() ?? ""));
 }
 
-function humanProgress(value: Record<string, unknown>): string {
-  const token = value.token ? `${shortAddress(value.token)} ` : "";
-  switch (value.type) {
-    case "startup":
-      return `Fairfun starting (${String(value.tokens)} token${value.tokens === 1 ? "" : "s"})`;
-    case "bootstrap": {
-      const stage = String(value.stage);
-      if (stage === "holder-history")
-        return `${token}[1/4] Holder history: replaying and catching up`;
-      if (stage === "market-history")
-        return `${token}[2/4] Market history: reading/backfilling Solard DB`;
-      if (stage === "gravity")
-        return `${token}[3/4] Gravity: rebuilding minute-by-minute`;
-      if (stage === "treasury")
-        return `${token}[4/4] Treasury: taking reward baseline`;
-      return `${token}${stage}`;
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    const abort = () => done();
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      resolve(undefined);
     }
-    case "heartbeat":
-      return `${token}${String(value.stage)} still running (${String(value.elapsedSec)}s)`;
-    case "holder-backfill": {
-      const phase = String(value.phase);
-      if (phase === "rpc-mint-signatures")
-        return `${token}Holder backfill: ${String(value.completed)} mint-linked transaction(s) discovered`;
-      if (phase === "rpc-mint-transactions")
-        return `${token}Holder backfill: reading mint transactions ${String(value.completed)}/${String(value.total)}`;
-      if (phase === "rpc-token-accounts")
-        return `${token}Holder backfill: ${String(value.completed)} historical token account(s) discovered`;
-      if (phase === "rpc-account-signatures")
-        return `${token}Holder backfill: scanning token accounts ${String(value.completed)}/${String(value.total)}`;
-      if (phase === "rpc-transactions")
-        return `${token}Holder backfill: reading transfer transactions ${String(value.completed)}/${String(value.total)}`;
-      return `${token}Holder backfill: ${phase}`;
-    }
-    case "holder-history-complete":
-      return `${token}Holder history ready: ${String(value.events)} events, verified through slot ${String(value.throughSlot)}`;
-    case "market-backfill": {
-      const phase = String(value.phase);
-      if (phase === "signatures")
-        return `${token}Market backfill: signatures ${String(value.signatures)} across ${String(value.pages)} page(s)`;
-      if (phase === "transactions" || phase === "parse" || phase === "store")
-        return `${token}Market backfill: ${phase} ${String(value.completed)}/${String(value.total)}`;
-      if (phase === "candles")
-        return `${token}Market backfill: ${String(value.trades)} trades → ${String(value.candles)} 1s candles`;
-      if (phase === "retry")
-        return `${token}Market backfill retry ${String(value.attempt)}/${String(value.maxAttempts)}: ${String(value.error)}`;
-      if (phase === "throttle")
-        return `${token}Market backfill throttled for ${String(value.waitMs)}ms`;
-      if (phase === "rpc-error")
-        return `${token}Market backfill RPC error: ${String(value.error)}`;
-      return `${token}Market backfill: ${phase}`;
-    }
-    case "verified-pumpswap-history":
-      return `${token}Verified PumpSwap history: ${String(value.trades)} exact trade(s), ${String(value.contributors)} contributor(s), buy quote raw=${String(value.buyQuoteRaw)}, skipped inexact=${String(value.skippedInexact)}`;
-    case "gravity-complete":
-      return `${token}Gravity ready: ${String(value.holders)} holder(s), through ${new Date(Number(value.throughMinuteMs)).toISOString()}`;
-    case "token-ready":
-      return `${token}READY — holders=${String(value.holders)} gravity-holders=${String(value.gravityHolders)} gravity=${String(value.gravity)} treasury=${shortAddress(value.treasury)}`;
-    case "minute":
-      return `${token}Gravity minute — holders=${String(value.holders)} price=${String(value.price)} ${shortAddress(value.quoteMint)} slot=${String(value.slot)}`;
-    case "reward-deposit":
-      return `${token}Reward deposit ${String(value.depositRaw)} raw units → ${String(value.allocations)} holder(s); outstanding=${String(value.outstandingRaw)}`;
-    case "distribution":
-      return `${token}Distribution ${String(value.status)} — recipients=${String(value.recipients)} paid=${String(value.confirmedPaidRaw)} raw`;
-    case "ready":
-      return `Fairfun live. Commands: status | distribute [mint] | quit`;
-    case "server":
-      return `Fairfun API ${String(value.url)} — SSE ${String(value.stream)}`;
-    default:
-      return `${token}${JSON.stringify(value)}`;
-  }
-}
-
-function emit(value: Record<string, unknown>): void {
-  const event = { ...value, atMs: Date.now() };
-  measure.note({
-    start: () => humanProgress(event),
-    meta: event,
-    maxResultLength: 1600,
+    signal?.addEventListener("abort", abort, { once: true });
   });
-}
-
-async function withHeartbeat<T>(args: {
-  token: string;
-  stage: string;
-  work: () => Promise<T>;
-  everyMs?: number;
-}): Promise<T> {
-  const startedAtMs = Date.now();
-  const timer = setInterval(
-    () => {
-      emit({
-        type: "heartbeat",
-        token: args.token,
-        stage: args.stage,
-        elapsedSec: Math.floor((Date.now() - startedAtMs) / 1_000),
-      });
-    },
-    Math.max(1_000, args.everyMs ?? 10_000),
-  );
-  try {
-    return await args.work();
-  } finally {
-    clearInterval(timer);
-  }
-}
-
-function candleClosePrice(candle: unknown): string | number {
-  const row = candle as Record<string, unknown>;
-  const value =
-    row.closePriceQuotePerToken ?? row.closePrice ?? row.closePriceSol;
-  if (typeof value !== "string" && typeof value !== "number") {
-    throw new Error("Stored market candle has no close price");
-  }
-  return value;
-}
-
-function minutePriceMap(
-  market: MarketHistory,
-  startMinute: number,
-  endMinute: number,
-): Map<number, bigint> {
-  const candles = [...market.candles1s].sort(
-    (a, b) => a.bucketAtMs - b.bucketAtMs,
-  );
-  const out = new Map<number, bigint>();
-  let candleIndex = 0;
-  let lastPriceQ: bigint | null = null;
-  while (
-    candleIndex < candles.length &&
-    candles[candleIndex]!.bucketAtMs < startMinute
-  ) {
-    lastPriceQ = decimalToScaled(candleClosePrice(candles[candleIndex]!));
-    candleIndex += 1;
-  }
-  for (let minute = startMinute; minute <= endMinute; minute += MINUTE_MS) {
-    const through = minute + MINUTE_MS - 1;
-    while (
-      candleIndex < candles.length &&
-      candles[candleIndex]!.bucketAtMs <= through
-    ) {
-      lastPriceQ = decimalToScaled(candleClosePrice(candles[candleIndex]!));
-      candleIndex += 1;
-    }
-    if (lastPriceQ == null || lastPriceQ <= 0n) {
-      throw new Error(
-        `No stored market price at or before ${new Date(through).toISOString()} for ${market.mint}`,
-      );
-    }
-    out.set(minute, lastPriceQ);
-  }
-  return out;
-}
-
-function quoteMatches(
-  configured: string | undefined,
-  actual: string,
-  nativeSol: boolean,
-): boolean {
-  if (!configured) return true;
-  if (nativeSol && configured.trim().toUpperCase() === "SOL") return true;
-  return configured.trim() === actual;
 }
 
 function walletAddress(slrd: Solard, ref: string): string {
@@ -437,7 +258,7 @@ function walletAddress(slrd: Solard, ref: string): string {
   if (byAddress) return byAddress.address;
   const byName = rows.find((row) => row.name === clean);
   if (byName) return byName.address;
-  throw new Error(`Treasury wallet ${ref} is not in the Solard vault`);
+  throw new Error(`Wallet ${ref} is not in the Solard wallet registry`);
 }
 
 async function ensureToken(slrd: Solard, mint: string): Promise<TokenRow> {
@@ -448,78 +269,142 @@ async function ensureToken(slrd: Solard, mint: string): Promise<TokenRow> {
   }
 }
 
-function replayTimestampMs(item: ReplayItem): number {
-  if (item.timestampSec == null)
-    throw new Error(`Replay event ${item.id} has no block timestamp`);
-  return item.timestampSec * 1_000;
-}
-
-function applyReplayBalances(
-  balances: Map<string, bigint>,
-  item: ReplayItem,
-): void {
-  for (const [owner, amount] of item.postBalance) {
-    if (amount === 0n) balances.delete(owner);
-    else balances.set(owner, amount);
-  }
-}
-
-function sortedEntitlements(map: Map<string, bigint>): CumulativeEntitlement[] {
-  return [...map]
+function sortedEntitlements(
+  values: ReadonlyMap<string, bigint>,
+): CumulativeEntitlement[] {
+  return [...values]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([recipient, entitledRaw]) => ({ recipient, entitledRaw }));
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0 || signal?.aborted) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    const timer = setTimeout(done, ms);
-    const abort = () => done();
-    function done() {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      resolve();
-    }
-    signal?.addEventListener("abort", abort, { once: true });
+function largestRemainderAllocation(
+  amountRaw: bigint,
+  weights: readonly { recipient: string; weight: bigint }[],
+): Array<{ recipient: string; amountRaw: bigint }> {
+  if (amountRaw <= 0n) return [];
+  const positive = weights.filter((row) => row.weight > 0n);
+  const total = positive.reduce((sum, row) => sum + row.weight, 0n);
+  if (total <= 0n) return [];
+
+  const rows = positive.map((row) => {
+    const numerator = amountRaw * row.weight;
+    return {
+      recipient: row.recipient,
+      amountRaw: numerator / total,
+      remainder: numerator % total,
+    };
   });
+
+  let assigned = rows.reduce((sum, row) => sum + row.amountRaw, 0n);
+  let residual = amountRaw - assigned;
+
+  rows.sort((left, right) => {
+    if (left.remainder === right.remainder)
+      return left.recipient.localeCompare(right.recipient);
+    return left.remainder > right.remainder ? -1 : 1;
+  });
+
+  for (let index = 0; residual > 0n; index += 1) {
+    rows[index % rows.length]!.amountRaw += 1n;
+    residual -= 1n;
+  }
+
+  return rows
+    .filter((row) => row.amountRaw > 0n)
+    .map(({ recipient, amountRaw }) => ({ recipient, amountRaw }));
 }
 
-function liveGate(): boolean {
-  return [
-    process.env.SOLARD_ENABLE_LIVE_TRADES,
-    process.env.SLRD_ENABLE_LIVE_TRADES,
-  ].some((value) => /^(1|true|yes)$/i.test(value?.trim() ?? ""));
+function exactPumpSwapBuyFeeRaw(
+  trade: TokenHistoryTrade,
+  mode: FeeContributionMode,
+): bigint | null {
+  if (trade.side !== "buy") return null;
+  const fees = trade.history.pumpSwapFees;
+  if (!fees || fees.source !== "anchor-event") return null;
+
+  const lp = BigInt(fees.lpFeeQuoteRaw);
+  const protocol = BigInt(fees.protocolFeeQuoteRaw);
+  const creator =
+    fees.creatorFeeQuoteRaw == null ? null : BigInt(fees.creatorFeeQuoteRaw);
+
+  if (mode === "lp") return lp;
+  if (mode === "protocol") return protocol;
+  if (mode === "creator") return creator;
+  if (creator == null) return null;
+
+  // Pump documents LP + protocol + creator as the primary trade-fee components.
+  // Do not add holderRewards/cashback again: those can represent creator-fee routing.
+  return lp + protocol + creator;
+}
+
+function exactLivePumpSwapBuyFeeRaw(
+  event: SolardTokenSwapEvent,
+  mode: FeeContributionMode,
+): bigint | null {
+  if (event.side !== "buy" || event.venue !== "pumpswap" || !event.fees)
+    return null;
+  const fees = event.fees;
+  if (mode === "lp") return fees.lpFeeQuoteRaw;
+  if (mode === "protocol") return fees.protocolFeeQuoteRaw;
+  if (mode === "creator") return fees.creatorFeeQuoteRaw;
+  if (fees.creatorFeeQuoteRaw == null) return null;
+  return (
+    fees.lpFeeQuoteRaw + fees.protocolFeeQuoteRaw + fees.creatorFeeQuoteRaw
+  );
+}
+
+function historicalTradeIdentity(trade: TokenHistoryTrade): string {
+  return `${trade.signature}:${trade.owner ?? ""}:${trade.side}`;
+}
+
+function liveTradeIdentity(event: SolardTokenSwapEvent): string {
+  return `${event.signature}:${event.trader ?? ""}:${event.side}`;
+}
+
+function replayOwnerDelta(items: readonly ReplayItem[], owner: string): bigint {
+  let total = 0n;
+  for (const item of items) {
+    const before = item.beforeBalance.get(owner);
+    const post = item.postBalance.get(owner);
+    if (before == null || post == null) continue;
+    total += BigInt(post) - BigInt(before);
+  }
+  return total;
 }
 
 class TokenEngine {
   private runtime!: RuntimeToken;
+
   private readonly balances = new Map<string, bigint>();
   private readonly holderAccounts = new Map<string, string[]>();
-  private readonly gravity = new Map<string, GravityRow>();
-  private readonly pumpSwapContribution = new Map<
-    string,
-    PumpSwapContribution
-  >();
-  private readonly verifiedPumpSwapTradeKeys = new Set<string>();
-  private verifiedPumpSwapSkippedInexact = 0;
-  private verifiedPumpSwapThroughMs = 0;
-  private readonly entitlements = new Map<string, bigint>();
+  private readonly feeInventory = new Map<string, FeeInventoryRow>();
+  private readonly exactTradeIds = new Set<string>();
+
+  private readonly rewardEntitlements = new Map<string, bigint>();
+  private readonly bonusEntitlements = new Map<string, bigint>();
   private readonly excluded = new Set<string>();
-  private readonly chart: ChartPoint[] = [];
-  private lastAccruedMinuteMs = -1;
-  private lastTreasuryBalanceRaw = 0n;
-  private currentSupplyRaw = 0n;
-  private latestPriceQ = 0n;
-  private latestPriceText = "0";
-  private latestPriceAtMs = 0;
+
+  private rewardTreasuryBalanceRaw = 0n;
+  private bonusTreasuryBalanceRaw = 0n;
+
+  private exactPumpSwapBuys = 0;
+  private missingExactPumpSwapFees = 0;
+  private rejectedPumpSwapTrades = 0;
+  private feeHistoryThroughMs = 0;
+
+  private latestPrice: {
+    value: string | null;
+    capturedAtMs: number | null;
+    error: string | null;
+  } = {
+    value: null,
+    capturedAtMs: null,
+    error: null,
+  };
+
   private phase = "starting";
-  private readonly pendingTreasuryDeposits: Array<{
-    amountRaw: bigint;
-    requiredMinuteMs: number;
-    balanceAfterRaw: bigint;
-  }> = [];
-  private queue: Promise<unknown> = Promise.resolve();
   private stopped = false;
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly slrd: Solard,
@@ -535,166 +420,538 @@ class TokenEngine {
     ) => void = () => {},
   ) {}
 
-  private serial<T>(fn: () => Promise<T> | T): Promise<T> {
-    const run = this.queue.then(fn, fn);
-    this.queue = run.catch(() => undefined);
-    return run;
+  mint(): string {
+    return this.config.mint;
+  }
+
+  private serial<T>(operation: () => Promise<T> | T): Promise<T> {
+    const next = this.queue.then(operation, operation);
+    this.queue = next.catch(() => undefined);
+    return next;
   }
 
   private checkpointRow(): TokenCheckpoint {
     let row = this.checkpoint.tokens[this.config.mint];
     if (!row) {
-      const existing = this.slrd.distributions.status(
-        this.runtime.distributionId,
-      );
       row = {
-        rewardStartedAtMs: Date.now(),
-        entitlements: Object.fromEntries(
-          (existing?.recipients ?? []).map((recipient) => [
-            recipient.recipient,
-            recipient.entitledRaw,
-          ]),
-        ),
+        rewardEntitlements: {},
+        bonusEntitlements: {},
       };
       this.checkpoint.tokens[this.config.mint] = row;
-      saveCheckpoint(this.checkpointPath, this.checkpoint);
     }
+
+    // One-time migration from the previous FairFun script.
+    if (
+      Object.keys(row.rewardEntitlements ?? {}).length === 0 &&
+      row.entitlements
+    ) {
+      row.rewardEntitlements = { ...row.entitlements };
+    }
+    if (
+      row.rewardTreasuryBalanceRaw == null &&
+      row.treasuryBalanceRaw != null
+    ) {
+      row.rewardTreasuryBalanceRaw = row.treasuryBalanceRaw;
+    }
+    row.rewardEntitlements ??= {};
+    row.bonusEntitlements ??= {};
     return row;
   }
 
-  private saveRuntimeCheckpoint(treasuryBalanceRaw?: bigint): void {
+  private saveCheckpoint(): void {
     const row = this.checkpointRow();
-    if (treasuryBalanceRaw != null)
-      row.treasuryBalanceRaw = treasuryBalanceRaw.toString();
-    row.entitlements = Object.fromEntries(
-      [...this.entitlements]
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([wallet, amount]) => [wallet, amount.toString()]),
+    row.rewardTreasuryBalanceRaw = this.rewardTreasuryBalanceRaw.toString();
+    if (this.runtime.bonusTreasuryAddress)
+      row.bonusTreasuryBalanceRaw = this.bonusTreasuryBalanceRaw.toString();
+
+    row.rewardEntitlements = Object.fromEntries(
+      [...this.rewardEntitlements]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([wallet, value]) => [wallet, value.toString()]),
+    );
+    row.bonusEntitlements = Object.fromEntries(
+      [...this.bonusEntitlements]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([wallet, value]) => [wallet, value.toString()]),
     );
     saveCheckpoint(this.checkpointPath, this.checkpoint);
   }
 
-  private gravityRow(owner: string): GravityRow {
-    let row = this.gravity.get(owner);
-    if (!row) {
-      row = { gravityQ: 0n, remainder: 0n };
-      this.gravity.set(owner, row);
-    }
-    return row;
-  }
-
-  private contributionRow(owner: string): PumpSwapContribution {
-    let row = this.pumpSwapContribution.get(owner);
+  private feeRow(owner: string, atMs: number): FeeInventoryRow {
+    let row = this.feeInventory.get(owner);
     if (!row) {
       row = {
-        buyQuoteRaw: 0n,
-        sellQuoteRaw: 0n,
-        boughtTokenRaw: 0n,
-        soldTokenRaw: 0n,
-        buys: 0,
-        sells: 0,
+        balanceRaw: 0n,
+        activeFeeBasisRaw: 0n,
+        feeGravityRawMs: 0n,
+        lastAtMs: atMs,
+        exactBuyFeesRaw: 0n,
+        exactBuyQuoteRaw: 0n,
+        buyCount: 0,
       };
-      this.pumpSwapContribution.set(owner, row);
+      this.feeInventory.set(owner, row);
     }
     return row;
   }
 
-  private applyVerifiedPumpSwapTrade(trade: TokenHistoryTrade): boolean {
-    if (trade.mint !== this.runtime.base.mint) return false;
-    if (!trade.owner || this.excluded.has(trade.owner)) return false;
-    if (trade.confidence !== "finalized") return false;
-    if (trade.history.venue !== "pumpswap") return false;
-    if (trade.source !== "history:pumpswap") return false;
-    if (this.verifiedPumpSwapTradeKeys.has(trade.eventKey)) return false;
-
-    const quoteText = trade.history.economicQuoteDeltaLamports;
-    if (
-      trade.history.pricingStatus !== "native-wsol-corrected" ||
-      quoteText == null
-    ) {
-      this.verifiedPumpSwapSkippedInexact += 1;
-      return false;
-    }
-
-    const quoteDelta = BigInt(quoteText);
-    const tokenDelta = BigInt(trade.history.ownerTokenDeltaRaw);
-    if (
-      quoteDelta === 0n ||
-      tokenDelta === 0n ||
-      (trade.side === "buy" && (quoteDelta >= 0n || tokenDelta <= 0n)) ||
-      (trade.side === "sell" && (quoteDelta <= 0n || tokenDelta >= 0n))
-    ) {
-      return false;
-    }
-
-    const row = this.contributionRow(trade.owner);
-    if (trade.side === "buy") {
-      row.buyQuoteRaw += -quoteDelta;
-      row.boughtTokenRaw += tokenDelta;
-      row.buys += 1;
-    } else {
-      row.sellQuoteRaw += quoteDelta;
-      row.soldTokenRaw += -tokenDelta;
-      row.sells += 1;
-    }
-    this.verifiedPumpSwapTradeKeys.add(trade.eventKey);
-    this.verifiedPumpSwapThroughMs = Math.max(
-      this.verifiedPumpSwapThroughMs,
-      trade.tradedAtMs,
-    );
-    return true;
+  private settleFeeRow(row: FeeInventoryRow, atMs: number): void {
+    if (atMs <= row.lastAtMs) return;
+    if (row.activeFeeBasisRaw > 0n)
+      row.feeGravityRawMs +=
+        row.activeFeeBasisRaw * BigInt(atMs - row.lastAtMs);
+    row.lastAtMs = atMs;
   }
 
-  private rebuildVerifiedPumpSwapAccounting(): void {
-    this.pumpSwapContribution.clear();
-    this.verifiedPumpSwapTradeKeys.clear();
-    this.verifiedPumpSwapSkippedInexact = 0;
-    this.verifiedPumpSwapThroughMs = 0;
+  private settleAllFeeGravity(atMs: number): void {
+    for (const row of this.feeInventory.values()) this.settleFeeRow(row, atMs);
+  }
 
-    const coverage = getTokenHistoryCoverage(this.runtime.base.mint);
-    if (!coverage?.fromCreation || !coverage.complete) {
-      throw new Error(
-        `Verified PumpSwap accounting requires complete market history from creation for ${this.runtime.base.mint}`,
+  private applyBalanceToFeeInventory(
+    owner: string,
+    nextBalanceRaw: bigint,
+    atMs: number,
+  ): void {
+    if (this.excluded.has(owner)) return;
+    const row = this.feeRow(owner, atMs);
+    this.settleFeeRow(row, atMs);
+
+    const previous = row.balanceRaw;
+    if (nextBalanceRaw < previous && previous > 0n) {
+      // Disposal destroys contribution basis and already accumulated Fee Gravity
+      // in the same proportion as the inventory that left the wallet.
+      row.activeFeeBasisRaw =
+        (row.activeFeeBasisRaw * nextBalanceRaw) / previous;
+      row.feeGravityRawMs = (row.feeGravityRawMs * nextBalanceRaw) / previous;
+    }
+
+    // Incoming ordinary transfers/mints add tokens but no new fee basis.
+    // This naturally dilutes fee basis per token.
+    row.balanceRaw = nextBalanceRaw;
+  }
+
+  private addExactBuyContribution(
+    owner: string,
+    tokenAmountRaw: bigint,
+    quoteAmountRaw: bigint,
+    feeRaw: bigint,
+    atMs: number,
+  ): void {
+    if (
+      this.excluded.has(owner) ||
+      tokenAmountRaw <= 0n ||
+      quoteAmountRaw <= 0n ||
+      feeRaw < 0n
+    )
+      return;
+
+    const row = this.feeRow(owner, atMs);
+    this.settleFeeRow(row, atMs);
+    row.activeFeeBasisRaw += feeRaw;
+    row.exactBuyFeesRaw += feeRaw;
+    row.exactBuyQuoteRaw += quoteAmountRaw;
+    row.buyCount += 1;
+    this.exactPumpSwapBuys += 1;
+  }
+
+  private feeGravityTotal(atMs = Date.now()): bigint {
+    this.settleAllFeeGravity(atMs);
+    let total = 0n;
+    for (const [owner, row] of this.feeInventory) {
+      if (!this.excluded.has(owner) && row.feeGravityRawMs > 0n)
+        total += row.feeGravityRawMs;
+    }
+    return total;
+  }
+
+  private activeFeeBasisTotal(atMs = Date.now()): bigint {
+    this.settleAllFeeGravity(atMs);
+    let total = 0n;
+    for (const [owner, row] of this.feeInventory) {
+      if (!this.excluded.has(owner) && row.activeFeeBasisRaw > 0n)
+        total += row.activeFeeBasisRaw;
+    }
+    return total;
+  }
+
+  private balanceWeights(): Array<{ recipient: string; weight: bigint }> {
+    return [...this.balances]
+      .filter(([owner, balance]) => balance > 0n && !this.excluded.has(owner))
+      .map(([recipient, weight]) => ({ recipient, weight }));
+  }
+
+  private feeGravityWeights(
+    atMs: number,
+  ): Array<{ recipient: string; weight: bigint }> {
+    this.settleAllFeeGravity(atMs);
+    return [...this.feeInventory]
+      .filter(
+        ([owner, row]) => !this.excluded.has(owner) && row.feeGravityRawMs > 0n,
+      )
+      .map(([recipient, row]) => ({
+        recipient,
+        weight: row.feeGravityRawMs,
+      }));
+  }
+
+  private applyAllocations(
+    target: Map<string, bigint>,
+    allocations: readonly { recipient: string; amountRaw: bigint }[],
+  ): void {
+    for (const row of allocations) {
+      target.set(
+        row.recipient,
+        (target.get(row.recipient) ?? 0n) + row.amountRaw,
       );
     }
-
-    for (const trade of loadTokenHistoryTrades(this.runtime.base.mint)) {
-      this.applyVerifiedPumpSwapTrade(trade);
-    }
   }
 
-  private totalVerifiedPumpSwapBuyQuoteRaw(): bigint {
+  private async readTreasuryBalanceRaw(address: string): Promise<bigint> {
+    const owner = new PublicKey(address);
+
+    if (this.runtime.quoteKind === "native-sol")
+      return BigInt(await this.connection.getBalance(owner, "finalized"));
+
+    const accounts = await this.connection.getParsedTokenAccountsByOwner(
+      owner,
+      { mint: new PublicKey(this.runtime.quoteMint) },
+      "finalized",
+    );
     let total = 0n;
-    for (const [owner, row] of this.pumpSwapContribution) {
-      if (!this.excluded.has(owner)) total += row.buyQuoteRaw;
+    for (const row of accounts.value) {
+      const amount = (row.account.data as any)?.parsed?.info?.tokenAmount
+        ?.amount;
+      if (typeof amount === "string") total += BigInt(amount);
     }
     return total;
   }
 
-  private totalVerifiedPumpSwapSellQuoteRaw(): bigint {
-    let total = 0n;
-    for (const [owner, row] of this.pumpSwapContribution) {
-      if (!this.excluded.has(owner)) total += row.sellQuoteRaw;
+  private async refreshFinalizedHolders(atMs = Date.now()): Promise<void> {
+    const snapshot = await this.slrd.snapshotHolders(this.runtime.base.mint, {
+      commitment: "finalized",
+      excludeOwners: [...this.excluded],
+      minimumRaw: 1n,
+    });
+
+    const next = new Map(
+      snapshot.holders.map(
+        (holder) => [holder.owner, holder.amountRaw] as const,
+      ),
+    );
+    const owners = new Set([...this.balances.keys(), ...next.keys()]);
+
+    for (const ownerValue of owners) {
+      const owner = String(ownerValue);
+      const balance = BigInt(String(next.get(ownerValue) ?? 0));
+      this.applyBalanceToFeeInventory(owner, balance, atMs);
+      if (balance === 0n) this.balances.delete(owner);
+      else this.balances.set(owner, balance);
     }
-    return total;
+
+    this.holderAccounts.clear();
+    for (const holder of snapshot.holders)
+      this.holderAccounts.set(holder.owner, [...holder.tokenAccounts]);
   }
 
-  private allocationWeights(): Array<{ recipient: string; weight: bigint }> {
-    if (this.runtime.rewardWeight === "pumpswap-buy-quote") {
-      return [...this.pumpSwapContribution]
-        .filter(
-          ([owner, row]) => !this.excluded.has(owner) && row.buyQuoteRaw > 0n,
-        )
-        .map(([recipient, row]) => ({ recipient, weight: row.buyQuoteRaw }));
+  private historicalFeeAccounting(
+    replay: ReplayHistory,
+    trades: readonly TokenHistoryTrade[],
+  ): void {
+    this.feeInventory.clear();
+    this.exactTradeIds.clear();
+    this.exactPumpSwapBuys = 0;
+    this.missingExactPumpSwapFees = 0;
+    this.rejectedPumpSwapTrades = 0;
+    this.feeHistoryThroughMs = 0;
+
+    const relevant = trades.filter(
+      (trade) =>
+        trade.mint === this.runtime.base.mint &&
+        trade.confidence === "finalized" &&
+        trade.history.venue === "pumpswap" &&
+        trade.source === "history:pumpswap" &&
+        trade.side === "buy" &&
+        trade.owner != null,
+    );
+
+    const bySignature = new Map<string, TokenHistoryTrade[]>();
+    for (const trade of relevant) {
+      const list = bySignature.get(trade.signature) ?? [];
+      list.push(trade);
+      bySignature.set(trade.signature, list);
     }
-    return [...this.gravity]
-      .filter(([owner, row]) => !this.excluded.has(owner) && row.gravityQ > 0n)
-      .map(([recipient, row]) => ({ recipient, weight: row.gravityQ }));
+
+    const ordered = [...replay.items].sort((left, right) => {
+      return (
+        left.slot - right.slot ||
+        (left.transactionIndex ?? Number.MAX_SAFE_INTEGER) -
+          (right.transactionIndex ?? Number.MAX_SAFE_INTEGER) ||
+        (left.instructionIndex ?? Number.MAX_SAFE_INTEGER) -
+          (right.instructionIndex ?? Number.MAX_SAFE_INTEGER) ||
+        left.signature.localeCompare(right.signature) ||
+        left.id.localeCompare(right.id)
+      );
+    });
+
+    let index = 0;
+    while (index < ordered.length) {
+      const signature = ordered[index]!.signature;
+      const group: ReplayItem[] = [];
+      while (
+        index < ordered.length &&
+        ordered[index]!.signature === signature
+      ) {
+        group.push(ordered[index++]!);
+      }
+
+      const atMs = Math.max(...group.map(replayAtMs));
+
+      for (const item of group) {
+        for (const [owner, nextBalance] of item.postBalance)
+          this.applyBalanceToFeeInventory(owner, nextBalance, atMs);
+      }
+
+      for (const trade of bySignature.get(signature) ?? []) {
+        const owner = trade.owner!;
+        const tradeId = historicalTradeIdentity(trade);
+        if (this.exactTradeIds.has(tradeId)) continue;
+
+        const tokenDeltaRaw = BigInt(trade.history.ownerTokenDeltaRaw);
+        const replayDelta = replayOwnerDelta(group, owner);
+        const feeRaw = exactPumpSwapBuyFeeRaw(
+          trade,
+          this.runtime.feeContribution,
+        );
+
+        if (
+          tokenDeltaRaw <= 0n ||
+          replayDelta <= 0n ||
+          replayDelta !== tokenDeltaRaw
+        ) {
+          this.rejectedPumpSwapTrades += 1;
+          continue;
+        }
+
+        if (feeRaw == null) {
+          this.missingExactPumpSwapFees += 1;
+          continue;
+        }
+
+        const fees = trade.history.pumpSwapFees!;
+        if (fees.quoteMint !== this.runtime.quoteMint) {
+          this.rejectedPumpSwapTrades += 1;
+          continue;
+        }
+        const quoteAmountRaw = BigInt(fees.userQuoteAmountRaw);
+        if (quoteAmountRaw <= 0n) {
+          this.rejectedPumpSwapTrades += 1;
+          continue;
+        }
+
+        this.addExactBuyContribution(
+          owner,
+          tokenDeltaRaw,
+          quoteAmountRaw,
+          feeRaw,
+          trade.tradedAtMs,
+        );
+        this.exactTradeIds.add(tradeId);
+        this.feeHistoryThroughMs = Math.max(
+          this.feeHistoryThroughMs,
+          trade.tradedAtMs,
+        );
+      }
+    }
+
+    if (
+      (this.config.requireExactPumpSwapFees ?? true) &&
+      this.missingExactPumpSwapFees > 0
+    ) {
+      throw new Error(
+        `${this.missingExactPumpSwapFees} finalized PumpSwap buy(s) for ${this.runtime.base.mint} lack exact AMM fee events. ` +
+          `After installing the Solard exact-fee patch, rebuild with: slrd token backfill ${this.runtime.base.mint} --replace`,
+      );
+    }
   }
 
-  private async verifiedPumpSwapLoop(): Promise<void> {
-    if (this.runtime.quoteKind !== "native-sol") return;
+  private async ensureExactFeeHistory(): Promise<readonly TokenHistoryTrade[]> {
+    let trades = loadTokenHistoryTrades(this.runtime.base.mint);
+    const hasPumpSwapBuy = trades.some(
+      (trade) =>
+        trade.confidence === "finalized" &&
+        trade.history.venue === "pumpswap" &&
+        trade.side === "buy",
+    );
+    const missing = trades.some(
+      (trade) =>
+        trade.confidence === "finalized" &&
+        trade.history.venue === "pumpswap" &&
+        trade.side === "buy" &&
+        !trade.history.pumpSwapFees,
+    );
 
+    if (hasPumpSwapBuy && missing) {
+      emit({
+        type: "market-history-rebuild",
+        token: this.runtime.base.mint,
+        reason: "stored PumpSwap trades predate exact-fee parser",
+      });
+      await this.slrd.history.market(this.runtime.base.mint, {
+        backfill: true,
+        replace: true,
+      });
+      trades = loadTokenHistoryTrades(this.runtime.base.mint);
+    }
+    return trades;
+  }
+
+  private async persistPlan(kind: DistributionKind) {
+    if (kind === "reward") {
+      return await this.slrd.distributions.plan({
+        id: this.runtime.rewardDistributionId,
+        from: this.config.treasury,
+        asset: this.runtime.asset,
+        entitlements: sortedEntitlements(this.rewardEntitlements),
+        reserveRaw: BigInt(this.config.reserveRaw ?? "0"),
+      });
+    }
+
+    if (!this.config.bonusTreasury || !this.runtime.bonusDistributionId)
+      throw new Error("Bonus treasury is not configured");
+
+    return await this.slrd.distributions.plan({
+      id: this.runtime.bonusDistributionId,
+      from: this.config.bonusTreasury,
+      asset: this.runtime.asset,
+      entitlements: sortedEntitlements(this.bonusEntitlements),
+      reserveRaw: BigInt(this.config.bonusReserveRaw ?? "0"),
+    });
+  }
+
+  private async handleDeposit(
+    kind: DistributionKind,
+    amountRaw: bigint,
+    balanceAfterRaw: bigint,
+  ): Promise<void> {
+    if (amountRaw <= 0n) return;
+
+    // Reconcile against a finalized holder snapshot at the observation boundary.
+    // This is deliberately independent from price.
+    const atMs = Date.now();
+    await this.refreshFinalizedHolders(atMs);
+
+    const weights =
+      kind === "reward" ? this.balanceWeights() : this.feeGravityWeights(atMs);
+
+    const allocations = largestRemainderAllocation(amountRaw, weights);
+    if (!allocations.length)
+      throw new Error(
+        `${kind} deposit ${amountRaw} has no eligible ${kind === "reward" ? "holder-balance" : "Fee Gravity"} weight`,
+      );
+
+    if (kind === "reward") {
+      this.applyAllocations(this.rewardEntitlements, allocations);
+      this.rewardTreasuryBalanceRaw = balanceAfterRaw;
+    } else {
+      this.applyAllocations(this.bonusEntitlements, allocations);
+      this.bonusTreasuryBalanceRaw = balanceAfterRaw;
+    }
+
+    // Persist entitlement debt before attempting any payout.
+    this.saveCheckpoint();
+    const plan = await this.persistPlan(kind);
+
+    emit({
+      type: `${kind}-deposit`,
+      token: this.runtime.base.mint,
+      amountRaw: amountRaw.toString(),
+      allocations: allocations.length,
+      distributionId: plan.id,
+      totalEntitledRaw: plan.totalEntitledRaw.toString(),
+      totalOutstandingRaw: plan.totalOutstandingRaw.toString(),
+    });
+    this.onChange(this, `${kind}-deposit`);
+
+    const threshold = BigInt(
+      kind === "reward"
+        ? (this.config.autoDistributeRaw ?? "0")
+        : (this.config.autoDistributeBonusRaw ?? "0"),
+    );
+    if (threshold > 0n && plan.totalOutstandingRaw >= threshold)
+      await this.executeDistributionLocked(kind);
+  }
+
+  private async treasuryLoop(kind: DistributionKind): Promise<void> {
+    const address =
+      kind === "reward"
+        ? this.runtime.rewardTreasuryAddress
+        : this.runtime.bonusTreasuryAddress;
+    if (!address) return;
+
+    const pollMs = Math.max(
+      500,
+      Math.trunc(this.config.treasuryPollMs ?? 2_000),
+    );
+
+    while (!this.signal.aborted && !this.stopped) {
+      try {
+        await this.serial(async () => {
+          const current = await this.readTreasuryBalanceRaw(address);
+          const previous =
+            kind === "reward"
+              ? this.rewardTreasuryBalanceRaw
+              : this.bonusTreasuryBalanceRaw;
+
+          if (current > previous) {
+            await this.handleDeposit(kind, current - previous, current);
+          } else if (current < previous) {
+            // A payout or external withdrawal happened. Entitlements remain debt;
+            // only the observed treasury baseline changes.
+            if (kind === "reward") this.rewardTreasuryBalanceRaw = current;
+            else this.bonusTreasuryBalanceRaw = current;
+            this.saveCheckpoint();
+          }
+        });
+      } catch (error) {
+        emit({
+          type: "treasury-error",
+          token: this.runtime.base.mint,
+          kind,
+          error: message(error),
+        });
+      }
+      await sleep(pollMs, this.signal);
+    }
+  }
+
+  private async holderReplayLoop(): Promise<void> {
+    const stream = await this.slrd.events(this.runtime.base.mint, {
+      pollMs: Math.max(500, Math.trunc(this.config.holderPollMs ?? 2_000)),
+      signal: this.signal,
+    });
+
+    try {
+      for await (const item of stream) {
+        if (this.signal.aborted || this.stopped) break;
+        if (item.postBalance.size === 0) continue;
+
+        const atMs =
+          item.timestampSec == null ? Date.now() : item.timestampSec * 1_000;
+
+        await this.serial(() => {
+          for (const [owner, balance] of item.postBalance) {
+            this.applyBalanceToFeeInventory(owner, balance, atMs);
+            if (balance === 0n) this.balances.delete(owner);
+            else this.balances.set(owner, balance);
+          }
+        });
+        this.onChange(this, "holder-change");
+      }
+    } finally {
+      await stream.close();
+    }
+  }
+
+  private async exactSwapLoop(): Promise<void> {
     const stream = await subscribeTokenEvents({
       connection: this.connection,
       token: this.runtime.base,
@@ -709,923 +966,545 @@ class TokenEngine {
 
     try {
       for await (const event of stream) {
-        if (this.signal.aborted || this.stopped) break;
-        if (event.type !== "swap" || event.venue !== "pumpswap") continue;
+        if (
+          this.signal.aborted ||
+          this.stopped ||
+          event.type !== "swap" ||
+          event.venue !== "pumpswap" ||
+          event.side !== "buy" ||
+          !event.trader ||
+          event.confidence !== "finalized"
+        )
+          continue;
 
-        const tx = await this.connection.getParsedTransaction(event.signature, {
-          commitment: "finalized",
-          maxSupportedTransactionVersion: 0,
-        });
-        if (!tx || tx.meta?.err) continue;
+        const id = liveTradeIdentity(event);
+        if (this.exactTradeIds.has(id)) continue;
 
-        const parsed = parsePumpHistoryTransaction({
-          tx,
-          signature: event.signature,
-          mint: this.runtime.base.mint,
-          decimals: this.runtime.base.decimals!,
-          supplyUi: 0,
-          historyOrder: 0,
-          scanAddress:
-            this.runtime.base.pool ??
-            this.runtime.base.bondingCurve ??
-            this.runtime.base.mint,
-          scanKind: "pool",
-          confidence: "finalized",
-          updatedAtMs: event.observedAtMs,
-        });
+        const feeRaw = exactLivePumpSwapBuyFeeRaw(
+          event,
+          this.runtime.feeContribution,
+        );
 
-        let changed = false;
+        if (
+          !event.fees ||
+          feeRaw == null ||
+          event.quoteMint !== this.runtime.quoteMint ||
+          event.tokenAmountRaw <= 0n ||
+          event.fees.userQuoteAmountRaw <= 0n
+        ) {
+          await this.serial(() => {
+            this.missingExactPumpSwapFees += 1;
+          });
+          emit({
+            type: "pumpswap-buy-rejected",
+            token: this.runtime.base.mint,
+            signature: event.signature,
+            reason: "missing exact PumpSwap fee event or quote economics",
+          });
+          continue;
+        }
+
         await this.serial(() => {
-          for (const trade of parsed.trades) {
-            if (this.applyVerifiedPumpSwapTrade(trade)) changed = true;
-          }
+          if (this.exactTradeIds.has(id)) return;
+          this.addExactBuyContribution(
+            event.trader!,
+            event.tokenAmountRaw,
+            event.fees!.userQuoteAmountRaw,
+            feeRaw,
+            event.blockTimeMs ?? event.observedAtMs,
+          );
+          this.exactTradeIds.add(id);
+          this.feeHistoryThroughMs = Math.max(
+            this.feeHistoryThroughMs,
+            event.blockTimeMs ?? event.observedAtMs,
+          );
         });
-        if (changed) this.onChange(this, "verified-pumpswap-trade");
+        this.onChange(this, "exact-pumpswap-buy");
       }
     } finally {
       await stream.close();
     }
   }
 
-  private accrueOwner(
-    owner: string,
-    balanceRaw: bigint,
-    priceSumQ: bigint,
-  ): void {
-    if (balanceRaw <= 0n || priceSumQ <= 0n || this.excluded.has(owner)) return;
-    const row = this.gravityRow(owner);
-    const baseDecimals = this.runtime.base.decimals;
-    if (baseDecimals == null)
-      throw new Error(`Token ${this.runtime.base.mint} has unknown decimals`);
-    const numerator =
-      balanceRaw * priceSumQ * 10n ** BigInt(this.runtime.quoteDecimals) +
-      row.remainder;
-    const denominator = 10n ** BigInt(baseDecimals);
-    row.gravityQ += numerator / denominator;
-    row.remainder = numerator % denominator;
-  }
-
-  private accrueMinute(priceQ: bigint): void {
-    for (const [owner, balanceRaw] of this.balances)
-      this.accrueOwner(owner, balanceRaw, priceQ);
-  }
-
-  private gravityTotal(): bigint {
-    let total = 0n;
-    for (const [owner, row] of this.gravity)
-      if (!this.excluded.has(owner) && row.gravityQ > 0n) total += row.gravityQ;
-    return total;
-  }
-
-  private allocateDeposit(
-    amountRaw: bigint,
-  ): Array<{ recipient: string; amountRaw: bigint }> {
-    if (amountRaw <= 0n) return [];
-    const rows = this.allocationWeights();
-    const totalWeight = rows.reduce((sum, row) => sum + row.weight, 0n);
-    if (totalWeight <= 0n)
-      throw new Error(
-        `Treasury deposit ${amountRaw} arrived for ${this.config.mint} before any ${this.runtime.rewardWeight} weight existed`,
-      );
-    const shares = rows.map((row) => {
-      const numerator = amountRaw * row.weight;
-      return {
-        recipient: row.recipient,
-        amountRaw: numerator / totalWeight,
-        remainder: numerator % totalWeight,
-      };
-    });
-    let assigned = shares.reduce((sum, row) => sum + row.amountRaw, 0n);
-    let remainderUnits = amountRaw - assigned;
-    shares.sort((left, right) => {
-      if (left.remainder === right.remainder)
-        return left.recipient.localeCompare(right.recipient);
-      return left.remainder > right.remainder ? -1 : 1;
-    });
-    for (let index = 0; remainderUnits > 0n; index += 1) {
-      shares[index % shares.length]!.amountRaw += 1n;
-      remainderUnits -= 1n;
-    }
-    const allocations = shares
-      .filter((row) => row.amountRaw > 0n)
-      .map(({ recipient, amountRaw }) => ({ recipient, amountRaw }));
-    for (const allocation of allocations)
-      this.entitlements.set(
-        allocation.recipient,
-        (this.entitlements.get(allocation.recipient) ?? 0n) +
-          allocation.amountRaw,
-      );
-    return allocations;
-  }
-
-  private async persistDistributionPlan() {
-    this.saveRuntimeCheckpoint();
-    return await this.slrd.distributions.plan({
-      id: this.runtime.distributionId,
-      from: this.config.treasury,
-      asset: this.runtime.asset,
-      entitlements: sortedEntitlements(this.entitlements),
-      reserveRaw: BigInt(this.config.reserveRaw ?? "0"),
-    });
-  }
-
-  private async readTreasuryBalanceRaw(): Promise<bigint> {
-    if (this.runtime.quoteKind === "native-sol") {
-      return (await this.slrd.walletBalances(this.config.treasury, []))
-        .solLamports;
-    }
-    const accounts = await this.slrd.tokenAccounts(
-      this.runtime.treasuryAddress,
-    );
-    return accounts
-      .filter((account) => account.mint === this.runtime.quoteMint)
-      .reduce((sum, account) => sum + account.amountRaw, 0n);
-  }
-
-  private async processTreasuryDeposit(
-    amountRaw: bigint,
-    balanceAfterRaw: bigint,
-  ): Promise<void> {
-    const allocations = this.allocateDeposit(amountRaw);
-    this.lastTreasuryBalanceRaw = balanceAfterRaw;
-    const plan = await this.persistDistributionPlan();
-    emit({
-      type: "reward-deposit",
-      token: this.runtime.base.mint,
-      quoteMint: this.runtime.quoteMint,
-      depositRaw: amountRaw.toString(),
-      allocations: allocations.length,
-      cumulativeEntitledRaw: plan.totalEntitledRaw.toString(),
-      outstandingRaw: plan.totalOutstandingRaw.toString(),
-    });
-    const threshold = BigInt(this.config.autoDistributeRaw ?? "0");
-    if (threshold > 0n && plan.totalOutstandingRaw >= threshold)
-      await this.executeDistributionLocked();
-  }
-
-  private async flushTreasuryDeposits(): Promise<void> {
-    while (this.pendingTreasuryDeposits.length) {
-      const next = this.pendingTreasuryDeposits[0]!;
-      if (next.requiredMinuteMs > this.lastAccruedMinuteMs) return;
-      await this.processTreasuryDeposit(next.amountRaw, next.balanceAfterRaw);
-      this.pendingTreasuryDeposits.shift();
-      this.onChange(this, "reward-deposit");
-    }
-  }
-
-  private historicalGravity(
-    history: Awaited<ReturnType<Solard["history"]["replay"]>>,
-    market: MarketHistory,
-    endMinute: number,
-  ): void {
-    const events = history.items.filter((item) => item.postBalance.size > 0);
-    if (!events.length) {
-      this.lastAccruedMinuteMs = endMinute;
-      return;
-    }
-    const earliestEventMs = replayTimestampMs(events[0]!);
-    const startMinute =
-      this.config.gravityStartAtMs == null
-        ? ceilMinute(earliestEventMs)
-        : ceilMinute(this.config.gravityStartAtMs);
-    if (startMinute > endMinute) {
-      for (const item of history.items)
-        applyReplayBalances(this.balances, item);
-      this.lastAccruedMinuteMs = endMinute;
-      return;
-    }
-    const prices = minutePriceMap(market, startMinute, endMinute);
-    const pricePrefix = new Map<number, bigint>();
-    let running = 0n;
-    pricePrefix.set(startMinute, 0n);
-    for (let minute = startMinute; minute <= endMinute; minute += MINUTE_MS) {
-      running += prices.get(minute)!;
-      pricePrefix.set(minute + MINUTE_MS, running);
-    }
-    const nextMinute = new Map<string, number>();
-    const settle = (owner: string, untilExclusive: number) => {
-      const from = nextMinute.get(owner) ?? startMinute;
-      if (untilExclusive <= from) return;
-      const left = pricePrefix.get(from);
-      const right = pricePrefix.get(untilExclusive);
-      if (left == null || right == null)
-        throw new Error(
-          `Historical gravity price range is not contiguous for ${owner}`,
-        );
-      this.accrueOwner(owner, this.balances.get(owner) ?? 0n, right - left);
-      nextMinute.set(owner, untilExclusive);
-    };
-    for (const item of history.items) {
-      if (item.postBalance.size === 0) continue;
-      const eventMs = replayTimestampMs(item);
-      const effectMinute = ceilMinute(eventMs);
-      if (effectMinute < startMinute) {
-        applyReplayBalances(this.balances, item);
-        continue;
-      }
-      if (effectMinute > endMinute) continue;
-      for (const owner of item.postBalance.keys()) settle(owner, effectMinute);
-      applyReplayBalances(this.balances, item);
-      for (const owner of item.postBalance.keys())
-        nextMinute.set(owner, effectMinute);
-    }
-    for (const owner of this.balances.keys())
-      settle(owner, endMinute + MINUTE_MS);
-    for (const item of history.items) {
-      if (item.postBalance.size === 0) continue;
-      const effectMinute = ceilMinute(replayTimestampMs(item));
-      if (effectMinute > endMinute) applyReplayBalances(this.balances, item);
-    }
-    this.lastAccruedMinuteMs = endMinute;
-  }
-
-  private chartPointLimit(): number {
-    return Math.max(
-      60,
-      Math.min(10_080, Math.trunc(this.root.chartWindowMinutes ?? 1_440)),
-    );
-  }
-
-  private appendChartPoint(point: ChartPoint): void {
-    const previous = this.chart[this.chart.length - 1];
-    if (previous?.atMs === point.atMs)
-      this.chart[this.chart.length - 1] = point;
-    else this.chart.push(point);
-    const excess = this.chart.length - this.chartPointLimit();
-    if (excess > 0) this.chart.splice(0, excess);
-  }
-
-  private buildHistoricalChart(
-    history: Awaited<ReturnType<Solard["history"]["replay"]>>,
-    market: MarketHistory,
-    endMinute: number,
-  ): void {
-    this.chart.length = 0;
-    const events = history.items.filter((item) => item.postBalance.size > 0);
-    if (!events.length) return;
-    const earliestEventMs = replayTimestampMs(events[0]!);
-    const startMinute =
-      this.config.gravityStartAtMs == null
-        ? ceilMinute(earliestEventMs)
-        : ceilMinute(this.config.gravityStartAtMs);
-    if (startMinute > endMinute) return;
-    const prices = minutePriceMap(market, startMinute, endMinute);
-    const scheduled = events
-      .map((item) => ({ item, minute: ceilMinute(replayTimestampMs(item)) }))
-      .sort((left, right) =>
-        left.minute === right.minute
-          ? left.item.slot - right.item.slot
-          : left.minute - right.minute,
-      );
-    const balances = new Map<string, bigint>();
-    let eligibleTotalRaw = 0n;
-    let eventIndex = 0;
-    let gravityQ = 0n;
-    let remainder = 0n;
-    const baseDecimals = this.runtime.base.decimals;
-    if (baseDecimals == null)
-      throw new Error(`Token ${this.runtime.base.mint} has unknown decimals`);
-    const denominator = 10n ** BigInt(baseDecimals);
-    const quoteScale = 10n ** BigInt(this.runtime.quoteDecimals);
-    const firstChartMinute = Math.max(
-      startMinute,
-      endMinute - (this.chartPointLimit() - 1) * MINUTE_MS,
-    );
-    const apply = (item: ReplayItem) => {
-      for (const [owner, next] of item.postBalance) {
-        const previous = balances.get(owner) ?? 0n;
-        if (!this.excluded.has(owner)) eligibleTotalRaw += next - previous;
-        if (next === 0n) balances.delete(owner);
-        else balances.set(owner, next);
-      }
-    };
-    for (let minute = startMinute; minute <= endMinute; minute += MINUTE_MS) {
-      while (
-        eventIndex < scheduled.length &&
-        scheduled[eventIndex]!.minute <= minute
-      ) {
-        apply(scheduled[eventIndex]!.item);
-        eventIndex += 1;
-      }
-      const priceQ = prices.get(minute)!;
-      const numerator = eligibleTotalRaw * priceQ * quoteScale + remainder;
-      gravityQ += numerator / denominator;
-      remainder = numerator % denominator;
-      if (minute >= firstChartMinute)
-        this.chart.push({ atMs: minute, priceQ, gravityQ });
-    }
-    const correction = this.gravityTotal() - gravityQ;
-    if (correction !== 0n) {
-      for (const point of this.chart) {
-        point.gravityQ += correction;
-        if (point.gravityQ < 0n) point.gravityQ = 0n;
-      }
-    }
-  }
-
-  private async recordLiveMinute(minuteMs: number): Promise<void> {
-    const excludeOwners = [
-      this.runtime.treasuryAddress,
-      ...(this.config.excludedOwners ?? []),
-    ];
-    const [snapshot, sampled] = await Promise.all([
-      this.slrd.snapshotHolders(this.runtime.base.mint, {
-        commitment: "finalized",
-        excludeOwners,
-        minimumRaw: 1n,
-      }),
-      this.slrd.samplePrice(this.runtime.base.mint),
-    ]);
-    const sampledQuote = sampled.quoteAsset.mint.toBase58();
-    if (sampledQuote !== this.runtime.quoteMint) {
-      throw new Error(
-        `Quote asset changed for ${this.runtime.base.mint}: expected ${this.runtime.quoteMint}, got ${sampledQuote}`,
-      );
-    }
-    const priceText = sampled.priceQuotePerToken.toString();
-    const priceQ = decimalToScaled(priceText);
-    if (priceQ <= 0n) {
-      throw new Error(
-        `Invalid live price ${priceText} for ${this.runtime.base.mint}`,
-      );
-    }
-    await this.serial(async () => {
-      this.balances.clear();
-      this.holderAccounts.clear();
-      for (const holder of snapshot.holders) {
-        this.balances.set(holder.owner, holder.amountRaw);
-        this.holderAccounts.set(holder.owner, [...holder.tokenAccounts]);
-      }
-      this.currentSupplyRaw = snapshot.supplyRaw;
-      this.latestPriceQ = priceQ;
-      this.latestPriceText = priceText;
-      this.latestPriceAtMs = sampled.capturedAtMs;
-      this.accrueMinute(priceQ);
-      this.lastAccruedMinuteMs = minuteMs;
-      this.appendChartPoint({
-        atMs: minuteMs,
-        priceQ,
-        gravityQ: this.gravityTotal(),
-      });
-      await this.flushTreasuryDeposits();
-    });
-    emit({
-      type: "minute",
-      token: this.runtime.base.mint,
-      minuteMs,
-      slot: snapshot.slot,
-      holders: snapshot.holders.length,
-      price: priceText,
-      quoteMint: this.runtime.quoteMint,
-    });
-    this.onChange(this, "minute");
-  }
-
-  private async treasuryLoop(): Promise<void> {
+  private async priceLoop(): Promise<void> {
     const pollMs = Math.max(
-      250,
-      Math.trunc(this.config.treasuryPollMs ?? 2_000),
+      2_000,
+      Math.trunc(this.config.pricePollMs ?? 15_000),
     );
     while (!this.signal.aborted && !this.stopped) {
-      await this.serial(async () => {
-        const current = await this.readTreasuryBalanceRaw();
-        if (current > this.lastTreasuryBalanceRaw) {
-          this.pendingTreasuryDeposits.push({
-            amountRaw: current - this.lastTreasuryBalanceRaw,
-            requiredMinuteMs: floorMinute(Date.now()),
-            balanceAfterRaw: current,
-          });
-          this.lastTreasuryBalanceRaw = current;
-        } else if (current < this.lastTreasuryBalanceRaw) {
-          this.lastTreasuryBalanceRaw = current;
-          this.saveRuntimeCheckpoint(current);
-        }
-        await this.flushTreasuryDeposits();
-      });
+      try {
+        const sampled = await this.slrd.samplePrice(this.runtime.base.mint);
+        const mint = sampled.quoteAsset.mint.toBase58();
+        if (mint !== this.runtime.quoteMint)
+          throw new Error(
+            `Price quote changed from ${this.runtime.quoteMint} to ${mint}`,
+          );
+        this.latestPrice = {
+          value: sampled.priceQuotePerToken.toString(),
+          capturedAtMs: sampled.capturedAtMs,
+          error: null,
+        };
+        this.onChange(this, "price");
+      } catch (error) {
+        this.latestPrice = {
+          ...this.latestPrice,
+          error: message(error),
+        };
+      }
       await sleep(pollMs, this.signal);
     }
   }
 
-  private async minuteLoop(): Promise<void> {
-    const graceMs = Math.max(
-      0,
-      Math.trunc(this.config.livePriceGraceMs ?? 12_000),
+  private async executeDistributionLocked(
+    kind: DistributionKind,
+  ): Promise<void> {
+    if (!liveGate())
+      throw new Error(
+        "Distribution requires SOLARD_ENABLE_LIVE_TRADES=1 or SLRD_ENABLE_LIVE_TRADES=1",
+      );
+
+    const isReward = kind === "reward";
+    const id = isReward
+      ? this.runtime.rewardDistributionId
+      : this.runtime.bonusDistributionId;
+    const from = isReward ? this.config.treasury : this.config.bonusTreasury;
+    const entitlements = isReward
+      ? this.rewardEntitlements
+      : this.bonusEntitlements;
+    const reserveRaw = BigInt(
+      isReward
+        ? (this.config.reserveRaw ?? "0")
+        : (this.config.bonusReserveRaw ?? "0"),
     );
-    while (!this.signal.aborted && !this.stopped) {
-      const now = Date.now();
-      const minute = floorMinute(now) + MINUTE_MS;
-      const delay = Math.max(0, minute + graceMs - now);
-      await sleep(delay, this.signal);
-      if (this.signal.aborted || this.stopped) break;
-      await measure(`minute:${this.runtime.base.mint.slice(0, 8)}`, () =>
-        this.recordLiveMinute(minute),
+
+    if (!id || !from) throw new Error(`${kind} distribution is not configured`);
+
+    const state = await this.slrd.distributions.execute({
+      id,
+      from,
+      asset: this.runtime.asset,
+      entitlements: sortedEntitlements(entitlements),
+      reserveRaw,
+      via: (this.root.sender ?? "rpc") as any,
+    });
+
+    if (isReward) {
+      this.rewardTreasuryBalanceRaw = await this.readTreasuryBalanceRaw(
+        this.runtime.rewardTreasuryAddress,
+      );
+    } else if (this.runtime.bonusTreasuryAddress) {
+      this.bonusTreasuryBalanceRaw = await this.readTreasuryBalanceRaw(
+        this.runtime.bonusTreasuryAddress,
       );
     }
+    this.saveCheckpoint();
+
+    emit({
+      type: `${kind}-distribution`,
+      token: this.runtime.base.mint,
+      id: state.id,
+      status: state.status,
+      recipients: state.recipients.length,
+    });
+    this.onChange(this, `${kind}-distribution`);
+  }
+
+  async distribute(kind: DistributionKind = "reward"): Promise<void> {
+    await this.serial(() => this.executeDistributionLocked(kind));
   }
 
   async bootstrap(): Promise<void> {
-    this.runtime = await measure(
-      `bootstrap:${this.config.mint.slice(0, 8)}`,
-      async () => {
-        const base = await ensureToken(this.slrd, this.config.mint);
-        if (base.decimals == null)
-          throw new Error(`Unknown decimals for ${base.mint}`);
-        const sample = await this.slrd.samplePrice(base.mint);
-        const quoteMint = sample.quoteAsset.mint.toBase58();
-        if (
-          !quoteMatches(
-            this.config.quoteMint,
-            quoteMint,
-            sample.quoteAsset.kind === "native-sol",
-          )
-        )
-          throw new Error(
-            `Configured quote mint ${this.config.quoteMint} does not match market quote ${quoteMint} for ${base.mint}`,
-          );
-        const quoteDecimals = sample.quoteAsset.decimals;
-        const treasuryAddress = walletAddress(this.slrd, this.config.treasury);
-        const rewardWeight = this.config.rewardWeight ?? "pumpswap-buy-quote";
-        if (
-          rewardWeight === "pumpswap-buy-quote" &&
-          sample.quoteAsset.kind !== "native-sol"
-        ) {
-          throw new Error(
-            `Verified PumpSwap quote-spend accounting currently requires a native SOL quote for ${base.mint}; do not infer custom-quote spend from transfers`,
-          );
-        }
-        const distributionId =
-          this.config.distributionId ??
-          `fairfun:${base.mint}:${rewardWeight}:v2`;
-        let quoteSymbol = this.config.quoteSymbol?.trim() || "";
-        if (!quoteSymbol) {
-          if (sample.quoteAsset.kind === "native-sol") quoteSymbol = "SOL";
-          else {
-            try {
-              quoteSymbol =
-                this.slrd.resolveToken(quoteMint).symbol?.trim() ||
-                shortAddress(quoteMint);
-            } catch {
-              quoteSymbol = shortAddress(quoteMint);
-            }
-          }
-        }
-        const initialPriceText = sample.priceQuotePerToken.toString();
-        return {
-          base,
-          baseSymbol: base.symbol?.trim() || shortAddress(base.mint),
-          quoteMint,
-          quoteSymbol,
-          quoteDecimals,
-          quoteKind: sample.quoteAsset.kind,
-          treasuryAddress,
-          distributionId,
-          asset: sample.quoteAsset.kind === "native-sol" ? "SOL" : quoteMint,
-          initialPriceText,
-          initialPriceQ: decimalToScaled(initialPriceText),
-          initialPriceAtMs: sample.capturedAtMs,
-          rewardWeight,
-        };
-      },
+    this.phase = "token";
+    const base = await ensureToken(this.slrd, this.config.mint);
+    if (base.decimals == null)
+      throw new Error(`Token ${base.mint} has unknown decimals`);
+
+    const rewardTreasuryAddress = walletAddress(
+      this.slrd,
+      this.config.treasury,
     );
-    this.latestPriceQ = this.runtime.initialPriceQ;
-    this.latestPriceText = this.runtime.initialPriceText;
-    this.latestPriceAtMs = this.runtime.initialPriceAtMs;
-    this.excluded.add(this.runtime.treasuryAddress);
-    if (this.runtime.base.bondingCurve)
-      this.excluded.add(this.runtime.base.bondingCurve);
-    if (this.runtime.base.pool) this.excluded.add(this.runtime.base.pool);
-    if (this.runtime.base.sharingConfig)
-      this.excluded.add(this.runtime.base.sharingConfig);
+    const bonusTreasuryAddress = this.config.bonusTreasury
+      ? walletAddress(this.slrd, this.config.bonusTreasury)
+      : null;
+
+    if (
+      bonusTreasuryAddress &&
+      bonusTreasuryAddress === rewardTreasuryAddress
+    ) {
+      throw new Error(
+        `Reward treasury and bonus treasury must be different for ${base.mint}`,
+      );
+    }
+
+    this.excluded.add(rewardTreasuryAddress);
+    if (bonusTreasuryAddress) this.excluded.add(bonusTreasuryAddress);
+    if (base.bondingCurve) this.excluded.add(base.bondingCurve);
+    if (base.pool) this.excluded.add(base.pool);
+    if (base.sharingConfig) this.excluded.add(base.sharingConfig);
     for (const owner of this.config.excludedOwners ?? [])
       this.excluded.add(owner);
-    const checkpoint = this.checkpointRow();
-    for (const [recipient, raw] of Object.entries(checkpoint.entitlements))
-      this.entitlements.set(recipient, BigInt(raw));
+
     this.phase = "holder-history";
     emit({
       type: "bootstrap",
-      token: this.runtime.base.mint,
-      stage: "holder-history",
+      token: base.mint,
+      stage: this.phase,
     });
-    const history = await withHeartbeat({
-      token: this.runtime.base.mint,
-      stage: "Holder history",
-      work: () =>
-        measure(`history:${this.config.mint.slice(0, 8)}`, () =>
-          this.slrd.history.replay(this.runtime.base.mint, {
-            provider: "rpc",
-            onProgress: (progress) => {
-              if (
-                progress.phase === "rpc-account-signatures" &&
-                progress.total != null &&
-                progress.completed !== progress.total &&
-                progress.completed % 25 !== 0
-              )
-                return;
-              if (
-                (progress.phase === "rpc-mint-transactions" ||
-                  progress.phase === "rpc-transactions") &&
-                progress.total != null &&
-                progress.completed !== progress.total &&
-                progress.completed % 500 !== 0
-              )
-                return;
-              emit({
-                type: "holder-backfill",
-                token: this.runtime.base.mint,
-                ...progress,
-              });
-            },
-          }),
-        ),
-    });
-    if (!history.coverage.fromCreation || !history.coverage.complete)
-      throw new Error(
-        `Incomplete holder history for ${this.runtime.base.mint}: ${history.coverage.warnings.join("; ")}`,
-      );
-    emit({
-      type: "holder-history-complete",
-      token: this.runtime.base.mint,
-      events: history.items.length,
-      throughSlot: history.coverage.throughSlot,
-    });
-    this.phase = "market-history";
-    emit({
-      type: "bootstrap",
-      token: this.runtime.base.mint,
-      stage: "market-history",
-    });
-    const market = await this.slrd.history.market(this.runtime.base.mint, {
-      backfill: true,
+
+    const replay = await this.slrd.history.replay(base.mint, {
+      provider: "rpc",
       onProgress: (progress) => {
         if (
-          progress.phase === "transactions" &&
+          progress.total != null &&
           progress.completed !== progress.total &&
-          progress.completed % 500 !== 0
-        )
-          return;
-        if (
-          progress.phase === "parse" &&
-          progress.completed !== progress.total &&
-          progress.completed % 1000 !== 0
+          progress.completed % 250 !== 0
         )
           return;
         emit({
-          type: "market-backfill",
-          token: this.runtime.base.mint,
+          type: "holder-history-progress",
+          token: base.mint,
           ...progress,
         });
       },
     });
-    if (!market.coverage.fromCreation || !market.coverage.complete)
+
+    if (!replay.coverage.fromCreation || !replay.coverage.complete)
       throw new Error(
-        `Incomplete market history for ${this.runtime.base.mint}`,
+        `Holder replay for ${base.mint} is incomplete: ${replay.coverage.warnings.join("; ")}`,
       );
-    if (market.quoteMint !== this.runtime.quoteMint)
-      throw new Error(
-        `Stored market quote ${market.quoteMint} does not match live quote ${this.runtime.quoteMint}`,
-      );
-    this.rebuildVerifiedPumpSwapAccounting();
-    emit({
-      type: "verified-pumpswap-history",
-      token: this.runtime.base.mint,
-      trades: this.verifiedPumpSwapTradeKeys.size,
-      contributors: this.pumpSwapContribution.size,
-      buyQuoteRaw: this.totalVerifiedPumpSwapBuyQuoteRaw().toString(),
-      skippedInexact: this.verifiedPumpSwapSkippedInexact,
-      throughMs: this.verifiedPumpSwapThroughMs,
-    });
-    const endMinute = floorMinute(Date.now()) - MINUTE_MS;
-    this.phase = "gravity";
+
+    this.phase = "market-history";
     emit({
       type: "bootstrap",
-      token: this.runtime.base.mint,
-      stage: "gravity",
+      token: base.mint,
+      stage: this.phase,
     });
-    this.historicalGravity(history, market, endMinute);
-    this.buildHistoricalChart(history, market, endMinute);
-    emit({
-      type: "gravity-complete",
-      token: this.runtime.base.mint,
-      holders: [...this.gravity.values()].filter((row) => row.gravityQ > 0n)
-        .length,
-      throughMinuteMs: this.lastAccruedMinuteMs,
-    });
-    await this.persistDistributionPlan();
-    this.phase = "treasury";
-    emit({
-      type: "bootstrap",
-      token: this.runtime.base.mint,
-      stage: "treasury",
-    });
-    const currentTreasuryBalanceRaw = await this.readTreasuryBalanceRaw();
-    if (checkpoint.treasuryBalanceRaw == null) {
-      this.lastTreasuryBalanceRaw = currentTreasuryBalanceRaw;
-      this.saveRuntimeCheckpoint(currentTreasuryBalanceRaw);
-    } else {
-      const previousTreasuryBalanceRaw = BigInt(checkpoint.treasuryBalanceRaw);
-      this.lastTreasuryBalanceRaw = currentTreasuryBalanceRaw;
-      if (currentTreasuryBalanceRaw > previousTreasuryBalanceRaw) {
-        this.pendingTreasuryDeposits.push({
-          amountRaw: currentTreasuryBalanceRaw - previousTreasuryBalanceRaw,
-          requiredMinuteMs: endMinute,
-          balanceAfterRaw: currentTreasuryBalanceRaw,
+
+    const market = await this.slrd.history.market(base.mint, {
+      backfill: true,
+      onProgress: (progress) => {
+        if (
+          progress.total != null &&
+          progress.completed !== progress.total &&
+          progress.completed % 500 !== 0
+        )
+          return;
+        emit({
+          type: "market-history-progress",
+          token: base.mint,
+          ...progress,
         });
-        await this.flushTreasuryDeposits();
-      } else if (currentTreasuryBalanceRaw !== previousTreasuryBalanceRaw) {
-        this.saveRuntimeCheckpoint(currentTreasuryBalanceRaw);
+      },
+    });
+
+    if (!market.coverage.fromCreation || !market.coverage.complete)
+      throw new Error(`Market history for ${base.mint} is incomplete`);
+
+    const quoteMint = market.quoteMint;
+    if (
+      this.config.quoteMint &&
+      this.config.quoteMint !== quoteMint &&
+      !(
+        this.config.quoteMint.toUpperCase() === "SOL" &&
+        quoteMint === NATIVE_SOL_MINT
+      )
+    ) {
+      throw new Error(
+        `Configured quote ${this.config.quoteMint} does not match ${quoteMint}`,
+      );
+    }
+
+    let quoteDecimals = 9;
+    let quoteKind: "native-sol" | "spl-token" = "native-sol";
+    if (quoteMint !== NATIVE_SOL_MINT) {
+      const quote = await ensureToken(this.slrd, quoteMint);
+      if (quote.decimals == null)
+        throw new Error(`Quote token ${quoteMint} has unknown decimals`);
+      quoteDecimals = quote.decimals;
+      quoteKind = "spl-token";
+    }
+
+    this.runtime = {
+      base,
+      quoteMint,
+      quoteSymbol:
+        this.config.quoteSymbol?.trim() ||
+        (quoteKind === "native-sol" ? "SOL" : quoteMint.slice(0, 8)),
+      quoteDecimals,
+      quoteKind,
+      rewardTreasuryAddress,
+      bonusTreasuryAddress,
+      rewardDistributionId:
+        this.config.distributionId ?? `fairfun:${base.mint}:reward:v3`,
+      bonusDistributionId: bonusTreasuryAddress
+        ? (this.config.bonusDistributionId ??
+          `fairfun:${base.mint}:fee-gravity:v3`)
+        : null,
+      asset: quoteKind === "native-sol" ? "SOL" : quoteMint,
+      feeContribution: this.config.feeContribution ?? "total",
+    };
+
+    // Ensure stored history was parsed by the exact-fee Solard version.
+    const trades = await this.ensureExactFeeHistory();
+    const coverage = getTokenHistoryCoverage(base.mint);
+    if (!coverage?.fromCreation || !coverage.complete)
+      throw new Error(
+        `Verified trade coverage for ${base.mint} is not complete from creation`,
+      );
+
+    this.phase = "fee-gravity";
+    this.historicalFeeAccounting(replay, trades);
+
+    // Bring current holder balances/account lists to an authoritative finalized snapshot.
+    await this.refreshFinalizedHolders(Date.now());
+
+    const row = this.checkpointRow();
+    for (const [wallet, raw] of Object.entries(row.rewardEntitlements))
+      this.rewardEntitlements.set(wallet, BigInt(raw));
+    for (const [wallet, raw] of Object.entries(row.bonusEntitlements))
+      this.bonusEntitlements.set(wallet, BigInt(raw));
+
+    // Establish treasury baselines. Existing funds are not retroactively treated
+    // as a new deposit on first boot.
+    const currentReward = await this.readTreasuryBalanceRaw(
+      rewardTreasuryAddress,
+    );
+    if (row.rewardTreasuryBalanceRaw == null) {
+      this.rewardTreasuryBalanceRaw = currentReward;
+    } else {
+      this.rewardTreasuryBalanceRaw = BigInt(row.rewardTreasuryBalanceRaw);
+      if (currentReward < this.rewardTreasuryBalanceRaw)
+        this.rewardTreasuryBalanceRaw = currentReward;
+    }
+
+    if (bonusTreasuryAddress) {
+      const currentBonus =
+        await this.readTreasuryBalanceRaw(bonusTreasuryAddress);
+      if (row.bonusTreasuryBalanceRaw == null) {
+        this.bonusTreasuryBalanceRaw = currentBonus;
+      } else {
+        this.bonusTreasuryBalanceRaw = BigInt(row.bonusTreasuryBalanceRaw);
+        if (currentBonus < this.bonusTreasuryBalanceRaw)
+          this.bonusTreasuryBalanceRaw = currentBonus;
       }
     }
-    const excludeOwners = [
-      this.runtime.treasuryAddress,
-      ...(this.config.excludedOwners ?? []),
-    ];
-    const [snapshot, currentPrice] = await Promise.all([
-      this.slrd.snapshotHolders(this.runtime.base.mint, {
-        commitment: "finalized",
-        excludeOwners,
-        minimumRaw: 1n,
-      }),
-      this.slrd.samplePrice(this.runtime.base.mint),
-    ]);
-    this.balances.clear();
-    this.holderAccounts.clear();
-    for (const holder of snapshot.holders) {
-      this.balances.set(holder.owner, holder.amountRaw);
-      this.holderAccounts.set(holder.owner, [...holder.tokenAccounts]);
-    }
-    this.currentSupplyRaw = snapshot.supplyRaw;
-    this.latestPriceText = currentPrice.priceQuotePerToken.toString();
-    this.latestPriceQ = decimalToScaled(this.latestPriceText);
-    this.latestPriceAtMs = currentPrice.capturedAtMs;
+
+    this.saveCheckpoint();
+    await this.persistPlan("reward");
+    if (bonusTreasuryAddress) await this.persistPlan("bonus");
+
     this.phase = "ready";
     emit({
       type: "token-ready",
-      token: this.runtime.base.mint,
-      quoteMint: this.runtime.quoteMint,
-      treasury: this.runtime.treasuryAddress,
+      token: base.mint,
+      quoteMint,
       holders: this.balances.size,
-      gravityHolders: [...this.gravity.values()].filter(
-        (row) => row.gravityQ > 0n,
-      ).length,
-      gravity: formatScaled(
-        this.gravityTotal(),
-        PRICE_SCALE_DIGITS + this.runtime.quoteDecimals,
-      ),
-      rewardStartedAtMs: checkpoint.rewardStartedAtMs,
-      lastAccruedMinuteMs: this.lastAccruedMinuteMs,
-      distributionId: this.runtime.distributionId,
+      exactPumpSwapBuys: this.exactPumpSwapBuys,
+      missingExactPumpSwapFees: this.missingExactPumpSwapFees,
+      rejectedPumpSwapTrades: this.rejectedPumpSwapTrades,
+      feeContribution: this.runtime.feeContribution,
+      rewardDistributionId: this.runtime.rewardDistributionId,
+      bonusDistributionId: this.runtime.bonusDistributionId,
     });
     this.onChange(this, "ready");
   }
 
   async run(): Promise<void> {
     await Promise.all([
-      this.treasuryLoop(),
-      this.minuteLoop(),
-      this.verifiedPumpSwapLoop(),
+      this.treasuryLoop("reward"),
+      this.treasuryLoop("bonus"),
+      this.holderReplayLoop(),
+      this.exactSwapLoop(),
+      this.priceLoop(),
     ]);
   }
 
-  private async executeDistributionLocked(): Promise<void> {
-    if (!liveGate())
-      throw new Error(
-        "Distribution requires SOLARD_ENABLE_LIVE_TRADES=1 or SLRD_ENABLE_LIVE_TRADES=1",
-      );
-    const state = await this.slrd.distributions.execute({
-      id: this.runtime.distributionId,
-      from: this.config.treasury,
-      asset: this.runtime.asset,
-      entitlements: sortedEntitlements(this.entitlements),
-      reserveRaw: BigInt(this.config.reserveRaw ?? "0"),
-      via: (this.root.sender ?? "rpc") as any,
-    });
-    this.lastTreasuryBalanceRaw = await this.readTreasuryBalanceRaw();
-    this.saveRuntimeCheckpoint(this.lastTreasuryBalanceRaw);
-    emit({
-      type: "distribution",
-      token: this.runtime.base.mint,
-      distributionId: state.id,
-      status: state.status,
-      recipients: state.recipients.length,
-      confirmedPaidRaw: state.recipients
-        .reduce((sum, row) => sum + BigInt(row.confirmedPaidRaw), 0n)
-        .toString(),
-    });
-    this.onChange(this, "distribution");
-  }
-
-  async distribute(): Promise<void> {
-    await this.serial(() => this.executeDistributionLocked());
-  }
-
-  mint(): string {
-    return this.config.mint;
-  }
-
-  publicState(wallet?: string) {
-    const distribution = this.slrd.distributions.status(
-      this.runtime.distributionId,
-    );
-    const paidByWallet = new Map(
-      (distribution?.recipients ?? []).map((row) => [
+  private paidByWallet(kind: DistributionKind): Map<string, bigint> {
+    const id =
+      kind === "reward"
+        ? this.runtime.rewardDistributionId
+        : this.runtime.bonusDistributionId;
+    if (!id) return new Map();
+    const state = this.slrd.distributions.status(id);
+    return new Map(
+      (state?.recipients ?? []).map((row) => [
         row.recipient,
         BigInt(row.confirmedPaidRaw),
       ]),
     );
-    const totalGravityQ = this.gravityTotal();
+  }
+
+  publicState(wallet?: string) {
+    const now = Date.now();
+    this.settleAllFeeGravity(now);
+
+    const rewardPaid = this.paidByWallet("reward");
+    const bonusPaid = this.paidByWallet("bonus");
+    const feeGravityTotal = this.feeGravityTotal(now);
     const baseDecimals = this.runtime.base.decimals ?? 0;
-    const gravityDecimals = PRICE_SCALE_DIGITS + this.runtime.quoteDecimals;
+
     const holder = (address: string): PublicHolder => {
       const balanceRaw = this.balances.get(address) ?? 0n;
-      const gravityQ = this.gravity.get(address)?.gravityQ ?? 0n;
-      const contribution = this.pumpSwapContribution.get(address) ?? {
-        buyQuoteRaw: 0n,
-        sellQuoteRaw: 0n,
-        boughtTokenRaw: 0n,
-        soldTokenRaw: 0n,
-        buys: 0,
-        sells: 0,
+      const fee = this.feeInventory.get(address) ?? {
+        balanceRaw,
+        activeFeeBasisRaw: 0n,
+        feeGravityRawMs: 0n,
+        lastAtMs: now,
+        exactBuyFeesRaw: 0n,
+        exactBuyQuoteRaw: 0n,
+        buyCount: 0,
       };
-      const totalBuyQuoteRaw = this.totalVerifiedPumpSwapBuyQuoteRaw();
-      const earnedRaw = this.entitlements.get(address) ?? 0n;
-      const paidRaw = paidByWallet.get(address) ?? 0n;
-      const outstandingRaw = earnedRaw > paidRaw ? earnedRaw - paidRaw : 0n;
-      const valueQ =
-        baseDecimals >= 0
-          ? (balanceRaw * this.latestPriceQ) / 10n ** BigInt(baseDecimals)
-          : 0n;
+
+      const rewardEarned = this.rewardEntitlements.get(address) ?? 0n;
+      const rewardPaidRaw = rewardPaid.get(address) ?? 0n;
+      const rewardOutstanding =
+        rewardEarned > rewardPaidRaw ? rewardEarned - rewardPaidRaw : 0n;
+
+      const bonusEarned = this.bonusEntitlements.get(address) ?? 0n;
+      const bonusPaidRaw = bonusPaid.get(address) ?? 0n;
+      const bonusOutstanding =
+        bonusEarned > bonusPaidRaw ? bonusEarned - bonusPaidRaw : 0n;
+
       return {
         wallet: address,
         tokenAccounts: this.holderAccounts.get(address) ?? [],
         balanceRaw: balanceRaw.toString(),
-        balance: formatScaled(balanceRaw, baseDecimals),
-        value: formatScaled(valueQ, PRICE_SCALE_DIGITS),
-        gravity: formatScaled(gravityQ, gravityDecimals),
-        gravitySharePct: percent(gravityQ, totalGravityQ),
-        verifiedPumpSwapBuyQuoteRaw: contribution.buyQuoteRaw.toString(),
-        verifiedPumpSwapBuyQuote: formatScaled(
-          contribution.buyQuoteRaw,
+        balance: formatRaw(balanceRaw, baseDecimals),
+
+        activeFeeBasisRaw: fee.activeFeeBasisRaw.toString(),
+        activeFeeBasis: formatRaw(
+          fee.activeFeeBasisRaw,
           this.runtime.quoteDecimals,
         ),
-        verifiedPumpSwapBuySharePct: percent(
-          contribution.buyQuoteRaw,
-          totalBuyQuoteRaw,
-        ),
-        verifiedPumpSwapBoughtTokenRaw: contribution.boughtTokenRaw.toString(),
-        verifiedPumpSwapBuys: contribution.buys,
-        verifiedPumpSwapSellQuoteRaw: contribution.sellQuoteRaw.toString(),
-        verifiedPumpSwapSellQuote: formatScaled(
-          contribution.sellQuoteRaw,
+        feeGravityRawMs: fee.feeGravityRawMs.toString(),
+        feeGravityQuoteMinutes: formatRaw(
+          fee.feeGravityRawMs / 60_000n,
           this.runtime.quoteDecimals,
         ),
-        verifiedPumpSwapSoldTokenRaw: contribution.soldTokenRaw.toString(),
-        verifiedPumpSwapSells: contribution.sells,
-        earnedRaw: earnedRaw.toString(),
-        earned: formatScaled(earnedRaw, this.runtime.quoteDecimals),
-        paidRaw: paidRaw.toString(),
-        paid: formatScaled(paidRaw, this.runtime.quoteDecimals),
-        outstandingRaw: outstandingRaw.toString(),
-        outstanding: formatScaled(outstandingRaw, this.runtime.quoteDecimals),
-        claimableRaw: outstandingRaw.toString(),
-        claimable: formatScaled(outstandingRaw, this.runtime.quoteDecimals),
-        now: balanceRaw > 0n,
+        feeGravitySharePct: pct(fee.feeGravityRawMs, feeGravityTotal),
+
+        exactPumpSwapBuyFeesRaw: fee.exactBuyFeesRaw.toString(),
+        exactPumpSwapBuyFees: formatRaw(
+          fee.exactBuyFeesRaw,
+          this.runtime.quoteDecimals,
+        ),
+        exactPumpSwapBuyQuoteRaw: fee.exactBuyQuoteRaw.toString(),
+        exactPumpSwapBuyQuote: formatRaw(
+          fee.exactBuyQuoteRaw,
+          this.runtime.quoteDecimals,
+        ),
+        exactPumpSwapBuys: fee.buyCount,
+
+        rewardEarnedRaw: rewardEarned.toString(),
+        rewardPaidRaw: rewardPaidRaw.toString(),
+        rewardOutstandingRaw: rewardOutstanding.toString(),
+
+        bonusEarnedRaw: bonusEarned.toString(),
+        bonusPaidRaw: bonusPaidRaw.toString(),
+        bonusOutstandingRaw: bonusOutstanding.toString(),
       };
     };
-    const holders = [...this.balances.keys()]
+
+    const addresses = new Set([
+      ...this.balances.keys(),
+      ...this.feeInventory.keys(),
+      ...this.rewardEntitlements.keys(),
+      ...this.bonusEntitlements.keys(),
+    ]);
+
+    const holders = [...addresses]
       .filter((address) => !this.excluded.has(address))
       .map(holder)
       .sort((left, right) => {
-        const leftGravity = this.gravity.get(left.wallet)?.gravityQ ?? 0n;
-        const rightGravity = this.gravity.get(right.wallet)?.gravityQ ?? 0n;
-        return leftGravity === rightGravity
+        const a = BigInt(left.balanceRaw);
+        const b = BigInt(right.balanceRaw);
+        return a === b
           ? left.wallet.localeCompare(right.wallet)
-          : leftGravity > rightGravity
+          : a > b
             ? -1
             : 1;
       });
-    const totalEntitledRaw = [...this.entitlements.values()].reduce(
-      (sum, value) => sum + value,
-      0n,
+
+    const rewardState = this.slrd.distributions.status(
+      this.runtime.rewardDistributionId,
     );
-    const totalPaidRaw = [...paidByWallet.values()].reduce(
-      (sum, value) => sum + value,
-      0n,
-    );
-    const totalOutstandingRaw =
-      totalEntitledRaw > totalPaidRaw ? totalEntitledRaw - totalPaidRaw : 0n;
-    const marketCapQ =
-      (this.currentSupplyRaw * this.latestPriceQ) / 10n ** BigInt(baseDecimals);
-    const twentyFourHoursAgo = Date.now() - 24 * 60 * MINUTE_MS;
-    const previousPrice =
-      this.chart.find((point) => point.atMs >= twentyFourHoursAgo)?.priceQ ??
-      this.chart[0]?.priceQ ??
-      0n;
-    const requestedWallet = wallet?.trim() || null;
-    const walletState = requestedWallet ? holder(requestedWallet) : null;
+    const bonusState = this.runtime.bonusDistributionId
+      ? this.slrd.distributions.status(this.runtime.bonusDistributionId)
+      : null;
+
+    const requested = wallet?.trim() || null;
+
     return {
-      version: 1,
+      version: 3,
       mint: this.runtime.base.mint,
-      pair: `${this.runtime.baseSymbol}/${this.runtime.quoteSymbol}`,
-      symbol: this.runtime.baseSymbol,
+      symbol: this.runtime.base.symbol ?? null,
       quoteMint: this.runtime.quoteMint,
       quoteSymbol: this.runtime.quoteSymbol,
-      active: this.phase === "ready" && !this.stopped,
       phase: this.phase,
+      active: this.phase === "ready" && !this.stopped,
+
       price: {
-        value: this.latestPriceText,
+        ...this.latestPrice,
         quoteSymbol: this.runtime.quoteSymbol,
-        capturedAtMs: this.latestPriceAtMs,
-        change24hPct: priceChangePct(this.latestPriceQ, previousPrice),
+        role: "display-only",
       },
-      marketCap: {
-        value: formatScaled(marketCapQ, PRICE_SCALE_DIGITS),
-        quoteSymbol: this.runtime.quoteSymbol,
+
+      holders: {
+        count: [...this.balances].filter(
+          ([owner, amount]) => amount > 0n && !this.excluded.has(owner),
+        ).length,
+        rows: holders,
       },
-      supply: {
-        raw: this.currentSupplyRaw.toString(),
-        value: formatScaled(this.currentSupplyRaw, baseDecimals),
-      },
-      holderCount: holders.length,
-      gravity: {
-        value: formatScaled(totalGravityQ, gravityDecimals),
-        unit: `${this.runtime.quoteSymbol}·min`,
-        throughMinuteMs: this.lastAccruedMinuteMs,
-      },
-      verifiedPumpSwap: {
-        source: "canonical-pump-amm-instructions",
-        confidence: "finalized",
-        exactQuoteOnly: true,
-        trades: this.verifiedPumpSwapTradeKeys.size,
-        contributors: this.pumpSwapContribution.size,
-        totalBuyQuoteRaw: this.totalVerifiedPumpSwapBuyQuoteRaw().toString(),
-        totalBuyQuote: formatScaled(
-          this.totalVerifiedPumpSwapBuyQuoteRaw(),
+
+      feeGravity: {
+        source: "verified-finalized-pumpswap-buy-events",
+        contributionMode: this.runtime.feeContribution,
+        totalRawMs: feeGravityTotal.toString(),
+        totalQuoteMinutes: formatRaw(
+          feeGravityTotal / 60_000n,
           this.runtime.quoteDecimals,
         ),
-        totalSellQuoteRaw: this.totalVerifiedPumpSwapSellQuoteRaw().toString(),
-        totalSellQuote: formatScaled(
-          this.totalVerifiedPumpSwapSellQuoteRaw(),
-          this.runtime.quoteDecimals,
-        ),
-        skippedInexact: this.verifiedPumpSwapSkippedInexact,
-        throughMs: this.verifiedPumpSwapThroughMs,
+        activeFeeBasisRaw: this.activeFeeBasisTotal(now).toString(),
+        exactPumpSwapBuys: this.exactPumpSwapBuys,
+        missingExactPumpSwapFees: this.missingExactPumpSwapFees,
+        rejectedPumpSwapTrades: this.rejectedPumpSwapTrades,
+        throughMs: this.feeHistoryThroughMs,
+        inventoryRule:
+          "buy adds exact fee basis; incoming transfer adds no basis; disposal destroys basis and accumulated Fee Gravity proportionally",
       },
+
       rewards: {
-        weightMode: this.runtime.rewardWeight,
-        rewardStartedAtMs: this.checkpointRow().rewardStartedAtMs,
-        depositedRaw: totalEntitledRaw.toString(),
-        deposited: formatScaled(totalEntitledRaw, this.runtime.quoteDecimals),
-        paidRaw: totalPaidRaw.toString(),
-        paid: formatScaled(totalPaidRaw, this.runtime.quoteDecimals),
-        outstandingRaw: totalOutstandingRaw.toString(),
-        outstanding: formatScaled(
-          totalOutstandingRaw,
-          this.runtime.quoteDecimals,
-        ),
-        assetMint: this.runtime.quoteMint,
-        assetSymbol: this.runtime.quoteSymbol,
+        allocation: "eligible-current-balance",
+        treasury: this.runtime.rewardTreasuryAddress,
+        balanceRaw: this.rewardTreasuryBalanceRaw.toString(),
+        distributionId: this.runtime.rewardDistributionId,
+        distributionStatus: rewardState?.status ?? null,
       },
-      treasury: {
-        wallet: this.runtime.treasuryAddress,
-        balanceRaw: this.lastTreasuryBalanceRaw.toString(),
-        balance: formatScaled(
-          this.lastTreasuryBalanceRaw,
-          this.runtime.quoteDecimals,
-        ),
-      },
-      distribution: distribution
+
+      bonus: this.runtime.bonusTreasuryAddress
         ? {
-            id: distribution.id,
-            status: distribution.status,
-            pendingSignature: distribution.pending?.signature ?? null,
-            lastError: distribution.lastError,
-            uncertainReason: distribution.uncertainReason,
-            updatedAtMs: distribution.updatedAtMs,
+            allocation: "fee-gravity",
+            treasury: this.runtime.bonusTreasuryAddress,
+            balanceRaw: this.bonusTreasuryBalanceRaw.toString(),
+            distributionId: this.runtime.bonusDistributionId,
+            distributionStatus: bonusState?.status ?? null,
           }
         : null,
-      chart: this.chart.map((point) => ({
-        atMs: point.atMs,
-        price: formatScaled(point.priceQ, PRICE_SCALE_DIGITS),
-        gravity: formatScaled(point.gravityQ, gravityDecimals),
-      })),
-      holders,
-      wallet: walletState,
+
+      wallet: requested ? holder(requested) : null,
     };
   }
 
   status() {
     const state = this.publicState();
     return {
-      token: state.mint,
-      pair: state.pair,
+      mint: state.mint,
       phase: state.phase,
-      holders: state.holderCount,
-      price: state.price,
-      gravity: state.gravity,
+      holders: state.holders.count,
+      feeGravity: state.feeGravity,
       rewards: state.rewards,
-      distribution: state.distribution,
-      lastAccruedMinuteMs: this.lastAccruedMinuteMs,
+      bonus: state.bonus,
+      price: state.price,
     };
   }
 
@@ -1662,20 +1541,20 @@ class StateHub {
   }
 
   stream(engines: readonly TokenEngine[]): ReadableStream<Uint8Array> {
-    let controllerRef: ReadableStreamDefaultController<Uint8Array> | null =
-      null;
+    let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+
     return new ReadableStream<Uint8Array>({
-      start: (controller) => {
-        controllerRef = controller;
-        this.clients.add(controller);
-        controller.enqueue(
+      start: (next) => {
+        controller = next;
+        this.clients.add(next);
+        next.enqueue(
           this.packet("snapshot", {
             tokens: engines.map((engine) => engine.publicState()),
           }),
         );
       },
       cancel: () => {
-        if (controllerRef) this.clients.delete(controllerRef);
+        if (controller) this.clients.delete(controller);
       },
     });
   }
@@ -1705,6 +1584,7 @@ function startHttpServer(
   hub: StateHub,
 ) {
   if (config.http?.enabled === false) return null;
+
   const hostname = config.http?.host ?? "127.0.0.1";
   const port = Math.max(
     1,
@@ -1712,6 +1592,7 @@ function startHttpServer(
   );
   const byMint = new Map(engines.map((engine) => [engine.mint(), engine]));
   const adminTokenEnv = config.http?.adminTokenEnv ?? "FAIRFUN_ADMIN_TOKEN";
+
   const server = Bun.serve({
     hostname,
     port,
@@ -1722,7 +1603,9 @@ function startHttpServer(
           headers: corsHeaders(config),
         });
       }
+
       const url = new URL(request.url);
+
       if (request.method === "GET" && url.pathname === "/health") {
         return jsonResponse(config, {
           ok: true,
@@ -1730,11 +1613,13 @@ function startHttpServer(
           atMs: Date.now(),
         });
       }
+
       if (request.method === "GET" && url.pathname === "/api/tokens") {
         return jsonResponse(config, {
           tokens: engines.map((engine) => engine.publicState()),
         });
       }
+
       if (request.method === "GET" && url.pathname === "/api/stream") {
         return new Response(hub.stream(engines), {
           headers: {
@@ -1745,22 +1630,26 @@ function startHttpServer(
           },
         });
       }
+
       const match = url.pathname.match(
         /^\/api\/tokens\/([^/]+)(?:\/(distribute))?$/,
       );
       if (!match) return jsonResponse(config, { error: "not found" }, 404);
+
       const mint = decodeURIComponent(match[1]!);
       const engine = byMint.get(mint);
       if (!engine) return jsonResponse(config, { error: "unknown token" }, 404);
+
       if (request.method === "GET" && !match[2]) {
         return jsonResponse(
           config,
           engine.publicState(url.searchParams.get("wallet") ?? undefined),
         );
       }
+
       if (request.method === "POST" && match[2] === "distribute") {
         const expected = process.env[adminTokenEnv]?.trim();
-        if (!expected) {
+        if (!expected)
           return jsonResponse(
             config,
             {
@@ -1768,25 +1657,27 @@ function startHttpServer(
             },
             403,
           );
-        }
-        const authorization = request.headers.get("authorization") ?? "";
-        if (authorization !== `Bearer ${expected}`) {
+
+        if (
+          (request.headers.get("authorization") ?? "") !== `Bearer ${expected}`
+        )
           return jsonResponse(config, { error: "unauthorized" }, 401);
-        }
+
+        const kind =
+          url.searchParams.get("kind") === "bonus" ? "bonus" : "reward";
+
         try {
-          await engine.distribute();
+          await engine.distribute(kind);
           return jsonResponse(config, engine.publicState());
         } catch (error) {
-          return jsonResponse(
-            config,
-            { error: error instanceof Error ? error.message : String(error) },
-            500,
-          );
+          return jsonResponse(config, { error: message(error) }, 500);
         }
       }
+
       return jsonResponse(config, { error: "method not allowed" }, 405);
     },
   });
+
   emit({
     type: "server",
     url: `http://${hostname}:${server.port}`,
@@ -1799,23 +1690,30 @@ async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2));
   const configPath = resolve(required(flags, "config"));
   const config = loadConfig(configPath);
+
   if (config.dbPath && !process.env.SLRD_DB_PATH)
     process.env.SLRD_DB_PATH = resolve(config.dbPath);
   if (config.rpcUrl && !process.env.RPC_ENDPOINT)
     process.env.RPC_ENDPOINT = config.rpcUrl;
+
   const rpcUrl =
     config.rpcUrl ??
     process.env.RPC_ENDPOINT ??
     process.env.SOLANA_RPC_URL ??
     process.env.HELIUS_RPC_URL;
+
   if (!rpcUrl)
-    throw new Error("Fairfun requires config.rpcUrl or RPC_ENDPOINT");
+    throw new Error("FairFun requires config.rpcUrl or RPC_ENDPOINT");
+
   const connection = new Connection(rpcUrl, "finalized");
   const checkpointPath = resolve(dirname(configPath), config.checkpoint);
   const checkpoint = loadCheckpoint(checkpointPath);
-  emit({ type: "startup", config: configPath, tokens: config.tokens.length });
-  const slrd = createSolard({ rpcUrl: config.rpcUrl, dbPath: config.dbPath });
-  const controller = new AbortController();
+  const slrd = createSolard({
+    rpcUrl,
+    dbPath: config.dbPath,
+  });
+
+  const abort = new AbortController();
   const hub = new StateHub();
   const engines = config.tokens.map(
     (token) =>
@@ -1826,22 +1724,34 @@ async function main(): Promise<void> {
         token,
         checkpointPath,
         checkpoint,
-        controller.signal,
+        abort.signal,
         (engine, reason) => hub.publish(reason, engine),
       ),
   );
+
   let server: ReturnType<typeof Bun.serve> | null = null;
+
   try {
+    emit({
+      type: "startup",
+      config: configPath,
+      tokens: engines.length,
+    });
+
     for (const engine of engines) await engine.bootstrap();
+
     server = startHttpServer(config, engines, hub);
     emit({ type: "ready", tokens: engines.length });
+
     const readline = createInterface({
       input: process.stdin,
       output: process.stdout,
       terminal: false,
     });
-    readline.on("line", (line: string) => {
-      const [command, token] = line.trim().split(/\s+/, 2);
+
+    readline.on("line", (line) => {
+      const [command, token, requestedKind] = line.trim().split(/\s+/, 3);
+
       if (command === "status") {
         process.stdout.write(
           `${JSON.stringify(
@@ -1850,30 +1760,41 @@ async function main(): Promise<void> {
             2,
           )}\n`,
         );
-      } else if (command === "distribute") {
-        const selected = token
-          ? engines.filter((engine) => engine.status().token === token)
+        return;
+      }
+
+      if (command === "distribute") {
+        const kind: DistributionKind =
+          requestedKind === "bonus" || token === "bonus" ? "bonus" : "reward";
+        const mint =
+          token === "bonus" || token === "reward" ? undefined : token;
+        const selected = mint
+          ? engines.filter((engine) => engine.mint() === mint)
           : engines;
-        void Promise.all(selected.map((engine) => engine.distribute())).catch(
-          (error) =>
-            process.stderr.write(
-              `${error instanceof Error ? error.message : String(error)}\n`,
-            ),
-        );
-      } else if (command === "quit" || command === "exit") {
-        controller.abort();
+
+        void Promise.all(
+          selected.map((engine) => engine.distribute(kind)),
+        ).catch((error) => process.stderr.write(`${message(error)}\n`));
+        return;
+      }
+
+      if (command === "quit" || command === "exit") {
+        abort.abort();
         for (const engine of engines) engine.stop();
         readline.close();
       }
     });
+
     const stop = () => {
-      controller.abort();
+      abort.abort();
       for (const engine of engines) engine.stop();
       readline.close();
       void server?.stop(true);
     };
+
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
+
     await Promise.all(engines.map((engine) => engine.run()));
   } finally {
     await server?.stop(true);

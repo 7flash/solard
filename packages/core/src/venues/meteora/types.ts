@@ -1753,6 +1753,7 @@ export type MeteoraMovePositionArgs = {
    * excluded. Defaults to false for backwards compatibility.
    */
   balanceInventory?: boolean;
+  nativeReserveLamports?: MeteoraInteger;
 };
 
 export type MeteoraMoveCapitalAttribution = {

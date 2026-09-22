@@ -8,13 +8,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { PublicKey } from "@solana/web3.js";
 import {
   createTraderSolard,
   executeJupiterSwap,
   quoteJupiterSwap,
+  rawAmount,
   RaydiumService,
   type JupiterSwapQuote,
+  type QuoteResult,
   type RaydiumSwapQuote,
+  type TokenRow,
+  type TradeVenuePlugin,
+  type VenueMarket,
 } from "@solard/core";
 import {
   normalizeValueBandPolicy,
@@ -28,8 +34,9 @@ configure({ silent: false });
 const m = createMeasure("slrd:value-band-agent", { maxResultLength: 1600 });
 
 type Flags = Map<string, string>;
-type SwapVenue = "jupiter" | "raydium";
-type VenueMode = "auto" | SwapVenue;
+type NativeSwapVenue = "pump-curve" | "pumpswap";
+type SwapVenue = NativeSwapVenue | "jupiter" | "raydium";
+type VenueMode = "auto" | "native" | "jupiter" | "raydium";
 type TradeSide = "buy" | "sell";
 
 type RoutedQuote = {
@@ -40,7 +47,7 @@ type RoutedQuote = {
   outputRaw: bigint;
   minOutputRaw: bigint | null;
   priceImpactPct: number | null;
-  raw: JupiterSwapQuote | RaydiumSwapQuote;
+  raw: JupiterSwapQuote | RaydiumSwapQuote | QuoteResult;
   alternatives: Array<{ venue: SwapVenue; outputRaw: bigint }>;
 };
 
@@ -52,6 +59,14 @@ type PendingSettlement = {
   quotedOutputRaw: string;
   preTokenRaw: string;
   submittedAtMs: number;
+  /** Durable expiry proof for transactions compiled locally by Solard. */
+  recentBlockhash?: string | null;
+  lastValidBlockHeight?: number | null;
+  /** Pre-submit balance proof used only when transaction metadata is unavailable. */
+  preWalletLamports?: string | null;
+  preOwnedTokenAccountLamports?: string | null;
+  /** Fee computed from the exact signed message before submission, when available. */
+  estimatedNetworkFeeLamports?: string | null;
 };
 
 type Journal = {
@@ -71,6 +86,8 @@ type Journal = {
   cumulativeSellSol: number;
   peakNetCapitalDeployedSol: number;
   executions: number;
+  /** Last transaction signature already applied to journal economics. */
+  lastSettledSignature?: string | null;
   pendingSettlement: PendingSettlement | null;
   /** Highest fixed-size executable entry quote observed while flat, in lamports/raw-token. */
   entryPeakPriceRaw: number | null;
@@ -87,6 +104,7 @@ type Snapshot = {
   liquidationSol: number;
   walletSol: number;
   walletLamports: bigint;
+  ownedTokenAccountLamports: bigint;
   effectivePriceSol: number | null;
   quote: RoutedQuote | null;
 };
@@ -184,9 +202,14 @@ function resolveMint(
 
 function venueMode(flags: Flags): VenueMode {
   const value = (flag(flags, "venue") ?? "auto").toLowerCase();
-  if (value === "auto" || value === "jupiter" || value === "raydium")
+  if (
+    value === "auto" ||
+    value === "native" ||
+    value === "jupiter" ||
+    value === "raydium"
+  )
     return value;
-  throw new Error("--venue must be auto, jupiter, or raydium");
+  throw new Error("--venue must be auto, native, jupiter, or raydium");
 }
 
 function buyMode(flags: Flags): ValueBandBuyMode {
@@ -225,6 +248,7 @@ function freshJournal(wallet: string, mint: string): Journal {
     cumulativeSellSol: 0,
     peakNetCapitalDeployedSol: 0,
     executions: 0,
+    lastSettledSignature: null,
     pendingSettlement: null,
     entryPeakPriceRaw: null,
     entryPeakProbeLamports: null,
@@ -280,12 +304,18 @@ function readJournal(path: string, wallet: string, mint: string): Journal {
       Number(parsed.peakNetCapitalDeployedSol ?? 0),
     ),
     executions: Math.max(0, Math.trunc(Number(parsed.executions ?? 0))),
+    lastSettledSignature:
+      typeof parsed.lastSettledSignature === "string"
+        ? parsed.lastSettledSignature
+        : null,
     pendingSettlement:
       parsed.pendingSettlement &&
       (parsed.pendingSettlement.side === "buy" ||
         parsed.pendingSettlement.side === "sell") &&
       (parsed.pendingSettlement.venue === "jupiter" ||
-        parsed.pendingSettlement.venue === "raydium") &&
+        parsed.pendingSettlement.venue === "raydium" ||
+        parsed.pendingSettlement.venue === "pump-curve" ||
+        parsed.pendingSettlement.venue === "pumpswap") &&
       typeof parsed.pendingSettlement.signature === "string" &&
       /^\d+$/.test(String(parsed.pendingSettlement.requestedInputRaw ?? "")) &&
       /^\d+$/.test(String(parsed.pendingSettlement.quotedOutputRaw ?? "")) &&
@@ -304,6 +334,34 @@ function readJournal(path: string, wallet: string, mint: string): Journal {
             )
               ? Number(parsed.pendingSettlement.submittedAtMs)
               : fresh.updatedAtMs,
+            recentBlockhash:
+              typeof parsed.pendingSettlement.recentBlockhash === "string"
+                ? parsed.pendingSettlement.recentBlockhash
+                : null,
+            lastValidBlockHeight: Number.isInteger(
+              Number(parsed.pendingSettlement.lastValidBlockHeight),
+            )
+              ? Number(parsed.pendingSettlement.lastValidBlockHeight)
+              : null,
+            preWalletLamports:
+              typeof parsed.pendingSettlement.preWalletLamports === "string" &&
+              /^\d+$/.test(parsed.pendingSettlement.preWalletLamports)
+                ? parsed.pendingSettlement.preWalletLamports
+                : null,
+            preOwnedTokenAccountLamports:
+              typeof parsed.pendingSettlement.preOwnedTokenAccountLamports ===
+                "string" &&
+              /^\d+$/.test(
+                parsed.pendingSettlement.preOwnedTokenAccountLamports,
+              )
+                ? parsed.pendingSettlement.preOwnedTokenAccountLamports
+                : null,
+            estimatedNetworkFeeLamports:
+              typeof parsed.pendingSettlement.estimatedNetworkFeeLamports ===
+                "string" &&
+              /^\d+$/.test(parsed.pendingSettlement.estimatedNetworkFeeLamports)
+                ? parsed.pendingSettlement.estimatedNetworkFeeLamports
+                : null,
           }
         : null,
     entryPeakPriceRaw:
@@ -365,6 +423,172 @@ function recordSell(journal: Journal, sol: number): void {
   journal.executions += 1;
 }
 
+type NativeRoute = {
+  token: TokenRow;
+  plugin: TradeVenuePlugin;
+  market: VenueMarket;
+};
+
+function nativeVenue(value: string): NativeSwapVenue {
+  if (value === "pump-curve" || value === "pumpswap") return value;
+  throw new Error(`Solard native router resolved unsupported venue ${value}`);
+}
+
+function venueModeForQuote(venue: SwapVenue): Exclude<VenueMode, "auto"> {
+  if (venue === "pump-curve" || venue === "pumpswap") return "native";
+  return venue;
+}
+
+type SubmissionAmbiguousError = Error & {
+  submissionAmbiguous?: true;
+  submissionVenue?: SwapVenue;
+};
+
+function errorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * RPC sendRawTransaction with skipPreflight=false can reject before broadcast
+ * when its own simulation fails. That is provably pre-submission and must never
+ * be treated as an ambiguous send.
+ */
+function isRpcPreflightSimulationRejection(error: unknown): boolean {
+  const message = errorMessage(error);
+  return (
+    /Transaction simulation failed/i.test(message) ||
+    /Simulation failed\./i.test(message) ||
+    /preflight.*simulation/i.test(message)
+  );
+}
+
+/**
+ * Native Pump/PumpSwap slippage failures are market-state races, not permanent
+ * transaction-construction failures. A single fresh re-quote/rebuild retry is
+ * useful; after that the outer cycle retries from a new strategy snapshot.
+ */
+function isNativeSlippageRejection(error: unknown): boolean {
+  const message = errorMessage(error);
+  return (
+    /TooLittleSolReceived/i.test(message) ||
+    /TooMuchSolRequired/i.test(message) ||
+    /Error Number:\s*6003\b/i.test(message) ||
+    /Error Number:\s*6040\b/i.test(message) ||
+    /custom program error:\s*0x1773\b/i.test(message)
+  );
+}
+
+/**
+ * RaydiumService.executePrepared() signs, then simulateTransaction() runs before
+ * sendRawTransaction(). Its own "Raydium swap simulation failed" error is
+ * therefore provably pre-submission. RPC sendRawTransaction preflight simulation
+ * rejection is also pre-submission and is covered by the generic classifier.
+ */
+function isRaydiumPreSubmissionFailure(error: unknown): boolean {
+  const message = errorMessage(error);
+  return (
+    /^Raydium\s+swap\s+simulation\s+failed:/i.test(message) ||
+    isRpcPreflightSimulationRejection(error)
+  );
+}
+
+function markSubmissionAmbiguous(
+  error: unknown,
+  venue: SwapVenue,
+): SubmissionAmbiguousError {
+  const wrapped: SubmissionAmbiguousError =
+    error instanceof Error ? error : new Error(String(error));
+  wrapped.submissionAmbiguous = true;
+  wrapped.submissionVenue = venue;
+  return wrapped;
+}
+
+function isSubmissionAmbiguous(
+  error: unknown,
+): error is SubmissionAmbiguousError {
+  return (
+    error instanceof Error &&
+    (error as SubmissionAmbiguousError).submissionAmbiguous === true
+  );
+}
+
+async function resolveNativeRoute(args: {
+  slrd: ReturnType<typeof createTraderSolard>;
+  walletRef: string;
+  mint: string;
+}): Promise<NativeRoute> {
+  let token: TokenRow;
+  try {
+    token = args.slrd.resolveToken(args.mint);
+  } catch {
+    token = await args.slrd.addToken(args.mint);
+  }
+  const user = args.slrd.signer(args.walletRef).publicKey;
+  const { plugin, market } = await args.slrd.route(token, user);
+  nativeVenue(market.venue);
+  if (market.quoteAsset.kind !== "native-sol") {
+    throw new Error(
+      `Solard native route ${market.venue} is paired with ${market.quoteAsset.mint.toBase58()}, not native SOL`,
+    );
+  }
+  return { token, plugin, market };
+}
+
+async function quoteNativeRoute(args: {
+  slrd: ReturnType<typeof createTraderSolard>;
+  walletRef: string;
+  mint: string;
+  inputMint: string;
+  outputMint: string;
+  amountRaw: bigint;
+  slippageBps: number;
+}): Promise<RoutedQuote> {
+  const route = await resolveNativeRoute(args);
+  const user = args.slrd.signer(args.walletRef).publicKey;
+  const ctx = {
+    connection: args.slrd.connection(),
+    token: route.token,
+    user,
+  };
+  let quote: QuoteResult;
+  if (args.inputMint === WSOL && args.outputMint === args.mint) {
+    quote = await route.plugin.quoteBuy(
+      ctx,
+      route.market,
+      rawAmount(args.amountRaw, route.market.quoteAsset),
+      args.slippageBps,
+    );
+  } else if (args.inputMint === args.mint && args.outputMint === WSOL) {
+    quote = await route.plugin.quoteSell(
+      ctx,
+      route.market,
+      args.amountRaw,
+      args.slippageBps,
+    );
+  } else {
+    throw new Error(
+      `Solard native controller route only supports SOL <-> ${args.mint}`,
+    );
+  }
+  return {
+    venue: nativeVenue(route.market.venue),
+    inputMint: args.inputMint,
+    outputMint: args.outputMint,
+    inputRaw: quote.inputRaw,
+    outputRaw: quote.expectedOutputRaw,
+    minOutputRaw: quote.minimumOutputRaw,
+    priceImpactPct: null,
+    raw: quote,
+    alternatives: [],
+  };
+}
+
 function toJupiterRoutedQuote(q: JupiterSwapQuote): RoutedQuote {
   return {
     venue: "jupiter",
@@ -394,13 +618,26 @@ function toRaydiumRoutedQuote(q: RaydiumSwapQuote): RoutedQuote {
 }
 
 async function quoteBestRoute(args: {
+  slrd: ReturnType<typeof createTraderSolard>;
   raydium: RaydiumService;
+  walletRef: string;
+  mint: string;
   mode: VenueMode;
   inputMint: string;
   outputMint: string;
   amountRaw: bigint;
   slippageBps: number;
 }): Promise<RoutedQuote> {
+  const quoteNative = async () =>
+    await quoteNativeRoute({
+      slrd: args.slrd,
+      walletRef: args.walletRef,
+      mint: args.mint,
+      inputMint: args.inputMint,
+      outputMint: args.outputMint,
+      amountRaw: args.amountRaw,
+      slippageBps: args.slippageBps,
+    });
   const quoteJupiter = async () =>
     toJupiterRoutedQuote(
       await quoteJupiterSwap({
@@ -419,47 +656,48 @@ async function quoteBestRoute(args: {
       }),
     );
 
+  if (args.mode === "native") return await quoteNative();
   if (args.mode === "jupiter") return await quoteJupiter();
   if (args.mode === "raydium") return await quoteRaydium();
 
-  const [jupiter, raydium] = await Promise.allSettled([
-    quoteJupiter(),
-    quoteRaydium(),
-  ]);
-  const candidates: RoutedQuote[] = [];
-  const errors: string[] = [];
+  // `auto` means Solard's own router first. A Pump/PumpSwap token must never
+  // call an external aggregator just because it might quote a slightly larger
+  // number. If Solard cannot route the token natively, fall back to direct
+  // Raydium. Jupiter is explicit-only (`--venue jupiter`).
+  try {
+    const native = await quoteNative();
+    native.alternatives = [
+      { venue: native.venue, outputRaw: native.outputRaw },
+    ];
+    return native;
+  } catch (nativeError) {
+    // Only an explicit "no registered native venue" result may fall through to
+    // Raydium. Once Solard has a Pump/PumpSwap route, programming errors, RPC
+    // errors, SDK incompatibilities, quote failures, etc. are native-route
+    // failures and must be surfaced directly. Hiding them behind a Raydium
+    // ROUTE_NOT_FOUND message made Pump failures look like cross-venue routing.
+    if (errorCode(nativeError) !== "UNSUPPORTED_TOKEN") {
+      throw new Error(
+        `Solard native route failed for ${args.mint}: ${errorMessage(nativeError)}. ` +
+          `Refusing external fallback because this was not an UNSUPPORTED_TOKEN result.`,
+        nativeError instanceof Error ? { cause: nativeError } : undefined,
+      );
+    }
 
-  if (jupiter.status === "fulfilled") candidates.push(jupiter.value);
-  else
-    errors.push(
-      `jupiter: ${jupiter.reason instanceof Error ? jupiter.reason.message : String(jupiter.reason)}`,
-    );
-
-  if (raydium.status === "fulfilled") candidates.push(raydium.value);
-  else
-    errors.push(
-      `raydium: ${raydium.reason instanceof Error ? raydium.reason.message : String(raydium.reason)}`,
-    );
-
-  if (!candidates.length)
-    throw new Error(`No executable swap route: ${errors.join("; ")}`);
-
-  candidates.sort((a, b) =>
-    a.outputRaw === b.outputRaw
-      ? a.venue === "raydium"
-        ? -1
-        : 1
-      : a.outputRaw > b.outputRaw
-        ? -1
-        : 1,
-  );
-
-  const best = candidates[0]!;
-  best.alternatives = candidates.map((row) => ({
-    venue: row.venue,
-    outputRaw: row.outputRaw,
-  }));
-  return best;
+    try {
+      const raydium = await quoteRaydium();
+      raydium.alternatives = [
+        { venue: raydium.venue, outputRaw: raydium.outputRaw },
+      ];
+      return raydium;
+    } catch (raydiumError) {
+      throw new Error(
+        `No executable Solard auto route: native=UNSUPPORTED_TOKEN; ` +
+          `raydium=${errorMessage(raydiumError)}. ` +
+          `Jupiter is explicit-only; pass --venue jupiter if you intentionally want it.`,
+      );
+    }
+  }
 }
 
 async function executeRoutedSwap(args: {
@@ -476,34 +714,219 @@ async function executeRoutedSwap(args: {
   signature: string | null;
   outputRaw: bigint;
   raw: unknown;
+  settlement?: {
+    recentBlockhash: string | null;
+    lastValidBlockHeight: number | null;
+    estimatedNetworkFeeLamports: string | null;
+  };
 }> {
-  if (args.quote.venue === "jupiter") {
-    const result = await executeJupiterSwap({
-      inputMint: args.quote.inputMint,
-      outputMint: args.quote.outputMint,
-      amountRaw: args.quote.inputRaw,
-      signer: args.slrd.signer(args.walletRef),
-      ...(args.minAcceptableOutputRaw != null
-        ? {
-            minOutputRaw: (() => {
-              const keepBps = 10_000 - args.slippageBps;
-              if (keepBps <= 0) {
-                throw new Error(
-                  "Cannot enforce an execution-order output guard with 100% slippage",
-                );
-              }
-              // Jupiter /order exposes expected outAmount rather than the
-              // transaction's internal threshold. Require enough expected
-              // output that the controller slippage budget still leaves the
-              // strategy-level minimum intact.
-              return (
-                (args.minAcceptableOutputRaw * 10_000n + BigInt(keepBps - 1)) /
-                BigInt(keepBps)
-              );
-            })(),
+  if (args.quote.venue === "pump-curve" || args.quote.venue === "pumpswap") {
+    const isBuy = args.quote.inputMint === WSOL;
+    const mint =
+      args.quote.inputMint === WSOL
+        ? args.quote.outputMint
+        : args.quote.inputMint;
+
+    // One immediate retry is intentionally narrow: only a known native
+    // slippage/preflight race gets retried here. Everything else returns to the
+    // outer cycle, and sender/transport ambiguity still fail-stops.
+    const maxNativeAttempts = 2;
+    let lastPreSubmissionError: unknown = null;
+
+    for (let attempt = 1; attempt <= maxNativeAttempts; attempt += 1) {
+      const route = await resolveNativeRoute({
+        slrd: args.slrd,
+        walletRef: args.walletRef,
+        mint,
+      });
+      if (route.market.venue !== args.quote.venue) {
+        throw new Error(
+          `Solard native route changed from ${args.quote.venue} to ${route.market.venue} before execution; retry from a fresh cycle`,
+        );
+      }
+
+      const user = args.slrd.signer(args.walletRef).publicKey;
+      const ctx = {
+        connection: args.slrd.connection(),
+        token: route.token,
+        user,
+      };
+
+      const freshQuote = isBuy
+        ? await route.plugin.quoteBuy(
+            ctx,
+            route.market,
+            rawAmount(args.quote.inputRaw, route.market.quoteAsset),
+            args.slippageBps,
+          )
+        : await route.plugin.quoteSell(
+            ctx,
+            route.market,
+            args.quote.inputRaw,
+            args.slippageBps,
+          );
+      const built = isBuy
+        ? await route.plugin.buildBuy(ctx, route.market, freshQuote)
+        : await route.plugin.buildSell(ctx, route.market, freshQuote);
+      const protectedOutput = built.minOutputRaw ?? freshQuote.minimumOutputRaw;
+
+      if (
+        args.minAcceptableOutputRaw != null &&
+        protectedOutput < args.minAcceptableOutputRaw
+      ) {
+        // This is a strategy guard, not a sender error. The market moved below
+        // the controller's acceptable execution floor before submission.
+        throw new Error(
+          `${route.market.venue} freshly built transaction protects only ${protectedOutput.toString()} output raw; strategy requires at least ${args.minAcceptableOutputRaw.toString()}`,
+        );
+      }
+
+      const tx = args.slrd
+        .transaction(args.walletRef)
+        .addMany(built.instructions, {
+          kind: isBuy ? "buy" : "sell",
+          mint: route.market.mint,
+          meta: {
+            venue: route.market.venue,
+            inputRaw: freshQuote.inputRaw.toString(),
+            minOutputRaw: protectedOutput.toString(),
+            controller: "value-band",
+            nativeAttempt: attempt,
+          },
+        });
+      const plan = await args.slrd.compile(
+        args.slrd.signer(args.walletRef),
+        tx.snapshot(),
+      );
+
+      const simulation = await args.slrd.simulatePlan(plan);
+      if (!simulation.success) {
+        const simulationError = new Error(
+          `${route.market.venue} simulation failed before submission: ${JSON.stringify(simulation.error)}\n${simulation.logs.join("\\n")}`,
+        );
+        if (
+          attempt < maxNativeAttempts &&
+          isNativeSlippageRejection(simulationError)
+        ) {
+          lastPreSubmissionError = simulationError;
+          continue;
+        }
+        throw simulationError;
+      }
+
+      // Capture settlement data from the exact compiled message before
+      // broadcast. This gives reconciliation an independent proof path if
+      // getTransaction() indexing lags after confirmation.
+      let estimatedNetworkFeeLamports: string | null = null;
+      try {
+        const fee = await args.slrd
+          .connection()
+          .getFeeForMessage(plan.transaction.message, "confirmed");
+        if (
+          fee.value != null &&
+          Number.isSafeInteger(fee.value) &&
+          fee.value >= 0
+        ) {
+          estimatedNetworkFeeLamports = String(fee.value);
+        }
+      } catch {
+        // Metadata-based reconciliation remains authoritative when fee lookup
+        // is unavailable.
+      }
+
+      let submission: Awaited<ReturnType<typeof args.slrd.submitPlan>>;
+      try {
+        submission = await args.slrd.submitPlan(
+          plan,
+          "rpc",
+          `value-band-${isBuy ? "buy" : "sell"}-${route.market.venue}`,
+          { skipSimulation: true, skipPreflight: false },
+        );
+      } catch (error) {
+        // IMPORTANT: RPC preflight runs inside sendRawTransaction. A
+        // SendTransactionError whose message says transaction simulation
+        // failed means the RPC rejected it BEFORE broadcast. It is therefore
+        // safe to re-quote/rebuild; never mark it submission-ambiguous.
+        if (isRpcPreflightSimulationRejection(error)) {
+          if (attempt < maxNativeAttempts && isNativeSlippageRejection(error)) {
+            lastPreSubmissionError = error;
+            continue;
           }
-        : {}),
-    });
+          throw error;
+        }
+
+        // Only transport/sender failures after preflight may be ambiguous.
+        throw markSubmissionAmbiguous(error, nativeVenue(route.market.venue));
+      }
+
+      return {
+        venue: nativeVenue(route.market.venue),
+        signature: submission.signature,
+        outputRaw: built.expectedOutputRaw ?? freshQuote.expectedOutputRaw,
+        raw: {
+          submission,
+          quote: freshQuote,
+          built: {
+            venue: built.venue,
+            minOutputRaw: protectedOutput.toString(),
+            expectedOutputRaw:
+              built.expectedOutputRaw?.toString() ??
+              freshQuote.expectedOutputRaw.toString(),
+          },
+          nativeAttempt: attempt,
+        },
+        settlement: {
+          recentBlockhash: submission.plan.recentBlockhash,
+          lastValidBlockHeight: submission.plan.lastValidBlockHeight,
+          estimatedNetworkFeeLamports,
+        },
+      };
+    }
+
+    throw (
+      lastPreSubmissionError ??
+      new Error(
+        `${args.quote.venue} native execution exhausted fresh pre-submission attempts`,
+      )
+    );
+  }
+
+  if (args.quote.venue === "jupiter") {
+    let result: Awaited<ReturnType<typeof executeJupiterSwap>>;
+    try {
+      result = await executeJupiterSwap({
+        inputMint: args.quote.inputMint,
+        outputMint: args.quote.outputMint,
+        amountRaw: args.quote.inputRaw,
+        signer: args.slrd.signer(args.walletRef),
+        ...(args.minAcceptableOutputRaw != null
+          ? {
+              minOutputRaw: (() => {
+                const keepBps = 10_000 - args.slippageBps;
+                if (keepBps <= 0) {
+                  throw new Error(
+                    "Cannot enforce an execution-order output guard with 100% slippage",
+                  );
+                }
+                return (
+                  (args.minAcceptableOutputRaw * 10_000n +
+                    BigInt(keepBps - 1)) /
+                  BigInt(keepBps)
+                );
+              })(),
+            }
+          : {}),
+      });
+    } catch (error) {
+      const endpoint =
+        error && typeof error === "object" && "endpoint" in error
+          ? String((error as { endpoint?: unknown }).endpoint ?? "")
+          : "";
+      // /order happens before Jupiter has a signed transaction to execute.
+      // Any later transport/execution failure is conservatively ambiguous.
+      if (endpoint === "/order") throw error;
+      throw markSubmissionAmbiguous(error, "jupiter");
+    }
     const actual = result.outputAmountResult ?? result.totalOutputAmount;
     return {
       venue: "jupiter",
@@ -533,16 +956,70 @@ async function executeRoutedSwap(args: {
     );
   }
 
-  const result = await args.raydium.executePrepared(prepared, {
-    live: true,
-    simulate: true,
-    commitment: "confirmed",
-  });
+  if (prepared.transactions.length !== 1) {
+    throw new Error(
+      `Raydium controller settlement currently requires exactly one swap transaction; builder returned ${prepared.transactions.length}`,
+    );
+  }
+
+  const raydiumTx: any = prepared.transactions[0]!;
+  const recentBlockhash =
+    typeof raydiumTx?.message?.recentBlockhash === "string"
+      ? raydiumTx.message.recentBlockhash
+      : typeof raydiumTx?.recentBlockhash === "string"
+        ? raydiumTx.recentBlockhash
+        : null;
+  let estimatedNetworkFeeLamports: string | null = null;
+  try {
+    const feeMessage =
+      raydiumTx?.message ??
+      (typeof raydiumTx?.compileMessage === "function"
+        ? raydiumTx.compileMessage()
+        : null);
+    if (feeMessage) {
+      const fee = await args.slrd
+        .connection()
+        .getFeeForMessage(feeMessage, "confirmed");
+      if (
+        fee.value != null &&
+        Number.isSafeInteger(fee.value) &&
+        fee.value >= 0
+      ) {
+        estimatedNetworkFeeLamports = String(fee.value);
+      }
+    }
+  } catch {
+    // Transaction metadata remains authoritative when fee lookup is unavailable.
+  }
+
+  let result: Awaited<ReturnType<RaydiumService["submitPrepared"]>>;
+  try {
+    // Submission returns immediately after sendRawTransaction accepts the signed
+    // transaction. Confirmation is deliberately delegated to the controller's
+    // durable settlement barrier so a timeout can never lose a known signature.
+    result = await args.raydium.submitPrepared(prepared, {
+      live: true,
+      simulate: true,
+      commitment: "confirmed",
+    });
+  } catch (error) {
+    // Raydium simulation and RPC preflight rejection are provably pre-send.
+    if (isRaydiumPreSubmissionFailure(error)) throw error;
+
+    // A transport failure from sendRawTransaction without a returned signature
+    // is still ambiguous and must not be automatically retried.
+    throw markSubmissionAmbiguous(error, "raydium");
+  }
   return {
     venue: "raydium",
     signature: result.signatures.at(-1) ?? null,
     outputRaw: prepared.quote.outputRaw,
     raw: result,
+    settlement: {
+      recentBlockhash,
+      lastValidBlockHeight: null,
+      estimatedNetworkFeeLamports,
+    },
   };
 }
 
@@ -781,6 +1258,9 @@ async function snapshot(
 
   if (amountRaw > 0n) {
     quote = await quoteBestRoute({
+      slrd,
+      walletRef,
+      mint,
       raydium,
       mode: routing,
       inputMint: mint,
@@ -791,6 +1271,11 @@ async function snapshot(
     liquidationSol = Number(quote.outputRaw) / 1e9;
   }
 
+  const ownedTokenAccountLamports = accounts.reduce(
+    (sum, row) => sum + row.lamports,
+    0n,
+  );
+
   return {
     atMs: Date.now(),
     amountRaw,
@@ -799,6 +1284,7 @@ async function snapshot(
     liquidationSol,
     walletSol: Number(lamports) / 1e9,
     walletLamports: BigInt(lamports),
+    ownedTokenAccountLamports,
     effectivePriceSol:
       amountUi != null && amountUi > 0 ? liquidationSol / amountUi : null,
     quote,
@@ -806,7 +1292,9 @@ async function snapshot(
 }
 
 async function sizeSameTokens(args: {
+  slrd: ReturnType<typeof createTraderSolard>;
   raydium: RaydiumService;
+  walletRef: string;
   routing: VenueMode;
   slippageBps: number;
   mint: string;
@@ -815,13 +1303,16 @@ async function sizeSameTokens(args: {
   iterations: number;
 }): Promise<{ lamports: bigint; expectedTokensRaw: bigint; venue: SwapVenue }> {
   if (args.tokenRaw <= 0n || args.maxLamports <= 0n)
-    return { lamports: 0n, expectedTokensRaw: 0n, venue: "jupiter" };
+    return { lamports: 0n, expectedTokensRaw: 0n, venue: "raydium" };
 
   let low = 1n;
   let high = args.maxLamports;
   for (let i = 0; i < args.iterations && high - low > 1n; i += 1) {
     const mid = (low + high) / 2n;
     const q = await quoteBestRoute({
+      slrd: args.slrd,
+      walletRef: args.walletRef,
+      mint: args.mint,
       raydium: args.raydium,
       mode: args.routing,
       inputMint: WSOL,
@@ -834,6 +1325,9 @@ async function sizeSameTokens(args: {
   }
 
   const q = await quoteBestRoute({
+    slrd: args.slrd,
+    walletRef: args.walletRef,
+    mint: args.mint,
     raydium: args.raydium,
     mode: args.routing,
     inputMint: WSOL,
@@ -845,7 +1339,9 @@ async function sizeSameTokens(args: {
 }
 
 async function futureLiquidationForBuy(args: {
+  slrd: ReturnType<typeof createTraderSolard>;
   raydium: RaydiumService;
+  walletRef: string;
   routing: VenueMode;
   slippageBps: number;
   mint: string;
@@ -853,6 +1349,9 @@ async function futureLiquidationForBuy(args: {
   buyLamports: bigint;
 }): Promise<{ liquidationSol: number; outRaw: bigint; venue: SwapVenue }> {
   const buy = await quoteBestRoute({
+    slrd: args.slrd,
+    walletRef: args.walletRef,
+    mint: args.mint,
     raydium: args.raydium,
     mode: args.routing,
     inputMint: WSOL,
@@ -862,6 +1361,9 @@ async function futureLiquidationForBuy(args: {
   });
   const totalRaw = args.currentRaw + buy.outputRaw;
   const sell = await quoteBestRoute({
+    slrd: args.slrd,
+    walletRef: args.walletRef,
+    mint: args.mint,
     raydium: args.raydium,
     mode: args.routing,
     inputMint: args.mint,
@@ -877,7 +1379,9 @@ async function futureLiquidationForBuy(args: {
 }
 
 async function sizeToBase(args: {
+  slrd: ReturnType<typeof createTraderSolard>;
   raydium: RaydiumService;
+  walletRef: string;
   routing: VenueMode;
   slippageBps: number;
   mint: string;
@@ -896,12 +1400,15 @@ async function sizeToBase(args: {
       lamports: 0n,
       expectedLiquidationSol: 0,
       expectedTokensRaw: 0n,
-      venue: "jupiter",
+      venue: "raydium",
     };
 
   // If already at/above target, never manufacture a minimum-sized buy.
   if (args.currentRaw > 0n) {
     const currentSell = await quoteBestRoute({
+      slrd: args.slrd,
+      walletRef: args.walletRef,
+      mint: args.mint,
       raydium: args.raydium,
       mode: args.routing,
       inputMint: args.mint,
@@ -925,7 +1432,9 @@ async function sizeToBase(args: {
   for (let i = 0; i < args.iterations && high - low > 1n; i += 1) {
     const mid = (low + high) / 2n;
     const evaluated = await futureLiquidationForBuy({
+      slrd: args.slrd,
       raydium: args.raydium,
+      walletRef: args.walletRef,
       routing: args.routing,
       slippageBps: args.slippageBps,
       mint: args.mint,
@@ -937,7 +1446,9 @@ async function sizeToBase(args: {
   }
 
   const evaluated = await futureLiquidationForBuy({
+    slrd: args.slrd,
     raydium: args.raydium,
+    walletRef: args.walletRef,
     routing: args.routing,
     slippageBps: args.slippageBps,
     mint: args.mint,
@@ -961,9 +1472,10 @@ export async function runValueBandAgent(
       "Usage: slrd run examples/position-controller.ts --token <mint|alias> --wallet <wallet> " +
         "[--base-sol 0.1] [--lower-multiple 0.5] [--upper-multiple 1.8] [--sell-fraction 0.5] " +
         "[--buy-mode to-base|same-value|same-tokens] [--max-capital-sol 0.5] [--max-buy-sol 0.1] " +
-        "[--venue auto|jupiter|raydium] [--slippage-bps 150] [--raydium-priority-micro-lamports N] " +
+        "[--venue auto|native|raydium|jupiter] [--slippage-bps 150] [--raydium-priority-micro-lamports N] " +
         "[--rebuy-after-sell-drop-pct 12] [--lower-ladder-drop-pct 15] [--take-profit-after-buy-rise-pct 12] " +
         "[--entry-pullback-pct 18] [--reset-entry-peak] [--reset-guards] [--scale-now] " +
+        "[--recover-signature <sig> --recover-side buy|sell --recover-venue raydium --recover-only] " +
         "[--sample-ms 5000] [--cooldown-ms 10000] [--error-retry-ms 3000] [--error-retry-max-ms 30000] [--loop] [--live]\n",
     );
     return;
@@ -1040,6 +1552,19 @@ export async function runValueBandAgent(
   const raydium = new RaydiumService(slrd);
   const mint = resolveMint(slrd, tokenRef);
   const wallet = slrd.resolveWallet(walletRef).address.toBase58();
+
+  // For auto/native, eagerly let Solard inspect a raw Pump mint so routing is
+  // based on the canonical venue registry rather than whether the token happened
+  // to be registered by an earlier command. Failure is allowed in auto mode: a
+  // non-Pump token may still be handled by direct Raydium.
+  if (routing === "auto" || routing === "native") {
+    try {
+      if (!slrd.tokens.list().some((row) => row.mint === mint))
+        await slrd.addToken(mint);
+    } catch (error) {
+      if (routing === "native") throw error;
+    }
+  }
   const statePath = journalPath(flags, wallet, mint);
   const journal = readJournal(statePath, wallet, mint);
 
@@ -1052,6 +1577,265 @@ export async function runValueBandAgent(
       () => data,
     );
 
+  const currentWalletSettlementState = async () => {
+    const [accounts, lamports] = await Promise.all([
+      slrd.tokenAccounts(walletRef),
+      slrd
+        .connection()
+        .getBalance(slrd.resolveWallet(walletRef).address, "confirmed"),
+    ]);
+    const mintAccounts = accounts.filter(
+      (row) => row.mint === mint && row.isAssociated,
+    );
+    const currentRaw = mintAccounts.reduce(
+      (sum, row) => sum + row.amountRaw,
+      0n,
+    );
+    const decimals =
+      mintAccounts.find((row) => Number.isInteger(row.decimals))?.decimals ??
+      null;
+    const ownedTokenAccountLamports = accounts.reduce(
+      (sum, row) => sum + row.lamports,
+      0n,
+    );
+    return {
+      accounts,
+      mintAccounts,
+      currentRaw,
+      decimals,
+      walletLamports: BigInt(lamports),
+      ownedTokenAccountLamports,
+    };
+  };
+
+  const walletSignatureHistory = async (signature: string) => {
+    const rows = await slrd
+      .connection()
+      .getSignaturesForAddress(
+        new PublicKey(wallet),
+        { limit: 1000 },
+        "confirmed",
+      );
+    const index = rows.findIndex((row) => row.signature === signature);
+    const row = index >= 0 ? rows[index]! : null;
+    return {
+      found: row != null,
+      latest: index === 0,
+      err: row?.err ?? null,
+      confirmationStatus: row?.confirmationStatus ?? null,
+    };
+  };
+
+  const tokenSignatureHistory = async (
+    signature: string,
+    addresses: string[],
+  ) => {
+    let found = false;
+    let latest = true;
+    for (const address of addresses) {
+      const rows = await slrd
+        .connection()
+        .getSignaturesForAddress(
+          new PublicKey(address),
+          { limit: 100 },
+          "confirmed",
+        );
+      const index = rows.findIndex((row) => row.signature === signature);
+      if (index < 0) continue;
+      found = true;
+      if (index !== 0) latest = false;
+    }
+    return { found, latest };
+  };
+
+  const finalizePendingSettlement = (args: {
+    pending: PendingSettlement;
+    tokenDeltaRaw: bigint;
+    decimals: number;
+    economicLamports: bigint;
+    proof: string;
+    networkFeeLamports?: bigint | null;
+    ownerNativeDeltaLamports?: bigint | null;
+    ownedTokenAccountLamportDelta?: bigint | null;
+  }): void => {
+    const tokenScale = 10 ** args.decimals;
+    if (args.pending.side === "buy") {
+      const tokensReceivedUi = Number(args.tokenDeltaRaw) / tokenScale;
+      const spendLamports = -args.economicLamports;
+      if (spendLamports <= 0n || !(tokensReceivedUi > 0)) {
+        throw new Error(
+          `Invalid confirmed buy economics for ${args.pending.signature}`,
+        );
+      }
+      const buySol = Number(spendLamports) / 1e9;
+      recordBuy(journal, buySol);
+      journal.lastTradeSide = "buy";
+      journal.lastBuyAtMs = args.pending.submittedAtMs;
+      journal.lastBuyPriceSol = buySol / tokensReceivedUi;
+      journal.lastSellPriceSol = null;
+      clearEntryPeak(journal);
+    } else {
+      const proceedsLamports = args.economicLamports;
+      const tokensSoldUi = Number(-args.tokenDeltaRaw) / tokenScale;
+      if (proceedsLamports <= 0n || !(tokensSoldUi > 0)) {
+        throw new Error(
+          `Invalid confirmed sell economics for ${args.pending.signature}`,
+        );
+      }
+      const actualSol = Number(proceedsLamports) / 1e9;
+      recordSell(journal, actualSol);
+      journal.lastTradeSide = "sell";
+      journal.lastSellAtMs = args.pending.submittedAtMs;
+      journal.lastSellPriceSol = actualSol / tokensSoldUi;
+    }
+
+    lastTradeAt = Math.max(journal.lastBuyAtMs ?? 0, journal.lastSellAtMs ?? 0);
+    journal.lastSettledSignature = args.pending.signature;
+    journal.pendingSettlement = null;
+    writeJournal(statePath, journal);
+    note("settlement.settled", {
+      side: args.pending.side,
+      venue: args.pending.venue,
+      signature: args.pending.signature,
+      proof: args.proof,
+      tokenDeltaRaw: args.tokenDeltaRaw.toString(),
+      economicSolDelta: Number(args.economicLamports) / 1e9,
+      networkFeeSol:
+        args.networkFeeLamports == null
+          ? null
+          : Number(args.networkFeeLamports) / 1e9,
+      ownerNativeDeltaSol:
+        args.ownerNativeDeltaLamports == null
+          ? null
+          : Number(args.ownerNativeDeltaLamports) / 1e9,
+      ownedTokenAccountLamportDeltaSol:
+        args.ownedTokenAccountLamportDelta == null
+          ? null
+          : Number(args.ownedTokenAccountLamportDelta) / 1e9,
+      lastBuyPriceSol: journal.lastBuyPriceSol,
+      lastSellPriceSol: journal.lastSellPriceSol,
+      cumulativeBuySol: journal.cumulativeBuySol,
+      cumulativeSellSol: journal.cumulativeSellSol,
+      netCapitalSol: netCapital(journal),
+    });
+  };
+
+  const recoverSignature = flag(flags, "recover-signature");
+  if (recoverSignature) {
+    const recoverSideRaw = flag(flags, "recover-side");
+    if (recoverSideRaw !== "buy" && recoverSideRaw !== "sell") {
+      throw new Error("--recover-signature requires --recover-side buy|sell");
+    }
+    const recoverVenueRaw = flag(flags, "recover-venue") ?? "raydium";
+    if (
+      recoverVenueRaw !== "raydium" &&
+      recoverVenueRaw !== "jupiter" &&
+      recoverVenueRaw !== "pump-curve" &&
+      recoverVenueRaw !== "pumpswap"
+    ) {
+      throw new Error(
+        "--recover-venue must be raydium, jupiter, pump-curve, or pumpswap",
+      );
+    }
+    if (
+      journal.pendingSettlement &&
+      journal.pendingSettlement.signature !== recoverSignature
+    ) {
+      throw new Error(
+        `Cannot recover ${recoverSignature} while different settlement ${journal.pendingSettlement.signature} is pending`,
+      );
+    }
+
+    if (journal.lastSettledSignature === recoverSignature) {
+      note("settlement.recover.already-applied", {
+        signature: recoverSignature,
+      });
+    } else {
+      const connection = slrd.connection();
+      let tx: any = await connection.getTransaction(recoverSignature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+      if (!tx) {
+        try {
+          tx = await connection.getParsedTransaction(recoverSignature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+        } catch {
+          // handled below
+        }
+      }
+      if (!tx) {
+        throw new Error(
+          `Recovery signature ${recoverSignature} is not available as a confirmed transaction yet; refusing to trade or guess its outcome`,
+        );
+      }
+      if (tx.meta?.err) {
+        throw new Error(
+          `Recovery signature ${recoverSignature} failed on-chain: ${JSON.stringify(tx.meta.err)}`,
+        );
+      }
+
+      const preToken = ownerTokenRaw(tx.meta?.preTokenBalances, wallet, mint);
+      const postToken = ownerTokenRaw(tx.meta?.postTokenBalances, wallet, mint);
+      const tokenDeltaRaw = postToken.raw - preToken.raw;
+      if (recoverSideRaw === "buy" && tokenDeltaRaw <= 0n) {
+        throw new Error(
+          `Recovery signature ${recoverSignature} does not prove a buy token delta`,
+        );
+      }
+      if (recoverSideRaw === "sell" && tokenDeltaRaw >= 0n) {
+        throw new Error(
+          `Recovery signature ${recoverSignature} does not prove a sell token delta`,
+        );
+      }
+      const decimals = postToken.decimals ?? preToken.decimals;
+      if (decimals == null) {
+        throw new Error(
+          `Recovery signature ${recoverSignature} has no token decimals`,
+        );
+      }
+      const solEconomics = transactionSolEconomics(tx, wallet);
+      if (!solEconomics) {
+        throw new Error(
+          `Recovery signature ${recoverSignature} has no provable wallet SOL economics`,
+        );
+      }
+
+      const pending: PendingSettlement = {
+        side: recoverSideRaw,
+        venue: recoverVenueRaw,
+        signature: recoverSignature,
+        requestedInputRaw: "0",
+        quotedOutputRaw: "0",
+        preTokenRaw: preToken.raw.toString(),
+        submittedAtMs:
+          typeof tx.blockTime === "number" && tx.blockTime > 0
+            ? tx.blockTime * 1_000
+            : Date.now(),
+      };
+      finalizePendingSettlement({
+        pending,
+        tokenDeltaRaw,
+        decimals,
+        economicLamports: solEconomics.economicLamports,
+        proof: "explicit-signature-transaction-metadata-recovery",
+        networkFeeLamports: solEconomics.networkFeeLamports,
+        ownerNativeDeltaLamports: solEconomics.ownerNativeDeltaLamports,
+        ownedTokenAccountLamportDelta:
+          solEconomics.ownedTokenAccountLamportDelta,
+      });
+      note("settlement.recover.applied", {
+        signature: recoverSignature,
+        side: recoverSideRaw,
+        venue: recoverVenueRaw,
+      });
+    }
+
+    if (flags.has("recover-only")) return;
+  }
+
   const reconcilePendingSettlement = async (): Promise<boolean> => {
     const pending = journal.pendingSettlement;
     if (!pending) return true;
@@ -1059,162 +1843,379 @@ export async function runValueBandAgent(
     const result = await m(
       {
         start: () => `settlement.reconcile.${pending.side}`,
-        end: (value: { settled: boolean; reason: string; signature: string }) =>
-          value,
+        end: (value: {
+          settled: boolean;
+          reason: string;
+          signature: string;
+          signatureStatus?: string | null;
+        }) => value,
       },
       async () => {
-        const tx = await slrd.connection().getTransaction(pending.signature, {
-          commitment: "confirmed",
-          maxSupportedTransactionVersion: 0,
-        });
-        if (!tx)
-          return {
-            settled: false,
-            reason: "transaction metadata not indexed yet",
-            signature: pending.signature,
-          };
-        if (tx.meta?.err) {
+        const connection = slrd.connection();
+        const statusResponse = await connection.getSignatureStatuses(
+          [pending.signature],
+          { searchTransactionHistory: true },
+        );
+        const status = statusResponse.value[0] ?? null;
+        if (status?.err) {
           journal.pendingSettlement = null;
           writeJournal(statePath, journal);
           throw new Error(
-            `Submitted ${pending.side} ${pending.signature} failed on-chain: ${JSON.stringify(tx.meta.err)}`,
+            `Submitted ${pending.side} ${pending.signature} failed on-chain: ${JSON.stringify(status.err)}`,
           );
         }
 
-        const preToken = ownerTokenRaw(tx.meta?.preTokenBalances, wallet, mint);
-        const postToken = ownerTokenRaw(
-          tx.meta?.postTokenBalances,
-          wallet,
-          mint,
-        );
-        const tokenDeltaRaw = postToken.raw - preToken.raw;
+        const statusName =
+          status?.confirmationStatus ??
+          (status?.confirmations === null
+            ? "finalized"
+            : status
+              ? "processed"
+              : null);
+
+        // Transaction metadata remains the strongest source because it isolates
+        // this transaction's exact token/SOL effects. Try both raw and parsed
+        // RPC surfaces before using the durable balance fallback below.
+        let tx: any = await connection.getTransaction(pending.signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        });
+        if (!tx && (statusName === "confirmed" || statusName === "finalized")) {
+          try {
+            tx = await connection.getParsedTransaction(pending.signature, {
+              commitment: "confirmed",
+              maxSupportedTransactionVersion: 0,
+            });
+          } catch {
+            // Some providers expose one transaction surface before the other.
+          }
+        }
+
+        if (tx) {
+          if (tx.meta?.err) {
+            journal.pendingSettlement = null;
+            writeJournal(statePath, journal);
+            throw new Error(
+              `Submitted ${pending.side} ${pending.signature} failed on-chain: ${JSON.stringify(tx.meta.err)}`,
+            );
+          }
+
+          const preToken = ownerTokenRaw(
+            tx.meta?.preTokenBalances,
+            wallet,
+            mint,
+          );
+          const postToken = ownerTokenRaw(
+            tx.meta?.postTokenBalances,
+            wallet,
+            mint,
+          );
+          const tokenDeltaRaw = postToken.raw - preToken.raw;
+          if (pending.side === "buy" && tokenDeltaRaw <= 0n)
+            return {
+              settled: false,
+              reason: "buy token delta not visible in tx metadata",
+              signature: pending.signature,
+              signatureStatus: statusName,
+            };
+          if (pending.side === "sell" && tokenDeltaRaw >= 0n)
+            return {
+              settled: false,
+              reason: "sell token delta not visible in tx metadata",
+              signature: pending.signature,
+              signatureStatus: statusName,
+            };
+
+          const expectedPostRaw = BigInt(pending.preTokenRaw) + tokenDeltaRaw;
+          const current = await currentWalletSettlementState();
+          if (current.currentRaw !== expectedPostRaw) {
+            note("settlement.wait-wallet-index", {
+              side: pending.side,
+              signature: pending.signature,
+              expectedPostTokenRaw: expectedPostRaw.toString(),
+              observedTokenRaw: current.currentRaw.toString(),
+            });
+            return {
+              settled: false,
+              reason: "wallet token index has not caught up",
+              signature: pending.signature,
+              signatureStatus: statusName,
+            };
+          }
+
+          const decimals =
+            postToken.decimals ?? preToken.decimals ?? current.decimals;
+          if (decimals == null)
+            return {
+              settled: false,
+              reason: "token decimals unavailable",
+              signature: pending.signature,
+              signatureStatus: statusName,
+            };
+
+          const solEconomics = transactionSolEconomics(tx, wallet);
+          if (!solEconomics)
+            return {
+              settled: false,
+              reason: "wallet SOL economics not provable from tx metadata",
+              signature: pending.signature,
+              signatureStatus: statusName,
+            };
+
+          finalizePendingSettlement({
+            pending,
+            tokenDeltaRaw,
+            decimals,
+            economicLamports: solEconomics.economicLamports,
+            proof: "transaction-metadata",
+            networkFeeLamports: solEconomics.networkFeeLamports,
+            ownerNativeDeltaLamports: solEconomics.ownerNativeDeltaLamports,
+            ownedTokenAccountLamportDelta:
+              solEconomics.ownedTokenAccountLamportDelta,
+          });
+          return {
+            settled: true,
+            reason: "confirmed tx and wallet index agree",
+            signature: pending.signature,
+            signatureStatus: statusName,
+          };
+        }
+
+        // If the provider's transaction-meta index is lagging, independently
+        // consult wallet signature history. This also distinguishes a genuinely
+        // unseen/dropped signature from a confirmed transaction whose metadata
+        // endpoint is stale.
+        const history = await walletSignatureHistory(pending.signature);
+        if (history.err) {
+          journal.pendingSettlement = null;
+          writeJournal(statePath, journal);
+          throw new Error(
+            `Submitted ${pending.side} ${pending.signature} failed on-chain: ${JSON.stringify(history.err)}`,
+          );
+        }
+        const historyStatus = history.confirmationStatus;
+        const confirmed =
+          statusName === "confirmed" ||
+          statusName === "finalized" ||
+          historyStatus === "confirmed" ||
+          historyStatus === "finalized";
+
+        if (!confirmed) {
+          const current = await currentWalletSettlementState();
+          const preTokenRaw = BigInt(pending.preTokenRaw);
+
+          // Locally compiled native trades carry exact blockhash expiry in new
+          // journals. Once that height is past, an unseen signature cannot later
+          // land. Clear only when the token balance also proves no trade effect.
+          if (pending.lastValidBlockHeight != null && !history.found) {
+            const currentBlockHeight =
+              await connection.getBlockHeight("confirmed");
+            if (
+              currentBlockHeight > pending.lastValidBlockHeight &&
+              current.currentRaw === preTokenRaw
+            ) {
+              journal.pendingSettlement = null;
+              writeJournal(statePath, journal);
+              note("settlement.expired-unseen", {
+                side: pending.side,
+                signature: pending.signature,
+                lastValidBlockHeight: pending.lastValidBlockHeight,
+                currentBlockHeight,
+              });
+              return {
+                settled: true,
+                reason: "submission expired unseen; pending cleared",
+                signature: pending.signature,
+                signatureStatus: statusName,
+              };
+            }
+          }
+
+          // Raydium Trade API transactions expose their recent blockhash but
+          // not the matching lastValidBlockHeight. The RPC can still prove the
+          // blockhash is no longer valid. If the signature is absent from wallet
+          // history and token balance is unchanged, it can no longer land.
+          if (
+            pending.lastValidBlockHeight == null &&
+            pending.recentBlockhash &&
+            !history.found
+          ) {
+            try {
+              const validity = await connection.isBlockhashValid(
+                pending.recentBlockhash,
+                "confirmed",
+              );
+              if (!validity.value && current.currentRaw === preTokenRaw) {
+                journal.pendingSettlement = null;
+                writeJournal(statePath, journal);
+                note("settlement.blockhash-expired-unseen", {
+                  side: pending.side,
+                  signature: pending.signature,
+                  recentBlockhash: pending.recentBlockhash,
+                });
+                return {
+                  settled: true,
+                  reason:
+                    "submission blockhash expired unseen; pending cleared",
+                  signature: pending.signature,
+                  signatureStatus: statusName,
+                };
+              }
+            } catch {
+              // Fall through to conservative age-based legacy expiry below.
+            }
+          }
+
+          // Backward-compatible recovery for journals created before blockhash
+          // expiry was persisted. Three minutes is deliberately far beyond a
+          // normal recent-blockhash lifetime. We still require the signature to
+          // be absent from wallet history AND the token balance to be unchanged.
+          const legacyExpiryMs = 180_000;
+          if (
+            pending.lastValidBlockHeight == null &&
+            !history.found &&
+            Date.now() - pending.submittedAtMs >= legacyExpiryMs &&
+            current.currentRaw === preTokenRaw
+          ) {
+            journal.pendingSettlement = null;
+            writeJournal(statePath, journal);
+            note("settlement.legacy-expired-unseen", {
+              side: pending.side,
+              signature: pending.signature,
+              ageMs: Date.now() - pending.submittedAtMs,
+            });
+            return {
+              settled: true,
+              reason:
+                "legacy submission unseen after conservative expiry; pending cleared",
+              signature: pending.signature,
+              signatureStatus: statusName,
+            };
+          }
+
+          return {
+            settled: false,
+            reason: status
+              ? `signature ${statusName ?? "pending"}; waiting for confirmation`
+              : "signature not yet found in status/history",
+            signature: pending.signature,
+            signatureStatus: statusName,
+          };
+        }
+
+        const current = await currentWalletSettlementState();
+        const preTokenRaw = BigInt(pending.preTokenRaw);
+        const tokenDeltaRaw = current.currentRaw - preTokenRaw;
         if (pending.side === "buy" && tokenDeltaRaw <= 0n)
           return {
             settled: false,
-            reason: "buy token delta not visible in tx metadata",
+            reason: "signature confirmed; waiting for wallet buy token delta",
             signature: pending.signature,
+            signatureStatus: statusName ?? historyStatus,
           };
         if (pending.side === "sell" && tokenDeltaRaw >= 0n)
           return {
             settled: false,
-            reason: "sell token delta not visible in tx metadata",
+            reason: "signature confirmed; waiting for wallet sell token delta",
             signature: pending.signature,
+            signatureStatus: statusName ?? historyStatus,
+          };
+        if (current.decimals == null)
+          return {
+            settled: false,
+            reason: "signature confirmed; token decimals unavailable",
+            signature: pending.signature,
+            signatureStatus: statusName ?? historyStatus,
           };
 
-        const expectedPostRaw = BigInt(pending.preTokenRaw) + tokenDeltaRaw;
-        const accounts = await slrd.tokenAccounts(walletRef);
-        const currentRaw = accounts
-          .filter(
-            (row) =>
-              row.mint === mint && row.isAssociated && row.amountRaw > 0n,
-          )
-          .reduce((sum, row) => sum + row.amountRaw, 0n);
-        if (currentRaw !== expectedPostRaw) {
-          note("settlement.wait-wallet-index", {
-            side: pending.side,
+        // Balance fallback is allowed only while this signature remains the
+        // latest wallet transaction and the latest transaction touching the
+        // strategy token ATA. That prevents unrelated later activity from being
+        // misattributed to this pending trade.
+        const tokenHistory = await tokenSignatureHistory(
+          pending.signature,
+          current.mintAccounts.map((row) => row.address),
+        );
+        if (
+          !history.found ||
+          !history.latest ||
+          !tokenHistory.found ||
+          !tokenHistory.latest
+        ) {
+          return {
+            settled: false,
+            reason:
+              "signature confirmed but transaction metadata unavailable and newer/unattributed wallet activity prevents balance-delta settlement",
             signature: pending.signature,
-            expectedPostTokenRaw: expectedPostRaw.toString(),
-            observedTokenRaw: currentRaw.toString(),
+            signatureStatus: statusName ?? historyStatus,
+          };
+        }
+
+        // Existing v1 journals did not persist pre-submit SOL accounting. A
+        // PumpSwap BuyExactQuoteIn has one useful exception: requestedInputRaw is
+        // the exact quote budget consumed by the protocol, so a confirmed latest
+        // signature plus its latest token-account delta is sufficient to recover
+        // the buy without guessing from a later SOL balance.
+        if (pending.side === "buy" && pending.venue === "pumpswap") {
+          const spendLamports = BigInt(pending.requestedInputRaw);
+          finalizePendingSettlement({
+            pending,
+            tokenDeltaRaw,
+            decimals: current.decimals,
+            economicLamports: -spendLamports,
+            proof:
+              "confirmed-signature+latest-wallet/token-history+pumpswap-exact-input",
           });
           return {
-            settled: false,
-            reason: "wallet token index has not caught up",
+            settled: true,
+            reason:
+              "confirmed PumpSwap exact-input buy settled from wallet delta",
             signature: pending.signature,
+            signatureStatus: statusName ?? historyStatus,
           };
         }
 
-        const decimals =
-          postToken.decimals ??
-          preToken.decimals ??
-          accounts.find((row) => row.mint === mint)?.decimals ??
-          null;
-        if (decimals == null)
+        const hasBalanceProof =
+          pending.preWalletLamports != null &&
+          pending.preOwnedTokenAccountLamports != null &&
+          pending.estimatedNetworkFeeLamports != null;
+        if (!hasBalanceProof) {
           return {
             settled: false,
-            reason: "token decimals unavailable",
+            reason:
+              "signature confirmed but transaction metadata unavailable; legacy journal lacks pre-submit accounting proof",
             signature: pending.signature,
+            signatureStatus: statusName ?? historyStatus,
           };
-        const tokenScale = 10 ** decimals;
-
-        const solEconomics = transactionSolEconomics(tx, wallet);
-        if (!solEconomics)
-          return {
-            settled: false,
-            reason: "wallet SOL economics not provable from tx metadata",
-            signature: pending.signature,
-          };
-
-        if (pending.side === "buy") {
-          const tokensReceivedUi = Number(tokenDeltaRaw) / tokenScale;
-          const spendLamports = -solEconomics.economicLamports;
-          if (spendLamports <= 0n)
-            return {
-              settled: false,
-              reason: "confirmed buy has no negative SOL/WSOL economic delta",
-              signature: pending.signature,
-            };
-          const buySol = Number(spendLamports) / 1e9;
-          if (!(tokensReceivedUi > 0) || !(buySol > 0))
-            return {
-              settled: false,
-              reason: "invalid confirmed buy economics",
-              signature: pending.signature,
-            };
-          recordBuy(journal, buySol);
-          journal.lastTradeSide = "buy";
-          journal.lastBuyAtMs = pending.submittedAtMs;
-          journal.lastBuyPriceSol = buySol / tokensReceivedUi;
-          journal.lastSellPriceSol = null;
-          clearEntryPeak(journal);
-        } else {
-          const proceedsLamports = solEconomics.economicLamports;
-          if (proceedsLamports <= 0n)
-            return {
-              settled: false,
-              reason: "confirmed sell has no positive SOL/WSOL economic delta",
-              signature: pending.signature,
-            };
-          const tokensSoldUi = Number(-tokenDeltaRaw) / tokenScale;
-          const actualSol = Number(proceedsLamports) / 1e9;
-          if (!(tokensSoldUi > 0) || !(actualSol > 0))
-            return {
-              settled: false,
-              reason: "invalid confirmed sell economics",
-              signature: pending.signature,
-            };
-          recordSell(journal, actualSol);
-          journal.lastTradeSide = "sell";
-          journal.lastSellAtMs = pending.submittedAtMs;
-          journal.lastSellPriceSol = actualSol / tokensSoldUi;
         }
 
-        lastTradeAt = Math.max(
-          journal.lastBuyAtMs ?? 0,
-          journal.lastSellAtMs ?? 0,
-        );
-        journal.pendingSettlement = null;
-        writeJournal(statePath, journal);
-        note("settlement.settled", {
-          side: pending.side,
-          venue: pending.venue,
-          signature: pending.signature,
-          tokenDeltaRaw: tokenDeltaRaw.toString(),
-          economicSolDelta: Number(solEconomics.economicLamports) / 1e9,
-          networkFeeSol: Number(solEconomics.networkFeeLamports) / 1e9,
-          ownerNativeDeltaSol:
-            Number(solEconomics.ownerNativeDeltaLamports) / 1e9,
-          ownedTokenAccountLamportDeltaSol:
-            Number(solEconomics.ownedTokenAccountLamportDelta) / 1e9,
-          lastBuyPriceSol: journal.lastBuyPriceSol,
-          lastSellPriceSol: journal.lastSellPriceSol,
-          cumulativeBuySol: journal.cumulativeBuySol,
-          cumulativeSellSol: journal.cumulativeSellSol,
-          netCapitalSol: netCapital(journal),
+        const preWalletLamports = BigInt(pending.preWalletLamports!);
+        const preOwnedLamports = BigInt(pending.preOwnedTokenAccountLamports!);
+        const networkFeeLamports = BigInt(pending.estimatedNetworkFeeLamports!);
+        const ownerNativeDeltaLamports =
+          current.walletLamports - preWalletLamports;
+        const ownedTokenAccountLamportDelta =
+          current.ownedTokenAccountLamports - preOwnedLamports;
+        const economicLamports =
+          ownerNativeDeltaLamports +
+          ownedTokenAccountLamportDelta +
+          networkFeeLamports;
+
+        finalizePendingSettlement({
+          pending,
+          tokenDeltaRaw,
+          decimals: current.decimals,
+          economicLamports,
+          proof: "confirmed-signature+latest-balance-delta",
+          networkFeeLamports,
+          ownerNativeDeltaLamports,
+          ownedTokenAccountLamportDelta,
         });
         return {
           settled: true,
-          reason: "confirmed tx and wallet index agree",
+          reason: "confirmed signature settled from durable balance proof",
           signature: pending.signature,
+          signatureStatus: statusName ?? historyStatus,
         };
       },
     );
@@ -1303,12 +2304,9 @@ export async function runValueBandAgent(
   let scaleNow = flags.has("scale-now");
   let stopping = false;
   let consecutiveCycleFailures = 0;
-  // Non-null only in the dangerous window after we start a swap call but before
-  // its signature has been durably persisted as pendingSettlement. Any error in
-  // this window is fail-stop: the transaction may have reached the network and
-  // blindly retrying could duplicate the trade.
-  let tradeSubmissionInProgress: { side: TradeSide; venue: SwapVenue } | null =
-    null;
+  // executeRoutedSwap marks only errors that occur inside a potentially
+  // submitting sender/execution call as submissionAmbiguous. Quote/build/guard
+  // failures remain ordinary retryable cycle failures.
   process.once("SIGINT", () => {
     stopping = true;
   });
@@ -1381,6 +2379,9 @@ export async function runValueBandAgent(
       },
       () =>
         quoteBestRoute({
+          slrd,
+          walletRef,
+          mint,
           raydium,
           mode: routing,
           inputMint: WSOL,
@@ -1469,7 +2470,9 @@ export async function runValueBandAgent(
 
     if (snap.amountRaw <= 0n || snap.liquidationSol <= 0) {
       const sized = await sizeToBase({
+        slrd,
         raydium,
+        walletRef,
         routing,
         slippageBps,
         mint,
@@ -1501,6 +2504,9 @@ export async function runValueBandAgent(
       }
       const lamports = BigInt(Math.floor(spendSol * 1e9));
       const q = await quoteBestRoute({
+        slrd,
+        walletRef,
+        mint,
         raydium,
         mode: routing,
         inputMint: WSOL,
@@ -1519,7 +2525,9 @@ export async function runValueBandAgent(
 
     if (selectedMode === "same-tokens") {
       const sized = await sizeSameTokens({
+        slrd,
         raydium,
+        walletRef,
         routing,
         slippageBps,
         mint,
@@ -1537,7 +2545,9 @@ export async function runValueBandAgent(
     }
 
     const sized = await sizeToBase({
+      slrd,
       raydium,
+      walletRef,
       routing,
       slippageBps,
       mint,
@@ -1730,8 +2740,11 @@ export async function runValueBandAgent(
         }
 
         const executionQuote = await quoteBestRoute({
+          slrd,
+          walletRef,
+          mint,
           raydium,
-          mode: sized.venue ?? routing,
+          mode: sized.venue ? venueModeForQuote(sized.venue) : routing,
           inputMint: WSOL,
           outputMint: mint,
           amountRaw: sized.lamports,
@@ -1820,11 +2833,7 @@ export async function runValueBandAgent(
           }
         }
 
-        tradeSubmissionInProgress = {
-          side: "buy",
-          venue: executionQuote.venue,
-        };
-        note("trade.submission.begin", {
+        note("trade.execution.prepare", {
           side: "buy",
           venue: executionQuote.venue,
           requestedInputRaw: executionQuote.inputRaw.toString(),
@@ -1863,9 +2872,15 @@ export async function runValueBandAgent(
           quotedOutputRaw: executionQuote.outputRaw.toString(),
           preTokenRaw: snap.amountRaw.toString(),
           submittedAtMs: Date.now(),
+          recentBlockhash: result.settlement?.recentBlockhash ?? null,
+          lastValidBlockHeight: result.settlement?.lastValidBlockHeight ?? null,
+          preWalletLamports: snap.walletLamports.toString(),
+          preOwnedTokenAccountLamports:
+            snap.ownedTokenAccountLamports.toString(),
+          estimatedNetworkFeeLamports:
+            result.settlement?.estimatedNetworkFeeLamports ?? null,
         };
         writeJournal(statePath, journal);
-        tradeSubmissionInProgress = null;
         note("settlement.pending", journal.pendingSettlement);
 
         const settled = await settleWithRetries();
@@ -1971,6 +2986,9 @@ export async function runValueBandAgent(
         }
 
         const quote = await quoteBestRoute({
+          slrd,
+          walletRef,
+          mint,
           raydium,
           mode: routing,
           inputMint: mint,
@@ -2043,8 +3061,7 @@ export async function runValueBandAgent(
           }
         }
 
-        tradeSubmissionInProgress = { side: "sell", venue: quote.venue };
-        note("trade.submission.begin", {
+        note("trade.execution.prepare", {
           side: "sell",
           venue: quote.venue,
           requestedInputRaw: quote.inputRaw.toString(),
@@ -2084,9 +3101,15 @@ export async function runValueBandAgent(
           quotedOutputRaw: quote.outputRaw.toString(),
           preTokenRaw: snap.amountRaw.toString(),
           submittedAtMs: Date.now(),
+          recentBlockhash: result.settlement?.recentBlockhash ?? null,
+          lastValidBlockHeight: result.settlement?.lastValidBlockHeight ?? null,
+          preWalletLamports: snap.walletLamports.toString(),
+          preOwnedTokenAccountLamports:
+            snap.ownedTokenAccountLamports.toString(),
+          estimatedNetworkFeeLamports:
+            result.settlement?.estimatedNetworkFeeLamports ?? null,
         };
         writeJournal(statePath, journal);
-        tradeSubmissionInProgress = null;
         note("settlement.pending", journal.pendingSettlement);
 
         const settled = await settleWithRetries();
@@ -2300,15 +3323,64 @@ export async function runValueBandAgent(
                 : null;
 
             if (scaleNow) {
-              // Startup-only control. It is consumed on the first eligible cycle.
-              scaleNow = false;
+              // --scale-now is an intent to scale toward base, not permission for
+              // exactly one broadcast attempt. Keep it armed across a dropped or
+              // expired submission; consume it only once the confirmed position
+              // reaches base or the configured capital budget cannot fund another
+              // minimum trade.
               if (latest.liquidationSol < p.baseSol) {
                 latest = await executeBuy(latest, true);
+              }
+
+              if (!journal.pendingSettlement) {
+                const capitalRemaining = Math.max(
+                  0,
+                  p.maxCapitalDeployedSol - netCapital(journal),
+                );
+                if (latest.liquidationSol >= p.baseSol) {
+                  scaleNow = false;
+                  note("scale.complete", {
+                    reason: "confirmed position reached base",
+                    liquidationSol: latest.liquidationSol,
+                    baseSol: p.baseSol,
+                    netCapitalSol: netCapital(journal),
+                  });
+                } else {
+                  const executableBudgetSol = await availableBuyBudget(
+                    p,
+                    latest,
+                  );
+                  if (executableBudgetSol < p.minTradeSol) {
+                    scaleNow = false;
+                    note("scale.hold", {
+                      reason:
+                        capitalRemaining < p.minTradeSol
+                          ? "capital cap reached before base"
+                          : "wallet/reserve budget cannot fund another minimum trade",
+                      liquidationSol: latest.liquidationSol,
+                      baseSol: p.baseSol,
+                      netCapitalSol: netCapital(journal),
+                      maxCapitalSol: p.maxCapitalDeployedSol,
+                      capitalRemainingSol: capitalRemaining,
+                      executableBudgetSol,
+                    });
+                  } else {
+                    note("scale.armed", {
+                      reason:
+                        "scale-to-base intent remains armed; no confirmed fill yet",
+                      liquidationSol: latest.liquidationSol,
+                      baseSol: p.baseSol,
+                      netCapitalSol: netCapital(journal),
+                      capitalRemainingSol: capitalRemaining,
+                      executableBudgetSol,
+                    });
+                  }
+                }
               } else {
-                note("scale.hold", {
-                  reason: "already at-or-above base",
-                  liquidationSol: latest.liquidationSol,
-                  baseSol: p.baseSol,
+                note("scale.armed", {
+                  reason:
+                    "scale-to-base intent remains armed while buy settlement is unresolved",
+                  signature: journal.pendingSettlement.signature,
                 });
               }
             }
@@ -2374,12 +3446,12 @@ export async function runValueBandAgent(
             ? { name: error.name, message: error.message }
             : { name: "Error", message: String(error) };
 
-        if (tradeSubmissionInProgress) {
+        if (isSubmissionAmbiguous(error)) {
           note("cycle.fail-stop.execution-ambiguous", {
             ...err,
-            ...tradeSubmissionInProgress,
+            venue: error.submissionVenue ?? null,
             reason:
-              "swap call failed before a signature was durably journaled; refusing automatic retry because submission status is ambiguous",
+              "sender/execution call failed after submission may have begun but before a signature was durably journaled; refusing automatic retry",
           });
           throw error;
         }

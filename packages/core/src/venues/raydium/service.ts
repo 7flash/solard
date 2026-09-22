@@ -731,6 +731,73 @@ export class RaydiumService {
     };
   }
 
+  /**
+   * Simulate and submit prepared Raydium transaction(s) without waiting for
+   * confirmation. Signatures are returned immediately after sendRawTransaction
+   * accepts each transaction so callers can durably journal them before any
+   * confirmation timeout can lose the submission identity.
+   */
+  async submitPrepared(
+    prepared: RaydiumPreparedTransactions,
+    options: RaydiumExecutionOptions = {},
+  ): Promise<RaydiumExecutionResult> {
+    assertLive(options);
+    const connection = this.host.connection();
+    const owner = this.host.signer(prepared.wallet);
+    const commitment = options.commitment ?? "confirmed";
+    const simulations: RaydiumExecutionResult["simulations"] = [];
+    const signatures: string[] = [];
+
+    for (let index = 0; index < prepared.transactions.length; index += 1) {
+      const tx = prepared.transactions[index]!;
+      signTransaction(tx, [owner, ...(prepared.extraSigners ?? [])]);
+      if (options.simulate !== false) {
+        const simulated = await connection.simulateTransaction(
+          tx as any,
+          {
+            sigVerify: true,
+            replaceRecentBlockhash: false,
+            commitment,
+          } as any,
+        );
+        simulations.push({
+          err: simulated.value.err,
+          unitsConsumed: simulated.value.unitsConsumed ?? null,
+          logs: simulated.value.logs ?? [],
+        });
+        if (
+          simulated.value.err &&
+          (options.live === true ||
+            prepared.transactions.length === 1 ||
+            index === 0)
+        ) {
+          throw new Error(
+            `Raydium ${prepared.kind} simulation failed: ${JSON.stringify(simulated.value.err)}`,
+          );
+        }
+      }
+      if (options.live === true) {
+        const signature = await connection.sendRawTransaction(tx.serialize(), {
+          skipPreflight: options.skipPreflight ?? false,
+          preflightCommitment: commitment,
+          maxRetries: options.maxRetries ?? 3,
+        });
+        // IMPORTANT: persist in the returned result immediately. Confirmation
+        // belongs to the caller's durable settlement barrier.
+        signatures.push(signature);
+      }
+    }
+
+    return {
+      kind: prepared.kind,
+      simulated: options.simulate !== false,
+      live: options.live === true,
+      signatures,
+      simulations,
+      metadata: prepared.metadata,
+    };
+  }
+
   async executePrepared(
     prepared: RaydiumPreparedTransactions,
     options: RaydiumExecutionOptions = {},

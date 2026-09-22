@@ -54,7 +54,49 @@ export type RegistrySolSweepOptions = {
   tokenScanConcurrency?: number;
   tokenScanDelayMs?: number;
   delayMs?: number;
+  /** Maximum fresh live attempts after a prior signed transaction is proven unable to land. */
+  maxAttempts?: number;
+  /** Confirmation wait for each submitted signature before expiry reconciliation begins. */
+  confirmationTimeoutMs?: number;
+  /** Poll interval while reconciling an unresolved submitted signature. */
+  confirmationPollMs?: number;
+  /** Optional live/simulation progress. Observability only; must not affect execution semantics. */
+  onProgress?: (event: RegistrySolSweepProgress) => void;
 };
+
+export type RegistrySolSweepProgress =
+  | {
+      stage: "wallet-start";
+      index: number;
+      total: number;
+      row: RegistrySolSweepRow;
+    }
+  | {
+      stage: "wallet-pending";
+      index: number;
+      total: number;
+      row: RegistrySolSweepRow;
+      attempt: number;
+      maxAttempts: number;
+      signature: string;
+      reason: string;
+    }
+  | {
+      stage: "wallet-done";
+      index: number;
+      total: number;
+      row: RegistrySolSweepRow;
+      receipt?: SendReceipt;
+      remainingLamports: bigint;
+      attempts: number;
+    }
+  | {
+      stage: "wallet-error";
+      index: number;
+      total: number;
+      row: RegistrySolSweepRow;
+      error: string;
+    };
 
 export type RegistrySolSweepPlan = {
   destination: string;
@@ -79,6 +121,29 @@ const pause = (ms: number) =>
   ms > 0
     ? new Promise<void>((resolve) => setTimeout(resolve, ms))
     : Promise.resolve();
+
+function sweepSourceBlockedReason(
+  info: { owner: PublicKey; data: Uint8Array } | null,
+): string | null {
+  if (!info) return null;
+  if (!info.owner.equals(SystemProgram.programId))
+    return "source-not-system-owned";
+  if (info.data.length !== 0) return "source-account-has-data";
+  return null;
+}
+
+function requireSweepableSource(
+  walletAddress: string,
+  info: { owner: PublicKey; data: Uint8Array } | null,
+): void {
+  if (!info) throw new Error(`source account ${walletAddress} does not exist`);
+  const reason = sweepSourceBlockedReason(info);
+  if (reason) {
+    throw new Error(
+      `source account ${walletAddress} is not sweepable by SystemProgram.transfer: ${reason}`,
+    );
+  }
+}
 
 function resolveDestination(slrd: Solard, value: string): PublicKey {
   const input = value.trim();
@@ -271,6 +336,7 @@ export async function planRegistrySolSweep(
   );
 
   const balances = new Map<string, bigint>();
+  const sourceBlockedReasons = new Map<string, string>();
   for (let offset = 0; offset < candidates.length; offset += 100) {
     const batch = candidates.slice(offset, offset + 100);
     const infos = await slrd.connection().getMultipleAccountsInfo(
@@ -278,7 +344,11 @@ export async function planRegistrySolSweep(
       "confirmed",
     );
     for (let index = 0; index < batch.length; index++) {
-      balances.set(batch[index]!.address, BigInt(infos[index]?.lamports ?? 0));
+      const wallet = batch[index]!;
+      const info = infos[index] ?? null;
+      balances.set(wallet.address, BigInt(info?.lamports ?? 0));
+      const blocked = sweepSourceBlockedReason(info);
+      if (blocked) sourceBlockedReasons.set(wallet.address, blocked);
     }
   }
 
@@ -294,6 +364,7 @@ export async function planRegistrySolSweep(
   const rows: RegistrySolSweepRow[] = [];
   for (const wallet of candidates) {
     const balanceLamports = balances.get(wallet.address) ?? 0n;
+    const sourceBlockedReason = sourceBlockedReasons.get(wallet.address);
     const excludedByMaxBalance =
       maxBalanceLamports != null && balanceLamports >= maxBalanceLamports;
     const configured = explicitKeepLamportsFor(wallet, options);
@@ -351,6 +422,7 @@ export async function planRegistrySolSweep(
     }
 
     const sendLamports =
+      !sourceBlockedReason &&
       !excludedByMaxBalance &&
       balanceLamports > keepLamports + sharedFeeLamports
         ? balanceLamports - keepLamports - sharedFeeLamports
@@ -369,11 +441,13 @@ export async function planRegistrySolSweep(
       reserveReason,
       reserveTokenMint,
       reserveTokenAmountRaw,
-      skippedReason: excludedByMaxBalance
-        ? "balance-at-or-above-max"
-        : sendLamports > 0n
-          ? undefined
-          : "balance-too-low",
+      skippedReason: sourceBlockedReason
+        ? sourceBlockedReason
+        : excludedByMaxBalance
+          ? "balance-at-or-above-max"
+          : sendLamports > 0n
+            ? undefined
+            : "balance-too-low",
     });
   }
 
@@ -402,11 +476,12 @@ export async function simulateRegistrySolSweep(
   for (const row of plan.rows) {
     if (row.sendLamports <= 0n || row.skippedReason) continue;
     try {
-      const freshBalance = BigInt(
-        await slrd
-          .connection()
-          .getBalance(new PublicKey(row.walletAddress), "confirmed"),
-      );
+      const sourceKey = new PublicKey(row.walletAddress);
+      const sourceInfo = await slrd
+        .connection()
+        .getAccountInfo(sourceKey, "confirmed");
+      requireSweepableSource(row.walletAddress, sourceInfo);
+      const freshBalance = BigInt(sourceInfo!.lamports);
       const built = await buildExactSweepPlan(
         slrd,
         row.walletAddress,
@@ -434,6 +509,93 @@ export async function simulateRegistrySolSweep(
   return results;
 }
 
+async function currentSweepSourceInfo(slrd: Solard, walletAddress: string) {
+  return await slrd
+    .connection()
+    .getAccountInfo(new PublicKey(walletAddress), "confirmed");
+}
+
+async function waitForSweepSubmissionToSettle(args: {
+  slrd: Solard;
+  submission: Awaited<ReturnType<Solard["submitPlan"]>>;
+  row: RegistrySolSweepRow;
+  index: number;
+  total: number;
+  attempt: number;
+  maxAttempts: number;
+  confirmationTimeoutMs: number;
+  confirmationPollMs: number;
+  onProgress?: RegistrySolSweepOptions["onProgress"];
+}): Promise<SendReceipt> {
+  let receipt = await args.slrd.confirmSubmission(
+    args.submission,
+    args.confirmationTimeoutMs,
+  );
+  if (receipt.status !== "submitted") return receipt;
+
+  args.onProgress?.({
+    stage: "wallet-pending",
+    index: args.index,
+    total: args.total,
+    row: args.row,
+    attempt: args.attempt,
+    maxAttempts: args.maxAttempts,
+    signature: args.submission.signature,
+    reason:
+      "confirmation-timeout; waiting until confirmed/failed or blockhash expiry",
+  });
+
+  // A timed-out signature is NOT safe to rebuild immediately: it may still land.
+  // Reconcile it until it confirms/fails or the original blockhash is expired.
+  while (true) {
+    const status = (
+      await args.slrd
+        .connection()
+        .getSignatureStatuses([args.submission.signature], {
+          searchTransactionHistory: true,
+        })
+    ).value[0];
+
+    if (status?.err) {
+      return {
+        signature: args.submission.signature,
+        slot: status.slot ?? null,
+        sender: args.submission.sender,
+        status: "failed",
+        error: JSON.stringify(status.err),
+      };
+    }
+
+    if (
+      status?.confirmationStatus === "confirmed" ||
+      status?.confirmationStatus === "finalized" ||
+      status?.confirmations === null
+    ) {
+      receipt = await args.slrd.confirmSignature(
+        args.submission.signature,
+        args.submission.sender,
+        5_000,
+      );
+      if (receipt.status !== "submitted") return receipt;
+    }
+
+    const blockHeight = await args.slrd
+      .connection()
+      .getBlockHeight("confirmed");
+    if (blockHeight > args.submission.plan.lastValidBlockHeight) {
+      return {
+        signature: args.submission.signature,
+        slot: status?.slot ?? null,
+        sender: args.submission.sender,
+        status: "submitted",
+        error: "blockhash-expired-without-confirmation",
+      };
+    }
+
+    await pause(args.confirmationPollMs);
+  }
+}
+
 export async function executeRegistrySolSweep(
   slrd: Solard,
   plan: RegistrySolSweepPlan,
@@ -442,48 +604,240 @@ export async function executeRegistrySolSweep(
   const destination = new PublicKey(plan.destination);
   const results: RegistrySolSweepReceipt[] = [];
   const delayMs = Math.max(0, options.delayMs ?? 100);
-  for (const row of plan.rows) {
-    if (row.sendLamports <= 0n || row.skippedReason) continue;
-    try {
-      // Refresh immediately before signing so concurrent cleanup/funding work
-      // cannot make the planned transfer stale.
-      const freshBalance = BigInt(
-        await slrd
-          .connection()
-          .getBalance(new PublicKey(row.walletAddress), "confirmed"),
-      );
-      const built = await buildExactSweepPlan(
-        slrd,
-        row.walletAddress,
-        destination,
-        freshBalance,
-        row.keepLamports,
-      );
-      const receipt = await slrd.sendPlan(
-        built.plan,
-        "rpc",
-        "registry-sol-sweep",
-        {
-          skipSimulation: false,
-          skipPreflight: false,
-        },
-      );
-      results.push({
-        row: {
-          ...row,
+  const maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? 3));
+  const confirmationTimeoutMs = Math.max(
+    1_000,
+    Math.trunc(options.confirmationTimeoutMs ?? 15_000),
+  );
+  const confirmationPollMs = Math.max(
+    250,
+    Math.trunc(options.confirmationPollMs ?? 750),
+  );
+  const maxBalanceLamports =
+    options.maxBalanceSol != null ? sol(options.maxBalanceSol).raw : null;
+
+  const executable = plan.rows.filter(
+    (row) => row.sendLamports > 0n && !row.skippedReason,
+  );
+
+  for (let index = 0; index < executable.length; index += 1) {
+    const plannedRow = executable[index]!;
+    options.onProgress?.({
+      stage: "wallet-start",
+      index: index + 1,
+      total: executable.length,
+      row: plannedRow,
+    });
+
+    let finalReceipt: SendReceipt | undefined;
+    let completedRow = plannedRow;
+    let success = false;
+    let lastError: string | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const sourceInfo = await currentSweepSourceInfo(
+          slrd,
+          plannedRow.walletAddress,
+        );
+
+        // Already drained by a prior attempt/process is a converged state.
+        if (!sourceInfo) {
+          completedRow = {
+            ...plannedRow,
+            balanceLamports: 0n,
+            feeLamports: 0n,
+            sendLamports: 0n,
+          };
+          success = true;
+          break;
+        }
+
+        requireSweepableSource(plannedRow.walletAddress, sourceInfo);
+        const freshBalance = BigInt(sourceInfo.lamports);
+
+        // Re-enforce the ceiling at execution time. A wallet funded above the
+        // threshold after planning must never be drained because of a stale plan.
+        if (maxBalanceLamports != null && freshBalance >= maxBalanceLamports) {
+          throw new Error(
+            `fresh balance ${freshBalance.toString()} is at-or-above sweep ceiling ${maxBalanceLamports.toString()}; refusing stale planned sweep`,
+          );
+        }
+
+        if (freshBalance <= plannedRow.keepLamports) {
+          completedRow = {
+            ...plannedRow,
+            balanceLamports: freshBalance,
+            feeLamports: 0n,
+            sendLamports: 0n,
+          };
+          success = true;
+          break;
+        }
+
+        const built = await buildExactSweepPlan(
+          slrd,
+          plannedRow.walletAddress,
+          destination,
+          freshBalance,
+          plannedRow.keepLamports,
+        );
+        completedRow = {
+          ...plannedRow,
           balanceLamports: freshBalance,
           feeLamports: built.feeLamports,
           sendLamports: built.sendLamports,
-        },
-        receipt,
-      });
-    } catch (error) {
+        };
+
+        const submission = await slrd.submitPlan(
+          built.plan,
+          "rpc",
+          "registry-sol-sweep",
+          {
+            skipSimulation: false,
+            skipPreflight: false,
+          },
+        );
+
+        const receipt = await waitForSweepSubmissionToSettle({
+          slrd,
+          submission,
+          row: completedRow,
+          index: index + 1,
+          total: executable.length,
+          attempt,
+          maxAttempts,
+          confirmationTimeoutMs,
+          confirmationPollMs,
+          onProgress: options.onProgress,
+        });
+        finalReceipt = receipt;
+
+        const afterInfo = await currentSweepSourceInfo(
+          slrd,
+          plannedRow.walletAddress,
+        );
+        const remainingLamports = BigInt(afterInfo?.lamports ?? 0);
+
+        if (receipt.status === "confirmed") {
+          if (remainingLamports <= plannedRow.keepLamports) {
+            success = true;
+            break;
+          }
+
+          // The transaction confirmed but new SOL may have arrived meanwhile.
+          // Retry only if the fresh balance still satisfies the ceiling.
+          if (
+            maxBalanceLamports != null &&
+            remainingLamports >= maxBalanceLamports
+          ) {
+            throw new Error(
+              `sweep confirmed but wallet was re-funded to ${remainingLamports.toString()} lamports, at-or-above the configured ceiling`,
+            );
+          }
+
+          lastError =
+            `sweep ${receipt.signature} confirmed but ` +
+            `${remainingLamports.toString()} lamports remain above reserve ` +
+            `${plannedRow.keepLamports.toString()}`;
+          if (attempt < maxAttempts) continue;
+          break;
+        }
+
+        if (receipt.status === "failed") {
+          lastError =
+            `sweep ${receipt.signature} failed` +
+            `${receipt.error ? `: ${receipt.error}` : ""}`;
+          if (attempt < maxAttempts) continue;
+          break;
+        }
+
+        // "submitted" here means the original blockhash expired without a
+        // confirmed/failed status. It is now safe to rebuild a fresh transaction.
+        if (remainingLamports <= plannedRow.keepLamports) {
+          lastError =
+            `signature ${receipt.signature} became unresolved, although the source ` +
+            `balance reached the requested reserve; refusing to label it confirmed`;
+          break;
+        }
+
+        lastError =
+          `signature ${receipt.signature} expired without confirmation; ` +
+          `${remainingLamports.toString()} lamports remain`;
+        if (attempt < maxAttempts) {
+          options.onProgress?.({
+            stage: "wallet-pending",
+            index: index + 1,
+            total: executable.length,
+            row: completedRow,
+            attempt,
+            maxAttempts,
+            signature: receipt.signature,
+            reason:
+              "expired-unconfirmed; rebuilding from fresh on-chain balance",
+          });
+          continue;
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+
+        // Simulation/build/account-eligibility errors are not ambiguous
+        // submissions. A fresh attempt is only useful for transient failures.
+        if (
+          /source-account-has-data|source-not-system-owned|at-or-above sweep ceiling|Simulation failed/i.test(
+            lastError,
+          )
+        ) {
+          break;
+        }
+
+        if (attempt < maxAttempts) {
+          await pause(confirmationPollMs);
+          continue;
+        }
+      }
+    }
+
+    const afterInfo = await currentSweepSourceInfo(
+      slrd,
+      plannedRow.walletAddress,
+    );
+    const remainingLamports = BigInt(afterInfo?.lamports ?? 0);
+
+    if (success) {
       results.push({
-        row,
-        error: error instanceof Error ? error.message : String(error),
+        row: completedRow,
+        receipt: finalReceipt,
+      });
+      options.onProgress?.({
+        stage: "wallet-done",
+        index: index + 1,
+        total: executable.length,
+        row: completedRow,
+        receipt: finalReceipt,
+        remainingLamports,
+        attempts: maxAttempts,
+      });
+    } else {
+      const errorText =
+        lastError ??
+        `sweep did not converge: ${remainingLamports.toString()} lamports remain`;
+      results.push({
+        row: completedRow,
+        receipt: finalReceipt,
+        error: errorText,
+      });
+      options.onProgress?.({
+        stage: "wallet-error",
+        index: index + 1,
+        total: executable.length,
+        row: completedRow,
+        error: errorText,
       });
     }
+
     await pause(delayMs);
   }
+
   return results;
 }

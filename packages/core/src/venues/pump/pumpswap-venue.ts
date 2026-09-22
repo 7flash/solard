@@ -4,8 +4,9 @@ import { OnlinePumpAmmSdk, PUMP_AMM_SDK } from "@pump-fun/pump-swap-sdk";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
   PublicKey,
+  SystemProgram,
+  TransactionInstruction,
   type AccountMeta,
-  type TransactionInstruction,
 } from "@solana/web3.js";
 import { sameAsset, type RawAmount } from "../../core/amounts.ts";
 import type {
@@ -18,6 +19,7 @@ import type {
 } from "../venue-plugin.ts";
 import { ammUserVolumeAccumulatorPda, ata, pumpSwapPoolPda } from "./pda.ts";
 import {
+  AMM_BUY_D8,
   AMM_BUY_EXACT_QUOTE_IN_D8,
   AMM_SELL_D8,
   PUMP_AMM_PROGRAM_ID,
@@ -75,29 +77,200 @@ function readU64(data: Buffer | Uint8Array, offset: number): bigint {
   return bytes.readBigUInt64LE(offset);
 }
 
+function instructionDiscriminatorEquals(
+  instruction: TransactionInstruction,
+  discriminator: Buffer,
+): boolean {
+  return (
+    instruction.programId.equals(PUMP_AMM_PROGRAM_ID) &&
+    instruction.data.length >= 24 &&
+    Buffer.from(instruction.data.subarray(0, 8)).equals(discriminator)
+  );
+}
+
 function pumpTradeInstruction(
   instructions: TransactionInstruction[],
   discriminator: Buffer,
   label: string,
 ): TransactionInstruction {
-  const instruction = instructions.find((candidate) => {
-    if (!candidate.programId.equals(PUMP_AMM_PROGRAM_ID)) return false;
-    if (candidate.data.length < 24) return false;
-    return Buffer.from(candidate.data.subarray(0, 8)).equals(discriminator);
-  });
+  const instruction = instructions.find((candidate) =>
+    instructionDiscriminatorEquals(candidate, discriminator),
+  );
   if (!instruction)
     throw new Error(`PumpSwap SDK did not build ${label} instruction`);
   return instruction;
 }
 
-function expectedFromMinimum(
-  minimumOutputRaw: bigint,
-  slippageBps: number,
-): bigint {
-  const keptBps = 10_000 - slippageBps;
-  if (keptBps <= 0) return minimumOutputRaw;
-  const denominator = BigInt(keptBps);
-  return (minimumOutputRaw * 10_000n + denominator - 1n) / denominator;
+function systemTransferLamports(
+  instruction: TransactionInstruction,
+  from: PublicKey,
+  to: PublicKey,
+): bigint | null {
+  if (!instruction.programId.equals(SystemProgram.programId)) return null;
+  if (instruction.keys.length < 2) return null;
+  if (!instruction.keys[0]!.pubkey.equals(from)) return null;
+  if (!instruction.keys[1]!.pubkey.equals(to)) return null;
+  const data = Buffer.from(instruction.data);
+  // SystemInstruction::Transfer = enum variant 2 (u32 LE), followed by u64 lamports.
+  if (data.length < 12 || data.readUInt32LE(0) !== 2) return null;
+  return data.readBigUInt64LE(4);
+}
+
+function bpsFloor(value: bigint, keepBps: number): bigint {
+  if (!Number.isInteger(keepBps) || keepBps < 0 || keepBps > 10_000) {
+    throw new Error(`Invalid keep bps: ${keepBps}`);
+  }
+  return (value * BigInt(keepBps)) / 10_000n;
+}
+
+/**
+ * Convert a ZERO-SLIPPAGE SDK quote-driven PumpSwap buy into the protocol's
+ * exact-quote-input wire instruction.
+ *
+ * Why zero slippage?
+ * PumpAmmSdk.buyQuoteInput historically emits legacy
+ *   buy(base_out, max_quote_in)
+ * where max_quote_in is the quote budget scaled UP by slippage. Reusing that
+ * base_out as buy_exact_quote_in.min_base_out is invalid: it asks an exact
+ * quote budget to buy the amount that the legacy path was allowed to spend
+ * MORE quote to obtain.
+ *
+ * Instead, call the SDK with slippage=0. At zero slippage:
+ *   - max_quote_in must equal the requested exact quote input
+ *   - base_out is the SDK's authoritative current expected base output
+ *
+ * Solard then applies its own BPS slippage DOWN to that base output and encodes:
+ *   buy_exact_quote_in(requested_quote_in, min_base_out)
+ *
+ * All SDK-selected setup/accounts remain unchanged.
+ */
+export function normalizeZeroSlippageSdkBuyToExactQuoteIn(args: {
+  instructions: TransactionInstruction[];
+  requestedQuoteInRaw: bigint;
+  slippageBps: number;
+  user: PublicKey;
+  userQuoteTokenAccount: PublicKey;
+  nativeQuote: boolean;
+}): {
+  instructions: TransactionInstruction[];
+  expectedOutputRaw: bigint;
+  minimumOutputRaw: bigint;
+  sdkWire: "buy" | "buy_exact_quote_in";
+} {
+  if (args.requestedQuoteInRaw <= 0n)
+    throw new Error("PumpSwap exact quote input must be positive");
+  if (
+    !Number.isInteger(args.slippageBps) ||
+    args.slippageBps < 0 ||
+    args.slippageBps >= 10_000
+  ) {
+    throw new Error(`Invalid slippage bps: ${args.slippageBps}`);
+  }
+
+  const exactIndex = args.instructions.findIndex((candidate) =>
+    instructionDiscriminatorEquals(candidate, AMM_BUY_EXACT_QUOTE_IN_D8),
+  );
+  const legacyIndex = args.instructions.findIndex((candidate) =>
+    instructionDiscriminatorEquals(candidate, AMM_BUY_D8),
+  );
+
+  if (exactIndex < 0 && legacyIndex < 0) {
+    const observed = args.instructions
+      .filter((candidate) => candidate.programId.equals(PUMP_AMM_PROGRAM_ID))
+      .map((candidate) =>
+        Buffer.from(candidate.data.subarray(0, 8)).toString("hex"),
+      );
+    throw new Error(
+      `PumpSwap SDK did not build a recognized quote-driven buy instruction` +
+        `${observed.length ? ` (AMM discriminators: ${observed.join(",")})` : ""}`,
+    );
+  }
+
+  const tradeIndex = exactIndex >= 0 ? exactIndex : legacyIndex;
+  const trade = args.instructions[tradeIndex]!;
+  const sdkWire: "buy" | "buy_exact_quote_in" =
+    exactIndex >= 0 ? "buy_exact_quote_in" : "buy";
+
+  let expectedOutputRaw: bigint;
+
+  if (sdkWire === "buy_exact_quote_in") {
+    const sdkQuoteInRaw = readU64(trade.data, 8);
+    expectedOutputRaw = readU64(trade.data, 16);
+    if (sdkQuoteInRaw !== args.requestedQuoteInRaw) {
+      throw new Error(
+        `PumpSwap zero-slippage SDK exact-input changed quote amount: requested=${args.requestedQuoteInRaw} built=${sdkQuoteInRaw}`,
+      );
+    }
+  } else {
+    expectedOutputRaw = readU64(trade.data, 8);
+    const zeroSlippageMaxQuoteInRaw = readU64(trade.data, 16);
+    if (zeroSlippageMaxQuoteInRaw !== args.requestedQuoteInRaw) {
+      throw new Error(
+        `PumpSwap zero-slippage SDK legacy buy did not preserve quote budget: requested=${args.requestedQuoteInRaw} maxQuote=${zeroSlippageMaxQuoteInRaw}`,
+      );
+    }
+  }
+
+  if (expectedOutputRaw <= 0n)
+    throw new Error("PumpSwap zero-slippage quote resolves to zero output");
+
+  const minimumOutputRaw = bpsFloor(
+    expectedOutputRaw,
+    10_000 - args.slippageBps,
+  );
+  if (minimumOutputRaw <= 0n)
+    throw new Error(
+      "PumpSwap slippage-protected minimum resolves to zero output",
+    );
+
+  const exactData = Buffer.from(trade.data);
+  AMM_BUY_EXACT_QUOTE_IN_D8.copy(exactData, 0);
+  exactData.writeBigUInt64LE(args.requestedQuoteInRaw, 8);
+  exactData.writeBigUInt64LE(minimumOutputRaw, 16);
+
+  const normalized = args.instructions.map((instruction, index) =>
+    index === tradeIndex
+      ? new TransactionInstruction({
+          programId: instruction.programId,
+          keys: instruction.keys,
+          data: exactData,
+        })
+      : instruction,
+  );
+
+  if (args.nativeQuote) {
+    const funding = normalized
+      .map((instruction, index) => ({
+        index,
+        lamports: systemTransferLamports(
+          instruction,
+          args.user,
+          args.userQuoteTokenAccount,
+        ),
+      }))
+      .filter(
+        (row): row is { index: number; lamports: bigint } =>
+          row.lamports != null,
+      );
+
+    if (funding.length !== 1) {
+      throw new Error(
+        `Expected exactly one PumpSwap WSOL funding transfer, found ${funding.length}`,
+      );
+    }
+    if (funding[0]!.lamports !== args.requestedQuoteInRaw) {
+      throw new Error(
+        `PumpSwap zero-slippage WSOL funding does not equal exact quote budget: requested=${args.requestedQuoteInRaw} funding=${funding[0]!.lamports}`,
+      );
+    }
+  }
+
+  return {
+    instructions: normalized,
+    expectedOutputRaw,
+    minimumOutputRaw,
+    sdkWire,
+  };
 }
 
 async function freshSdkBuy(
@@ -109,34 +282,39 @@ async function freshSdkBuy(
   instructions: TransactionInstruction[];
   minimumOutputRaw: bigint;
   expectedOutputRaw: bigint;
+  sdkWire: "buy" | "buy_exact_quote_in";
 }> {
   const m = market.metadata as PumpSwapMarketMeta;
   const online = new OnlinePumpAmmSdk(ctx.connection);
   const swapState = await online.swapSolanaState(m.pool, ctx.user);
-  const instructions = await PUMP_AMM_SDK.buyQuoteInput(
+
+  // Quote the exact budget with ZERO SDK slippage. The legacy SDK expresses
+  // slippage by increasing maxQuoteIn, which cannot be translated directly to
+  // buy_exact_quote_in. Solard applies its BPS protection to base output below.
+  const sdkInstructions = await PUMP_AMM_SDK.buyQuoteInput(
     swapState,
     new BN(inputRaw.toString()),
-    sdkSlippagePercent(slippageBps),
+    0,
   );
-  const trade = pumpTradeInstruction(
-    instructions,
-    AMM_BUY_EXACT_QUOTE_IN_D8,
-    "BuyExactQuoteIn",
-  );
-  const spendableQuoteInRaw = readU64(trade.data, 8);
-  const minimumOutputRaw = readU64(trade.data, 16);
-  if (spendableQuoteInRaw !== inputRaw) {
-    throw new Error(
-      `PumpSwap SDK changed spendable quote input: requested=${inputRaw} built=${spendableQuoteInRaw}`,
-    );
-  }
-  if (minimumOutputRaw <= 0n)
-    throw new Error("PumpSwap SDK buy quote resolves to zero output");
-  return {
-    instructions,
-    minimumOutputRaw,
-    expectedOutputRaw: expectedFromMinimum(minimumOutputRaw, slippageBps),
-  };
+
+  return normalizeZeroSlippageSdkBuyToExactQuoteIn({
+    instructions: sdkInstructions,
+    requestedQuoteInRaw: inputRaw,
+    slippageBps,
+    user: ctx.user,
+    userQuoteTokenAccount: swapState.userQuoteTokenAccount,
+    nativeQuote: market.quoteAsset.kind === "native-sol",
+  });
+}
+
+function expectedFromMinimum(
+  minimumOutputRaw: bigint,
+  slippageBps: number,
+): bigint {
+  const keptBps = 10_000 - slippageBps;
+  if (keptBps <= 0) return minimumOutputRaw;
+  const denominator = BigInt(keptBps);
+  return (minimumOutputRaw * 10_000n + denominator - 1n) / denominator;
 }
 
 async function freshSdkSell(
@@ -283,8 +461,9 @@ export class PumpSwapVenue implements TradeVenuePlugin {
       meta: {
         protectionBasis: "program-base-output",
         quoteSource: "@pump-fun/pump-swap-sdk",
+        sdkWire: fresh.sdkWire,
         slippageBps,
-        note: "PumpSwap SDK quote uses current pool/fee configuration and the buy_exact_quote_in minimum output.",
+        note: "PumpSwap SDK supplies current pool/fee pricing and accounts; Solard normalizes quote-driven buys to the protocol buy_exact_quote_in wire instruction.",
       },
     };
   }
@@ -341,6 +520,7 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     quote.meta = {
       ...(quote.meta ?? {}),
       refreshedAtBuild: true,
+      sdkWireAtBuild: fresh.sdkWire,
     };
     return {
       venue: this.id,

@@ -352,3 +352,110 @@ test("rereads an unsellable token account after AccountNotFound, verifies zero, 
   expect(amountRaw).toBe(0n);
   expect(exists).toBe(false);
 });
+
+describe("registry liquidation protected-mint execution invariant", () => {
+  test("refuses a destructive action for a mint protected by the plan before any chain call", async () => {
+    const wallet = Keypair.generate().publicKey.toBase58();
+    const mint = Keypair.generate().publicKey.toBase58();
+    let chainCalls = 0;
+
+    const slrd = {
+      tokens: { list: () => [] },
+      tokenAccounts: async () => {
+        chainCalls += 1;
+        return [];
+      },
+      tx: () => {
+        chainCalls += 1;
+        throw new Error("must not build protected action");
+      },
+    } as unknown as Solard;
+
+    const plan: RegistryTokenLiquidationPlan = {
+      protectedMints: [mint],
+      actions: [
+        {
+          kind: "skip-unsupported",
+          walletName: "test",
+          walletAddress: wallet,
+          mint,
+          name: null,
+          symbol: null,
+          decimals: 6,
+          amountRaw: 10n,
+          amountUi: "0.00001",
+          reason: "no route",
+        },
+      ],
+      totals: {
+        wallets: 1,
+        sell: 0,
+        jupiterSell: 0,
+        unwrapWsol: 0,
+        closeEmpty: 0,
+        keepProtected: 0,
+        skipUnsupported: 1,
+      },
+    };
+
+    await expect(
+      executeRegistryTokenLiquidation(slrd, plan, {
+        burnUnsellable: true,
+        delayMs: 0,
+      }),
+    ).rejects.toThrow("protected mint(s) appear in destructive action(s)");
+    expect(chainCalls).toBe(0);
+  });
+
+  test("re-resolves --except at execution time even when a stale plan omitted protectedMints", async () => {
+    const wallet = Keypair.generate().publicKey.toBase58();
+    const mint = Keypair.generate().publicKey.toBase58();
+    let chainCalls = 0;
+
+    const slrd = {
+      tokens: { list: () => [] },
+      tokenAccounts: async () => {
+        chainCalls += 1;
+        return [];
+      },
+      tx: () => {
+        chainCalls += 1;
+        throw new Error("must not build protected action");
+      },
+    } as unknown as Solard;
+
+    const plan: RegistryTokenLiquidationPlan = {
+      protectedMints: [],
+      actions: [
+        {
+          kind: "sell",
+          walletName: "test",
+          walletAddress: wallet,
+          mint,
+          name: null,
+          symbol: null,
+          decimals: 6,
+          amountRaw: 10n,
+          amountUi: "0.00001",
+        },
+      ],
+      totals: {
+        wallets: 1,
+        sell: 1,
+        jupiterSell: 0,
+        unwrapWsol: 0,
+        closeEmpty: 0,
+        keepProtected: 0,
+        skipUnsupported: 0,
+      },
+    };
+
+    await expect(
+      executeRegistryTokenLiquidation(slrd, plan, {
+        except: [mint],
+        delayMs: 0,
+      }),
+    ).rejects.toThrow("protected mint(s) appear in destructive action(s)");
+    expect(chainCalls).toBe(0);
+  });
+});

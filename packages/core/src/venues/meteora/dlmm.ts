@@ -9217,6 +9217,133 @@ export class MeteoraDlmmService {
     );
   }
 
+  async balanceWalletInventoryForRange(
+    args: {
+      wallet: WalletRef;
+      pool: string;
+      amountXRaw: MeteoraInteger;
+      amountYRaw: MeteoraInteger;
+      minBinId: number;
+      maxBinId: number;
+      strategy?: MeteoraStrategy;
+      slippageBps?: number;
+      nativeReserveLamports?: MeteoraInteger;
+    },
+    options: MeteoraExecutionOptions,
+  ): Promise<{
+    amountXRaw: string;
+    amountYRaw: string;
+    performed: boolean;
+    direction: "x-to-y" | "y-to-x" | null;
+    inputRaw: string;
+    outputRaw: string;
+    signatures: string[];
+    nativeLamports: string;
+    nativeReserveLamports: string;
+  }> {
+    return await this.withWalletWriteLock(args.wallet, async () => {
+      const pool = await this.rawPool(args.pool, true);
+      const tokenXMint = tokenReserve(pool.tokenX).mint;
+      const tokenYMint = tokenReserve(pool.tokenY).mint;
+      const walletAddress = this.resolveWalletAddress(args.wallet);
+      const commitment: Commitment = options.commitment ?? "confirmed";
+      const before = await this.walletAccountingSnapshot(
+        asPublicKey(walletAddress),
+        tokenXMint,
+        tokenYMint,
+        commitment,
+      );
+      const reserve = bigintOrZero(args.nativeReserveLamports);
+      const native = bigintOrZero(before.nativeLamports);
+      const deployableNative = native > reserve ? native - reserve : 0n;
+      const walletX =
+        bigintOrZero(before.tokenXRaw) +
+        (tokenXMint === WSOL_MINT ? deployableNative : 0n);
+      const walletY =
+        bigintOrZero(before.tokenYRaw) +
+        (tokenYMint === WSOL_MINT ? deployableNative : 0n);
+      const requestedX = bigintOrZero(args.amountXRaw);
+      const requestedY = bigintOrZero(args.amountYRaw);
+      const eligibleX = requestedX < walletX ? requestedX : walletX;
+      const eligibleY = requestedY < walletY ? requestedY : walletY;
+      if (eligibleX <= 0n && eligibleY <= 0n) {
+        throw new MeteoraError(
+          `No deployable Meteora inventory remains after reserving ${reserve} native lamports`,
+          "INSUFFICIENT_FUNDS",
+          {
+            requestedXRaw: requestedX.toString(),
+            requestedYRaw: requestedY.toString(),
+            walletXRaw: walletX.toString(),
+            walletYRaw: walletY.toString(),
+            nativeLamports: native.toString(),
+            nativeReserveLamports: reserve.toString(),
+          },
+          true,
+        );
+      }
+      const balanced = await this.balanceRecoveredInventoryForRange({
+        wallet: args.wallet,
+        pool: args.pool,
+        tokenXMint,
+        tokenYMint,
+        eligibleX,
+        eligibleY,
+        minBinId: args.minBinId,
+        maxBinId: args.maxBinId,
+        strategy: args.strategy ?? "spot",
+        slippageBps: Math.max(
+          0,
+          Math.min(10_000, Math.trunc(args.slippageBps ?? 100)),
+        ),
+        options,
+        commitment,
+        beforeSwapWallet: before,
+      });
+      const after = balanced.performed
+        ? await this.walletAccountingSnapshot(
+            asPublicKey(walletAddress),
+            tokenXMint,
+            tokenYMint,
+            commitment,
+          )
+        : before;
+      const nativeAfter = bigintOrZero(after.nativeLamports);
+      if (nativeAfter < reserve) {
+        throw new MeteoraError(
+          `Meteora wallet native SOL is below the configured operating reserve after inventory balancing: ${nativeAfter} < ${reserve} lamports`,
+          "INSUFFICIENT_FUNDS",
+          {
+            nativeLamports: nativeAfter.toString(),
+            nativeReserveLamports: reserve.toString(),
+          },
+          true,
+        );
+      }
+      const deployableNativeAfter = nativeAfter - reserve;
+      const availableXAfter =
+        bigintOrZero(after.tokenXRaw) +
+        (tokenXMint === WSOL_MINT ? deployableNativeAfter : 0n);
+      const availableYAfter =
+        bigintOrZero(after.tokenYRaw) +
+        (tokenYMint === WSOL_MINT ? deployableNativeAfter : 0n);
+      const finalX =
+        balanced.x < availableXAfter ? balanced.x : availableXAfter;
+      const finalY =
+        balanced.y < availableYAfter ? balanced.y : availableYAfter;
+      return {
+        amountXRaw: finalX.toString(),
+        amountYRaw: finalY.toString(),
+        performed: balanced.performed,
+        direction: balanced.direction,
+        inputRaw: balanced.inputRaw.toString(),
+        outputRaw: balanced.outputRaw.toString(),
+        signatures: balanced.signatures,
+        nativeLamports: nativeAfter.toString(),
+        nativeReserveLamports: reserve.toString(),
+      };
+    });
+  }
+
   private async balanceRecoveredInventoryForRange(args: {
     wallet: WalletRef;
     pool: string;
@@ -9625,14 +9752,30 @@ export class MeteoraDlmmService {
         nativeRecoveryAppliedTo = "y";
       }
 
-      const eligibleX =
+      let eligibleX =
         observedRecoveredX < sourceAttributableX
           ? observedRecoveredX
           : sourceAttributableX;
-      const eligibleY =
+      let eligibleY =
         observedRecoveredY < sourceAttributableY
           ? observedRecoveredY
           : sourceAttributableY;
+      const nativeReserveLamports = bigintOrZero(args.nativeReserveLamports);
+      const afterCloseNative = bigintOrZero(afterCloseWallet.nativeLamports);
+      const deployableNative =
+        afterCloseNative > nativeReserveLamports
+          ? afterCloseNative - nativeReserveLamports
+          : 0n;
+      if (source.tokenX.mint === WSOL_MINT) {
+        const available =
+          bigintOrZero(afterCloseWallet.tokenXRaw) + deployableNative;
+        if (eligibleX > available) eligibleX = available;
+      }
+      if (source.tokenY.mint === WSOL_MINT) {
+        const available =
+          bigintOrZero(afterCloseWallet.tokenYRaw) + deployableNative;
+        if (eligibleY > available) eligibleY = available;
+      }
 
       if (eligibleX === 0n && eligibleY === 0n) {
         const attribution: MeteoraMoveCapitalAttribution = {
@@ -9699,6 +9842,60 @@ export class MeteoraDlmmService {
         });
         reopenX = inventorySwap.x;
         reopenY = inventorySwap.y;
+      }
+
+      const afterBalanceWallet = inventorySwap?.performed
+        ? await this.walletAccountingSnapshot(
+            walletOwner,
+            source.tokenX.mint,
+            source.tokenY.mint,
+            commitment,
+          )
+        : afterCloseWallet;
+      const nativeAfterBalance = bigintOrZero(
+        afterBalanceWallet.nativeLamports,
+      );
+      if (nativeAfterBalance < nativeReserveLamports) {
+        throw new MeteoraMovePositionError({
+          message: `Meteora source-only move closed ${args.position}, but native SOL fell below the configured operating reserve: ${nativeAfterBalance} < ${nativeReserveLamports} lamports`,
+          stage: "reopen",
+          sourcePosition: args.position,
+          closeResult,
+          attribution: {
+            sourcePosition: source.position,
+            principalSource: "source-position-only",
+            sourceAttributableXRaw: sourceAttributableX.toString(),
+            sourceAttributableYRaw: sourceAttributableY.toString(),
+            observedRecoveredXRaw: observedRecoveredX.toString(),
+            observedRecoveredYRaw: observedRecoveredY.toString(),
+            observedRecoveredNativeLamports: observedRecoveredNative.toString(),
+            nativeRecoveryAppliedTo,
+            eligibleReopenXRaw: eligibleX.toString(),
+            eligibleReopenYRaw: eligibleY.toString(),
+            reopenedXRaw: "0",
+            reopenedYRaw: "0",
+            freshWalletPrincipalXRaw: "0",
+            freshWalletPrincipalYRaw: "0",
+            nativeSolUsedAsPrincipal: nativeRecoveryAppliedTo != null,
+            marketSwapPerformed: inventorySwap?.performed ?? false,
+            marketSwapDirection: inventorySwap?.direction ?? null,
+            marketSwapInputRaw: (inventorySwap?.inputRaw ?? 0n).toString(),
+            marketSwapOutputRaw: (inventorySwap?.outputRaw ?? 0n).toString(),
+            marketSwapSignatures: inventorySwap?.signatures ?? [],
+            closeUsedSkipUnwrapSol: true,
+          },
+        });
+      }
+      const deployableAfterBalance = nativeAfterBalance - nativeReserveLamports;
+      if (source.tokenX.mint === WSOL_MINT) {
+        const available =
+          bigintOrZero(afterBalanceWallet.tokenXRaw) + deployableAfterBalance;
+        if (reopenX > available) reopenX = available;
+      }
+      if (source.tokenY.mint === WSOL_MINT) {
+        const available =
+          bigintOrZero(afterBalanceWallet.tokenYRaw) + deployableAfterBalance;
+        if (reopenY > available) reopenY = available;
       }
 
       const attribution: MeteoraMoveCapitalAttribution = {

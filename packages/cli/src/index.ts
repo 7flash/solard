@@ -317,6 +317,7 @@ function commandNeedsSigningVault(
       "spam-buy",
       "buy-spam",
       "run",
+      "strategy",
     ].includes(command)
   )
     return true;
@@ -380,8 +381,14 @@ Vanity mints
   slrd vanity pool release <mint-address>               Release an ambiguous/failed launch reservation
   launch/vamp: add --mint-pool pump [--mint-pool-address <address>] to consume a pooled mint
 
-Pump pairs
+Launch discovery
+  slrd launch watch [--venue pump,raydium-launchlab] [--min-mcap 5000] [--candle 30s] [--green-candles 5] [--track-ttl 30m] [--max-tracked 500] [--json]
+                                                        RPC/WebSocket launch watcher; after crossing the threshold, alert on closed green-candle streaks
+
+Pump discovery
   slrd pump pairs [--json]                              Read Pump-supported quote mints from the on-chain Global account
+  slrd pump watch [--min-mcap 5000] [--candle 30s] [--green-candles 5] [--json]
+                                                        Compatibility alias for: slrd launch watch --venue pump
 
 Metadata and launching
   slrd launch pump --creator <wallet> (--uri <metadata_uri> | --metadata <json> | --image <path> --description <text>) [--pair SOL|USDC|<custom-quote-mint>] [--beneficiary <wallet|address>] [--alias <name>] [--live] [--skip-simulation]
@@ -450,10 +457,12 @@ Trading
   slrd rewards claim <token|ca> --wallet <fee-payer> [--id <stable-claim-id> --basis <reward-basis.json>]
   slrd rewards claim-status <stable-claim-id>
 
-Scripts (strategies stay outside the kernel)
+Scripts and event strategies
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
+  slrd strategy run <file.ts> --token <mint|alias> --wallet <wallet> [--params <json>] [--live]
+                                                        Invoke strategy.onTrade(ctx, trade) serially for each observed trade; dry-run by default
 
 Meteora DLMM
   slrd meteora discover --timeframe 30m --sort fee-active-tvl --limit 20
@@ -490,6 +499,9 @@ Watching
   slrd watch list
 
 Transactions and ALTs
+  slrd tx stream --wallet <wallet|address> [--finalized] [--jsonl]
+  slrd tx stream --wallets <a,b,c> [--finalized] [--jsonl]
+                                                        Stream every transaction mentioning the selected wallets until Ctrl+C
   slrd history
   slrd jito tip-accounts [--endpoint <block-engine-url>]
   slrd alt add <address> [label]
@@ -791,6 +803,12 @@ async function main() {
     process.exitCode = await runScript(script, scriptArgs);
     return;
   }
+  if (command === "strategy" && values[0] === "run") {
+    const { runTradeStrategyCommand } =
+      await import("./trade-strategy-command.ts");
+    await runTradeStrategyCommand({ values, flags, emit });
+    return;
+  }
   if (
     (command === "prepare" && values[0] === "pump") ||
     (command === "launch" &&
@@ -801,6 +819,11 @@ async function main() {
       await import("./pump/external-deployment-cli.ts");
     const externalArgs = command === "prepare" ? rest.slice(1) : rest.slice(1);
     await runPumpExternalDeploymentFromArgs(externalArgs);
+    return;
+  }
+  if (command === "launch" && values[0] === "watch") {
+    const { runLaunchWatchCommand } = await import("./launch-watch-command.ts");
+    await runLaunchWatchCommand({ flags, emit });
     return;
   }
   if (
@@ -829,6 +852,11 @@ async function main() {
       persistOnLive: true,
       report: (label, value) => emit(`${label}: ${json(value)}\n`),
     });
+    return;
+  }
+  if (command === "pump" && values[0] === "watch") {
+    const { runPumpWatchCommand } = await import("./pump-watch-command.ts");
+    await runPumpWatchCommand({ flags, emit });
     return;
   }
   if (command === "jito" && values[0] === "tip-accounts") {
@@ -1376,6 +1404,328 @@ async function main() {
         );
       return;
     }
+    if (command === "tx" && values[0] === "stream") {
+      const walletFlag = flags.get("wallet");
+      const walletRefs = [
+        ...(walletFlag && walletFlag !== "true" ? [walletFlag] : []),
+        ...csv(flags.get("wallets")),
+      ];
+      if (walletRefs.length === 0) {
+        throw new Error(
+          "Usage: slrd tx stream --wallet <wallet|address> | --wallets <a,b,c> [--finalized] [--jsonl]",
+        );
+      }
+
+      const { PublicKey } = await import("@solana/web3.js");
+      const connection = slrd.connection();
+      const commitment = flags.has("finalized") ? "finalized" : "confirmed";
+      const enrichAttempts = Math.max(
+        1,
+        Math.min(20, Math.trunc(int(flags, "enrich-attempts", 8) ?? 8)),
+      );
+      const enrichDelayMs = Math.max(
+        50,
+        Math.trunc(int(flags, "enrich-delay-ms", 250) ?? 250),
+      );
+
+      type StreamWallet = {
+        ref: string;
+        name: string | null;
+        address: string;
+        publicKey: InstanceType<typeof PublicKey>;
+      };
+
+      const byAddress = new Map<string, StreamWallet>();
+      for (const ref of walletRefs) {
+        let name: string | null = null;
+        let publicKey: InstanceType<typeof PublicKey>;
+        try {
+          const resolved = slrd.resolveWallet(ref);
+          publicKey = resolved.address;
+          name = resolved.row?.name ?? null;
+        } catch {
+          try {
+            publicKey = new PublicKey(ref);
+          } catch {
+            throw new Error(`Unknown wallet or invalid Solana address: ${ref}`);
+          }
+        }
+        const address = publicKey.toBase58();
+        if (!byAddress.has(address)) {
+          byAddress.set(address, { ref, name, address, publicKey });
+        }
+      }
+      const watched = [...byAddress.values()];
+      const watchedAddresses = new Set(watched.map((row) => row.address));
+      const labelFor = (row: StreamWallet) =>
+        row.name ? `@${row.name}` : shortKey(row.address);
+
+      type PendingSignature = {
+        signature: string;
+        observedSlot: number | null;
+      };
+
+      const queue: PendingSignature[] = [];
+      const queued = new Set<string>();
+      const seen = new Set<string>();
+      const seenOrder: string[] = [];
+      const listenerIds: number[] = [];
+      let processing = false;
+      let stopped = false;
+      let stopResolve: (() => void) | null = null;
+
+      const rememberSeen = (signature: string) => {
+        if (seen.has(signature)) return;
+        seen.add(signature);
+        seenOrder.push(signature);
+        while (seenOrder.length > 20_000) {
+          const oldest = seenOrder.shift();
+          if (oldest) seen.delete(oldest);
+        }
+      };
+
+      const transactionWithRetry = async (signature: string) => {
+        for (let attempt = 1; attempt <= enrichAttempts; attempt += 1) {
+          const tx = await connection.getTransaction(signature, {
+            commitment,
+            maxSupportedTransactionVersion: 0,
+          });
+          if (tx) return tx;
+          if (attempt < enrichAttempts) {
+            await new Promise((resolve) => setTimeout(resolve, enrichDelayMs));
+          }
+        }
+        return null;
+      };
+
+      const printTransaction = async (
+        item: PendingSignature,
+      ): Promise<void> => {
+        const tx = await transactionWithRetry(item.signature);
+        if (!tx?.meta) {
+          const unavailable = {
+            type: "transaction",
+            signature: item.signature,
+            slot: item.observedSlot,
+            commitment,
+            status: "unavailable",
+            wallets: [],
+          };
+          if (flags.has("jsonl")) emit(JSON.stringify(unavailable) + "\n");
+          else
+            emit(
+              `${new Date().toISOString()}  UNAVAILABLE  ${item.signature}  slot=${item.observedSlot ?? "?"}\n`,
+            );
+          return;
+        }
+
+        const keys = txAccountKeys(tx);
+        const keySet = new Set(keys);
+        const touched = watched.filter((row) => keySet.has(row.address));
+        if (touched.length === 0) return;
+
+        const feeLamports =
+          typeof tx.meta.fee === "number" && Number.isFinite(tx.meta.fee)
+            ? BigInt(Math.trunc(tx.meta.fee))
+            : 0n;
+        const payer = keys[0] ?? null;
+        const status = tx.meta.err ? "failed" : "confirmed";
+        const at =
+          tx.blockTime == null
+            ? new Date().toISOString()
+            : new Date(tx.blockTime * 1_000).toISOString();
+
+        const walletRows = touched.map((wallet) => {
+          const walletIndex = keys.indexOf(wallet.address);
+          let nativeDeltaLamports: bigint | null = null;
+          if (
+            walletIndex >= 0 &&
+            typeof tx.meta!.preBalances?.[walletIndex] === "number" &&
+            typeof tx.meta!.postBalances?.[walletIndex] === "number"
+          ) {
+            nativeDeltaLamports =
+              BigInt(Math.trunc(tx.meta!.postBalances[walletIndex]!)) -
+              BigInt(Math.trunc(tx.meta!.preBalances[walletIndex]!));
+          }
+
+          const tokenDeltas = [...txWalletTokenBalances(tx, wallet.address)]
+            .map(([mint, balance]) => ({
+              mint,
+              decimals: balance.decimals,
+              deltaRaw: balance.post - balance.pre,
+            }))
+            .filter((row) => row.deltaRaw !== 0n)
+            .sort((left, right) => {
+              const leftAbs =
+                left.deltaRaw < 0n ? -left.deltaRaw : left.deltaRaw;
+              const rightAbs =
+                right.deltaRaw < 0n ? -right.deltaRaw : right.deltaRaw;
+              return leftAbs === rightAbs
+                ? left.mint.localeCompare(right.mint)
+                : leftAbs > rightAbs
+                  ? -1
+                  : 1;
+            });
+
+          return {
+            ref: wallet.ref,
+            name: wallet.name,
+            address: wallet.address,
+            nativeDeltaLamports,
+            feePaidLamports: payer === wallet.address ? feeLamports : 0n,
+            tokenDeltas,
+          };
+        });
+
+        if (flags.has("jsonl")) {
+          emit(
+            JSON.stringify(
+              {
+                type: "transaction",
+                at,
+                signature: item.signature,
+                slot: tx.slot ?? item.observedSlot,
+                commitment,
+                status,
+                error: tx.meta.err ?? null,
+                feeLamports,
+                feePayer: payer,
+                wallets: walletRows,
+              },
+              (_, value) =>
+                typeof value === "bigint" ? value.toString() : value,
+            ) + "\n",
+          );
+          return;
+        }
+
+        emit(
+          `\n${at}  ${status.toUpperCase()}  slot=${tx.slot ?? item.observedSlot ?? "?"}\n` +
+            `SIG  ${item.signature}\n` +
+            `FEE  ${formatRaw(feeLamports, 9)} SOL  payer=${payer ?? "?"}\n`,
+        );
+
+        for (const row of walletRows) {
+          const wallet = byAddress.get(row.address)!;
+          emit(`  ${labelFor(wallet)}  ${row.address}\n`);
+          emit(
+            `    SOL    ${
+              row.nativeDeltaLamports == null
+                ? "n/a"
+                : `${formatSignedRaw(row.nativeDeltaLamports, 9)} SOL`
+            }${
+              row.feePaidLamports > 0n
+                ? `  (paid fee ${formatRaw(row.feePaidLamports, 9)} SOL)`
+                : ""
+            }\n`,
+          );
+          if (row.tokenDeltas.length === 0) {
+            emit("    TOKEN  no wallet-owned SPL balance delta\n");
+          } else {
+            for (const delta of row.tokenDeltas) {
+              const tokenLabel =
+                delta.mint === NATIVE_SOL_MINT
+                  ? "WSOL"
+                  : delta.mint === CANONICAL_USDC_MINT
+                    ? "USDC"
+                    : shortKey(delta.mint);
+              emit(
+                `    TOKEN  ${formatSignedRaw(delta.deltaRaw, delta.decimals)} ${tokenLabel}  ${delta.mint}\n`,
+              );
+            }
+          }
+        }
+
+        if (tx.meta.err) {
+          emit(`  ERROR  ${JSON.stringify(tx.meta.err)}\n`);
+        }
+      };
+
+      const drain = async (): Promise<void> => {
+        if (processing) return;
+        processing = true;
+        try {
+          while (!stopped && queue.length > 0) {
+            const item = queue.shift()!;
+            queued.delete(item.signature);
+            if (seen.has(item.signature)) continue;
+            try {
+              await printTransaction(item);
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              if (flags.has("jsonl")) {
+                emit(
+                  JSON.stringify({
+                    type: "stream-error",
+                    signature: item.signature,
+                    error: message,
+                  }) + "\n",
+                );
+              } else {
+                process.stderr.write(
+                  `${OWL} tx stream ${item.signature}: ${message}\n`,
+                );
+              }
+            } finally {
+              rememberSeen(item.signature);
+            }
+          }
+        } finally {
+          processing = false;
+          if (!stopped && queue.length > 0) void drain();
+        }
+      };
+
+      const enqueue = (signature: string, observedSlot: number | null) => {
+        if (stopped || seen.has(signature) || queued.has(signature)) return;
+        queued.add(signature);
+        queue.push({ signature, observedSlot });
+        void drain();
+      };
+
+      if (!flags.has("jsonl")) {
+        emit(
+          `TX STREAM  wallets=${watched.length}  commitment=${commitment}  Ctrl+C to stop\n`,
+        );
+        for (const wallet of watched) {
+          emit(`  ${labelFor(wallet)}  ${wallet.address}\n`);
+        }
+        emit("\n");
+      }
+
+      for (const wallet of watched) {
+        const id = connection.onLogs(
+          wallet.publicKey,
+          (logs, context) => {
+            // Stream failed transactions too. The transaction metadata below
+            // is the authoritative status/error source.
+            enqueue(logs.signature, context?.slot ?? null);
+          },
+          commitment,
+        );
+        listenerIds.push(id);
+      }
+
+      await new Promise<void>((resolve) => {
+        stopResolve = resolve;
+        const stop = () => {
+          if (stopped) return;
+          stopped = true;
+          resolve();
+        };
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+      });
+
+      await Promise.allSettled(
+        listenerIds.map((id) => connection.removeOnLogsListener(id)),
+      );
+
+      if (!flags.has("jsonl")) emit("TX STREAM STOPPED\n");
+      return;
+    }
+
     if (command === "sol-flow" || (command === "tx" && values[0] === "flow")) {
       const walletRef = need(flags, "wallet");
       const wallet = slrd.resolveWallet(walletRef);
@@ -2163,6 +2513,25 @@ async function main() {
         throw new Error("Use either --simulate or --live, not both");
       }
 
+      const sweepMode = flags.has("live")
+        ? "LIVE"
+        : flags.has("simulate")
+          ? "SIMULATE"
+          : "PLAN";
+
+      if (!flags.has("json") && (flags.has("live") || flags.has("simulate"))) {
+        const initialDestinationLabel = destination.contactName
+          ? `${destination.contactName} (${destination.address})`
+          : destination.walletName
+            ? `${destination.walletName} (${destination.address})`
+            : destination.address;
+        emit(`SWEEP ${sweepMode} -> ${initialDestinationLabel}\n`);
+        if (maxBalanceSol != null) emit(`Threshold: < ${maxBalanceSol} SOL\n`);
+        emit(
+          "PLAN  reading confirmed wallet balances and estimating transfer fee...\n",
+        );
+      }
+
       const options = {
         destination: destination.address,
         excludeGroups,
@@ -2182,6 +2551,18 @@ async function main() {
           Math.trunc(int(flags, "rpc-delay-ms", 75) ?? 75),
         ),
         delayMs: int(flags, "delay-ms", 0) ?? 0,
+        maxAttempts: Math.max(
+          1,
+          Math.trunc(int(flags, "sweep-attempts", 3) ?? 3),
+        ),
+        confirmationTimeoutMs: Math.max(
+          1_000,
+          Math.trunc(int(flags, "confirm-timeout-ms", 15_000) ?? 15_000),
+        ),
+        confirmationPollMs: Math.max(
+          250,
+          Math.trunc(int(flags, "confirm-poll-ms", 750) ?? 750),
+        ),
         onProgress:
           !flags.has("json") && flags.has("live")
             ? (event: any) => {
@@ -2190,9 +2571,17 @@ async function main() {
                     `SEND ${event.index}/${event.total}  @${event.row.walletName}  ` +
                       `${formatRaw(event.row.sendLamports, 9)} SOL\n`,
                   );
+                } else if (event.stage === "wallet-pending") {
+                  emit(
+                    `WAIT ${event.index}/${event.total}  @${event.row.walletName}  ` +
+                      `attempt=${event.attempt}/${event.maxAttempts}  ` +
+                      `${event.reason}\n`,
+                  );
                 } else if (event.stage === "wallet-done") {
                   emit(
-                    `OK   ${event.index}/${event.total}  @${event.row.walletName}\n`,
+                    `OK   ${event.index}/${event.total}  @${event.row.walletName}  ` +
+                      `remaining=${formatRaw(event.remainingLamports, 9)} SOL` +
+                      `${event.receipt?.status ? `  status=${event.receipt.status}` : "  state=already-settled"}\n`,
                   );
                 } else if (event.stage === "wallet-error") {
                   emit(
@@ -2204,7 +2593,9 @@ async function main() {
             : undefined,
       };
       const plan = await planRegistrySolSweep(slrd, options);
-      const sendRows = plan.rows.filter((row) => row.sendLamports > 0n);
+      const sendRows = plan.rows.filter(
+        (row) => row.sendLamports > 0n && !row.skippedReason,
+      );
       const destinationLabel = destination.contactName
         ? `${destination.contactName} (${plan.destination})`
         : destination.walletName
@@ -2275,6 +2666,12 @@ async function main() {
       }
 
       if (flags.has("simulate")) {
+        if (!flags.has("json")) {
+          emit(
+            `PLAN  eligible=${sendRows.length}/${plan.rows.length}  ` +
+              `total=${formatRaw(plan.totalSendLamports, 9)} SOL\n`,
+          );
+        }
         const results = await simulateRegistrySolSweep(slrd, plan, options);
         if (flags.has("json")) {
           emit(json({ ...printablePlan, results }) + "\n");
@@ -2297,6 +2694,16 @@ async function main() {
           emit("No transactions submitted.\n");
         }
         return;
+      }
+
+      if (!flags.has("json")) {
+        emit(
+          `PLAN  eligible=${sendRows.length}/${plan.rows.length}  ` +
+            `total=${formatRaw(plan.totalSendLamports, 9)} SOL\n`,
+        );
+        if (sendRows.length === 0) {
+          emit("Nothing to sweep.\n");
+        }
       }
 
       const receipts = await executeRegistrySolSweep(slrd, plan, options);
