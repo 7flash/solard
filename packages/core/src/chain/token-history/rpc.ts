@@ -303,7 +303,7 @@ export class SolanaTokenHistoryRpc implements TokenHistoryRpc {
                     {
                       encoding: "jsonParsed",
                       commitment: options.commitment,
-                      maxSupportedTransactionVersion: 0,
+                      maxSupportedTransactionVersion: 1,
                     },
                   ],
                 })),
@@ -684,7 +684,7 @@ export class SolanaTokenHistoryRpc implements TokenHistoryRpc {
                     // Helius currently caps full transaction pages at 100.
                     limit: 100,
                     encoding: "jsonParsed",
-                    maxSupportedTransactionVersion: 0,
+                    maxSupportedTransactionVersion: 1,
                     filters: {
                       status: "succeeded",
                       slot: { gte: window.minSlot, lte: window.maxSlot },

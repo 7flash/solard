@@ -140,6 +140,10 @@ export type TokenHistoryCoverage = {
   creationSymbol: string | null;
   fromCreation: boolean;
   complete: boolean;
+  historyMode?: "exact" | "price-sampled";
+  priceSampleMs?: number | null;
+  sampledSignatures?: number;
+  priceTapeComplete?: boolean;
   updatedAtMs: number;
 };
 
@@ -150,6 +154,12 @@ export type TokenHistoryBackfillProgress =
       address: string;
       pages: number;
       signatures: number;
+    }
+  | {
+      phase: "sample";
+      total: number;
+      selected: number;
+      sampleMs: number;
     }
   | {
       phase: "transactions";
@@ -209,6 +219,7 @@ export type BackfillTokenHistoryOptions = {
   rpcRetries?: number;
   retryDelayMs?: number;
   maxSignaturesPerAddress?: number;
+  priceSampleMs?: number;
   replace?: boolean;
   onProgress?: (progress: TokenHistoryBackfillProgress) => void;
 };

@@ -1,3 +1,4 @@
+import { PublicKey, type ConfirmedSignatureInfo } from "@solana/web3.js";
 import type { Solard } from "@solard/core";
 import {
   analyzeTokenHistory,
@@ -8,6 +9,12 @@ import {
   type TokenHistoryCoverage,
   type TokenHistoryTrade,
 } from "@solard/core";
+
+import {
+  replaceResearchHistoryIndex,
+  researchHistoryCachePath,
+  type ResearchHistorySignature,
+} from "./research-history-cache.ts";
 
 export type TokenHistoryCliFlags = Map<string, string>;
 
@@ -135,12 +142,170 @@ function tradeLine(
   );
 }
 
+async function scanHistoryAddress(args: {
+  slrd: Solard;
+  kind: "curve" | "pool";
+  address: string;
+  maxSignatures: number;
+  progress: (line: string) => void;
+}): Promise<{
+  rows: ResearchHistorySignature[];
+  reachedStart: boolean;
+  truncated: boolean;
+}> {
+  const rows: ConfirmedSignatureInfo[] = [];
+  let before: string | undefined;
+  let pages = 0;
+  let reachedStart = false;
+  let truncated = false;
+  while (true) {
+    const remaining =
+      args.maxSignatures > 0 ? args.maxSignatures - rows.length : 1_000;
+    if (args.maxSignatures > 0 && remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    const limit = Math.min(1_000, args.maxSignatures > 0 ? remaining : 1_000);
+    const page = await args.slrd
+      .connection()
+      .getSignaturesForAddress(
+        new PublicKey(args.address),
+        { limit, ...(before ? { before } : {}) },
+        "finalized",
+      );
+    pages += 1;
+    rows.push(...page.filter((row) => !row.err));
+    if (pages === 1 || pages % 5 === 0)
+      args.progress(
+        `SIGS   ${args.kind.padEnd(5)} pages=${pages} signatures=${rows.length}`,
+      );
+    if (page.length < limit) {
+      reachedStart = true;
+      break;
+    }
+    const next = page.at(-1)?.signature;
+    if (!next || next === before) {
+      reachedStart = true;
+      break;
+    }
+    before = next;
+  }
+  return {
+    rows: [...rows].reverse().map((row, index) => ({
+      mint: "",
+      signature: row.signature,
+      slot: row.slot,
+      blockTime: row.blockTime ?? null,
+      scanKind: args.kind,
+      scanAddress: args.address,
+      localChronologicalOrder: index,
+    })),
+    reachedStart,
+    truncated,
+  };
+}
+
+async function runIndexBackfill(args: {
+  slrd: Solard;
+  mint: string;
+  flags: TokenHistoryCliFlags;
+  emit: Emit;
+}): Promise<void> {
+  const jsonMode = args.flags.has("json");
+  const progress = (line: string) => {
+    if (!jsonMode) process.stderr.write(`${line}\n`);
+  };
+  progress(`TOKEN INDEX     ${args.mint}`);
+  const token = await args.slrd.addToken(args.mint);
+  if (!token.bondingCurve)
+    throw new Error(`Token ${args.mint} has no Pump bonding curve to index`);
+  const supply = await args.slrd
+    .connection()
+    .getTokenSupply(new PublicKey(args.mint), "confirmed");
+  const maxSignatures = Math.max(
+    0,
+    Math.trunc(numberFlag(args.flags, "max-signatures", 0) ?? 0),
+  );
+  const curve = await scanHistoryAddress({
+    slrd: args.slrd,
+    kind: "curve",
+    address: token.bondingCurve,
+    maxSignatures,
+    progress,
+  });
+  const pool = token.pool
+    ? await scanHistoryAddress({
+        slrd: args.slrd,
+        kind: "pool",
+        address: token.pool,
+        maxSignatures,
+        progress,
+      })
+    : null;
+  const unique = new Map<string, ResearchHistorySignature>();
+  for (const row of [...curve.rows, ...(pool?.rows ?? [])]) {
+    const value = { ...row, mint: args.mint };
+    const previous = unique.get(value.signature);
+    if (!previous || value.scanKind === "curve")
+      unique.set(value.signature, value);
+  }
+  const rows = [...unique.values()].sort(
+    (a, b) =>
+      a.slot - b.slot ||
+      (a.blockTime ?? 0) - (b.blockTime ?? 0) ||
+      a.localChronologicalOrder - b.localChronologicalOrder ||
+      a.signature.localeCompare(b.signature),
+  );
+  rows.forEach((row, index) => {
+    row.localChronologicalOrder = index;
+  });
+  const fromCreation = curve.reachedStart && !curve.truncated;
+  const meta = {
+    version: 1 as const,
+    mint: args.mint,
+    decimals: supply.value.decimals,
+    supplyUi: Number(supply.value.uiAmountString ?? "0"),
+    quoteMint: token.quoteMint ?? null,
+    bondingCurve: token.bondingCurve,
+    pool: token.pool ?? null,
+    fromCreation,
+    indexedSignatures: rows.length,
+    indexedAtMs: Date.now(),
+  };
+  replaceResearchHistoryIndex({ mint: args.mint, rows, meta });
+  const result = {
+    ...meta,
+    curveSignatures: curve.rows.length,
+    poolSignatures: pool?.rows.length ?? 0,
+    cache: researchHistoryCachePath(),
+  };
+  if (jsonMode) args.emit(`${JSON.stringify(result)}\n`);
+  else
+    args.emit(
+      [
+        "",
+        "TOKEN HISTORY INDEX",
+        `Mint:              ${args.mint}`,
+        `Signatures:        ${rows.length}`,
+        `From creation:     ${fromCreation ? "yes" : "no"}`,
+        `Transactions read: 0`,
+        `Research cache:    ${researchHistoryCachePath()}`,
+        "",
+        "READY: scripts hydrate only the historical intervals they request.",
+      ].join("\n") + "\n",
+    );
+}
+
 async function runBackfill(args: {
   slrd: Solard;
   mint: string;
   flags: TokenHistoryCliFlags;
   emit: Emit;
 }): Promise<void> {
+  if (!args.flags.has("exact") && !args.flags.has("materialize")) {
+    await runIndexBackfill(args);
+    return;
+  }
   const jsonMode = args.flags.has("json");
   const progress = (line: string) => {
     if (!jsonMode) process.stderr.write(`${line}\n`);
@@ -157,53 +322,53 @@ async function runBackfill(args: {
     rpcRetries: numberFlag(args.flags, "rpc-retries", 2),
     retryDelayMs: numberFlag(args.flags, "retry-delay-ms", 750),
     maxSignaturesPerAddress: numberFlag(args.flags, "max-signatures", 0),
+    priceSampleMs: args.flags.has("exact")
+      ? 0
+      : numberFlag(args.flags, "price-sample-ms", 1_000),
     replace: args.flags.has("replace"),
     onProgress: (row) => {
       if (row.phase === "signatures") {
-        if (row.pages === 1 || row.pages % 5 === 0) {
+        if (row.pages === 1 || row.pages % 5 === 0)
           progress(
             `SIGS   ${row.kind.padEnd(5)} pages=${row.pages} signatures=${row.signatures}`,
           );
-        }
+      } else if (row.phase === "sample") {
+        progress(
+          `SAMPLE ${row.selected}/${row.total} signatures @ ${row.sampleMs}ms`,
+        );
       } else if (row.phase === "transactions") {
         if (
           row.completed === row.total ||
           row.completed <= row.batchSize ||
           row.completed % 500 === 0
-        ) {
+        )
           progress(`TX     ${row.completed}/${row.total}`);
-        }
       } else if (row.phase === "retry") {
         progress(
-          `RETRY  ${row.operation}${row.kind ? `:${row.kind}` : ""} ` +
-            `${row.attempt}/${row.maxAttempts}  ${row.error}`,
+          `RETRY  ${row.operation}${row.kind ? `:${row.kind}` : ""} ${row.attempt}/${row.maxAttempts}  ${row.error}`,
         );
       } else if (row.phase === "rpc-error") {
         progress(
-          `RPCERR ${row.operation}${row.kind ? `:${row.kind}` : ""} ` +
-            `failed=${row.failedItems}  ${row.error}`,
+          `RPCERR ${row.operation}${row.kind ? `:${row.kind}` : ""} failed=${row.failedItems}  ${row.error}`,
         );
       } else if (row.phase === "throttle") {
         progress(
-          `THROT  ${row.reason} wait=${row.waitMs}ms ` +
-            `batch=${row.batchSize}->${row.nextBatchSize}`,
+          `THROT  ${row.reason} wait=${row.waitMs}ms batch=${row.batchSize}->${row.nextBatchSize}`,
         );
       } else if (row.phase === "parse") {
         if (
           row.completed === row.total ||
           row.completed === 1 ||
           row.completed % 1_000 === 0
-        ) {
+        )
           progress(
             `PARSE  ${row.completed}/${row.total} trades=${row.trades} ambiguous=${row.ambiguous}`,
           );
-        }
       } else if (row.phase === "store") {
-        if (row.completed === row.total || row.completed % 1_000 === 0) {
+        if (row.completed === row.total || row.completed % 1_000 === 0)
           progress(
             `STORE  ${row.completed}/${row.total} inserted=${row.inserted} updated=${row.updated}`,
           );
-        }
       } else if (row.phase === "candles") {
         progress(`1S     trades=${row.trades} sparse-candles=${row.candles}`);
       }
@@ -225,28 +390,16 @@ async function runBackfill(args: {
   args.emit(
     [
       "",
-      "TOKEN HISTORY BACKFILL",
+      "TOKEN HISTORY MATERIALIZATION",
       `Mint:              ${result.mint}`,
       `Coverage:          ${coverageText(result)}`,
       `Creation:          ${fmtDate(result.creationAtMs)} ${result.creationSignature ? compact(result.creationSignature, 10, 10) : "-"}`,
-      result.venueFamily === "raydium"
-        ? `LaunchLab pool:    ${result.launchLabPool ?? "not found / history begins after launch"}`
-        : `Bonding curve:     ${result.bondingCurve}`,
-      result.venueFamily === "raydium"
-        ? `Raydium pools:     ${(result.raydiumPools ?? []).join(", ") || "none discovered"}`
-        : `PumpSwap pool:     ${result.pool ?? "not observed / not graduated"}`,
       `Signatures:        ${result.uniqueSignatures}`,
-      `Parsed tx:         ${result.parsedTransactions}`,
-      `Missing tx:        ${result.missingTransactions}`,
-      `Failed tx lookups: ${result.failedTransactions}`,
+      `History mode:      ${result.historyMode ?? "exact"}${result.priceSampleMs ? ` @ ${result.priceSampleMs}ms` : ""}`,
+      `Hydrated tx:       ${result.parsedTransactions}/${result.uniqueSignatures}`,
       `Stored trades:     ${result.storedTrades}`,
       `Sparse 1s candles: ${result.storedCandles1s}`,
-      `Inserted/updated:  ${result.insertedTrades}/${result.updatedTrades}`,
-      `Ambiguous skipped: ${result.skippedAmbiguous}`,
       "",
-      result.complete
-        ? "READY: durable tape is proven complete from creation."
-        : "WARNING: tape is not proven complete; inspect the gaps above before strict backtesting.",
     ].join("\n") + "\n",
   );
 }
@@ -514,7 +667,7 @@ export async function runTokenHistoryCommand(args: {
     throw new Error(
       `Usage: slrd token ${args.action} <CA> ${
         args.action === "backfill"
-          ? "[--replace] [--confirmed] [--json]"
+          ? "[--exact|--materialize --price-sample-ms 1000] [--max-signatures N] [--json]"
           : args.action === "trades"
             ? "[--from-start] [--min-sol N] [--owner wallet] [--json]"
             : "[--top N] [--first N] [--json]"

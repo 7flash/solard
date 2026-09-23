@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@meteora-ag/dlmm": "^1.9.14",
+    "@solana/web3.js": "^1.99.0",
     "bn.js": "^5.2.5",
     "measure-fn": "5.2.0"
   }

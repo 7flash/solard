@@ -366,7 +366,9 @@ External contacts (public addresses only; never signing wallets or group members
   slrd token <token_ca> [name] [--metadata-json <json>]
   slrd token set <token|ca> [--pool <address>] [--quote-mint <mint>] [--quote-program <program>] [--metadata-json <json>]
   slrd token refresh <token|ca>
-  slrd token backfill <ca> [--replace] [--confirmed] [--batch-size 100] [--rpc-concurrency 3] [--max-signatures N] [--json]
+  slrd token backfill <ca> [--max-signatures N] [--json]  Index signatures only; no transaction hydration by default
+  slrd token backfill <ca> --materialize [--price-sample-ms 1000] [--replace] [--rpc-concurrency 2]
+  slrd token backfill <ca> --exact [--replace] [--rpc-concurrency 2]
                                                         Durable exact trades + sparse 1s candle materialization from creation
   slrd token trades <ca> [--from-start] [--min-sol N] [--owner <wallet>] [--side buy|sell] [--limit N] [--json]
   slrd token analyze <ca> [--top N] [--json]
@@ -383,13 +385,17 @@ Vanity mints
   slrd vanity pool release <mint-address>               Release an ambiguous/failed launch reservation
   launch/vamp: add --mint-pool pump [--mint-pool-address <address>] to consume a pooled mint
 
+Shared market feed
+  slrd feed serve [--host 127.0.0.1] [--port 8788] [--rpc-rps 5] [--rpc-read-rps 2] [--max-fallback-subs 200]
+                                                        One upstream Pump/PumpSwap/LaunchLab feed shared by watchers, agents, and future UI clients
+
 Launch discovery
-  slrd launch watch [--venue pump,raydium-launchlab] [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--max-tracked 500] [--rpc-rps 5] [--rpc-read-rps 2] [--standard-ws] [--show-new] [--trades] [--json]
-                                                        Discover new launches, ignore Pump Mayhem by default, notify on first $5k cross and each +20% notified ATH step
+  slrd launch watch [--venue pump,raydium-launchlab] [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--feed ws://127.0.0.1:8788/ws] [--show-new] [--prices] [--json]
+                                                        Consume the shared feed; ignore Pump Mayhem and notify on first $5k cross and each +20% notified ATH step
 
 Pump discovery
   slrd pump pairs [--json]                              Read Pump-supported quote mints from the on-chain Global account
-  slrd pump watch [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--max-tracked 500] [--show-new] [--trades] [--json]
+  slrd pump watch [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--feed ws://127.0.0.1:8788/ws] [--show-new] [--prices] [--json]
                                                         Compatibility alias for: slrd launch watch --venue pump
 
 Metadata and launching
@@ -468,8 +474,10 @@ Scripts and event strategies
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
-  slrd strategy run <file.ts> --token <mint|alias> --wallet <wallet> [--params <json>] [--live]
-                                                        Invoke strategy.onTrade(ctx, trade) serially for each observed trade; dry-run by default
+  slrd strategy run <file.ts> --token <mint|alias> --wallet <wallet> [--params <json>] [--feed ws://127.0.0.1:8788/ws] [--live]
+                                                        Run an onPrice strategy from the shared feed; wallet/execution state remains isolated per agent
+  slrd strategy backtest <file.ts> --token <mint> [--params <json>] [--capital-sol 1] [--price-sample 5s] [--sol-usd N] [--json]
+                                                        Replay the same strategy file over durable token history
 
 Meteora DLMM
   slrd meteora discover --timeframe 30m --sort fee-active-tvl --limit 20
@@ -808,6 +816,18 @@ async function main() {
     if (!script)
       throw new Error("Usage: slrd run <name-or-path> [script flags...]");
     process.exitCode = await runScript(script, scriptArgs);
+    return;
+  }
+  if (command === "feed" && values[0] === "serve") {
+    const { runPriceFeedServerCommand } =
+      await import("./price-feed-server.ts");
+    await runPriceFeedServerCommand({ flags, emit });
+    return;
+  }
+  if (command === "strategy" && values[0] === "backtest") {
+    const { runStrategyBacktestCommand } =
+      await import("./strategy-backtest-command.ts");
+    await runStrategyBacktestCommand({ values, flags, emit });
     return;
   }
   if (command === "strategy" && values[0] === "run") {

@@ -17,6 +17,7 @@ import type {
   TokenHistoryClock,
   TokenHistoryCoverage,
   TokenHistoryTrade,
+  TokenHistoryScanSignature,
 } from "./types.ts";
 
 const m = createSolardMeasure("history");
@@ -63,6 +64,49 @@ export function normalizeTokenHistoryRpcOptions(
     ),
     onProgress: input.onProgress,
   };
+}
+
+function priceSampleSignatures(
+  signatures: readonly TokenHistoryScanSignature[],
+  sampleMs: number,
+): TokenHistoryScanSignature[] {
+  if (!(sampleMs > 0) || signatures.length <= 2) return [...signatures];
+  const selected = new Map<string, TokenHistoryScanSignature>();
+  const add = (row: TokenHistoryScanSignature | undefined) => {
+    if (row) selected.set(row.signature, row);
+  };
+
+  add(signatures[0]);
+  add(signatures.at(-1));
+  add(signatures.find((row) => row.scanKind === "curve"));
+  add(signatures.find((row) => row.scanKind === "pool"));
+
+  const bucketRows = new Map<number, TokenHistoryScanSignature>();
+  for (const row of signatures) {
+    if (row.blockTime == null) {
+      add(row);
+      continue;
+    }
+    const bucket = Math.floor((row.blockTime * 1_000) / sampleMs);
+    const current = bucketRows.get(bucket);
+    if (
+      !current ||
+      row.slot > current.slot ||
+      (row.slot === current.slot &&
+        row.localChronologicalOrder > current.localChronologicalOrder)
+    ) {
+      bucketRows.set(bucket, row);
+    }
+  }
+  for (const row of bucketRows.values()) add(row);
+
+  return [...selected.values()].sort(
+    (left, right) =>
+      left.slot - right.slot ||
+      (left.blockTime ?? 0) - (right.blockTime ?? 0) ||
+      left.localChronologicalOrder - right.localChronologicalOrder ||
+      left.signature.localeCompare(right.signature),
+  );
 }
 
 export async function runTokenHistoryBackfill(
@@ -144,7 +188,20 @@ export async function runTokenHistoryBackfill(
         curve.rows,
         pool?.rows ?? [],
       );
-      const fetched = await deps.rpc.fetchTransactions(signatures, rpcOptions);
+      const priceSampleMs = Math.max(0, Math.trunc(input.priceSampleMs ?? 0));
+      const fetchSignatures = priceSampleSignatures(signatures, priceSampleMs);
+      if (priceSampleMs > 0) {
+        input.onProgress?.({
+          phase: "sample",
+          total: signatures.length,
+          selected: fetchSignatures.length,
+          sampleMs: priceSampleMs,
+        });
+      }
+      const fetched = await deps.rpc.fetchTransactions(
+        fetchSignatures,
+        rpcOptions,
+      );
       const parsedAtMs = deps.clock.nowMs();
 
       const parsed = measuredSync(
@@ -156,8 +213,16 @@ export async function runTokenHistoryBackfill(
           let skippedAmbiguous = 0;
           const trades: TokenHistoryTrade[] = [];
 
-          for (let order = 0; order < signatures.length; order += 1) {
-            const scan = signatures[order]!;
+          const historyOrder = new Map(
+            signatures.map((row, index) => [row.signature, index] as const),
+          );
+          for (
+            let selectedOrder = 0;
+            selectedOrder < fetchSignatures.length;
+            selectedOrder += 1
+          ) {
+            const scan = fetchSignatures[selectedOrder]!;
+            const order = historyOrder.get(scan.signature) ?? selectedOrder;
             const tx = fetched.bySignature.get(scan.signature);
             if (!tx) continue;
             if (!creation) {
@@ -186,14 +251,14 @@ export async function runTokenHistoryBackfill(
             trades.push(...result.trades);
             skippedAmbiguous += result.ambiguous;
             if (
-              order === 0 ||
-              (order + 1) % 1_000 === 0 ||
-              order + 1 === signatures.length
+              selectedOrder === 0 ||
+              (selectedOrder + 1) % 1_000 === 0 ||
+              selectedOrder + 1 === fetchSignatures.length
             ) {
               input.onProgress?.({
                 phase: "parse",
-                completed: order + 1,
-                total: signatures.length,
+                completed: selectedOrder + 1,
+                total: fetchSignatures.length,
                 trades: trades.length,
                 ambiguous: skippedAmbiguous,
               });
@@ -238,6 +303,7 @@ export async function runTokenHistoryBackfill(
         fromCreation &&
         !curve.coverage.truncated &&
         (!pool || (pool.coverage.reachedStart && !pool.coverage.truncated)) &&
+        priceSampleMs === 0 &&
         fetched.missingTransactions === 0 &&
         fetched.failedTransactions === 0 &&
         parsed.skippedNoTimestamp === 0 &&
@@ -272,6 +338,15 @@ export async function runTokenHistoryBackfill(
         creationSymbol: parsed.creation?.symbol ?? null,
         fromCreation,
         complete,
+        historyMode: priceSampleMs > 0 ? "price-sampled" : "exact",
+        priceSampleMs: priceSampleMs > 0 ? priceSampleMs : null,
+        sampledSignatures: fetchSignatures.length,
+        priceTapeComplete:
+          fromCreation &&
+          !curve.coverage.truncated &&
+          (!pool || (pool.coverage.reachedStart && !pool.coverage.truncated)) &&
+          fetched.missingTransactions === 0 &&
+          fetched.failedTransactions === 0,
         updatedAtMs: deps.clock.nowMs(),
       };
       deps.repository.saveCoverage(coverage);

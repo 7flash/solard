@@ -4,7 +4,7 @@ type Candle = {
   high: number;
   low: number;
   close: number;
-  trades: number;
+  samples: number;
 };
 
 type State = {
@@ -29,6 +29,7 @@ function firstFullBucket(atMs: number, candleMs: number): number {
 }
 
 export default {
+  history: { mode: "price", sampleMs: 1_000 },
   name: "five-green-after-5k",
   state: {
     crossedAtMs: null,
@@ -38,26 +39,26 @@ export default {
     alerted: false,
   } satisfies State,
 
-  onTrade(ctx: any, trade: any) {
+  onPrice(ctx: any, tick: any) {
     const candleMs = positive(ctx.params.candleMs, 30_000);
     const required = Math.max(
       1,
       Math.trunc(positive(ctx.params.greenCandles, 5)),
     );
     const threshold = positive(ctx.params.minMarketCapUsd, 5_000);
-    const price = Number(trade.priceSol ?? trade.priceUsd);
-    const marketCapUsd = Number(trade.marketCapUsd);
+    const price = Number(tick.priceSol ?? tick.priceUsd);
+    const marketCapUsd = Number(tick.marketCapUsd);
     if (!(price > 0)) return;
 
     if (ctx.state.crossedAtMs == null) {
       if (!(marketCapUsd >= threshold)) return;
-      ctx.state.crossedAtMs = trade.atMs;
-      ctx.state.firstBucketAtMs = firstFullBucket(trade.atMs, candleMs);
+      ctx.state.crossedAtMs = tick.atMs;
+      ctx.state.firstBucketAtMs = firstFullBucket(tick.atMs, candleMs);
       ctx.log("market-cap gate crossed", { threshold, marketCapUsd });
       return;
     }
 
-    const startAtMs = bucket(trade.atMs, candleMs);
+    const startAtMs = bucket(tick.atMs, candleMs);
     if (startAtMs < ctx.state.firstBucketAtMs) return;
 
     const finalize = (candle: Candle, nextStartAtMs: number) => {
@@ -72,7 +73,7 @@ export default {
           ctx.notify(
             `${required} consecutive green ${Math.round(candleMs / 1_000)}s candles`,
             {
-              mint: trade.mint,
+              mint: tick.mint,
               marketCapUsd,
               greenStreak: ctx.state.greenStreak,
               candleStartAtMs: candle.startAtMs,
@@ -93,7 +94,7 @@ export default {
         high: price,
         low: price,
         close: price,
-        trades: 1,
+        samples: 1,
       };
       return;
     }
@@ -102,7 +103,7 @@ export default {
       ctx.state.current.high = Math.max(ctx.state.current.high, price);
       ctx.state.current.low = Math.min(ctx.state.current.low, price);
       ctx.state.current.close = price;
-      ctx.state.current.trades += 1;
+      ctx.state.current.samples += 1;
       return;
     }
 
@@ -114,7 +115,7 @@ export default {
         high: price,
         low: price,
         close: price,
-        trades: 1,
+        samples: 1,
       };
     }
   },

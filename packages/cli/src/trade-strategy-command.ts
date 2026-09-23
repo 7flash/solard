@@ -7,6 +7,8 @@ import {
   type Logs,
   type ParsedTransactionWithMeta,
 } from "@solana/web3.js";
+import { connectPriceFeed } from "./price-feed-client.ts";
+import type { PriceFeedPrice } from "./price-feed-protocol.ts";
 import {
   RaydiumService,
   createTraderSolard,
@@ -33,6 +35,16 @@ export type StrategyTrade = {
   tokenAmountUi: number;
   quote: "SOL" | "USDC";
   quoteAmountUi: number;
+  priceSol: number | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+};
+
+export type StrategyPriceTick = {
+  signature: string;
+  slot: number;
+  atMs: number;
+  mint: string;
   priceSol: number | null;
   priceUsd: number | null;
   marketCapUsd: number | null;
@@ -65,6 +77,8 @@ export type TradeStrategyContext<State = Record<string, unknown>> = {
   readonly live: boolean;
   readonly state: State;
   readonly params: Record<string, unknown>;
+  readonly priceCount: number;
+  readonly lastPrice: StrategyPriceTick | null;
   readonly tradeCount: number;
   readonly lastTrade: StrategyTrade | null;
   buy(input: { sol: number; reason?: string }): Promise<StrategyExecution>;
@@ -78,9 +92,14 @@ export type TradeStrategyContext<State = Record<string, unknown>> = {
 
 export type TradeStrategy<State = Record<string, unknown>> = {
   name?: string;
+  history?: { mode?: "price" | "exact"; sampleMs?: number };
   state?: State | (() => State | Promise<State>);
   onStart?(ctx: TradeStrategyContext<State>): void | Promise<void>;
-  onTrade(
+  onPrice?(
+    ctx: TradeStrategyContext<State>,
+    price: StrategyPriceTick,
+  ): void | Promise<void>;
+  onTrade?(
     ctx: TradeStrategyContext<State>,
     trade: StrategyTrade,
   ): void | Promise<void>;
@@ -211,6 +230,16 @@ function liveEnabled(): boolean {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function parsedTransaction(
+  connection: Connection,
+  signature: string,
+): Promise<ParsedTransactionWithMeta | null> {
+  return (await connection.getParsedTransaction(signature, {
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 1,
+  } as any)) as ParsedTransactionWithMeta | null;
 }
 
 function keyText(value: unknown): string | null {
@@ -886,9 +915,12 @@ async function loadStrategy(path: string): Promise<TradeStrategy<any>> {
   const strategy = (module.default ?? module.strategy) as TradeStrategy<any>;
   if (!strategy || typeof strategy !== "object")
     throw new Error(`Strategy ${absolute} must default-export an object`);
-  if (typeof strategy.onTrade !== "function")
+  if (
+    typeof strategy.onPrice !== "function" &&
+    typeof strategy.onTrade !== "function"
+  )
     throw new Error(
-      `Strategy ${absolute} must define async onTrade(ctx, trade)`,
+      `Strategy ${absolute} must define async onPrice(ctx, price) or legacy onTrade(ctx, trade)`,
     );
   return strategy;
 }
@@ -930,11 +962,10 @@ export async function runTradeStrategyCommand(args: {
   const tokenRef = required(args.flags, "token");
   const walletRef = required(args.flags, "wallet");
   const live = args.flags.has("live");
-  if (live && !liveEnabled()) {
+  if (live && !liveEnabled())
     throw new Error(
       "Live strategy execution requires --live and SOLARD_ENABLE_LIVE_TRADES=1",
     );
-  }
   const json = args.flags.has("json");
   configure({
     silent: false,
@@ -952,10 +983,7 @@ export async function runTradeStrategyCommand(args: {
       return value;
     }
     return m.sync(
-      {
-        start: () => label,
-        end: (result: T) => result,
-      },
+      { start: () => label, end: (result: T) => result },
       () => value,
     );
   };
@@ -974,36 +1002,32 @@ export async function runTradeStrategyCommand(args: {
     1_000,
     Math.trunc(numberFlag(args.flags, "heartbeat-ms", 15_000)),
   );
-  const url = rpcUrl(args.flags);
-  const rate = rpcReadRate(args.flags);
-  const pacer = new RpcPacer(rate.read);
+  const rpc = rpcUrl(args.flags);
+  const feed =
+    flag(args.flags, "feed") ??
+    process.env.SOLARD_FEED_URL?.trim() ??
+    "ws://127.0.0.1:8788/ws";
   const strategy = await loadStrategy(path);
+  if (typeof strategy.onPrice !== "function")
+    throw new Error(
+      `Live shared-feed strategy ${path} must define onPrice(ctx, price). ` +
+        `Legacy onTrade is retained for historical exact-trade backtests, not per-agent live RPC subscriptions.`,
+    );
   const state = await initialState(strategy);
   const strategyParams = params(args.flags);
-  const slrd = createTraderSolard({ rpcUrl: url });
-  const connection = slrd.connection();
+  const slrd = createTraderSolard({ rpcUrl: rpc });
   let stopped = false;
   let stopReason = "stopped";
-  let tradeCount = 0;
-  let lastTrade: StrategyTrade | null = null;
+  let priceCount = 0;
+  let lastPrice: StrategyPriceTick | null = null;
   let callbackErrors = 0;
-  let rpcErrors = 0;
-  let solUsdValue: number | null = null;
-  let solUsdAt = 0;
-  let queuePeak = 0;
-  const queue: string[] = [];
-  const queued = new Set<string>();
-  const processed = new Map<string, number>();
-  const subscriptions = new Map<string, number>();
+  let feedErrors = 0;
+  let feedConnected = false;
+  let callbackQueue: Promise<void> = Promise.resolve();
 
   try {
     const mint = await ensureToken(slrd, tokenRef);
     const walletAddress = slrd.resolveWallet(walletRef).address.toBase58();
-    const supply = await pacer.run(() =>
-      connection.getTokenSupply(new PublicKey(mint), "confirmed"),
-    );
-    const decimals = supply.value.decimals;
-    const supplyUi = Number(supply.value.uiAmountString ?? "0");
     const executor = new StrategyExecutor(
       slrd,
       mint,
@@ -1023,7 +1047,6 @@ export async function runTradeStrategyCommand(args: {
         ...(data === undefined ? {} : { data }),
       });
     };
-
     const notify = (message: string, data?: unknown) => {
       if (!args.flags.has("no-bell") && !json) process.stderr.write("\x07");
       report("strategy notification", {
@@ -1054,34 +1077,38 @@ export async function runTradeStrategyCommand(args: {
       get params() {
         return strategyParams;
       },
+      get priceCount() {
+        return priceCount;
+      },
+      get lastPrice() {
+        return lastPrice;
+      },
       get tradeCount() {
-        return tradeCount;
+        return 0;
       },
       get lastTrade() {
-        return lastTrade;
+        return null;
       },
       async buy(input: { sol: number; reason?: string }) {
         const result = await executor.buy(input.sol, input.reason ?? null);
-        const event = {
-          type: "strategy-execution",
+        report("strategy execution", {
           at: new Date(result.completedAt).toISOString(),
           ...result,
+          side: "buy",
           tokenDeltaRaw: result.tokenDeltaRaw?.toString() ?? null,
           solDeltaLamports: result.solDeltaLamports?.toString() ?? null,
-        };
-        report("strategy execution", { ...event, side: "buy" });
+        });
         return result;
       },
       async sell(input: { percent: number; reason?: string }) {
         const result = await executor.sell(input.percent, input.reason ?? null);
-        const event = {
-          type: "strategy-execution",
+        report("strategy execution", {
           at: new Date(result.completedAt).toISOString(),
           ...result,
+          side: "sell",
           tokenDeltaRaw: result.tokenDeltaRaw?.toString() ?? null,
           solDeltaLamports: result.solDeltaLamports?.toString() ?? null,
-        };
-        report("strategy execution", { ...event, side: "sell" });
+        });
         return result;
       },
       position: () => executor.position(),
@@ -1094,94 +1121,11 @@ export async function runTradeStrategyCommand(args: {
       },
     } satisfies TradeStrategyContext<any>;
 
-    const refreshSolUsd = async () => {
-      if (solUsdValue != null && Date.now() - solUsdAt < 30_000)
-        return solUsdValue;
-      try {
-        solUsdValue = await fetchSolUsd();
-        solUsdAt = Date.now();
-      } catch {}
-      return solUsdValue;
-    };
-
-    const enqueue = (signature: string) => {
-      if (
-        stopped ||
-        !signature ||
-        queued.has(signature) ||
-        processed.has(signature)
-      )
-        return;
-      queued.add(signature);
-      queue.push(signature);
-      queuePeak = Math.max(queuePeak, queue.length);
-      if (queue.length === 100 || queue.length % 500 === 0) {
-        report("strategy queue warning", {
-          queue: queue.length,
-          message: "RPC/callback processing is behind live trades",
-        });
-      }
-    };
-
-    const subscribeAddress = (address: string) => {
-      if (!address || subscriptions.has(address)) return;
-      try {
-        const id = connection.onLogs(
-          new PublicKey(address),
-          (event: Logs) => {
-            if (!event.err) enqueue(event.signature);
-          },
-          "processed",
-        );
-        subscriptions.set(address, id);
-      } catch (error) {
-        report("strategy subscription error", {
-          address,
-          error: errorText(error),
-        });
-      }
-    };
-
-    const refreshAddresses = async () => {
-      subscribeAddress(mint);
-      try {
-        const token = slrd.resolveToken(mint) as any;
-        if (token.bondingCurve) subscribeAddress(String(token.bondingCurve));
-        if (token.pool) subscribeAddress(String(token.pool));
-      } catch {}
-      for (const address of await discoverRaydiumPools(mint)) {
-        subscribeAddress(address);
-      }
-    };
-
-    const fetchTransaction = async (
-      signature: string,
-    ): Promise<ParsedTransactionWithMeta | null> => {
-      for (let attempt = 0; attempt < 8 && !stopped; attempt += 1) {
-        try {
-          const tx = await pacer.run(() =>
-            connection.getParsedTransaction(signature, {
-              commitment: "confirmed",
-              maxSupportedTransactionVersion: 1,
-            }),
-          );
-          if (tx) return tx;
-        } catch {
-          rpcErrors += 1;
-        }
-        await sleep(200 + attempt * 150);
-      }
-      return null;
-    };
-
-    const handleCallbackError = async (
-      error: unknown,
-      trade: StrategyTrade | null,
-    ) => {
+    const handleCallbackError = async (error: unknown) => {
       callbackErrors += 1;
       if (strategy.onError) {
         try {
-          await strategy.onError(context, error, trade);
+          await strategy.onError(context, error, null);
         } catch (handlerError) {
           report("strategy onError failure", {
             error: errorText(handlerError),
@@ -1195,49 +1139,46 @@ export async function runTradeStrategyCommand(args: {
       }
     };
 
-    const processQueue = async () => {
-      while (!stopped) {
-        const signature = queue.shift();
-        if (!signature) {
-          await sleep(25);
-          continue;
-        }
-        queued.delete(signature);
-        if (processed.has(signature)) continue;
-        processed.set(signature, Date.now());
-        const tx = await fetchTransaction(signature);
-        if (!tx) continue;
-        const solUsd = await refreshSolUsd();
-        const parsed = parseTrades({
-          tx,
-          signature,
-          mint,
-          decimals,
-          supplyUi,
-          walletAddress,
-          solUsd,
-        });
-        for (const trade of parsed) {
-          if (stopped) break;
-          tradeCount += 1;
-          lastTrade = trade;
-          if (json) {
-            report("trade", {
-              ...trade,
-              tokenAmountRaw: trade.tokenAmountRaw.toString(),
-            });
-          }
-          try {
-            await strategy.onTrade(context, trade);
-          } catch (error) {
-            await handleCallbackError(error, trade);
-          }
-        }
+    const onPrice = async (event: PriceFeedPrice) => {
+      if (event.mint !== mint || stopped) return;
+      const price: StrategyPriceTick = {
+        signature: event.signature ?? "feed",
+        slot: event.slot ?? 0,
+        atMs: event.atMs,
+        mint,
+        priceSol: event.priceSol,
+        priceUsd: event.priceUsd,
+        marketCapUsd: event.marketCapUsd,
+      };
+      if (price.priceSol == null && price.priceUsd == null) return;
+      priceCount += 1;
+      lastPrice = price;
+      if (json) report("price", price as any);
+      try {
+        await strategy.onPrice!(context, price);
+      } catch (error) {
+        await handleCallbackError(error);
       }
     };
 
-    await refreshSolUsd();
-    await refreshAddresses();
+    const controller = new AbortController();
+    const feedClient = await connectPriceFeed({
+      url: feed,
+      subscribe: { op: "subscribe", mints: [mint] },
+      signal: controller.signal,
+      onStatus(event, data) {
+        if (event === "connected") feedConnected = true;
+        if (event === "connect-error") {
+          feedConnected = false;
+          feedErrors += 1;
+        }
+        report(`feed ${event}`, data ?? {});
+      },
+      onMessage(message) {
+        if (message.type !== "price" || message.mint !== mint) return;
+        callbackQueue = callbackQueue.then(() => onPrice(message));
+      },
+    });
 
     report("strategy ready", {
       strategy: strategy.name ?? path,
@@ -1245,62 +1186,46 @@ export async function runTradeStrategyCommand(args: {
       wallet: walletRef,
       walletAddress,
       live,
-      subscriptions: subscriptions.size,
-      event: "each-trade",
-      rpcReadRps: rate.read,
-      rpcHardRps: rate.hard,
+      feed,
+      event: "shared-price-feed",
+      upstreamMarketSubscriptions: 0,
     });
 
     if (strategy.onStart) {
       try {
         await strategy.onStart(context);
       } catch (error) {
-        await handleCallbackError(error, null);
+        await handleCallbackError(error);
       }
     }
 
     const stopSignal = () => {
       stopped = true;
       stopReason = "signal";
+      controller.abort();
     };
     process.once("SIGINT", stopSignal);
     process.once("SIGTERM", stopSignal);
-    const addressTimer = setInterval(() => {
-      void refreshAddresses();
-      const cutoff = Date.now() - 3_600_000;
-      for (const [signature, at] of processed) {
-        if (at < cutoff) processed.delete(signature);
-      }
-    }, 30_000);
-    const solUsdTimer = setInterval(() => void refreshSolUsd(), 30_000);
     const heartbeatTimer = setInterval(() => {
       report("strategy heartbeat", {
-        trades: tradeCount,
-        queue: queue.length,
-        queuePeak,
-        subscriptions: subscriptions.size,
+        feedConnected,
+        prices: priceCount,
         callbackErrors,
-        rpcErrors,
-        rpcQueue: pacer.queued,
-        rpcReadRps: rate.read,
-        rpcHardRps: rate.hard,
+        feedErrors,
+        upstreamMarketSubscriptions: 0,
         executionVenue: executor.venue ?? "unresolved",
       });
     }, heartbeatMs);
 
     try {
-      await processQueue();
+      while (!stopped) await sleep(250);
     } finally {
-      clearInterval(addressTimer);
-      clearInterval(solUsdTimer);
       clearInterval(heartbeatTimer);
       process.removeListener("SIGINT", stopSignal);
       process.removeListener("SIGTERM", stopSignal);
-      for (const id of subscriptions.values()) {
-        try {
-          await connection.removeOnLogsListener(id);
-        } catch {}
-      }
+      controller.abort();
+      feedClient.close();
+      await callbackQueue.catch(() => undefined);
       if (strategy.onStop) {
         try {
           await strategy.onStop(context, stopReason);
@@ -1311,10 +1236,9 @@ export async function runTradeStrategyCommand(args: {
       report("strategy stopped", {
         strategy: strategy.name ?? path,
         reason: stopReason,
-        trades: tradeCount,
-        queuePeak,
+        prices: priceCount,
         callbackErrors,
-        rpcErrors,
+        feedErrors,
       });
     }
   } finally {

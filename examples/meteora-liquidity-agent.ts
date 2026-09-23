@@ -12,7 +12,7 @@ const WSOL = "So11111111111111111111111111111111111111112";
 const FIVE_MINUTES_MS = 5 * 60_000;
 const FIVE_MINUTES_SECONDS = 5 * 60;
 const m = createMeasure("slrd:lp-agent", { maxResultLength: 1600 });
-const AGENT_POLICY_VERSION = 20;
+const AGENT_POLICY_VERSION = 22;
 const DEFAULT_MIN_CENTERED_BINS = 11;
 const DEFAULT_GAS_RESERVE_SOL = "0.02";
 
@@ -608,20 +608,62 @@ function targetRange(
   flags: Flags,
 ): { minBinId: number; maxBinId: number } {
   const fixedWidth = optionalInteger(flags, "range-bins");
-  if (fixedWidth != null && fixedWidth <= 0) {
-    throw new Error("--range-bins must be > 0");
+  if (fixedWidth != null) {
+    if (fixedWidth <= 0) throw new Error("--range-bins must be > 0");
+    let width = fixedWidth;
+    if (width % 2 === 0) width += 1;
+    const half = Math.floor(width / 2);
+    return {
+      minBinId: target.activeBin - half,
+      maxBinId: target.activeBin + half,
+    };
   }
+
+  let minBinId = target.candleMinBinId;
+  let maxBinId = target.candleMaxBinId;
   const minimumWidth =
     optionalInteger(flags, "min-bins") ?? DEFAULT_MIN_CENTERED_BINS;
   if (minimumWidth <= 0) throw new Error("--min-bins must be > 0");
-  const candleWidth = target.candleMaxBinId - target.candleMinBinId + 1;
-  let width = fixedWidth ?? Math.max(candleWidth, minimumWidth);
-  if (width % 2 === 0) width += 1;
-  const half = Math.floor(width / 2);
-  return {
-    minBinId: target.activeBin - half,
-    maxBinId: target.activeBin + half,
-  };
+  const width = maxBinId - minBinId + 1;
+  if (width < minimumWidth) {
+    const missing = minimumWidth - width;
+    const below = Math.floor(missing / 2);
+    minBinId -= below;
+    maxBinId += missing - below;
+  }
+  return { minBinId, maxBinId };
+}
+
+async function freshExecutionRange(args: {
+  slrd: Solard;
+  pool: string;
+  target: Target;
+  flags: Flags;
+}): Promise<{
+  range: { minBinId: number; maxBinId: number };
+  activeBin: number;
+}> {
+  const state = await args.slrd.meteora.getPoolState(args.pool, true);
+  const activeBin = Number((state as any)?.activeBin?.binId);
+  if (!Number.isInteger(activeBin)) {
+    throw new Error(
+      "Meteora active bin is unavailable immediately before position build",
+    );
+  }
+  const fixedWidth = optionalInteger(args.flags, "range-bins");
+  let range = targetRange(args.target, args.flags);
+  if (fixedWidth != null) {
+    let width = fixedWidth;
+    if (width % 2 === 0) width += 1;
+    const half = Math.floor(width / 2);
+    range = { minBinId: activeBin - half, maxBinId: activeBin + half };
+  }
+  if (activeBin < range.minBinId || activeBin > range.maxBinId) {
+    throw new Error(
+      `Active bin ${activeBin} moved outside target range ${range.minBinId}..${range.maxBinId} before position build`,
+    );
+  }
+  return { range, activeBin };
 }
 
 function infrastructure(flags: Flags): Record<string, unknown> | undefined {
@@ -900,7 +942,8 @@ async function bootstrapIfNeeded(args: {
     );
   }
 
-  const range = targetRange(target, flags);
+  let range = targetRange(target, flags);
+  let openActiveBin = target.activeBin;
   const candleIso = new Date(target.candleTimestamp * 1_000).toISOString();
 
   if (state.bootstrapUsed) {
@@ -909,7 +952,7 @@ async function bootstrapIfNeeded(args: {
       pool,
       position: null,
       targetRange: `${range.minBinId}..${range.maxBinId}`,
-      activeBin: target.activeBin,
+      activeBin: openActiveBin,
       candle: candleIso,
       reason:
         "managed position is absent after this process already used/adopted its principal; fresh bootstrap is disabled, so the loop remains alive and keeps reconciling on-chain state",
@@ -1204,11 +1247,25 @@ async function bootstrapIfNeeded(args: {
       pool,
       position: null,
       targetRange: `${range.minBinId}..${range.maxBinId}`,
-      activeBin: target.activeBin,
+      activeBin: openActiveBin,
       candle: candleIso,
       reason:
         "no on-chain position; pass --sol <amount> for a WSOL pair or --amount-x/--amount-y to bootstrap",
     };
+  }
+
+  if (flags.has("live")) {
+    const refreshed = await measuredValue(
+      "refresh active bin before bootstrap open",
+      () => freshExecutionRange({ slrd, pool, target, flags }),
+      (value) => ({
+        previousActive: openActiveBin,
+        active: value.activeBin,
+        range: `${value.range.minBinId}..${value.range.maxBinId}`,
+      }),
+    );
+    range = refreshed.range;
+    openActiveBin = refreshed.activeBin;
   }
 
   if (flags.has("live") && amountXRaw != null && amountYRaw != null) {
@@ -1292,7 +1349,7 @@ async function bootstrapIfNeeded(args: {
       pool,
       position: null,
       targetRange: `${range.minBinId}..${range.maxBinId}`,
-      activeBin: target.activeBin,
+      activeBin: openActiveBin,
       candle: candleIso,
       signatures: balanceSignatures,
       reason:
@@ -1317,7 +1374,7 @@ async function bootstrapIfNeeded(args: {
     (value) => ({
       position: short(value.position),
       range: `${range.minBinId}..${range.maxBinId}`,
-      active: target.activeBin,
+      active: openActiveBin,
       amountX: amountXRaw ? `${amountXRaw} raw` : (amountX ?? "0"),
       amountY: amountYRaw ? `${amountYRaw} raw` : (amountY ?? "0"),
       balanced: Boolean(sol && !flags.has("no-auto-balance")),
@@ -1332,7 +1389,7 @@ async function bootstrapIfNeeded(args: {
       pool,
       position: prepared.position ?? null,
       targetRange: `${range.minBinId}..${range.maxBinId}`,
-      activeBin: target.activeBin,
+      activeBin: openActiveBin,
       candle: candleIso,
       signatures: balanceSignatures,
     };
@@ -1379,7 +1436,7 @@ async function bootstrapIfNeeded(args: {
     pool,
     position,
     targetRange: `${range.minBinId}..${range.maxBinId}`,
-    activeBin: target.activeBin,
+    activeBin: openActiveBin,
     candle: candleIso,
     signatures: [...balanceSignatures, ...result.signatures],
   };
@@ -1395,7 +1452,8 @@ async function reopenRecoveredInventory(args: {
 }): Promise<CycleResult> {
   const { slrd, flags, walletRef, pool, target, state } = args;
   const pendingRecovery = state.pendingRecovery;
-  const range = targetRange(target, flags);
+  let range = targetRange(target, flags);
+  let openActiveBin = target.activeBin;
   const candleIso = new Date(target.candleTimestamp * 1_000).toISOString();
   if (!pendingRecovery) {
     return {
@@ -1403,7 +1461,7 @@ async function reopenRecoveredInventory(args: {
       pool,
       position: null,
       targetRange: `${range.minBinId}..${range.maxBinId}`,
-      activeBin: target.activeBin,
+      activeBin: openActiveBin,
       candle: candleIso,
       reason: "no recoverable source inventory is pending",
     };
@@ -1411,6 +1469,17 @@ async function reopenRecoveredInventory(args: {
 
   const strategy = (flag(flags, "strategy") ?? "spot") as MeteoraStrategy;
   const infra = infrastructure(flags);
+  const refreshed = await measuredValue(
+    "refresh active bin before recovery open",
+    () => freshExecutionRange({ slrd, pool, target, flags }),
+    (value) => ({
+      previousActive: openActiveBin,
+      active: value.activeBin,
+      range: `${value.range.minBinId}..${value.range.maxBinId}`,
+    }),
+  );
+  range = refreshed.range;
+  openActiveBin = refreshed.activeBin;
   const infrastructureQuote = await measuredValue(
     "inspect recovery candle-range infrastructure",
     () => inspectTargetInfrastructure({ slrd, pool, range, strategy }),
@@ -1552,7 +1621,7 @@ async function reopenRecoveredInventory(args: {
     pool,
     position,
     targetRange: `${range.minBinId}..${range.maxBinId}`,
-    activeBin: target.activeBin,
+    activeBin: openActiveBin,
     candle: candleIso,
     reason: `reopened principal recovered after ${recovery.sourcePosition ? `closing ${recovery.sourcePosition}` : "an interrupted bootstrap"}`,
     signatures: result.signatures,
@@ -1696,7 +1765,8 @@ async function runCycle(args: {
       breakoutBins: value.breakoutBins,
     }),
   );
-  const range = targetRange(target, flags);
+  let range = targetRange(target, flags);
+  let cycleActiveBin = target.activeBin;
   const candleIso = new Date(target.candleTimestamp * 1_000).toISOString();
   const strategy = (flag(flags, "strategy") ?? "spot") as MeteoraStrategy;
 
@@ -1940,6 +2010,20 @@ async function runCycle(args: {
 
   const inv = inventoryFromPosition(position);
 
+  if (flags.has("live")) {
+    const refreshed = await measuredValue(
+      "refresh active bin before replacement open",
+      () => freshExecutionRange({ slrd, pool, target, flags }),
+      (value) => ({
+        previousActive: cycleActiveBin,
+        active: value.activeBin,
+        range: `${value.range.minBinId}..${value.range.maxBinId}`,
+      }),
+    );
+    range = refreshed.range;
+    cycleActiveBin = refreshed.activeBin;
+  }
+
   const shift = Math.max(
     Math.abs(range.minBinId - currentMin),
     Math.abs(range.maxBinId - currentMax),
@@ -1954,7 +2038,7 @@ async function runCycle(args: {
       position: position.position,
       currentRange: `${currentMin}..${currentMax}`,
       targetRange: `${range.minBinId}..${range.maxBinId}`,
-      activeBin: target.activeBin,
+      activeBin: cycleActiveBin,
       candle: candleIso,
       shiftBins: shift,
       inventory: inv,
@@ -1971,7 +2055,7 @@ async function runCycle(args: {
         position: position.position,
         currentRange: `${currentMin}..${currentMax}`,
         targetRange: `${range.minBinId}..${range.maxBinId}`,
-        activeBin: target.activeBin,
+        activeBin: cycleActiveBin,
         candle: candleIso,
         shiftBins: shift,
         inventory: inv,
@@ -2005,7 +2089,7 @@ async function runCycle(args: {
       position: position.position,
       currentRange: `${currentMin}..${currentMax}`,
       targetRange: `${range.minBinId}..${range.maxBinId}`,
-      activeBin: target.activeBin,
+      activeBin: cycleActiveBin,
       candle: candleIso,
       shiftBins: shift,
       inventory: inv,
@@ -2183,7 +2267,7 @@ async function runCycle(args: {
     targetPosition: result.targetPosition,
     currentRange: `${currentMin}..${currentMax}`,
     targetRange: `${range.minBinId}..${range.maxBinId}`,
-    activeBin: target.activeBin,
+    activeBin: cycleActiveBin,
     candle: candleIso,
     shiftBins: shift,
     inventory: inv,
@@ -2385,12 +2469,12 @@ async function main(): Promise<void> {
         "  slrd run examples/meteora-liquidity-agent.ts --pool <dlmm-pool> --wallet <wallet> [--position <position>] [--live] [--once|--loop]\n" +
         "  slrd run examples/meteora-liquidity-agent.ts --token <mint> --wallet <wallet> --sol 0.1 --live\n\n" +
         "The previous closed 5m candle determines range width while the current active bin is always the exact middle of an odd-width Spot range.\n" +
-        `The default minimum centered width is ${DEFAULT_MIN_CENTERED_BINS} bins; --range-bins N fixes the width and --min-bins N changes the adaptive minimum. Even widths are widened by one bin so a true center always exists.\n` +
+        `Default bounds are the previous fully closed 5m candle low/high, widened only to the ${DEFAULT_MIN_CENTERED_BINS}-bin minimum. --range-bins N explicitly switches to a fixed active-centered width; even values are widened by one bin.\n` +
         "With --sol, the agent balances that principal into both pool tokens before a Spot deposit so both sides of an in-range candle can be funded; --no-auto-balance disables this.\n" +
         `The wallet keeps ${DEFAULT_GAS_RESERVE_SOL} SOL out of LP principal by default; change it with --gas-reserve-sol N.\n` +
         "Empty position shells are closed and recovered wallet token inventory is reused automatically when --sol is present; --no-orphan-wallet-recovery disables that, while --adopt-orphan-wallet-inventory enables it explicitly.\n" +
         "Fresh native SOL is not adopted as orphan LP principal unless --adopt-native-orphan-principal is explicitly supplied.\n" +
-        "--padding-bins N widens the candle-derived volatility width before centering.\n" +
+        "--padding-bins N expands the previous-candle bounds directly.\n" +
         "Live writes require at least 30s remaining before the next 5m boundary by default, preventing a previous-candle target from becoming stale during build/confirmation; tune with --min-write-window-ms.\n" +
         "The example keeps only process memory and reconciles zero/one/many on-chain positions as bootstrap/adopt/require --position.\n" +
         "Before opening or moving it inspects shared bin infrastructure; missing arrays remain denied unless explicitly authorized.\n" +
@@ -2416,12 +2500,13 @@ async function main(): Promise<void> {
     () => ({
       exactPreviousClosed5m: true,
       activeBinCenteredRange: true,
-      defaultMinCenteredBins: DEFAULT_MIN_CENTERED_BINS,
+      defaultMinCandleBins: DEFAULT_MIN_CENTERED_BINS,
       configuredRangeBins: optionalInteger(flags, "range-bins") ?? null,
       configuredMinBins:
         optionalInteger(flags, "min-bins") ?? DEFAULT_MIN_CENTERED_BINS,
       autoBalance: !flags.has("no-auto-balance"),
       gasReserveSol: flag(flags, "gas-reserve-sol") ?? DEFAULT_GAS_RESERVE_SOL,
+      freshActiveBinBeforeOpen: true,
       orphanWalletRecovery:
         flags.has("adopt-orphan-wallet-inventory") ||
         (flag(flags, "sol") != null && !flags.has("no-orphan-wallet-recovery")),

@@ -29,6 +29,7 @@ function median(values: number[]): number | null {
 }
 
 export default {
+  history: { mode: "exact" },
   name: "median-volume-low-mcap",
   state: {
     current: null,

@@ -349,7 +349,9 @@ export function buildTokenBacktestTapeFromCandles(input: {
       ? Math.max(0, firstRecordedTradeAtMs - tokenCreatedAtMs)
       : null;
   const provenFromCreation = input.historicalCoverage?.fromCreation === true;
-  const backfillComplete = input.historicalCoverage?.complete === true;
+  const backfillComplete =
+    input.historicalCoverage?.complete === true ||
+    input.historicalCoverage?.priceTapeComplete === true;
   const status: TokenBacktestCoverage["status"] =
     provenFromCreation && backfillComplete
       ? "likely-from-creation"
