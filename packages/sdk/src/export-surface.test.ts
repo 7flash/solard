@@ -5,6 +5,7 @@ import { join } from "node:path";
 const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
 const client = readFileSync(join(import.meta.dir, "client.ts"), "utf8");
 const protocol = readFileSync(join(import.meta.dir, "protocol.ts"), "utf8");
+const defaultClient = readFileSync(join(import.meta.dir, "default.ts"), "utf8");
 
 function exportedNames(value: string) {
   const values: string[] = [];
@@ -128,8 +129,16 @@ describe("sdk membrane", () => {
     });
   });
 
+  test("exports a lazy zero-config default client", () => {
+    expect(source).toContain('export { default } from "./default.ts"');
+    expect(defaultClient).toContain("instance ??= createSolard()");
+    expect(defaultClient).toContain('if (key === "close")');
+    expect(defaultClient).not.toContain("export default createSolard()");
+  });
+
   test("does not create persistence at module import", () => {
     expect(source).not.toMatch(/createCoreSolard|createTraderSolard\(\)/);
+    expect(defaultClient).not.toMatch(/^const\s+\w+\s*=\s*createSolard\(\)/m);
     expect(client.indexOf("createCoreSolard(options)")).toBeGreaterThan(
       client.indexOf("export function createSolard"),
     );

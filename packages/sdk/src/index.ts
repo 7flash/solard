@@ -1,3 +1,4 @@
+export { default } from "./default.ts";
 export { createSolard } from "./client.ts";
 export type {
   Solard,
