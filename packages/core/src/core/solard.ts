@@ -96,6 +96,7 @@ import { GroupRepo } from "../db/group-repo.ts";
 import type { SolardDatabase, TokenRow } from "../db/schema.ts";
 import { TokenRepo } from "../db/token-repo.ts";
 import { WalletRepo, type WalletInfo } from "../db/wallet-repo.ts";
+import bs58 from "bs58";
 import { PositionStore } from "../runtime/positions.ts";
 import { SolardAgent } from "../runtime/agent.ts";
 import { SolardWatcher } from "../runtime/watcher.ts";
@@ -274,6 +275,14 @@ export type MarketHistory = {
   candles1s: readonly TokenHistoryCandle1s[];
 };
 
+export type WalletPrivateKeyFormat = "base58" | "json";
+
+export type WalletPrivateKeyExport = {
+  wallet: WalletInfo;
+  format: WalletPrivateKeyFormat;
+  privateKey: string;
+};
+
 export type SolardHistoryApi = {
   replay: (
     tokenRef: TokenRef,
@@ -331,6 +340,10 @@ export class Solard implements ComposerHost {
   readonly blockhash = new BlockhashCache();
   private readonly chain: SolardConnection;
   private readonly agentRepo: AgentRepo;
+  private readonly pendingExecutionTokens = new Map<
+    string,
+    Promise<TokenRow>
+  >();
   private readonly dbPath: string;
   private closed = false;
 
@@ -493,6 +506,31 @@ export class Solard implements ComposerHost {
   listWallets(): WalletInfo[] {
     return this.wallets.list();
   }
+  walletAddress(ref: WalletRef): string {
+    return this.resolveWallet(ref).address.toBase58();
+  }
+  exportWalletPrivateKey(
+    ref: WalletRef,
+    format: WalletPrivateKeyFormat = "base58",
+  ): WalletPrivateKeyExport {
+    const { signer, row } = this.wallets.signer(ref);
+    if (!row) throw new Error("Private-key export requires a stored wallet");
+    return {
+      wallet: {
+        id: row.id,
+        name: row.name,
+        address: row.address,
+        isActive: row.isActive,
+        createdAtMs: row.createdAtMs,
+        updatedAtMs: row.updatedAtMs,
+      },
+      format,
+      privateKey:
+        format === "json"
+          ? JSON.stringify(Array.from(signer.secretKey))
+          : bs58.encode(signer.secretKey),
+    };
+  }
   resolveWallet(ref: WalletRef) {
     return this.wallets.resolve(ref);
   }
@@ -505,6 +543,37 @@ export class Solard implements ComposerHost {
 
   resolveToken(ref: TokenRef): TokenRow {
     return this.tokens.resolve(ref);
+  }
+  async resolveTokenForExecution(ref: TokenRef): Promise<TokenRow> {
+    try {
+      return this.resolveToken(ref);
+    } catch (error) {
+      let mint: string;
+      if (ref instanceof PublicKey) {
+        mint = ref.toBase58();
+      } else if (typeof ref === "string") {
+        try {
+          mint = new PublicKey(ref.trim()).toBase58();
+        } catch {
+          throw error;
+        }
+      } else {
+        throw error;
+      }
+
+      const existing = this.pendingExecutionTokens.get(mint);
+      if (existing) return await existing;
+
+      const pending = this.addToken(mint);
+      this.pendingExecutionTokens.set(mint, pending);
+      try {
+        return await pending;
+      } finally {
+        if (this.pendingExecutionTokens.get(mint) === pending) {
+          this.pendingExecutionTokens.delete(mint);
+        }
+      }
+    }
   }
   token(ref: TokenRef): TokenRow {
     return this.resolveToken(ref);

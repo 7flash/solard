@@ -85,6 +85,8 @@ export type {
   SolardEventsApi,
   SolardHistoryApi,
   SolardOptions,
+  WalletPrivateKeyExport,
+  WalletPrivateKeyFormat,
 } from "./core/solard.ts";
 export { createTraderSolard } from "./presets/trader.ts";
 
@@ -733,3 +735,41 @@ export type {
   CumulativeDistributionState,
   CumulativeEntitlement,
 } from "./distributions/cumulative.ts";
+
+export {
+  decodeProgramDataLogs,
+  decodePumpProgramData,
+  decodePumpSwapProgramData,
+  decodeRaydiumLaunchLabProgramData,
+  subscribeLaunches,
+  subscribeMigrations,
+  subscribeTrades,
+} from "./market/launch-trades.ts";
+export {
+  fetchTokenMetadata,
+  publicTokenMetadataUrl,
+} from "./market/token-metadata.ts";
+export type {
+  FetchTokenMetadataOptions,
+  TokenMetadata,
+  TokenMetadataHint,
+  TokenMetadataKind,
+  TokenMetadataMode,
+} from "./market/token-metadata.ts";
+
+export type {
+  LaunchEvent,
+  LaunchSubscription,
+  LaunchVenue,
+  MigrationDestination,
+  MigrationEvent,
+  MigrationSubscription,
+  MigrationVenue,
+  TradeEvent,
+  TradeSide,
+  TradeSubscription,
+  TradeVenue,
+  PumpDecodedEvent,
+  PumpSwapDecodedEvent,
+  RaydiumLaunchLabDecodedEvent,
+} from "./market/launch-trades.ts";

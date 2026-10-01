@@ -20,6 +20,8 @@ import {
   type TokenHolderSnapshotOptions,
   type TokenRef,
   type WalletRef,
+  type WalletPrivateKeyExport,
+  type WalletPrivateKeyFormat,
 } from "@solard/core";
 
 export type SolardOptions = {
@@ -78,6 +80,11 @@ export type Solard = {
   createVanityWallet: ReturnType<typeof createCoreSolard>["createVanityWallet"];
   importWallet: ReturnType<typeof createCoreSolard>["importWallet"];
   listWallets: ReturnType<typeof createCoreSolard>["listWallets"];
+  walletAddress(wallet: WalletRef): string;
+  exportWalletPrivateKey(
+    wallet: WalletRef,
+    format?: WalletPrivateKeyFormat,
+  ): WalletPrivateKeyExport;
   addToken: ReturnType<typeof createCoreSolard>["addToken"];
   resolveToken: ReturnType<typeof createCoreSolard>["resolveToken"];
   tokenAccounts: ReturnType<typeof createCoreSolard>["tokenAccounts"];
@@ -127,6 +134,8 @@ export function createSolard(options: SolardOptions = {}): Solard {
     createVanityWallet: core.createVanityWallet.bind(core),
     importWallet: core.importWallet.bind(core),
     listWallets: core.listWallets.bind(core),
+    walletAddress: core.walletAddress.bind(core),
+    exportWalletPrivateKey: core.exportWalletPrivateKey.bind(core),
     addToken: core.addToken.bind(core),
     resolveToken: core.resolveToken.bind(core),
     tokenAccounts: core.tokenAccounts.bind(core),
@@ -137,5 +146,3 @@ export function createSolard(options: SolardOptions = {}): Solard {
     sell: core.sell.bind(core),
   });
 }
-
-export const createTraderSolard = createSolard;

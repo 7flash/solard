@@ -27,7 +27,7 @@ import type {
 
 export interface ComposerHost extends TransactionHost {
   connection(): Connection;
-  resolveToken(ref: TokenRef): TokenRow;
+  resolveTokenForExecution(ref: TokenRef): Promise<TokenRow>;
   route(
     token: TokenRow,
     user: PublicKey,
@@ -82,7 +82,7 @@ export class TransactionComposer extends TransactionBuilder {
 
   claimFees(ref: TokenRef): this {
     return this.addOperation(async (_ctx, tx) => {
-      const token = this.composerHost.resolveToken(ref);
+      const token = await this.composerHost.resolveTokenForExecution(ref);
       const plan = await this.composerHost.resolveClaim(token, tx.payer());
       tx.addMany(plan.instructions, {
         kind: "claim",
@@ -117,7 +117,7 @@ export class TransactionComposer extends TransactionBuilder {
     options: { slippageBps?: number } = {},
   ): this {
     return this.addOperation(async (ctx, tx) => {
-      const token = this.composerHost.resolveToken(ref);
+      const token = await this.composerHost.resolveTokenForExecution(ref);
       const { plugin, market } = await this.composerHost.route(
         token,
         tx.payer(),
@@ -168,7 +168,7 @@ export class TransactionComposer extends TransactionBuilder {
     options: { bps?: number; slippageBps?: number } = {},
   ): this {
     return this.addOperation(async (_ctx, tx) => {
-      const token = this.composerHost.resolveToken(ref);
+      const token = await this.composerHost.resolveTokenForExecution(ref);
       const { plugin, market } = await this.composerHost.route(
         token,
         tx.payer(),
@@ -293,7 +293,7 @@ export class TransactionComposer extends TransactionBuilder {
     amountRaw: bigint,
   ): this {
     return this.addOperation(async (_ctx, tx) => {
-      const token = this.composerHost.resolveToken(ref);
+      const token = await this.composerHost.resolveTokenForExecution(ref);
       const { market } = await this.composerHost.route(token, tx.payer());
       const destination =
         typeof recipient === "string" ? new PublicKey(recipient) : recipient;

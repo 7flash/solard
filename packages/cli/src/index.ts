@@ -385,17 +385,13 @@ Vanity mints
   slrd vanity pool release <mint-address>               Release an ambiguous/failed launch reservation
   launch/vamp: add --mint-pool pump [--mint-pool-address <address>] to consume a pooled mint
 
-Shared market feed
-  slrd feed serve [--host 127.0.0.1] [--port 8788] [--rpc-rps 5] [--rpc-read-rps 2] [--max-fallback-subs 200]
-                                                        One upstream Pump/PumpSwap/LaunchLab feed shared by watchers, agents, and future UI clients
-
 Launch discovery
-  slrd launch watch [--venue pump,raydium-launchlab] [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--feed ws://127.0.0.1:8788/ws] [--show-new] [--prices] [--json]
-                                                        Consume the shared feed; ignore Pump Mayhem and notify on first $5k cross and each +20% notified ATH step
+  slrd launch watch [--venue pump,raydium-launchlab] [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--show-new] [--prices] [--json]
+                                                        Subscribe directly to launch/trade logs; ignore Pump Mayhem and notify on first $5k cross and each +20% notified ATH step
 
 Pump discovery
   slrd pump pairs [--json]                              Read Pump-supported quote mints from the on-chain Global account
-  slrd pump watch [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--feed ws://127.0.0.1:8788/ws] [--show-new] [--prices] [--json]
+  slrd pump watch [--min-mcap 5000] [--ath-step-pct 20] [--track-ttl 30m] [--show-new] [--prices] [--json]
                                                         Compatibility alias for: slrd launch watch --venue pump
 
 Metadata and launching
@@ -474,8 +470,8 @@ Scripts and event strategies
   slrd scripts                              List scripts registered in slrd.config.ts
   slrd run <name-or-path> [script flags...] Execute a script that imports slrd
   slrd run snipe --name <exact_name> --group <group> --sol 0.05 --sender jito
-  slrd strategy run <file.ts> --token <mint|alias> --wallet <wallet> [--params <json>] [--feed ws://127.0.0.1:8788/ws] [--live]
-                                                        Run an onPrice strategy from the shared feed; wallet/execution state remains isolated per agent
+  slrd strategy run <file.ts> --token <mint|alias> --wallet <wallet> [--params <json>] [--live]
+                                                        Run an onPrice strategy from direct token trade subscriptions; wallet/execution state remains isolated per agent
   slrd strategy backtest <file.ts> --token <mint> [--params <json>] [--capital-sol 1] [--price-sample 5s] [--sol-usd N] [--json]
                                                         Replay the same strategy file over durable token history
 
@@ -818,12 +814,6 @@ async function main() {
     process.exitCode = await runScript(script, scriptArgs);
     return;
   }
-  if (command === "feed" && values[0] === "serve") {
-    const { runPriceFeedServerCommand } =
-      await import("./price-feed-server.ts");
-    await runPriceFeedServerCommand({ flags, emit });
-    return;
-  }
   if (command === "strategy" && values[0] === "backtest") {
     const { runStrategyBacktestCommand } =
       await import("./strategy-backtest-command.ts");
@@ -1082,11 +1072,10 @@ async function main() {
         throw new Error(
           "Usage: slrd export <wallet|address> [--json] [--out <path>]",
         );
-      const bs58 = (await import("bs58")).default;
-      const { signer, row } = slrd.wallets.signer(ref);
-      const secret = flags.has("json")
-        ? JSON.stringify(Array.from(signer.secretKey))
-        : bs58.encode(signer.secretKey);
+      const exported = slrd.exportWalletPrivateKey(
+        ref,
+        flags.has("json") ? "json" : "base58",
+      );
 
       const out = flags.get("out");
       if (out && out !== "true") {
@@ -1094,18 +1083,20 @@ async function main() {
         const { dirname, resolve } = await import("node:path");
         const path = resolve(out);
         mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, `${secret}\n`, { mode: 0o600, flag: "wx" });
+        writeFileSync(path, `${exported.privateKey}\n`, {
+          mode: 0o600,
+          flag: "wx",
+        });
         emit(
-          `${OWL} exported @${row?.name ?? "?"} ${signer.publicKey.toBase58()} -> ${path}\n`,
+          `${OWL} exported @${exported.wallet.name ?? "?"} ${exported.wallet.address} -> ${path}\n`,
         );
         return;
       }
 
-      // Secret to stdout only; metadata to stderr so piping stays clean.
       process.stderr.write(
-        `${OWL} @${row?.name ?? "?"} ${signer.publicKey.toBase58()} (${flags.has("json") ? "keypair-json" : "base58"})\n`,
+        `${OWL} @${exported.wallet.name ?? "?"} ${exported.wallet.address} (${exported.format === "json" ? "keypair-json" : "base58"})\n`,
       );
-      process.stdout.write(`${secret}\n`);
+      process.stdout.write(`${exported.privateKey}\n`);
       return;
     }
     if (command === "import") {

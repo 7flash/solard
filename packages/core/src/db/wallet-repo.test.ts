@@ -3,6 +3,7 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
 
 import { Solard } from "../index.ts";
 import { encryptKeypair } from "../core/keypair.ts";
@@ -49,6 +50,35 @@ test("createWallet generates, encrypts, lists and signs from the canonical DB", 
 
     const signer = slrd.signer(created.address);
     expect(signer.publicKey.toBase58()).toBe(created.address);
+  } finally {
+    slrd.close();
+  }
+});
+
+test("wallet capabilities separate address lookup from explicit secret export", () => {
+  process.env.SLRD_MASTER_KEY = "solard-wallet-export-test-master-key";
+  const slrd = new Solard({ dbPath: tempDb("wallet-export") });
+  try {
+    const created = slrd.createWallet("exportable");
+    expect(slrd.walletAddress(created.address)).toBe(created.address);
+
+    const base58 = slrd.exportWalletPrivateKey(created.address);
+    expect(base58.wallet).toEqual(created);
+    expect(base58.format).toBe("base58");
+    expect(
+      Keypair.fromSecretKey(
+        bs58.decode(base58.privateKey),
+      ).publicKey.toBase58(),
+    ).toBe(created.address);
+
+    const json = slrd.exportWalletPrivateKey(created.address, "json");
+    expect(json.wallet).toEqual(created);
+    expect(json.format).toBe("json");
+    expect(
+      Keypair.fromSecretKey(
+        Uint8Array.from(JSON.parse(json.privateKey)),
+      ).publicKey.toBase58(),
+    ).toBe(created.address);
   } finally {
     slrd.close();
   }

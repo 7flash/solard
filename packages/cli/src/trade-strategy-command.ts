@@ -7,13 +7,13 @@ import {
   type Logs,
   type ParsedTransactionWithMeta,
 } from "@solana/web3.js";
-import { connectPriceFeed } from "./price-feed-client.ts";
-import type { PriceFeedPrice } from "./price-feed-protocol.ts";
 import {
   RaydiumService,
   createTraderSolard,
   resolveTradeAsset,
   sol,
+  subscribeTrades,
+  type TradeEvent,
 } from "@solard/core";
 
 type Flags = Map<string, string>;
@@ -1003,14 +1003,10 @@ export async function runTradeStrategyCommand(args: {
     Math.trunc(numberFlag(args.flags, "heartbeat-ms", 15_000)),
   );
   const rpc = rpcUrl(args.flags);
-  const feed =
-    flag(args.flags, "feed") ??
-    process.env.SOLARD_FEED_URL?.trim() ??
-    "ws://127.0.0.1:8788/ws";
   const strategy = await loadStrategy(path);
   if (typeof strategy.onPrice !== "function")
     throw new Error(
-      `Live shared-feed strategy ${path} must define onPrice(ctx, price). ` +
+      `Live trade strategy ${path} must define onPrice(ctx, price). ` +
         `Legacy onTrade is retained for historical exact-trade backtests, not per-agent live RPC subscriptions.`,
     );
   const state = await initialState(strategy);
@@ -1021,8 +1017,7 @@ export async function runTradeStrategyCommand(args: {
   let priceCount = 0;
   let lastPrice: StrategyPriceTick | null = null;
   let callbackErrors = 0;
-  let feedErrors = 0;
-  let feedConnected = false;
+  let marketErrors = 0;
   let callbackQueue: Promise<void> = Promise.resolve();
 
   try {
@@ -1139,18 +1134,20 @@ export async function runTradeStrategyCommand(args: {
       }
     };
 
-    const onPrice = async (event: PriceFeedPrice) => {
-      if (event.mint !== mint || stopped) return;
+    const onPrice = async (event: TradeEvent) => {
+      if (event.mint !== mint || stopped || event.priceQuote == null) return;
+      const priceSol = event.quoteMint === WSOL_MINT ? event.priceQuote : null;
+      const priceUsd = event.quoteMint === USDC_MINT ? event.priceQuote : null;
+      if (priceSol == null && priceUsd == null) return;
       const price: StrategyPriceTick = {
-        signature: event.signature ?? "feed",
-        slot: event.slot ?? 0,
+        signature: event.signature,
+        slot: event.slot,
         atMs: event.atMs,
         mint,
-        priceSol: event.priceSol,
-        priceUsd: event.priceUsd,
-        marketCapUsd: event.marketCapUsd,
+        priceSol,
+        priceUsd,
+        marketCapUsd: null,
       };
-      if (price.priceSol == null && price.priceUsd == null) return;
       priceCount += 1;
       lastPrice = price;
       if (json) report("price", price as any);
@@ -1162,21 +1159,16 @@ export async function runTradeStrategyCommand(args: {
     };
 
     const controller = new AbortController();
-    const feedClient = await connectPriceFeed({
-      url: feed,
-      subscribe: { op: "subscribe", mints: [mint] },
+    const marketSubscription = await subscribeTrades({
+      connection: slrd.connection(),
+      tokens: [mint],
       signal: controller.signal,
-      onStatus(event, data) {
-        if (event === "connected") feedConnected = true;
-        if (event === "connect-error") {
-          feedConnected = false;
-          feedErrors += 1;
-        }
-        report(`feed ${event}`, data ?? {});
+      onTrade(event) {
+        callbackQueue = callbackQueue.then(() => onPrice(event));
       },
-      onMessage(message) {
-        if (message.type !== "price" || message.mint !== mint) return;
-        callbackQueue = callbackQueue.then(() => onPrice(message));
+      onStatus(event, data) {
+        if (event.includes("error")) marketErrors += 1;
+        report(`market ${event}`, data ?? {});
       },
     });
 
@@ -1186,9 +1178,8 @@ export async function runTradeStrategyCommand(args: {
       wallet: walletRef,
       walletAddress,
       live,
-      feed,
-      event: "shared-price-feed",
-      upstreamMarketSubscriptions: 0,
+      event: "direct-trade-subscription",
+      upstreamMarketSubscriptions: marketSubscription.listTokens().length,
     });
 
     if (strategy.onStart) {
@@ -1208,11 +1199,10 @@ export async function runTradeStrategyCommand(args: {
     process.once("SIGTERM", stopSignal);
     const heartbeatTimer = setInterval(() => {
       report("strategy heartbeat", {
-        feedConnected,
         prices: priceCount,
         callbackErrors,
-        feedErrors,
-        upstreamMarketSubscriptions: 0,
+        marketErrors,
+        upstreamMarketSubscriptions: marketSubscription.listTokens().length,
         executionVenue: executor.venue ?? "unresolved",
       });
     }, heartbeatMs);
@@ -1224,7 +1214,7 @@ export async function runTradeStrategyCommand(args: {
       process.removeListener("SIGINT", stopSignal);
       process.removeListener("SIGTERM", stopSignal);
       controller.abort();
-      feedClient.close();
+      await marketSubscription.close();
       await callbackQueue.catch(() => undefined);
       if (strategy.onStop) {
         try {
@@ -1238,7 +1228,7 @@ export async function runTradeStrategyCommand(args: {
         reason: stopReason,
         prices: priceCount,
         callbackErrors,
-        feedErrors,
+        marketErrors,
       });
     }
   } finally {

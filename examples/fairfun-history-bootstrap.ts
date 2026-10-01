@@ -1,5 +1,5 @@
 import { configure, createMeasure } from "measure-fn";
-import { createTraderSolard, type ReplayItem } from "@solard/sdk";
+import { createSolard, type ReplayItem } from "@solard/sdk";
 
 configure({ silent: true });
 const m = createMeasure("slrd:fairfun-history-bootstrap", {
@@ -74,7 +74,7 @@ export async function runFairfunHistoryBootstrap(
   const recipient = required(flags, "wallet");
   const provider = (flags.get("provider") ?? "auto") as
     "auto" | "solscan" | "rpc";
-  const slrd = createTraderSolard();
+  const slrd = createSolard();
   try {
     const history = await m("history", () =>
       slrd.history.replay(token, {

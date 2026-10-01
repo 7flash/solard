@@ -1,7 +1,7 @@
 {
   "name": "@solard/sdk",
-  "version": "0.2.19",
-  "description": "Public Solard SDK for wallets, transactions, trading and token launches.",
+  "version": "0.2.21",
+  "description": "Public Solard SDK for wallets, trading, history, live market subscriptions and token metadata.",
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
@@ -12,6 +12,11 @@
       "types": "./src/browser/index.ts",
       "import": "./src/browser/index.ts",
       "default": "./src/browser/index.ts"
+    },
+    "./protocol": {
+      "types": "./src/protocol.ts",
+      "import": "./src/protocol.ts",
+      "default": "./src/protocol.ts"
     }
   },
   "files": [
@@ -22,7 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
-    "@solard/core": "0.2.19"
+    "@solard/core": "0.2.21"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.browser.json",

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Solard · Live token stream</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Solard home">
+        <span class="mark">S</span>
+        <span><strong>solard</strong><small>market feed</small></span>
+      </a>
+      <div class="connection-pill">
+        <span id="connection-dot" class="status-dot bad"></span>
+        <span id="connection-text">disconnected</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <div class="eyebrow">SHARED PRICE FEED</div>
+          <h1>New launches,<br /><span>moving in real time.</span></h1>
+          <p>One feed connection. Global launch discovery. Live Pump, PumpSwap and Raydium LaunchLab prices. No per-row RPC polling.</p>
+        </div>
+        <div class="feed-control panel">
+          <label for="feed-url">Feed WebSocket</label>
+          <div class="input-row">
+            <input id="feed-url" spellcheck="false" />
+            <button id="connect" class="primary">Connect</button>
+          </div>
+          <p>The browser subscribes to <code>launches + allPrices</code>. Opening this page does not create a Solana subscription per token.</p>
+        </div>
+      </section>
+
+      <section class="stats-grid">
+        <article class="stat panel"><span>Launch events</span><strong id="stat-launches">0</strong><small>received by this page</small></article>
+        <article class="stat panel"><span>Priced tokens</span><strong id="stat-priced">0</strong><small>latest quote available</small></article>
+        <article class="stat panel"><span>Price rate</span><strong id="stat-rate">0.0/s</strong><small>10-second moving rate</small></article>
+        <article class="stat panel"><span>Tracked locally</span><strong id="stat-tracked">0</strong><small>browser state only</small></article>
+      </section>
+
+      <section class="workspace">
+        <div class="stream panel">
+          <div class="stream-head">
+            <div>
+              <div class="eyebrow">LIVE MARKET</div>
+              <h2>Token stream</h2>
+            </div>
+            <div class="actions">
+              <button id="pause">Pause UI</button>
+              <button id="clear">Clear</button>
+            </div>
+          </div>
+
+          <div class="filters">
+            <input id="search" type="search" placeholder="Search symbol, name or mint…" />
+            <select id="venue">
+              <option value="all">All venues</option>
+              <option value="pump">Pump / PumpSwap</option>
+              <option value="raydium-launchlab">LaunchLab</option>
+              <option value="rpc-fallback">RPC fallback</option>
+            </select>
+            <select id="sort">
+              <option value="activity">Recent activity</option>
+              <option value="market-cap">Market cap</option>
+              <option value="launch">Newest launch</option>
+              <option value="price">Price</option>
+            </select>
+            <label class="check"><input id="session-only" type="checkbox" /> This session</label>
+            <label class="check"><input id="priced-only" type="checkbox" checked /> Priced only</label>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Token</th><th>Venue</th><th class="numeric">USD price</th><th class="numeric">SOL price</th><th class="numeric">Market cap</th><th class="numeric">Since seen</th><th class="numeric">Observed ATH</th><th class="numeric">Ticks</th><th class="numeric">Age</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="token-rows"></tbody>
+            </table>
+            <div id="empty" class="empty">Waiting for the feed…</div>
+          </div>
+        </div>
+
+        <aside class="side panel">
+          <div class="eyebrow">EVENTS</div>
+          <h2>Feed activity</h2>
+          <div id="event-log" class="event-log"></div>
+          <div class="architecture">
+            <div class="arch-title">What this demo proves</div>
+            <div class="arch-node upstream">Solana programs</div>
+            <div class="arch-line"></div>
+            <div class="arch-node feed">slrd feed serve</div>
+            <div class="arch-line"></div>
+            <div class="arch-node browser">this browser</div>
+            <div class="arch-fan">
+              <span>launches</span><span>prices</span><span>future UI</span>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

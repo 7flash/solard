@@ -1,6 +1,6 @@
 import { configure, createMeasure } from "measure-fn";
 import { readFileSync } from "node:fs";
-import { createTraderSolard } from "@solard/sdk";
+import { createSolard } from "@solard/sdk";
 
 type FairfunEntitlementSnapshot = {
   recipients: Array<{ wallet: string; entitledRaw: string }>;
@@ -71,7 +71,7 @@ export async function runFairfunRewardsAgent(
   const wallet = required(flags, "wallet");
   const input = snapshot(required(flags, "snapshot"));
   const live = flags.has("live");
-  const slrd = createTraderSolard();
+  const slrd = createSolard();
   try {
     const common = {
       id: flags.get("id") ?? `fairfun:${token}`,

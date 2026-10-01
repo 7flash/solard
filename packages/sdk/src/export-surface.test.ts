@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
 const client = readFileSync(join(import.meta.dir, "client.ts"), "utf8");
+const protocol = readFileSync(join(import.meta.dir, "protocol.ts"), "utf8");
 
 function exportedNames(value: string) {
   const values: string[] = [];
@@ -28,8 +29,12 @@ describe("sdk membrane", () => {
     expect(exportedNames(source)).toEqual({
       values: [
         "createSolard",
-        "createTraderSolard",
+        "fetchTokenMetadata",
         "formatRaw",
+        "publicTokenMetadataUrl",
+        "subscribeLaunches",
+        "subscribeMigrations",
+        "subscribeTrades",
         "sol",
         "tokenAmount",
       ].sort(),
@@ -43,7 +48,15 @@ describe("sdk membrane", () => {
         "CumulativeDistributionRecipient",
         "CumulativeDistributionState",
         "CumulativeEntitlement",
+        "FetchTokenMetadataOptions",
         "HumanAmount",
+        "LaunchEvent",
+        "LaunchSubscription",
+        "LaunchVenue",
+        "MigrationDestination",
+        "MigrationEvent",
+        "MigrationSubscription",
+        "MigrationVenue",
         "MarketHistory",
         "MarketHistoryOptions",
         "MarketPrice",
@@ -60,6 +73,10 @@ describe("sdk membrane", () => {
         "SendReceipt",
         "SenderId",
         "SimulationResult",
+        "TradeEvent",
+        "TradeSide",
+        "TradeSubscription",
+        "TradeVenue",
         "Solard",
         "SolardCanonicalEvent",
         "SolardClaimAttribution",
@@ -72,9 +89,15 @@ describe("sdk membrane", () => {
         "TokenHolderSnapshot",
         "TokenHolderSnapshotOptions",
         "TokenEventHistoryProgress",
+        "TokenMetadata",
+        "TokenMetadataHint",
+        "TokenMetadataKind",
+        "TokenMetadataMode",
         "TokenRef",
         "TokenRow",
         "WalletInfo",
+        "WalletPrivateKeyExport",
+        "WalletPrivateKeyFormat",
         "WalletRef",
       ].sort(),
     });
@@ -84,6 +107,25 @@ describe("sdk membrane", () => {
     expect(source).not.toContain('export * from "@solard/core"');
     expect(source).not.toMatch(/\.\.\/\.\.\/core\/src|@solard\/core\//);
     expect(client).not.toMatch(/\.\.\/\.\.\/core\/src|@solard\/core\//);
+  });
+
+  test("keeps raw protocol decoders off the root surface", () => {
+    expect(source).not.toMatch(
+      /decode(?:ProgramDataLogs|PumpProgramData|PumpSwapProgramData|RaydiumLaunchLabProgramData)/,
+    );
+    expect(exportedNames(protocol)).toEqual({
+      values: [
+        "decodeProgramDataLogs",
+        "decodePumpProgramData",
+        "decodePumpSwapProgramData",
+        "decodeRaydiumLaunchLabProgramData",
+      ].sort(),
+      types: [
+        "PumpDecodedEvent",
+        "PumpSwapDecodedEvent",
+        "RaydiumLaunchLabDecodedEvent",
+      ].sort(),
+    });
   });
 
   test("does not create persistence at module import", () => {

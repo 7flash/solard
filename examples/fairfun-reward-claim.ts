@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createTraderSolard } from "@solard/sdk";
+import { createSolard } from "@solard/sdk";
 
 type Flags = Map<string, string>;
 
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   const wallet = required(flags, "wallet");
   const id = required(flags, "id");
   const basisPath = required(flags, "basis");
-  const slrd = createTraderSolard();
+  const slrd = createSolard();
   try {
     try {
       slrd.resolveToken(token);

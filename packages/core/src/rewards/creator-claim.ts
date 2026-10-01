@@ -825,7 +825,7 @@ export async function claimCreatorRewards(
   wallet: WalletRef,
   options: ClaimCreatorRewardsOptions = {},
 ): Promise<CreatorRewardClaimResult> {
-  const token = slrd.resolveToken(tokenRef);
+  const token = await slrd.resolveTokenForExecution(tokenRef);
   const feePayer = slrd.resolveWallet(wallet).address;
   const id = options.id?.trim() || null;
   const requestedBasis = options.basis

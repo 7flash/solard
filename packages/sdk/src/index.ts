@@ -1,4 +1,4 @@
-export { createSolard, createTraderSolard } from "./client.ts";
+export { createSolard } from "./client.ts";
 export type {
   Solard,
   SolardEventsApi,
@@ -46,5 +46,33 @@ export type {
   TokenRef,
   TokenRow,
   WalletInfo,
+  WalletPrivateKeyExport,
+  WalletPrivateKeyFormat,
   WalletRef,
+} from "@solard/core";
+
+export {
+  fetchTokenMetadata,
+  publicTokenMetadataUrl,
+  subscribeLaunches,
+  subscribeMigrations,
+  subscribeTrades,
+} from "@solard/core";
+export type {
+  LaunchEvent,
+  LaunchSubscription,
+  LaunchVenue,
+  MigrationDestination,
+  MigrationEvent,
+  MigrationSubscription,
+  MigrationVenue,
+  TradeEvent,
+  TradeSide,
+  TradeSubscription,
+  TradeVenue,
+  FetchTokenMetadataOptions,
+  TokenMetadata,
+  TokenMetadataHint,
+  TokenMetadataKind,
+  TokenMetadataMode,
 } from "@solard/core";
