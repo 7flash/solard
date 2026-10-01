@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import { configure, createMeasure } from "measure-fn";
-import { Connection } from "@solana/web3.js";
-import {
-  subscribeTrades,
+import slrd, {
   type TokenMetadataMode,
   type TradeEvent,
   type TradeVenue,
@@ -68,8 +66,12 @@ function printable(event: TradeEvent) {
     ...event,
     baseRaw: event.baseRaw?.toString() ?? null,
     quoteRaw: event.quoteRaw?.toString() ?? null,
-    virtualBaseRaw: event.virtualBaseRaw?.toString() ?? null,
-    virtualQuoteRaw: event.virtualQuoteRaw?.toString() ?? null,
+    market: {
+      ...event.market,
+      supplyRaw: event.market.supplyRaw.toString(),
+      baseReserveRaw: event.market.baseReserveRaw.toString(),
+      quoteReserveRaw: event.market.quoteReserveRaw.toString(),
+    },
   };
 }
 
@@ -86,43 +88,34 @@ if (!tokens.length)
   throw new Error(
     "Pass token mints as positionals or with --token <mint> / --tokens <mint,mint>",
   );
-const rpc =
-  flag(flags, "rpc") ??
-  process.env.RPC_ENDPOINT?.trim() ??
-  process.env.SOLANA_RPC_URL?.trim() ??
-  process.env.HELIUS_RPC_URL?.trim();
-if (!rpc)
+if (flags.has("rpc") || flags.has("ws"))
   throw new Error(
-    "Missing --rpc, RPC_ENDPOINT, SOLANA_RPC_URL, or HELIUS_RPC_URL",
+    "Set only RPC_ENDPOINT in the environment. --rpc and --ws are intentionally unsupported in this example.",
   );
-const ws =
-  flag(flags, "ws") ??
-  process.env.SOLANA_WS_URL?.trim() ??
-  process.env.HELIUS_WS_URL?.trim();
-const connection = new Connection(
-  rpc,
-  ws ? { commitment: "confirmed", wsEndpoint: ws } : "confirmed",
-);
 const controller = new AbortController();
-const subscription = await subscribeTrades({
-  connection,
+const solUsdQuote = await slrd.getSolUsdPrice();
+m.sync(
+  { start: () => "sol-usd", end: (value: typeof solUsdQuote) => value },
+  () => solUsdQuote,
+);
+const subscription = await slrd.listenTrades({
   tokens,
   venues: venues(flags),
   metadata: metadataMode(flags),
   signal: controller.signal,
-  onTrade(event) {
-    const value = printable(event);
-    m.sync(
-      { start: () => "trade", end: (result: typeof value) => result },
-      () => value,
-    );
-  },
   onStatus(event, data) {
     m.sync(
       { start: () => event, end: (value: Record<string, unknown>) => value },
       () => data ?? {},
     );
   },
+});
+subscription.onTrade((event) => {
+  const value = printable(event);
+  m.sync(
+    { start: () => "trade", end: (result: typeof value) => result },
+    () => value,
+  );
 });
 
 const stop = () => controller.abort();

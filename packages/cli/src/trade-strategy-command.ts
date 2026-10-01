@@ -208,14 +208,14 @@ function required(flags: Flags, key: string): string {
 }
 
 function rpcUrl(flags: Flags): string {
-  const value =
-    flag(flags, "rpc") ??
-    process.env.RPC_ENDPOINT?.trim() ??
-    process.env.SOLANA_RPC_URL?.trim() ??
-    process.env.HELIUS_RPC_URL?.trim();
+  if (flags.has("rpc") || flags.has("ws"))
+    throw new Error(
+      "Set only RPC_ENDPOINT in the environment. --rpc and --ws are intentionally unsupported.",
+    );
+  const value = process.env.RPC_ENDPOINT?.trim();
   if (!value)
     throw new Error(
-      "strategy run requires RPC_ENDPOINT, SOLANA_RPC_URL, HELIUS_RPC_URL, or --rpc <url>",
+      "strategy run requires RPC_ENDPOINT. WebSocket access is derived from the same endpoint.",
     );
   return value;
 }
@@ -474,23 +474,6 @@ async function fetchJson(url: string): Promise<any> {
   } finally {
     clearTimeout(timer);
   }
-}
-
-async function fetchSolUsd(): Promise<number> {
-  try {
-    const raw = await fetchJson(
-      "https://api.coinbase.com/v2/prices/SOL-USD/spot",
-    );
-    const value = Number(raw?.data?.amount);
-    if (Number.isFinite(value) && value > 0) return value;
-  } catch {}
-  const raw = await fetchJson(
-    "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
-  );
-  const value = Number(raw?.solana?.usd);
-  if (!Number.isFinite(value) || value <= 0)
-    throw new Error("SOL/USD price unavailable");
-  return value;
 }
 
 async function discoverRaydiumPools(mint: string): Promise<string[]> {
@@ -1017,7 +1000,7 @@ export async function runTradeStrategyCommand(args: {
   let priceCount = 0;
   let lastPrice: StrategyPriceTick | null = null;
   let callbackErrors = 0;
-  let marketErrors = 0;
+  let tradeErrors = 0;
   let callbackQueue: Promise<void> = Promise.resolve();
 
   try {
@@ -1135,18 +1118,17 @@ export async function runTradeStrategyCommand(args: {
     };
 
     const onPrice = async (event: TradeEvent) => {
-      if (event.mint !== mint || stopped || event.priceQuote == null) return;
-      const priceSol = event.quoteMint === WSOL_MINT ? event.priceQuote : null;
-      const priceUsd = event.quoteMint === USDC_MINT ? event.priceQuote : null;
-      if (priceSol == null && priceUsd == null) return;
+      if (event.mint !== mint || stopped) return;
+      if (event.market.priceSol == null && event.market.priceUsd == null)
+        return;
       const price: StrategyPriceTick = {
         signature: event.signature,
         slot: event.slot,
         atMs: event.atMs,
         mint,
-        priceSol,
-        priceUsd,
-        marketCapUsd: null,
+        priceSol: event.market.priceSol,
+        priceUsd: event.market.priceUsd,
+        marketCapUsd: event.market.marketCapUsd,
       };
       priceCount += 1;
       lastPrice = price;
@@ -1159,7 +1141,7 @@ export async function runTradeStrategyCommand(args: {
     };
 
     const controller = new AbortController();
-    const marketSubscription = await subscribeTrades({
+    const tradeSubscription = await subscribeTrades({
       connection: slrd.connection(),
       tokens: [mint],
       signal: controller.signal,
@@ -1167,8 +1149,8 @@ export async function runTradeStrategyCommand(args: {
         callbackQueue = callbackQueue.then(() => onPrice(event));
       },
       onStatus(event, data) {
-        if (event.includes("error")) marketErrors += 1;
-        report(`market ${event}`, data ?? {});
+        if (event.includes("error")) tradeErrors += 1;
+        report(`trades ${event}`, data ?? {});
       },
     });
 
@@ -1179,7 +1161,7 @@ export async function runTradeStrategyCommand(args: {
       walletAddress,
       live,
       event: "direct-trade-subscription",
-      upstreamMarketSubscriptions: marketSubscription.listTokens().length,
+      upstreamTradeSubscriptions: tradeSubscription.listTokens().length,
     });
 
     if (strategy.onStart) {
@@ -1201,8 +1183,8 @@ export async function runTradeStrategyCommand(args: {
       report("strategy heartbeat", {
         prices: priceCount,
         callbackErrors,
-        marketErrors,
-        upstreamMarketSubscriptions: marketSubscription.listTokens().length,
+        tradeErrors,
+        upstreamTradeSubscriptions: tradeSubscription.listTokens().length,
         executionVenue: executor.venue ?? "unresolved",
       });
     }, heartbeatMs);
@@ -1214,7 +1196,7 @@ export async function runTradeStrategyCommand(args: {
       process.removeListener("SIGINT", stopSignal);
       process.removeListener("SIGTERM", stopSignal);
       controller.abort();
-      await marketSubscription.close();
+      await tradeSubscription.close();
       await callbackQueue.catch(() => undefined);
       if (strategy.onStop) {
         try {
@@ -1228,7 +1210,7 @@ export async function runTradeStrategyCommand(args: {
         reason: stopReason,
         prices: priceCount,
         callbackErrors,
-        marketErrors,
+        tradeErrors,
       });
     }
   } finally {

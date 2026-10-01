@@ -129,6 +129,7 @@ export function openDatabase(input?: string): SolardDatabase {
     },
   ) as SolardDatabase;
 
+  db.raw("PRAGMA busy_timeout = 5000");
   ensureSolardDatabaseRuntimeObjects(db);
   open.set(path, { db, refs: 1 });
   m.measureSync(`open ${path}`, () => "ready");

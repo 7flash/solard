@@ -10,6 +10,7 @@ import {
 } from "@solard/core";
 
 import { resolveTradeTargets, type TradeTargets } from "./trade-targets.ts";
+import { tradeFeeOptions } from "./trade-fees.ts";
 import { summarizeTradeRoute, type TradeRouteSummary } from "./trade-result.ts";
 import { parseVenuePreference, type TradeCommandFlags } from "./trade-venue.ts";
 
@@ -105,6 +106,7 @@ export async function runSmartBuyCommand({
     }
 
     const options = {
+      ...tradeFeeOptions(flags),
       slippageBps: intFlag(flags, "slippage-bps", 1_500),
       via: (flags.get("sender") ?? "rpc") as SenderId,
       skipSimulation: flags.has("skip-simulation"),
@@ -118,15 +120,22 @@ export async function runSmartBuyCommand({
           ? [
               await slrd
                 .tx(target.refs[0]!)
+                .priorityFee(options.priorityFee)
                 .buy(resolution.token!.mint, amount, options)
                 .build(),
             ]
           : await slrd
               .composeMany(target.refs)
+              .priorityFee(options.priorityFee)
               .buy(resolution.token!.mint, amount, options)
               .build();
       const results = await Promise.all(
-        plans.map((plan) => slrd.simulatePlan(plan)),
+        plans.map(async (plan, index) => {
+          const prepared = await slrd.prepareTradePlan(target.refs[index]!, plan, options);
+          return { ...await slrd.simulatePlan(prepared.plan),
+            priorityMicroLamports: prepared.priorityMicroLamports,
+            cuLimit: prepared.plan.draft.cuLimit ?? 600_000 };
+        }),
       );
       return {
         mode: "simulation",

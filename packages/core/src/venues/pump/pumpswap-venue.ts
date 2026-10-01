@@ -9,6 +9,8 @@ import {
   type AccountMeta,
 } from "@solana/web3.js";
 import { sameAsset, type RawAmount } from "../../core/amounts.ts";
+import { readMint } from "../../chain/state.ts";
+import type { TokenRow } from "../../db/schema.ts";
 import type {
   BuiltInstructions,
   MarketPrice,
@@ -27,7 +29,7 @@ import {
 } from "./constants.ts";
 import { spotPriceQuotePerToken } from "./quote.ts";
 import { resolvePumpSwapProtocolFeeRecipient, tokenMeta } from "./routing.ts";
-import { defaultTokenProgram, fetchCurve, fetchPool } from "./state.ts";
+import { fetchCurve, fetchPool } from "./state.ts";
 import {
   extraAccounts,
   poolQuoteAsset,
@@ -361,34 +363,60 @@ function quoteSlippageBps(quote: QuoteResult): number {
 export class PumpSwapVenue implements TradeVenuePlugin {
   readonly id = "pumpswap";
 
+  async inspectToken(connection: VenueContext["connection"], mint: PublicKey): Promise<Partial<TokenRow> | null> {
+    const pools = await connection.getProgramAccounts(PUMP_AMM_PROGRAM_ID, {
+      commitment: "confirmed", filters: [{ memcmp: { offset: 43, bytes: mint.toBase58() } }],
+    });
+    const verified = await Promise.all(pools.map(async ({ pubkey }) => fetchPool(connection, pubkey)));
+    const solPools = verified.filter((pool) => pool.baseMint.equals(mint) && pool.quoteMint.equals(WRAPPED_SOL_MINT));
+    const ranked = await Promise.all(solPools.map(async (pool) => ({ pool,
+      quoteReserve: await tokenAccountAmount(connection, pool.quoteTokenAccount, TOKEN_PROGRAM_ID, WRAPPED_SOL_MINT) })));
+    ranked.sort((a, b) => a.quoteReserve === b.quoteReserve ? a.pool.address.toBase58().localeCompare(b.pool.address.toBase58()) : a.quoteReserve > b.quoteReserve ? -1 : 1);
+    const solPool = ranked.find((row) => row.quoteReserve > 0n)?.pool;
+    const selected = solPool ?? (verified.length === 1 ? verified[0] : null);
+    if (!selected) return null;
+    if (!selected.baseMint.equals(mint)) throw new Error("PumpSwap discovery base mint mismatch");
+    const quote = await readMint(connection, selected.quoteMint);
+    return { venueHint: this.id, pool: selected.address.toBase58(),
+      quoteMint: selected.quoteMint.toBase58(), quoteTokenProgram: quote.tokenProgram.toBase58(),
+      metadataJson: JSON.stringify({ quoteDecimals: quote.decimals }), refreshedAtMs: Date.now() };
+  }
+
   async resolveMarket(ctx: VenueContext): Promise<VenueMarket | null> {
-    const curve = await fetchCurve(ctx.connection, ctx.token);
-    if (!curve?.complete) return null;
+    if (ctx.token.venueHint && !["unknown", "pump-curve", "pumpswap"].includes(ctx.token.venueHint)) return null;
+    const curve = ctx.token.pool ? null : await fetchCurve(ctx.connection, ctx.token);
+    if (!ctx.token.pool && !curve?.complete) return null;
     const mint = new PublicKey(ctx.token.mint);
     const pool = ctx.token.pool
       ? new PublicKey(ctx.token.pool)
-      : pumpSwapPoolPda(mint, curve.quoteAsset.mint);
+      : pumpSwapPoolPda(mint, curve!.quoteAsset.mint);
     const state = await fetchPool(ctx.connection, pool);
     if (!state.baseMint.equals(mint))
       throw new Error(
         `Configured PumpSwap pool does not contain token ${ctx.token.mint}`,
       );
-    const quoteAsset = await poolQuoteAsset(
-      ctx.connection,
-      ctx.token,
-      state.quoteMint,
-    );
-    const baseTokenProgram = defaultTokenProgram(ctx.token);
+    if (curve && !state.quoteMint.equals(curve.quoteAsset.mint)) {
+      throw new Error(
+        `PumpSwap pool ${pool.toBase58()} quote mint ${state.quoteMint.toBase58()} does not match curve quote ${curve.quoteAsset.mint.toBase58()}`,
+      );
+    }
+    const [baseMintState, quoteAsset] = await Promise.all([
+      readMint(ctx.connection, mint),
+      poolQuoteAsset(ctx.connection, ctx.token, state.quoteMint),
+    ]);
+    const baseTokenProgram = baseMintState.tokenProgram;
     const [baseReserve, rawQuoteReserve] = await Promise.all([
       tokenAccountAmount(
         ctx.connection,
         state.baseTokenAccount,
         baseTokenProgram,
+        mint,
       ),
       tokenAccountAmount(
         ctx.connection,
         state.quoteTokenAccount,
         quoteAsset.tokenProgram,
+        state.quoteMint,
       ),
     ]);
     const effectiveQuoteReserve = rawQuoteReserve + state.virtualQuoteReserves;
@@ -419,6 +447,7 @@ export class PumpSwapVenue implements TradeVenuePlugin {
       creator: state.coinCreator,
       metadata: {
         pool,
+        baseDecimals: baseMintState.decimals,
         poolBaseAta: state.baseTokenAccount,
         poolQuoteAta: state.quoteTokenAccount,
         protocolFeeRecipient,
@@ -496,7 +525,7 @@ export class PumpSwapVenue implements TradeVenuePlugin {
       quoteAsset: market.quoteAsset,
       priceQuotePerToken: spotPriceQuotePerToken(
         reserves,
-        ctx.token.decimals ?? 6,
+        Number(market.metadata.baseDecimals),
         market.quoteAsset.decimals,
       ),
       baseReserveRaw: reserves.virtualBase,

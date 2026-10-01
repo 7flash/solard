@@ -28,6 +28,11 @@ bun.lock
 *.db-wal
 
 .secrets
+.env
+.env.*
+wallets.json
+*_state*.json
+*_queue*.json
 
 run
 
@@ -46,5 +51,6 @@ run
 *.txt
 
 !package.json
+!packages/core/src/venues/meteora/fixtures/handoff-mainnet.json
 
 *.csv

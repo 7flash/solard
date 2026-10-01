@@ -166,6 +166,9 @@ async function main(): Promise<void> {
     autoRearmTargets:
       setting(flags, "auto-rearm", "SOLARD_TRADER_AUTO_REARM") !== "false",
     via: setting(flags, "via", "SOLARD_TRADER_VIA") ?? "rpc",
+    priceFeedUrl:
+      setting(flags, "price-feed", "SOLARD_PRICE_FEED_URL") ??
+      "ws://127.0.0.1:8788/ws",
   });
   await engine.start();
   let stopping = false;

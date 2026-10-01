@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { configure, createMeasure } from "measure-fn";
+import slrd from "@solard/sdk";
 import {
   calculateRuntime,
   getAllProcesses,
@@ -15,6 +16,9 @@ configure({ silent: false });
 const m = createMeasure("slrd:trader-manager", { maxResultLength: 1600 });
 
 const PREFIX = "solard-trader-";
+const PRICE_FEED_PROCESS = "solard-price-feed";
+const PRICE_FEED_URL = "ws://127.0.0.1:8788/ws";
+const PRICE_FEED_HEALTH = "http://127.0.0.1:8788/health";
 
 type Flags = Map<string, string>;
 
@@ -71,8 +75,22 @@ async function bodyJson(request: Request): Promise<any> {
   return JSON.parse(text);
 }
 
+function jsonSafe(value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        jsonSafe(item),
+      ]),
+    );
+  }
+  return value;
+}
+
 function response(value: unknown, status = 200): Response {
-  return Response.json(value, { status });
+  return Response.json(jsonSafe(value), { status });
 }
 
 function errorResponse(error: unknown, status = 400): Response {
@@ -130,6 +148,60 @@ function portNumbers(value: any): number[] {
       Number(typeof item === "number" ? item : (item?.port ?? item?.localPort)),
     )
     .filter((item) => Number.isInteger(item) && item > 0 && item <= 65535);
+}
+
+async function priceFeedHealthy(): Promise<boolean> {
+  try {
+    const response = await fetch(PRICE_FEED_HEALTH, {
+      signal: AbortSignal.timeout(1_000),
+    });
+    if (!response.ok) return false;
+    const body = await response.json().catch(() => null);
+    return body?.ok === true && body?.service === "solard-price-feed";
+  } catch {
+    return false;
+  }
+}
+
+async function waitForPriceFeed(): Promise<void> {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (await priceFeedHealthy()) return;
+    await Bun.sleep(100);
+  }
+  throw new Error(
+    `Shared price feed did not become healthy at ${PRICE_FEED_HEALTH}`,
+  );
+}
+
+async function ensurePriceFeed(): Promise<string> {
+  if (await priceFeedHealthy()) return PRICE_FEED_URL;
+  const existing: any = getProcess(PRICE_FEED_PROCESS);
+  const running = Boolean(
+    existing?.pid && (await isProcessRunning(existing.pid)),
+  );
+  if (!running) {
+    await handleRun({
+      action: "run",
+      name: PRICE_FEED_PROCESS,
+      command: "bun run examples/price-feed-server.ts",
+      directory: process.cwd(),
+      env: cleanEnv({}),
+      force: true,
+      remoteName: "",
+    } as any);
+  }
+  try {
+    await waitForPriceFeed();
+  } catch (error) {
+    const processInfo: any = getProcess(PRICE_FEED_PROCESS);
+    const stderr = processInfo?.stderr_path
+      ? await readFileTail(processInfo.stderr_path, 30).catch(() => "")
+      : "";
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}${stderr ? `\n${stderr.trim()}` : ""}`,
+    );
+  }
+  return PRICE_FEED_URL;
 }
 
 async function workerBaseUrl(name: string): Promise<string | null> {
@@ -240,6 +312,7 @@ async function spawnTrader(args: {
       "Manager requires SOLARD_ENABLE_LIVE_TRADES=1 before spawning live traders",
     );
   }
+  const priceFeedUrl = await ensurePriceFeed();
   const id = cleanId(args.id ?? generatedId(token));
   const name = processName(id);
   const existing: any = getProcess(name);
@@ -265,6 +338,7 @@ async function spawnTrader(args: {
       ),
       SOLARD_TRADER_AUTO_REARM: String(args.autoRearm !== false),
       SOLARD_TRADER_VIA: args.via ?? "rpc",
+      SOLARD_PRICE_FEED_URL: priceFeedUrl,
       ...(args.apiToken ? { SOLARD_TRADER_API_TOKEN: args.apiToken } : {}),
     }),
     force: true,
@@ -304,6 +378,74 @@ async function traderLogs(id: string, lines: number) {
   return { id: traderId(proc.name), stdout, stderr };
 }
 
+function queryValue(url: URL, key: string): string | undefined {
+  const value = url.searchParams.get(key)?.trim();
+  return value || undefined;
+}
+
+function requiredQuery(url: URL, key: string): string {
+  const value = queryValue(url, key);
+  if (!value) throw new Error(`${key} is required`);
+  return value;
+}
+
+function tradeStatuses(url: URL) {
+  const raw = queryValue(url, "status");
+  if (!raw) return undefined;
+  const allowed = new Set([
+    "planned",
+    "simulated",
+    "submitted",
+    "confirmed",
+    "failed",
+  ]);
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!values.length || values.some((value) => !allowed.has(value))) {
+    throw new Error(
+      "status must be planned, simulated, submitted, confirmed, or failed",
+    );
+  }
+  return values as Array<
+    "planned" | "simulated" | "submitted" | "confirmed" | "failed"
+  >;
+}
+
+function tradeSide(url: URL): "buy" | "sell" | undefined {
+  const side = queryValue(url, "side");
+  if (!side) return undefined;
+  if (side !== "buy" && side !== "sell") {
+    throw new Error("side must be buy or sell");
+  }
+  return side;
+}
+
+async function ledgerTrades(url: URL) {
+  const wallet = requiredQuery(url, "wallet");
+  const token = requiredQuery(url, "token");
+  const rawLimit = queryValue(url, "limit");
+  const limit = rawLimit == null ? 100 : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 10_000) {
+    throw new Error("limit must be an integer from 1 to 10000");
+  }
+  return await slrd.trades({
+    wallet,
+    token,
+    status: tradeStatuses(url),
+    side: tradeSide(url),
+    limit,
+  });
+}
+
+async function ledgerPosition(url: URL) {
+  return await slrd.position({
+    wallet: requiredQuery(url, "wallet"),
+    token: requiredQuery(url, "token"),
+  });
+}
+
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2));
   const host =
@@ -320,17 +462,31 @@ async function main(): Promise<void> {
       "A non-loopback manager requires SOLARD_TRADER_MANAGER_TOKEN",
     );
   }
+  await ensurePriceFeed();
   const server = Bun.serve({
     hostname: host,
     port,
     async fetch(request) {
       const url = new URL(request.url);
       if (url.pathname === "/health" && request.method === "GET") {
-        return response({ ok: true, service: "solard-trader-manager" });
+        return response({
+          ok: true,
+          service: "solard-trader-manager",
+          priceFeed: {
+            url: PRICE_FEED_URL,
+            healthy: await priceFeedHealthy(),
+          },
+        });
       }
       if (!authorized(request, apiToken))
         return errorResponse("Unauthorized", 401);
       try {
+        if (url.pathname === "/ledger/trades" && request.method === "GET") {
+          return response({ ok: true, trades: await ledgerTrades(url) });
+        }
+        if (url.pathname === "/ledger/position" && request.method === "GET") {
+          return response({ ok: true, position: await ledgerPosition(url) });
+        }
         if (url.pathname === "/traders" && request.method === "GET") {
           return response({ ok: true, traders: await listTraders(apiToken) });
         }

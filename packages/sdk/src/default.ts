@@ -1,4 +1,17 @@
+import { getSolUsdPrice } from "@solard/core";
+import {
+  listenTrades,
+  subscribeLaunches,
+  subscribeMigrations,
+} from "./live.ts";
 import { createSolard, type Solard } from "./client.ts";
+
+type DefaultSolard = Solard & {
+  getSolUsdPrice: typeof getSolUsdPrice;
+  listenTrades: typeof listenTrades;
+  subscribeLaunches: typeof subscribeLaunches;
+  subscribeMigrations: typeof subscribeMigrations;
+};
 
 let instance: Solard | undefined;
 
@@ -7,7 +20,14 @@ function client(): Solard {
   return instance;
 }
 
-const slrd = new Proxy({} as Solard, {
+const operations = {
+  getSolUsdPrice,
+  listenTrades,
+  subscribeLaunches,
+  subscribeMigrations,
+} as const;
+
+const slrd = new Proxy({} as DefaultSolard, {
   get(_target, key) {
     if (key === "close") {
       return () => {
@@ -15,6 +35,9 @@ const slrd = new Proxy({} as Solard, {
         instance = undefined;
         current?.close();
       };
+    }
+    if (typeof key === "string" && key in operations) {
+      return operations[key as keyof typeof operations];
     }
     const current = client();
     const value = Reflect.get(current as object, key, current);

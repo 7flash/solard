@@ -1,6 +1,6 @@
 {
   "name": "@solard/core",
-  "version": "0.2.21",
+  "version": "0.2.30",
   "description": "Core Solana wallet, transaction and trading engine for Solard.",
   "type": "module",
   "main": "./src/index.ts",
@@ -24,14 +24,16 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@meteora-ag/cp-amm-sdk": "1.5.1",
+    "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
+    "@pump-fun/pump-swap-sdk": "1.20.0",
+    "@raydium-io/raydium-sdk-v2": "0.2.62-alpha",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
-    "bs58": "^6.0.0",
-    "sqlite-zod-orm": "^3.33.0",
-    "buffer": "^6.0.3",
-    "@raydium-io/raydium-sdk-v2": "0.2.62-alpha",
-    "bn.js": "^5.2.2",
     "@types/bn.js": "^5.1.6",
-    "@pump-fun/pump-swap-sdk": "1.20.0"
+    "bn.js": "^5.2.2",
+    "bs58": "^6.0.0",
+    "buffer": "^6.0.3",
+    "sqlite-zod-orm": "^3.33.0"
   }
 }

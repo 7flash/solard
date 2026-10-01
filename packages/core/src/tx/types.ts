@@ -49,6 +49,11 @@ export type SimulationResult = {
   logs: string[];
   cuUsed: number | null;
   error: unknown | null;
+  /** Best-effort fee-payer account check after AccountNotFound, separate from program logs. */
+  diagnostics?: {
+    message: string;
+    feePayer: { address: string; exists: boolean | null; lamports: number | null };
+  };
   accountChanges: Array<{
     address: string;
     beforeLamports: number | null;
@@ -70,6 +75,14 @@ export type SimulationResult = {
   }>;
 };
 export type SendReceipt = {
+  /** Selected/estimated fees remain separate from confirmed feeLamports. */
+  feeEstimate?: import("./fee-estimate.ts").TransactionFeeEstimate;
+  /** Confirmed wallet SOL principal, excluding network fees and token-account rent. */
+  solPrincipalDeltaLamports?: bigint;
+  targetTokenDeltaRaw?: bigint;
+  networkFeeLamports?: bigint;
+  /** Only verified expiry with successful absence checks permits a replacement. */
+  retryable?: boolean;
   signature: string;
   slot: number | null;
   sender: string;
@@ -81,6 +94,8 @@ export type SendReceipt = {
   error?: string;
 };
 export type SubmittedPlan = {
+  feeEstimate?: import("./fee-estimate.ts").TransactionFeeEstimate;
+  onRebroadcast?: (signature: string) => void;
   signature: string;
   sender: string;
   executionId: number;

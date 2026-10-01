@@ -446,6 +446,7 @@ Trading
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
   slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
+    Native buy/sell and transfer fees: --cu-limit N --priority-micro-lamports N (fixed), or --fee-percentile N --trade-attempts N --fee-multiplier N --max-priority-fee-lamports N (automatic)
   slrd unwrap-wsol (--all-wallets | --wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--simulate-only]
                                                         Close every owned WSOL token account, including non-ATA WSOL accounts
   slrd reclaim inspect --all-wallets                    List Loader-v3 buffers/programs controlled by stored wallets

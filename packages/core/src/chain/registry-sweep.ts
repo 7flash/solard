@@ -155,18 +155,17 @@ function resolveDestination(slrd: Solard, value: string): PublicKey {
     // Not a signing-wallet ref; external contacts and raw addresses are valid.
   }
 
-  const contact = findExternalContact(input);
-  if (contact) return new PublicKey(contact.address);
-
   try {
     return new PublicKey(input);
-  } catch {
-    throw new Error(
+  } catch {}
+
+  const contact = findExternalContact(input);
+  if (contact) return new PublicKey(contact.address);
+  throw new Error(
       `Unknown sweep destination "${input}". ` +
         `Use a valid Solana address, a stored wallet name, or register it first with ` +
         `slrd contact add <name> <address>.`,
     );
-  }
 }
 
 function explicitKeepLamportsFor(

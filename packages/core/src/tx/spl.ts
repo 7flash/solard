@@ -35,12 +35,13 @@ export function transferTokenIxs(args: {
   amountRaw: bigint;
   decimals: number;
   tokenProgram: PublicKey;
+  source?: PublicKey;
 }): {
   instructions: TransactionInstruction[];
   source: PublicKey;
   destination: PublicKey;
 } {
-  const source = getAssociatedTokenAddressSync(
+  const source = args.source ?? getAssociatedTokenAddressSync(
     args.mint,
     args.owner,
     false,

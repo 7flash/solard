@@ -1,9 +1,17 @@
 import bs58 from "bs58";
+import { quoteJupiterSwap } from "../chain/jupiter-swap.ts";
 import {
   PUMP_AMM_PROGRAM_ID,
   PUMP_PROGRAM_ID,
   WRAPPED_SOL_MINT as WRAPPED_SOL_PUBLIC_KEY,
 } from "../venues/pump/constants.ts";
+import { fetchPool } from "../venues/pump/state.ts";
+import { PumpSwapVenue } from "../venues/pump/pumpswap-venue.ts";
+import type { TokenRow } from "../db/schema.ts";
+import { readDbcMarket, dbcPrice, DYNAMIC_BONDING_CURVE_PROGRAM_ID } from "../venues/meteora/dbc.ts";
+import { decodeDbcTrade, dbcTradesFromTransaction, type DbcTradeEvent } from "../venues/meteora/dbc-events.ts";
+import { readDammV2Market, dammV2Price, CP_AMM_PROGRAM_ID } from "../venues/meteora/damm-v2.ts";
+import { decodeDammV2Trade, dammV2TradesFromTransaction, type DammV2TradeEvent } from "../venues/meteora/damm-v2-events.ts";
 import {
   fetchTokenMetadata,
   type TokenMetadata,
@@ -42,11 +50,27 @@ const RAYDIUM_MIGRATE_TO_AMM_D8 = Buffer.from([
 const RAYDIUM_MIGRATE_TO_CPSWAP_D8 = Buffer.from([
   136, 92, 200, 103, 28, 218, 144, 140,
 ]);
+const RAYDIUM_BUY_EXACT_IN_D8 = Buffer.from([
+  250, 234, 13, 123, 213, 156, 19, 236,
+]);
+const RAYDIUM_BUY_EXACT_OUT_D8 = Buffer.from([
+  24, 211, 116, 40, 105, 3, 153, 56,
+]);
+const RAYDIUM_SELL_EXACT_IN_D8 = Buffer.from([
+  149, 39, 222, 155, 211, 124, 152, 26,
+]);
+const RAYDIUM_SELL_EXACT_OUT_D8 = Buffer.from([95, 200, 71, 34, 8, 9, 11, 166]);
+const RAYDIUM_INITIALIZE_D8 = Buffer.from([
+  175, 175, 109, 31, 13, 152, 155, 237,
+]);
+const RAYDIUM_INITIALIZE_V2_D8 = Buffer.from([
+  67, 153, 175, 39, 218, 16, 38, 32,
+]);
 
 export type LaunchVenue = "pump" | "raydium-launchlab";
 export type MigrationVenue = "pump" | "raydium-launchlab";
 export type MigrationDestination = "pumpswap" | "raydium-amm" | "raydium-cpmm";
-export type TradeVenue = "pump" | "pumpswap" | "raydium-launchlab";
+export type TradeVenue = "pump" | "pumpswap" | "raydium-launchlab" | "meteora-dbc" | "meteora-damm-v2";
 export type TradeSide = "buy" | "sell";
 
 export type PumpDecodedEvent =
@@ -67,6 +91,7 @@ export type PumpDecodedEvent =
       atMs: number;
       mint: string;
       side: TradeSide;
+      quoteMint: string;
       baseRaw: bigint;
       quoteRaw: bigint;
       virtualBaseRaw: bigint;
@@ -93,6 +118,10 @@ export type PumpSwapDecodedEvent =
       side: TradeSide;
       baseRaw: bigint;
       quoteRaw: bigint;
+      poolBaseRaw: bigint;
+      poolQuoteRaw: bigint;
+      virtualQuoteRaw: bigint | null;
+      supplyRaw: bigint | null;
     };
 
 export type RaydiumLaunchLabDecodedEvent =
@@ -100,6 +129,9 @@ export type RaydiumLaunchLabDecodedEvent =
   | {
       kind: "trade";
       pool: string;
+      side: TradeSide;
+      baseRaw: bigint;
+      quoteRaw: bigint;
       virtualBaseRaw: bigint;
       virtualQuoteRaw: bigint;
     };
@@ -136,7 +168,64 @@ export type MigrationEvent = {
   metadata: TokenMetadata | null;
 };
 
+export type SolUsdSource = "provided" | "coinbase" | "coingecko";
+
+export type SolUsdPrice = {
+  price: number;
+  source: SolUsdSource;
+  atMs: number;
+};
+
+export type GetSolUsdPriceOptions = {
+  maxAgeMs?: number;
+  forceRefresh?: boolean;
+};
+
+export type TradeMarket = {
+  quoteMint: string;
+  baseDecimals: number;
+  quoteDecimals: number;
+  supplyRaw: bigint;
+  supply: number;
+  baseReserveRaw: bigint;
+  baseReserve: number;
+  quoteReserveRaw: bigint;
+  quoteReserve: number;
+  priceQuotePerToken: number;
+  marketCapQuote: number;
+  priceSol: number | null;
+  marketCapSol: number | null;
+  solUsd: number | null;
+  solUsdSource: SolUsdSource | null;
+  solUsdAtMs: number | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+};
+
 export type TradeEvent = {
+  type: "trade";
+  venue: TradeVenue;
+  signature: string;
+  slot: number;
+  atMs: number;
+  mint: string;
+  pool: string | null;
+  side: TradeSide | null;
+  baseRaw: bigint | null;
+  quoteRaw: bigint | null;
+  market: TradeMarket;
+  metadata: TokenMetadata | null;
+};
+
+type MarketState = {
+  /** Concentrated/virtual curves expose a marginal price, not a vault ratio. */
+  priceQuotePerToken?: number;
+  supplyRaw: bigint;
+  baseReserveRaw: bigint;
+  quoteReserveRaw: bigint;
+};
+
+type InternalTradeEvent = {
   type: "trade";
   venue: TradeVenue;
   signature: string;
@@ -150,10 +239,8 @@ export type TradeEvent = {
   quoteDecimals: number | null;
   baseRaw: bigint | null;
   quoteRaw: bigint | null;
-  virtualBaseRaw: bigint | null;
-  virtualQuoteRaw: bigint | null;
-  priceQuote: number | null;
   metadata: TokenMetadata | null;
+  marketState: MarketState | null;
 };
 
 export type LaunchSubscription = {
@@ -206,6 +293,13 @@ class Cursor {
     return value;
   }
 
+  u32(): number {
+    if (this.remaining < 4) throw new Error("truncated u32");
+    const value = this.data.readUInt32LE(this.offset);
+    this.offset += 4;
+    return value;
+  }
+
   u64(): bigint {
     if (this.remaining < 8) throw new Error("truncated u64");
     const value = this.data.readBigUInt64LE(this.offset);
@@ -218,6 +312,14 @@ class Cursor {
     const value = this.data.readBigInt64LE(this.offset);
     this.offset += 8;
     return value;
+  }
+
+  i128(): bigint {
+    if (this.remaining < 16) throw new Error("truncated i128");
+    const low = this.data.readBigUInt64LE(this.offset);
+    const high = this.data.readBigUInt64LE(this.offset + 8);
+    this.offset += 16;
+    return BigInt.asIntN(128, low | (high << 64n));
   }
 
   bool(): boolean {
@@ -319,18 +421,53 @@ export function decodePumpProgramData(
     if (!starts(data, PUMP_TRADE_EVENT)) return null;
     const c = new Cursor(data, 8);
     const mint = c.pubkey();
-    const quoteRaw = c.u64();
+    const legacyQuoteRaw = c.u64();
     const baseRaw = c.u64();
     const side: TradeSide = c.bool() ? "buy" : "sell";
     c.pubkey();
     const atMs = timestamp(c.i64());
-    const virtualQuoteRaw = c.u64();
+    const legacyVirtualQuoteRaw = c.u64();
     const virtualBaseRaw = c.u64();
+    let quoteMint = WRAPPED_SOL_MINT;
+    let quoteRaw = legacyQuoteRaw;
+    let virtualQuoteRaw = legacyVirtualQuoteRaw;
+    try {
+      c.u64();
+      c.u64();
+      c.pubkey();
+      c.u64();
+      c.u64();
+      c.pubkey();
+      c.u64();
+      c.u64();
+      c.bool();
+      c.u64();
+      c.u64();
+      c.u64();
+      c.i64();
+      c.string();
+      c.bool();
+      c.u64();
+      c.u64();
+      c.u64();
+      c.u64();
+      const shareholderCount = c.u32();
+      for (let index = 0; index < shareholderCount; index += 1) {
+        c.pubkey();
+        c.u16();
+      }
+      const rawQuoteMint = c.pubkey();
+      quoteMint =
+        rawQuoteMint === DEFAULT_PUBKEY ? WRAPPED_SOL_MINT : rawQuoteMint;
+      quoteRaw = c.u64();
+      virtualQuoteRaw = c.u64();
+    } catch {}
     return {
       kind: "trade",
       atMs,
       mint,
       side,
+      quoteMint,
       baseRaw,
       quoteRaw,
       virtualBaseRaw,
@@ -387,15 +524,50 @@ export function decodePumpSwapProgramData(
     if (!side) return null;
     const c = new Cursor(data, 8);
     const atMs = timestamp(c.i64());
-    c.u64();
-    c.u64();
-    c.u64();
-    c.u64();
     const baseRaw = c.u64();
+    c.u64();
+    c.u64();
+    c.u64();
+    const poolBaseRaw = c.u64();
+    const poolQuoteRaw = c.u64();
     const quoteRaw = c.u64();
-    for (let index = 0; index < 7; index += 1) c.u64();
+    for (let index = 0; index < 6; index += 1) c.u64();
     const pool = c.pubkey();
-    return { kind: "trade", atMs, pool, side, baseRaw, quoteRaw };
+    let virtualQuoteRaw: bigint | null = null;
+    let supplyRaw: bigint | null = null;
+    try {
+      for (let index = 0; index < 6; index += 1) c.pubkey();
+      c.u64();
+      c.u64();
+      if (side === "buy") {
+        c.bool();
+        c.u64();
+        c.u64();
+        c.u64();
+        c.i64();
+        c.u64();
+        c.string();
+      }
+      c.u64();
+      c.u64();
+      c.u64();
+      c.u64();
+      virtualQuoteRaw = c.i128();
+      c.bool();
+      supplyRaw = c.u64();
+    } catch {}
+    return {
+      kind: "trade",
+      atMs,
+      pool,
+      side,
+      baseRaw,
+      quoteRaw,
+      poolBaseRaw,
+      poolQuoteRaw,
+      virtualQuoteRaw,
+      supplyRaw,
+    };
   } catch {
     return null;
   }
@@ -415,7 +587,28 @@ export function decodeRaydiumLaunchLabProgramData(
     c.u64();
     const virtualBaseRaw = c.u64();
     const virtualQuoteRaw = c.u64();
-    return { kind: "trade", pool, virtualBaseRaw, virtualQuoteRaw };
+    c.u64();
+    c.u64();
+    c.u64();
+    c.u64();
+    const amountIn = c.u64();
+    const amountOut = c.u64();
+    c.u64();
+    c.u64();
+    c.u64();
+    c.u64();
+    const side: TradeSide = c.u8() === 0 ? "buy" : "sell";
+    c.u8();
+    c.bool();
+    return {
+      kind: "trade",
+      pool,
+      side,
+      baseRaw: side === "buy" ? amountOut : amountIn,
+      quoteRaw: side === "buy" ? amountIn : amountOut,
+      virtualBaseRaw,
+      virtualQuoteRaw,
+    };
   } catch {
     return null;
   }
@@ -456,6 +649,212 @@ function priceQuote(
   const quoteUi = Number(quoteRaw) / 10 ** quoteDecimalsValue;
   const value = baseUi > 0 ? quoteUi / baseUi : 0;
   return value > 0 && Number.isFinite(value) ? value : null;
+}
+
+function marketMetrics(
+  baseReserveRaw: bigint,
+  quoteReserveRaw: bigint,
+  supplyRaw: bigint,
+  baseDecimals: number,
+  quoteDecimalsValue: number,
+  marginalPrice?: number,
+): { priceQuotePerToken: number; marketCapQuote: number } | null {
+  const priceQuotePerToken = marginalPrice ?? priceQuote(
+    baseReserveRaw,
+    quoteReserveRaw,
+    baseDecimals,
+    quoteDecimalsValue,
+  );
+  if (priceQuotePerToken == null || !Number.isFinite(priceQuotePerToken) || priceQuotePerToken <= 0 || supplyRaw <= 0n) return null;
+  const supplyUi = Number(supplyRaw) / 10 ** baseDecimals;
+  const marketCapQuote = priceQuotePerToken * supplyUi;
+  if (!Number.isFinite(marketCapQuote) || marketCapQuote <= 0) return null;
+  return { priceQuotePerToken, marketCapQuote };
+}
+
+function tradeMarketFromTradeEvent(
+  event: InternalTradeEvent,
+  solUsd: SolUsdPrice | null,
+  quoteSolPerToken: number | null = null,
+): TradeMarket | null {
+  if (
+    event.quoteMint == null ||
+    event.baseDecimals == null ||
+    event.quoteDecimals == null ||
+    event.marketState == null
+  )
+    return null;
+  const metrics = marketMetrics(
+    event.marketState.baseReserveRaw,
+    event.marketState.quoteReserveRaw,
+    event.marketState.supplyRaw,
+    event.baseDecimals,
+    event.quoteDecimals,
+    event.marketState.priceQuotePerToken,
+  );
+  if (!metrics) return null;
+  const supply = Number(event.marketState.supplyRaw) / 10 ** event.baseDecimals;
+  const baseReserve =
+    Number(event.marketState.baseReserveRaw) / 10 ** event.baseDecimals;
+  const quoteReserve =
+    Number(event.marketState.quoteReserveRaw) / 10 ** event.quoteDecimals;
+  let priceSol: number | null = null;
+  let marketCapSol: number | null = null;
+  let priceUsd: number | null = null;
+  let marketCapUsd: number | null = null;
+  if (event.quoteMint === WRAPPED_SOL_MINT) {
+    priceSol = metrics.priceQuotePerToken;
+    marketCapSol = metrics.marketCapQuote;
+    if (solUsd) {
+      priceUsd = priceSol * solUsd.price;
+      marketCapUsd = marketCapSol * solUsd.price;
+    }
+  } else if (event.quoteMint === USDC_MINT) {
+    priceUsd = metrics.priceQuotePerToken;
+    marketCapUsd = metrics.marketCapQuote;
+    if (solUsd) {
+      priceSol = priceUsd / solUsd.price;
+      marketCapSol = marketCapUsd / solUsd.price;
+    }
+  } else if (quoteSolPerToken != null && Number.isFinite(quoteSolPerToken) && quoteSolPerToken > 0) {
+    priceSol = metrics.priceQuotePerToken * quoteSolPerToken;
+    marketCapSol = metrics.marketCapQuote * quoteSolPerToken;
+    if (solUsd) {
+      priceUsd = priceSol * solUsd.price;
+      marketCapUsd = marketCapSol * solUsd.price;
+    }
+  }
+  return {
+    quoteMint: event.quoteMint,
+    baseDecimals: event.baseDecimals,
+    quoteDecimals: event.quoteDecimals,
+    supplyRaw: event.marketState.supplyRaw,
+    supply,
+    baseReserveRaw: event.marketState.baseReserveRaw,
+    baseReserve,
+    quoteReserveRaw: event.marketState.quoteReserveRaw,
+    quoteReserve,
+    priceQuotePerToken: metrics.priceQuotePerToken,
+    marketCapQuote: metrics.marketCapQuote,
+    priceSol,
+    marketCapSol,
+    solUsd: solUsd?.price ?? null,
+    solUsdSource: solUsd?.source ?? null,
+    solUsdAtMs: solUsd?.atMs ?? null,
+    priceUsd,
+    marketCapUsd,
+  };
+}
+
+async function fetchJson(url: string): Promise<unknown> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function loadSolUsd(): Promise<SolUsdPrice> {
+  try {
+    const raw = (await fetchJson(
+      "https://api.coinbase.com/v2/prices/SOL-USD/spot",
+    )) as { data?: { amount?: unknown } };
+    const value = Number(raw.data?.amount);
+    if (Number.isFinite(value) && value > 0)
+      return { price: value, source: "coinbase", atMs: Date.now() };
+  } catch {}
+  const raw = (await fetchJson(
+    "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+  )) as { solana?: { usd?: unknown } };
+  const value = Number(raw.solana?.usd);
+  if (!Number.isFinite(value) || value <= 0)
+    throw new Error("SOL/USD unavailable");
+  return { price: value, source: "coingecko", atMs: Date.now() };
+}
+
+const DEFAULT_SOL_USD_MAX_AGE_MS = 15_000;
+let sharedSolUsdPrice: SolUsdPrice | null = null;
+let sharedSolUsdPending: Promise<SolUsdPrice> | null = null;
+
+export async function getSolUsdPrice(
+  options: GetSolUsdPriceOptions = {},
+): Promise<SolUsdPrice> {
+  const maxAgeMs = Math.max(
+    1_000,
+    Math.trunc(options.maxAgeMs ?? DEFAULT_SOL_USD_MAX_AGE_MS),
+  );
+  if (
+    !options.forceRefresh &&
+    sharedSolUsdPrice &&
+    Date.now() - sharedSolUsdPrice.atMs < maxAgeMs
+  )
+    return sharedSolUsdPrice;
+  if (sharedSolUsdPending) return await sharedSolUsdPending;
+  sharedSolUsdPending = loadSolUsd();
+  try {
+    sharedSolUsdPrice = await sharedSolUsdPending;
+    return sharedSolUsdPrice;
+  } catch (error) {
+    if (sharedSolUsdPrice) return sharedSolUsdPrice;
+    throw error;
+  } finally {
+    sharedSolUsdPending = null;
+  }
+}
+
+function solUsdLoader(
+  input: number | (() => number | Promise<number>) | undefined,
+  refreshMs: number,
+  status: (event: string, data?: Record<string, unknown>) => void,
+) {
+  if (input == null) {
+    return async (): Promise<SolUsdPrice | null> => {
+      try {
+        return await getSolUsdPrice({ maxAgeMs: refreshMs });
+      } catch (error) {
+        status("sol-usd-error", {
+          error: error instanceof Error ? error.message : String(error),
+          cached: null,
+        });
+        return null;
+      }
+    };
+  }
+  let cached: SolUsdPrice | null =
+    typeof input === "number" && Number.isFinite(input) && input > 0
+      ? { price: input, source: "provided", atMs: Date.now() }
+      : null;
+  let pending: Promise<SolUsdPrice | null> | null = null;
+  return async (): Promise<SolUsdPrice | null> => {
+    if (cached && Date.now() - cached.atMs < refreshMs) return cached;
+    if (pending) return await pending;
+    pending = (async () => {
+      try {
+        const value =
+          typeof input === "function" ? Number(await input()) : Number(input);
+        if (!Number.isFinite(value) || value <= 0)
+          throw new Error("Provided SOL/USD source returned an invalid value");
+        cached = { price: value, source: "provided", atMs: Date.now() };
+        return cached;
+      } catch (error) {
+        status("sol-usd-error", {
+          error: error instanceof Error ? error.message : String(error),
+          cached: cached?.price ?? null,
+        });
+        return cached;
+      } finally {
+        pending = null;
+      }
+    })();
+    return await pending;
+  };
 }
 
 function keyText(value: unknown): string | null {
@@ -546,9 +945,19 @@ type ProgramDataEntry = {
 type TradeTokenState = {
   mint: string;
   decimals: number | null;
+  supplyRaw: bigint | null;
+  supplyRefreshedAtMs: number;
   quoteMint: string | null;
   quoteDecimals: number | null;
   pool: string | null;
+};
+
+type PumpSwapPoolIdentity = {
+  pool: string;
+  baseMint: string;
+  quoteMint: string;
+  baseDecimals: number;
+  quoteDecimals: number;
 };
 
 function programDataEntries(logs: readonly string[]): ProgramDataEntry[] {
@@ -602,13 +1011,11 @@ function quoteFromTransaction(
     ...tokenBalances(tx.meta?.preTokenBalances),
     ...tokenBalances(tx.meta?.postTokenBalances),
   ].filter((row) => row.mint && row.mint !== mint);
-  const preferred =
-    rows.find((row) => row.mint === WRAPPED_SOL_MINT) ??
-    rows.find((row) => row.mint === USDC_MINT) ??
-    rows[0];
-  return preferred
-    ? { mint: preferred.mint, decimals: preferred.decimals }
-    : null;
+  const quotes = new Map<string, number>();
+  for (const row of rows) quotes.set(row.mint, row.decimals);
+  if (quotes.size !== 1) return null;
+  const quote = [...quotes.entries()][0];
+  return quote ? { mint: quote[0], decimals: quote[1] } : null;
 }
 
 function instructionData(
@@ -651,6 +1058,52 @@ function findInstruction(
       )
     )
       return decoded;
+  }
+  return null;
+}
+
+function launchLabQuoteFromTransaction(
+  tx: ParsedTransactionWithMeta,
+  mint: string,
+  pool?: string | null,
+): { mint: string; decimals: number | null } | null {
+  const balances = [
+    ...tokenBalances(tx.meta?.preTokenBalances),
+    ...tokenBalances(tx.meta?.postTokenBalances),
+  ];
+  const decimalsByMint = new Map<string, number>();
+  for (const row of balances) decimalsByMint.set(row.mint, row.decimals);
+  for (const value of instructions(tx)) {
+    const decoded = instructionData(value, RAYDIUM_LAUNCHLAB_PROGRAM_ID);
+    if (!decoded) continue;
+    let poolIndex = -1;
+    let baseIndex = -1;
+    let quoteIndex = -1;
+    if (
+      starts(decoded.data, RAYDIUM_BUY_EXACT_IN_D8) ||
+      starts(decoded.data, RAYDIUM_BUY_EXACT_OUT_D8) ||
+      starts(decoded.data, RAYDIUM_SELL_EXACT_IN_D8) ||
+      starts(decoded.data, RAYDIUM_SELL_EXACT_OUT_D8)
+    ) {
+      poolIndex = 4;
+      baseIndex = 9;
+      quoteIndex = 10;
+    } else if (
+      starts(decoded.data, RAYDIUM_INITIALIZE_D8) ||
+      starts(decoded.data, RAYDIUM_INITIALIZE_V2_D8)
+    ) {
+      poolIndex = 5;
+      baseIndex = 6;
+      quoteIndex = 7;
+    }
+    if (poolIndex < 0 || decoded.accounts.length <= quoteIndex) continue;
+    if (decoded.accounts[baseIndex] !== mint) continue;
+    if (pool && decoded.accounts[poolIndex] !== pool) continue;
+    const quoteMint = decoded.accounts[quoteIndex]!;
+    return {
+      mint: quoteMint,
+      decimals: decimalsByMint.get(quoteMint) ?? quoteDecimals(quoteMint),
+    };
   }
   return null;
 }
@@ -719,7 +1172,7 @@ async function resolveEventMetadata(args: {
 
 function callbackError(
   status: (event: string, data?: Record<string, unknown>) => void,
-  event: LaunchEvent | MigrationEvent | TradeEvent,
+  event: { type: string; venue: string; signature: string },
   error: unknown,
 ): void {
   status("callback-error", {
@@ -804,7 +1257,9 @@ export async function subscribeLaunches(options: {
           supplyUi: Number(loaded.value.uiAmountString ?? "0"),
         };
       }
-      const quote = quoteFromTransaction(parsed, mint);
+      const quote =
+        launchLabQuoteFromTransaction(parsed, mint, pool) ??
+        quoteFromTransaction(parsed, mint);
       await deliver({
         type: "launch",
         venue: "raydium-launchlab",
@@ -815,7 +1270,7 @@ export async function subscribeLaunches(options: {
         pool,
         decimals: supply.decimals,
         supplyUi: supply.supplyUi,
-        quoteMint: quote?.mint ?? WRAPPED_SOL_MINT,
+        quoteMint: quote?.mint ?? null,
         name: null,
         symbol: null,
         uri: null,
@@ -1132,24 +1587,26 @@ export async function subscribeMigrations(options: {
   };
 }
 
-export async function subscribeTrades(options: {
+async function subscribeTradeStream(options: {
   connection: Connection;
   tokens: readonly string[];
   venues?: readonly TradeVenue[];
   commitment?: Commitment;
   metadata?: TokenMetadataMode;
   signal?: AbortSignal;
-  onTrade: (event: TradeEvent) => void | Promise<void>;
+  onTrade: (event: InternalTradeEvent) => void | Promise<void>;
   onStatus?: (event: string, data?: Record<string, unknown>) => void;
 }): Promise<TradeSubscription> {
   const venues = new Set<TradeVenue>(
-    options.venues ?? ["pump", "pumpswap", "raydium-launchlab"],
+    options.venues ?? ["pump", "pumpswap", "raydium-launchlab", "meteora-dbc", "meteora-damm-v2"],
   );
   const commitment = options.commitment ?? "processed";
   const metadataMode = options.metadata ?? false;
   const subscriptions = new Map<string, number>();
   const states = new Map<string, TradeTokenState>();
   const metadataFetches = new Map<string, Promise<void>>();
+  const pumpSwapPools = new Map<string, Promise<PumpSwapPoolIdentity>>();
+  const SUPPLY_REFRESH_MS = 5 * 60_000;
   let stopped = false;
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => {
@@ -1162,8 +1619,8 @@ export async function subscribeTrades(options: {
     } catch {}
   };
 
-  const deliver = async (value: Omit<TradeEvent, "metadata">) => {
-    const event: TradeEvent = {
+  const deliver = async (value: Omit<InternalTradeEvent, "metadata">) => {
+    const event: InternalTradeEvent = {
       ...value,
       metadata: await resolveEventMetadata({
         connection: options.connection,
@@ -1180,35 +1637,94 @@ export async function subscribeTrades(options: {
     }
   };
 
+  const resolvePumpSwapPool = async (poolText: string) => {
+    const cached = pumpSwapPools.get(poolText);
+    if (cached) return await cached;
+    const pending = (async (): Promise<PumpSwapPoolIdentity> => {
+      const pool = await fetchPool(options.connection, new PublicKey(poolText));
+      const [baseSupply, quoteSupply] = await Promise.all([
+        options.connection.getTokenSupply(pool.baseMint, "confirmed"),
+        options.connection.getTokenSupply(pool.quoteMint, "confirmed"),
+      ]);
+      return {
+        pool: poolText,
+        baseMint: pool.baseMint.toBase58(),
+        quoteMint: pool.quoteMint.toBase58(),
+        baseDecimals: baseSupply.value.decimals,
+        quoteDecimals: quoteSupply.value.decimals,
+      };
+    })();
+    pumpSwapPools.set(poolText, pending);
+    try {
+      return await pending;
+    } catch (error) {
+      pumpSwapPools.delete(poolText);
+      throw error;
+    }
+  };
+
+  const refreshWatchedSupply = async (state: TradeTokenState) => {
+    const now = Date.now();
+    if (
+      state.supplyRaw != null &&
+      now - state.supplyRefreshedAtMs < SUPPLY_REFRESH_MS
+    )
+      return;
+    const supply = await options.connection.getTokenSupply(
+      new PublicKey(state.mint),
+      "confirmed",
+    );
+    state.decimals = supply.value.decimals;
+    state.supplyRaw = BigInt(supply.value.amount);
+    state.supplyRefreshedAtMs = now;
+  };
+
   const ensureMetadata = async (mint: string, signature?: string) => {
     const existing = metadataFetches.get(mint);
     if (existing) return await existing;
     const state = states.get(mint);
     if (!state) return;
-    if (state.decimals != null && (state.quoteMint != null || !signature))
+    if (
+      state.decimals != null &&
+      state.supplyRaw != null &&
+      (!signature || (state.quoteMint != null && state.quoteDecimals != null))
+    )
       return;
     const pending = (async () => {
       try {
-        if (state.decimals == null) {
+        if (state.decimals == null || state.supplyRaw == null) {
           const supply = await options.connection.getTokenSupply(
             new PublicKey(mint),
             "confirmed",
           );
           state.decimals = supply.value.decimals;
+          if (state.supplyRaw == null)
+            state.supplyRaw = BigInt(supply.value.amount);
+          state.supplyRefreshedAtMs = Date.now();
         }
-        if (signature && state.quoteMint == null) {
+        if (
+          signature &&
+          (state.quoteMint == null || state.quoteDecimals == null)
+        ) {
           const tx = await options.connection.getParsedTransaction(signature, {
             commitment: "confirmed",
             maxSupportedTransactionVersion: 1,
           });
           if (tx) {
-            const quote = quoteFromTransaction(
-              tx as ParsedTransactionWithMeta,
-              mint,
-            );
+            const parsed = tx as ParsedTransactionWithMeta;
+            const quote =
+              launchLabQuoteFromTransaction(parsed, mint, state.pool) ??
+              quoteFromTransaction(parsed, mint);
             if (quote) {
               state.quoteMint = quote.mint;
               state.quoteDecimals = quote.decimals;
+              if (state.quoteDecimals == null) {
+                const loaded = await options.connection.getTokenSupply(
+                  new PublicKey(quote.mint),
+                  "confirmed",
+                );
+                state.quoteDecimals = loaded.value.decimals;
+              }
             }
           }
         }
@@ -1233,13 +1749,15 @@ export async function subscribeTrades(options: {
     decoded: Extract<PumpDecodedEvent, { kind: "trade" }>,
   ) => {
     if (decoded.mint !== mint) return;
+    const current = states.get(mint);
+    if (current) {
+      current.quoteMint = decoded.quoteMint;
+      current.quoteDecimals =
+        current.quoteDecimals ?? quoteDecimals(decoded.quoteMint);
+    }
     await ensureMetadata(mint, signature);
     const state = states.get(mint);
     if (!state || stopped || !subscriptions.has(mint)) return;
-    if (state.quoteMint == null) {
-      state.quoteMint = WRAPPED_SOL_MINT;
-      state.quoteDecimals = 9;
-    }
     const baseDecimals = state.decimals ?? 6;
     const qDecimals = state.quoteDecimals;
     await deliver({
@@ -1256,17 +1774,14 @@ export async function subscribeTrades(options: {
       quoteDecimals: qDecimals,
       baseRaw: decoded.baseRaw,
       quoteRaw: decoded.quoteRaw,
-      virtualBaseRaw: decoded.virtualBaseRaw,
-      virtualQuoteRaw: decoded.virtualQuoteRaw,
-      priceQuote:
-        qDecimals == null
+      marketState:
+        qDecimals == null || state.supplyRaw == null
           ? null
-          : priceQuote(
-              decoded.virtualBaseRaw,
-              decoded.virtualQuoteRaw,
-              baseDecimals,
-              qDecimals,
-            ),
+          : {
+              supplyRaw: state.supplyRaw,
+              baseReserveRaw: decoded.virtualBaseRaw,
+              quoteReserveRaw: decoded.virtualQuoteRaw,
+            },
     });
   };
 
@@ -1276,10 +1791,51 @@ export async function subscribeTrades(options: {
     slot: number,
     decoded: Extract<PumpSwapDecodedEvent, { kind: "trade" }>,
   ) => {
-    await ensureMetadata(mint, signature);
+    let identity: PumpSwapPoolIdentity;
+    try {
+      identity = await resolvePumpSwapPool(decoded.pool);
+    } catch (error) {
+      status("pumpswap-pool-resolution-error", {
+        mint,
+        pool: decoded.pool,
+        signature,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    if (identity.baseMint !== mint) {
+      status("pumpswap-pool-mismatch", {
+        watchedMint: mint,
+        pool: decoded.pool,
+        poolBaseMint: identity.baseMint,
+        signature,
+      });
+      return;
+    }
+
     const state = states.get(mint);
     if (!state || stopped || !subscriptions.has(mint)) return;
-    state.pool = decoded.pool;
+    state.pool = identity.pool;
+    state.decimals = identity.baseDecimals;
+    state.quoteMint = identity.quoteMint;
+    state.quoteDecimals = identity.quoteDecimals;
+    // Event supply belongs to the event payload, not necessarily the watched
+    // mint in a multi-pool transaction. Chain supply is the authority.
+    try {
+      await refreshWatchedSupply(state);
+    } catch (error) {
+      status("trade-enrichment-error", {
+        mint,
+        signature,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    const effectiveQuoteRaw =
+      decoded.virtualQuoteRaw == null
+        ? null
+        : decoded.poolQuoteRaw + decoded.virtualQuoteRaw;
     await deliver({
       type: "trade",
       venue: "pumpswap",
@@ -1289,23 +1845,77 @@ export async function subscribeTrades(options: {
       mint,
       pool: decoded.pool,
       side: decoded.side,
-      quoteMint: state.quoteMint,
-      baseDecimals: state.decimals,
-      quoteDecimals: state.quoteDecimals,
+      quoteMint: identity.quoteMint,
+      baseDecimals: identity.baseDecimals,
+      quoteDecimals: identity.quoteDecimals,
       baseRaw: decoded.baseRaw,
       quoteRaw: decoded.quoteRaw,
-      virtualBaseRaw: null,
-      virtualQuoteRaw: null,
-      priceQuote:
-        state.decimals == null || state.quoteDecimals == null
+      marketState:
+        state.supplyRaw == null || effectiveQuoteRaw == null
           ? null
-          : priceQuote(
-              decoded.baseRaw,
-              decoded.quoteRaw,
-              state.decimals,
-              state.quoteDecimals,
-            ),
+          : {
+              supplyRaw: state.supplyRaw,
+              baseReserveRaw: decoded.poolBaseRaw,
+              quoteReserveRaw: effectiveQuoteRaw,
+            },
     });
+  };
+
+  const emitDbcTrade = async (mint: string, signature: string, slot: number, decoded: DbcTradeEvent) => {
+    try {
+      const market = await readDbcMarket(options.connection, decoded.pool);
+      const poolState = market.virtualPool.poolState;
+      if (poolState.baseMint.toBase58() !== mint || !poolState.config.equals(decoded.config)) {
+        status("meteora-dbc-pool-mismatch", { mint, pool: decoded.pool.toBase58(), signature });
+        return;
+      }
+      const state = states.get(mint);
+      if (!state || stopped || !subscriptions.has(mint)) return;
+      state.pool = decoded.pool.toBase58();
+      state.quoteMint = market.config.quoteMint.toBase58();
+      state.quoteDecimals = market.quoteDecimals;
+      await refreshWatchedSupply(state);
+      await deliver({ type: "trade", venue: "meteora-dbc", signature, slot, atMs: decoded.atMs,
+        mint, pool: state.pool, side: decoded.sell ? "sell" : "buy",
+        quoteMint: state.quoteMint, baseDecimals: market.baseDecimals, quoteDecimals: market.quoteDecimals,
+        baseRaw: decoded.sell ? decoded.inputRaw : decoded.outputRaw,
+        quoteRaw: decoded.sell ? decoded.outputRaw : decoded.inputRaw,
+        marketState: { supplyRaw: state.supplyRaw!,
+          baseReserveRaw: BigInt(poolState.baseReserve.toString()),
+          quoteReserveRaw: BigInt(poolState.quoteReserve.toString()),
+          priceQuotePerToken: dbcPrice(market, decoded.nextSqrtPrice) } });
+    } catch (error) {
+      status("meteora-dbc-enrichment-error", { mint, signature, error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  const emitDammV2Trade = async (mint: string, signature: string, slot: number, decoded: DammV2TradeEvent) => {
+    try {
+      const market = await readDammV2Market(options.connection, decoded.pool);
+      const base = new PublicKey(mint);
+      if (!market.state.tokenAMint.equals(base) && !market.state.tokenBMint.equals(base)) {
+        status("meteora-damm-v2-pool-mismatch", { mint, pool: decoded.pool.toBase58(), signature });
+        return;
+      }
+      const state = states.get(mint);
+      if (!state || stopped || !subscriptions.has(mint)) return;
+      const baseIsA = market.state.tokenAMint.equals(base);
+      state.pool = decoded.pool.toBase58();
+      state.quoteMint = (baseIsA ? market.state.tokenBMint : market.state.tokenAMint).toBase58();
+      state.quoteDecimals = baseIsA ? market.decimalsB : market.decimalsA;
+      await refreshWatchedSupply(state);
+      const sell = baseIsA === decoded.aToB;
+      await deliver({ type: "trade", venue: "meteora-damm-v2", signature, slot, atMs: decoded.atMs,
+        mint, pool: state.pool, side: sell ? "sell" : "buy", quoteMint: state.quoteMint,
+        baseDecimals: baseIsA ? market.decimalsA : market.decimalsB, quoteDecimals: state.quoteDecimals,
+        baseRaw: sell ? decoded.inputRaw : decoded.outputRaw, quoteRaw: sell ? decoded.outputRaw : decoded.inputRaw,
+        marketState: { supplyRaw: state.supplyRaw!,
+          baseReserveRaw: baseIsA ? decoded.reserveA : decoded.reserveB,
+          quoteReserveRaw: baseIsA ? decoded.reserveB : decoded.reserveA,
+          priceQuotePerToken: dammV2Price(market, base, decoded.nextSqrtPrice) } });
+    } catch (error) {
+      status("meteora-damm-v2-enrichment-error", { mint, signature, error: error instanceof Error ? error.message : String(error) });
+    }
   };
 
   const emitLaunchLabTrade = async (
@@ -1314,10 +1924,11 @@ export async function subscribeTrades(options: {
     slot: number,
     decoded: Extract<RaydiumLaunchLabDecodedEvent, { kind: "trade" }>,
   ) => {
+    const current = states.get(mint);
+    if (current) current.pool = decoded.pool;
     await ensureMetadata(mint, signature);
     const state = states.get(mint);
     if (!state || stopped || !subscriptions.has(mint)) return;
-    state.pool = decoded.pool;
     await deliver({
       type: "trade",
       venue: "raydium-launchlab",
@@ -1326,24 +1937,44 @@ export async function subscribeTrades(options: {
       atMs: Date.now(),
       mint,
       pool: decoded.pool,
-      side: null,
+      side: decoded.side,
       quoteMint: state.quoteMint,
       baseDecimals: state.decimals,
       quoteDecimals: state.quoteDecimals,
-      baseRaw: null,
-      quoteRaw: null,
-      virtualBaseRaw: decoded.virtualBaseRaw,
-      virtualQuoteRaw: decoded.virtualQuoteRaw,
-      priceQuote:
-        state.decimals == null || state.quoteDecimals == null
+      baseRaw: decoded.baseRaw,
+      quoteRaw: decoded.quoteRaw,
+      marketState:
+        state.decimals == null ||
+        state.quoteDecimals == null ||
+        state.supplyRaw == null
           ? null
-          : priceQuote(
-              decoded.virtualBaseRaw,
-              decoded.virtualQuoteRaw,
-              state.decimals,
-              state.quoteDecimals,
-            ),
+          : {
+              supplyRaw: state.supplyRaw,
+              baseReserveRaw: decoded.virtualBaseRaw,
+              quoteReserveRaw: decoded.virtualQuoteRaw,
+            },
     });
+  };
+
+  const processMeteoraLogs = async <Event>(
+    mint: string, logs: { logs: string[]; signature: string }, slot: number, venue: TradeVenue, program: PublicKey,
+    decode: (connection: Connection, data: Buffer) => Event | null,
+    fromTransaction: (connection: Connection, transaction: ParsedTransactionWithMeta) => Array<Event>,
+    emit: (mint: string, signature: string, slot: number, event: Event) => Promise<void>,
+  ) => {
+    if (!venues.has(venue) || !logs.logs.some((line) => line.startsWith(`Program ${program.toBase58()} invoke`))) return;
+    try {
+      const decodedLogs = programDataEntries(logs.logs).filter((entry) => entry.programId === program.toBase58())
+        .map((entry) => decode(options.connection, Buffer.from(entry.data))).filter((event): event is Event => event !== null);
+      const transaction = decodedLogs.length ? null : await options.connection.getParsedTransaction(logs.signature, {
+        commitment: "confirmed", maxSupportedTransactionVersion: 1,
+      });
+      const events = decodedLogs.length ? decodedLogs : transaction ? fromTransaction(options.connection, transaction) : [];
+      if (!transaction && !decodedLogs.length) status(`${venue}-transaction-unavailable`, { mint, signature: logs.signature });
+      for (const event of events) await emit(mint, logs.signature, slot, event);
+    } catch (error) {
+      status(`${venue}-event-error`, { mint, signature: logs.signature, error: error instanceof Error ? error.message : String(error) });
+    }
   };
 
   const onTokenLogs = (
@@ -1352,6 +1983,8 @@ export async function subscribeTrades(options: {
     slot: number,
   ) => {
     if (logs.err || stopped || !subscriptions.has(mint)) return;
+    void processMeteoraLogs(mint, logs, slot, "meteora-dbc", DYNAMIC_BONDING_CURVE_PROGRAM_ID, decodeDbcTrade, dbcTradesFromTransaction, emitDbcTrade);
+    void processMeteoraLogs(mint, logs, slot, "meteora-damm-v2", CP_AMM_PROGRAM_ID, decodeDammV2Trade, dammV2TradesFromTransaction, emitDammV2Trade);
     for (const entry of programDataEntries(logs.logs)) {
       if (
         entry.programId === PUMP_PROGRAM_ID.toBase58() &&
@@ -1363,6 +1996,7 @@ export async function subscribeTrades(options: {
           const state = states.get(mint);
           if (state) {
             state.decimals = decoded.decimals;
+            state.supplyRaw = decoded.supplyRaw;
             state.quoteMint = decoded.quoteMint;
             state.quoteDecimals = quoteDecimals(decoded.quoteMint);
           }
@@ -1380,13 +2014,26 @@ export async function subscribeTrades(options: {
         if (!decoded) continue;
         if (decoded.kind === "pool") {
           if (decoded.mint !== mint) continue;
-          const state = states.get(mint);
-          if (state) {
-            state.decimals = decoded.baseDecimals;
-            state.quoteMint = decoded.quoteMint;
-            state.quoteDecimals = decoded.quoteDecimals;
-            state.pool = decoded.pool;
-          }
+          void (async () => {
+            try {
+              const identity = await resolvePumpSwapPool(decoded.pool);
+              if (identity.baseMint !== mint) return;
+              const state = states.get(mint);
+              if (!state) return;
+              state.decimals = identity.baseDecimals;
+              state.quoteMint = identity.quoteMint;
+              state.quoteDecimals = identity.quoteDecimals;
+              state.pool = identity.pool;
+              await refreshWatchedSupply(state);
+            } catch (error) {
+              status("pumpswap-pool-resolution-error", {
+                mint,
+                pool: decoded.pool,
+                signature: logs.signature,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          })();
           continue;
         }
         void emitPumpSwapTrade(mint, logs.signature, slot, decoded);
@@ -1416,6 +2063,8 @@ export async function subscribeTrades(options: {
       states.set(mint, {
         mint,
         decimals: null,
+        supplyRaw: null,
+        supplyRefreshedAtMs: 0,
         quoteMint: null,
         quoteDecimals: null,
         pool: null,
@@ -1488,4 +2137,145 @@ export async function subscribeTrades(options: {
     close,
     closed,
   };
+}
+
+function quoteSolLoader(
+  connection: Connection,
+  status: (event: string, data?: Record<string, unknown>) => void,
+  maxAgeMs = 15_000,
+) {
+  const cache = new Map<string, { value: number | null; atMs: number }>();
+  const pending = new Map<string, Promise<number | null>>();
+  return async (mint: string, decimals: number): Promise<number | null> => {
+    if (mint === WRAPPED_SOL_MINT) return 1;
+    const now = Date.now();
+    const cached = cache.get(mint);
+    if (cached && now - cached.atMs < maxAgeMs) return cached.value;
+    const active = pending.get(mint);
+    if (active) return await active;
+    const request = (async () => {
+      try {
+        const venue = new PumpSwapVenue();
+        const inspected = await venue.inspectToken(connection, new PublicKey(mint));
+        if (inspected?.quoteMint === WRAPPED_SOL_MINT) {
+          const token = { ...inspected, mint } as TokenRow;
+          const market = await venue.resolveMarket({ connection, token, user: PublicKey.default });
+          if (market) {
+            const price = (await venue.price({ connection, token, user: PublicKey.default }, market)).priceQuotePerToken;
+            if (Number.isFinite(price) && price > 0) {
+              cache.set(mint, { value: price, atMs: Date.now() });
+              return price;
+            }
+          }
+        }
+      } catch {
+        // If no supported direct SOL pool is available, try the verified
+        // executable quote route below. Unavailability remains null.
+      }
+      try {
+        // Quote a modest notional to avoid a zero-lamport route while limiting
+        // price impact. This is an executable-route conversion, not an inferred
+        // transaction-balance ratio.
+        const units = 100n;
+        const amountRaw = units * 10n ** BigInt(decimals);
+        const quote = await quoteJupiterSwap({
+          inputMint: mint,
+          outputMint: WRAPPED_SOL_MINT,
+          amountRaw,
+        });
+        const value = Number(quote.outAmountRaw) / 1e9 / Number(units);
+        const resolved = Number.isFinite(value) && value > 0 ? value : null;
+        cache.set(mint, { value: resolved, atMs: Date.now() });
+        return resolved;
+      } catch (error) {
+        cache.set(mint, { value: null, atMs: Date.now() });
+        status("quote-sol-conversion-unavailable", {
+          quoteMint: mint,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    })().finally(() => pending.delete(mint));
+    pending.set(mint, request);
+    return await request;
+  };
+}
+
+export async function subscribeTrades(options: {
+  connection: Connection;
+  tokens: readonly string[];
+  venues?: readonly TradeVenue[];
+  commitment?: Commitment;
+  metadata?: TokenMetadataMode;
+  signal?: AbortSignal;
+  solUsd?: number | (() => number | Promise<number>);
+  solUsdRefreshMs?: number;
+  /** Override quote-token conversion; null keeps quote prices available without SOL pricing. */
+  quoteSol?: (mint: string, decimals: number) => Promise<number | null>;
+  onTrade: (event: TradeEvent) => void | Promise<void>;
+  onStatus?: (event: string, data?: Record<string, unknown>) => void;
+}): Promise<TradeSubscription> {
+  const status = (event: string, data?: Record<string, unknown>) => {
+    try {
+      options.onStatus?.(event, data);
+    } catch {}
+  };
+  const getSolUsd = solUsdLoader(
+    options.solUsd,
+    Math.max(1_000, Math.trunc(options.solUsdRefreshMs ?? 15_000)),
+    status,
+  );
+  const getQuoteSol = options.quoteSol ?? quoteSolLoader(options.connection, status);
+  return await subscribeTradeStream({
+    connection: options.connection,
+    tokens: options.tokens,
+    venues: options.venues,
+    commitment: options.commitment,
+    metadata: options.metadata,
+    signal: options.signal,
+    onStatus: options.onStatus,
+    onTrade: async (internal) => {
+      const needsSolUsd = internal.quoteMint != null;
+      const solUsd = needsSolUsd ? await getSolUsd() : null;
+      const quoteSolPerToken =
+        internal.quoteMint != null &&
+        internal.quoteDecimals != null &&
+        internal.quoteMint !== WRAPPED_SOL_MINT &&
+        internal.quoteMint !== USDC_MINT
+          ? await getQuoteSol(internal.quoteMint, internal.quoteDecimals)
+          : null;
+      const market = tradeMarketFromTradeEvent(
+        internal,
+        solUsd,
+        quoteSolPerToken,
+      );
+      if (!market) {
+        status("trade-market-incomplete", {
+          venue: internal.venue,
+          mint: internal.mint,
+          signature: internal.signature,
+        });
+        return;
+      }
+      const event: TradeEvent = {
+        type: "trade",
+        venue: internal.venue,
+        signature: internal.signature,
+        slot: internal.slot,
+        atMs: internal.atMs,
+        mint: internal.mint,
+        pool: internal.pool,
+        side: internal.side,
+        baseRaw: internal.baseRaw,
+        quoteRaw: internal.quoteRaw,
+        market,
+        metadata: internal.metadata,
+      };
+      try {
+        await options.onTrade(event);
+      } catch (error) {
+        callbackError(status, event, error);
+      }
+    },
+  });
 }

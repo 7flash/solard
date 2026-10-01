@@ -4,6 +4,14 @@ import { measuredSync } from "../core/measured.ts";
 import type { SolardDatabase, ExecutionRow } from "./schema.ts";
 import type { TransactionAction } from "../tx/types.ts";
 
+export type ExecutionQuery = {
+  walletAddress?: string;
+  mint?: string;
+  status?: ExecutionRow["status"] | readonly ExecutionRow["status"][];
+  kind?: string | readonly string[];
+  limit?: number;
+};
+
 const m = measure("executions");
 export class ExecutionRepo {
   constructor(private readonly db: SolardDatabase) {}
@@ -54,11 +62,40 @@ export class ExecutionRepo {
     Object.assign(row, patch, { updatedAtMs: Date.now() });
     return row;
   }
+  query(input: ExecutionQuery = {}): ExecutionRow[] {
+    const statuses =
+      input.status == null
+        ? null
+        : new Set<ExecutionRow["status"]>(
+            Array.isArray(input.status) ? [...input.status] : [input.status],
+          );
+    const kinds =
+      input.kind == null
+        ? null
+        : new Set<string>(
+            Array.isArray(input.kind) ? [...input.kind] : [input.kind],
+          );
+    const limit =
+      input.limit == null
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, Math.trunc(input.limit));
+    return (
+      this.db.executions
+        .select()
+        .orderBy("createdAtMs", "desc")
+        .all() as ExecutionRow[]
+    )
+      .filter(
+        (row) =>
+          (input.walletAddress == null ||
+            row.walletAddress === input.walletAddress) &&
+          (input.mint == null || row.mint === input.mint) &&
+          (statuses == null || statuses.has(row.status)) &&
+          (kinds == null || kinds.has(row.kind)),
+      )
+      .slice(0, limit);
+  }
   history(limit = 50): ExecutionRow[] {
-    return this.db.executions
-      .select()
-      .orderBy("createdAtMs", "desc")
-      .limit(limit)
-      .all() as ExecutionRow[];
+    return this.query({ limit });
   }
 }

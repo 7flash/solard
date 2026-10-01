@@ -8,14 +8,13 @@ const source = readFileSync(
 );
 
 describe("price feed application boundary", () => {
-  test("consumes sdk subscriptions instead of protocol internals", () => {
-    expect(source).toContain("subscribeLaunches");
-    expect(source).toContain("subscribeTrades");
-    expect(source).toContain('from "@solard/sdk"');
+  test("owns one sdk trade subscription and changes its token set dynamically", () => {
+    expect(source).toContain("slrd.listenTrades");
+    expect(source).toContain("tradeSubscription.add");
+    expect(source).toContain("tradeSubscription?.remove");
+    expect(source).toContain("const refs = new Map<string, number>()");
+    expect(source).not.toContain("subscribeLaunches");
     expect(source).not.toContain('from "@solard/core"');
-    expect(source).not.toMatch(
-      /PUMP_(?:CREATE|TRADE)_EVENT|PUMPSWAP_(?:BUY|SELL|CREATE)_EVENT|LAUNCHLAB_(?:CREATE|TRADE)_EVENT/,
-    );
     expect(source).not.toMatch(/logsSubscribe|onLogs\(/);
   });
 });

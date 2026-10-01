@@ -5,6 +5,11 @@ import {
   resolveTradeAsset,
   sol,
 } from "@solard/core";
+import {
+  connectPriceFeed,
+  type PriceFeedClient,
+  type PriceFeedPrice,
+} from "./price-feed-client.ts";
 
 configure({ silent: false });
 const m = createMeasure("slrd:trader-engine", { maxResultLength: 1600 });
@@ -62,6 +67,7 @@ export type TraderEngineOptions = {
   launchlabProbeSol?: number;
   autoRearmTargets?: boolean;
   via?: string;
+  priceFeedUrl?: string;
 };
 
 export type TraderCommand =
@@ -122,8 +128,14 @@ export class InteractiveTraderEngine {
   readonly launchlabProbeSol: number;
   readonly autoRearmTargets: boolean;
   readonly via: string;
+  readonly priceFeedUrl: string;
   private readonly slrd: Trader;
   private readonly raydium: RaydiumService;
+  private priceFeed: PriceFeedClient | null = null;
+  private latestPriceValue: PriceFeedPrice | null = null;
+  private latestPriceReceivedAt = 0;
+  private priceVersion = 0;
+  private readonly priceWaiters = new Set<() => void>();
   private mintValue: string | null = null;
   private venueValue: ExecutionVenue | null = null;
   private modeValue: TraderMode = "starting";
@@ -149,6 +161,10 @@ export class InteractiveTraderEngine {
     );
     this.autoRearmTargets = options.autoRearmTargets !== false;
     this.via = options.via ?? "rpc";
+    this.priceFeedUrl =
+      options.priceFeedUrl ??
+      process.env.SOLARD_PRICE_FEED_URL?.trim() ??
+      "ws://127.0.0.1:8788/ws";
     this.slrd = createTraderSolard();
     this.raydium = new RaydiumService(this.slrd);
   }
@@ -173,21 +189,29 @@ export class InteractiveTraderEngine {
   async start(): Promise<void> {
     this.mintValue = await this.ensureToken(this.tokenRef);
     this.venueValue = await this.detectVenue();
+    await this.connectPriceFeed();
     this.modeValue = "awaiting-command";
     this.lastErrorValue = null;
     await m.measure(
       {
         start: () => "trader engine ready",
-        end: (value: { mint: string; wallet: string; venue: string }) => ({
+        end: (value: {
+          mint: string;
+          wallet: string;
+          venue: string;
+          priceFeed: string;
+        }) => ({
           mint: short(value.mint),
           wallet: value.wallet,
           venue: value.venue,
+          priceFeed: value.priceFeed,
         }),
       },
       async () => ({
         mint: this.mint,
         wallet: this.walletRef,
         venue: this.venueValue!,
+        priceFeed: this.priceFeedUrl,
       }),
     );
   }
@@ -196,6 +220,12 @@ export class InteractiveTraderEngine {
     this.watchGeneration += 1;
     this.planValue = null;
     this.modeValue = "stopped";
+    for (const wake of this.priceWaiters) wake();
+    this.priceWaiters.clear();
+    const feed = this.priceFeed;
+    this.priceFeed = null;
+    feed?.close();
+    await feed?.closed.catch(() => undefined);
     this.slrd.close();
   }
 
@@ -220,6 +250,12 @@ export class InteractiveTraderEngine {
       launchlabProbeSol: this.launchlabProbeSol,
       autoRearmTargets: this.autoRearmTargets,
       via: this.via,
+      priceFeed: {
+        url: this.priceFeedUrl,
+        connected: this.priceFeed?.connected ?? false,
+        lastPriceAtMs: this.latestPriceValue?.atMs ?? null,
+        lastPriceReceivedAt: this.latestPriceReceivedAt || null,
+      },
       market,
     };
   }
@@ -479,6 +515,68 @@ export class InteractiveTraderEngine {
     }
   }
 
+  private async connectPriceFeed(): Promise<void> {
+    this.priceFeed = await connectPriceFeed({
+      url: this.priceFeedUrl,
+      mints: [this.mint],
+      onMessage: (message) => {
+        if (message.type !== "price" || message.mint !== this.mint) return;
+        const priceSol = message.market.priceSol;
+        if (!(priceSol != null && Number.isFinite(priceSol) && priceSol > 0))
+          return;
+        this.latestPriceValue = message;
+        this.latestPriceReceivedAt = Date.now();
+        this.priceVersion += 1;
+        for (const wake of this.priceWaiters) wake();
+        this.priceWaiters.clear();
+      },
+      onStatus: (event, data) => {
+        if (event === "connected") {
+          if (this.modeValue !== "error") this.lastErrorValue = null;
+          return;
+        }
+        if (event !== "connect-error" && event !== "disconnected") return;
+        this.lastErrorValue = `${event}: ${errorText(data?.error ?? "price feed unavailable")}`;
+      },
+    });
+  }
+
+  private feedMarket(
+    maxAgeMs = 30_000,
+  ): { price: number; venue: string } | null {
+    const tick = this.latestPriceValue;
+    if (!tick) return null;
+    if (Math.max(0, Date.now() - tick.atMs) > maxAgeMs) return null;
+    const price = tick.market.priceSol;
+    if (!(price != null && Number.isFinite(price) && price > 0)) return null;
+    return { price, venue: tick.venue };
+  }
+
+  private async waitForFeedPrice(
+    version: number,
+    timeoutMs: number,
+  ): Promise<{ version: number; price: number; venue: string } | null> {
+    const current = this.feedMarket();
+    if (this.priceVersion > version && current) {
+      return { version: this.priceVersion, ...current };
+    }
+    let wake!: () => void;
+    const update = new Promise<void>((resolve) => {
+      wake = resolve;
+      this.priceWaiters.add(wake);
+    });
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, Math.max(1, timeoutMs));
+    });
+    await Promise.race([update, timeout]);
+    if (timer) clearTimeout(timer);
+    this.priceWaiters.delete(wake);
+    const next = this.feedMarket();
+    if (this.priceVersion <= version || !next) return null;
+    return { version: this.priceVersion, ...next };
+  }
+
   private async walletState(): Promise<WalletState> {
     const balances = await this.slrd.walletBalances(this.walletRef, [
       this.mint,
@@ -503,7 +601,9 @@ export class InteractiveTraderEngine {
 
   private async snapshot() {
     const [market, wallet] = await Promise.all([
-      this.sampleMarket(),
+      Promise.resolve(this.feedMarket()).then(
+        (value) => value ?? this.sampleMarket(),
+      ),
       this.walletState(),
     ]);
     return {
@@ -628,6 +728,26 @@ export class InteractiveTraderEngine {
     return this.launchlabProbeSol / outUi;
   }
 
+  private async recordConfirmedTrade(
+    signature: string | null,
+    side: "buy" | "sell",
+    venue: string,
+  ): Promise<void> {
+    if (!signature) return;
+    try {
+      await this.slrd.recordConfirmedTrade({
+        signature,
+        wallet: this.walletRef,
+        token: this.mint,
+        side,
+        venue,
+        sender: "raydium",
+      });
+    } catch (error) {
+      this.lastErrorValue = `trade ledger: ${errorText(error)}`;
+    }
+  }
+
   private async executeBuy(
     amountSol: number,
   ): Promise<{ signature: string | null; venue: string }> {
@@ -647,10 +767,9 @@ export class InteractiveTraderEngine {
           skipPreflight: false,
           commitment: "confirmed",
         });
-        return {
-          signature: result.signatures.at(-1) ?? null,
-          venue: "raydium-launchlab",
-        };
+        const signature = result.signatures.at(-1) ?? null;
+        await this.recordConfirmedTrade(signature, "buy", "raydium-launchlab");
+        return { signature, venue: "raydium-launchlab" };
       } catch (error) {
         if (await this.trySwitchToRaydium()) {
           return await this.executeBuy(amountSol);
@@ -674,7 +793,9 @@ export class InteractiveTraderEngine {
         skipPreflight: false,
         commitment: "confirmed",
       });
-      return { signature: result.signatures.at(-1) ?? null, venue: "raydium" };
+      const signature = result.signatures.at(-1) ?? null;
+      await this.recordConfirmedTrade(signature, "buy", "raydium");
+      return { signature, venue: "raydium" };
     }
     const value = await this.slrd.buy(
       this.mint,
@@ -712,10 +833,9 @@ export class InteractiveTraderEngine {
           skipPreflight: false,
           commitment: "confirmed",
         });
-        return {
-          signature: result.signatures.at(-1) ?? null,
-          venue: "raydium-launchlab",
-        };
+        const signature = result.signatures.at(-1) ?? null;
+        await this.recordConfirmedTrade(signature, "sell", "raydium-launchlab");
+        return { signature, venue: "raydium-launchlab" };
       } catch (error) {
         if (await this.trySwitchToRaydium()) {
           return await this.executeSell(sellPct, before);
@@ -742,7 +862,9 @@ export class InteractiveTraderEngine {
         skipPreflight: false,
         commitment: "confirmed",
       });
-      return { signature: result.signatures.at(-1) ?? null, venue: "raydium" };
+      const signature = result.signatures.at(-1) ?? null;
+      await this.recordConfirmedTrade(signature, "sell", "raydium");
+      return { signature, venue: "raydium" };
     }
     const value = await this.slrd.sell(this.mint, this.walletRef, {
       bps,
@@ -842,65 +964,51 @@ export class InteractiveTraderEngine {
   }
 
   private async watch(generation: number, plan: TraderPlan): Promise<void> {
+    let version = this.priceVersion - 1;
     let lastStatusAt = 0;
     while (
       generation === this.watchGeneration &&
       this.modeValue === "watching" &&
       this.planValue === plan
     ) {
-      try {
-        const sampled = await this.sampleMarket();
-        const price = sampled.price;
-        if (price >= plan.upTarget) {
-          if (!this.claimTrigger(generation, plan)) return;
-          await this.reportTrigger("up", price, plan.upTarget, sampled.venue);
-          await this.sell(plan.sellPct, "up-target");
-          await this.rearmAfterTriggeredTrade(plan);
-          return;
-        }
-        if (price <= plan.downTarget) {
-          if (!this.claimTrigger(generation, plan)) return;
-          await this.reportTrigger(
-            "down",
-            price,
-            plan.downTarget,
-            sampled.venue,
-          );
-          await this.buy(plan.buySol, "down-target");
-          await this.rearmAfterTriggeredTrade(plan);
-          return;
-        }
-        if (Date.now() - lastStatusAt >= 15_000) {
-          lastStatusAt = Date.now();
-          await m.measure(
-            {
-              start: () => "watch targets",
-              end: (value: {
-                price: string;
-                up: string;
-                down: string;
-                venue: string;
-              }) => value,
-            },
-            async () => ({
-              price: priceText(price),
-              up: priceText(plan.upTarget),
-              down: priceText(plan.downTarget),
-              venue: sampled.venue,
-            }),
-          );
-        }
-      } catch (error) {
-        this.lastErrorValue = errorText(error);
+      const sampled = await this.waitForFeedPrice(version, this.intervalMs);
+      if (!sampled) continue;
+      version = sampled.version;
+      const price = sampled.price;
+      if (price >= plan.upTarget) {
+        if (!this.claimTrigger(generation, plan)) return;
+        await this.reportTrigger("up", price, plan.upTarget, sampled.venue);
+        await this.sell(plan.sellPct, "up-target");
+        await this.rearmAfterTriggeredTrade(plan);
+        return;
+      }
+      if (price <= plan.downTarget) {
+        if (!this.claimTrigger(generation, plan)) return;
+        await this.reportTrigger("down", price, plan.downTarget, sampled.venue);
+        await this.buy(plan.buySol, "down-target");
+        await this.rearmAfterTriggeredTrade(plan);
+        return;
+      }
+      if (Date.now() - lastStatusAt >= 15_000) {
+        lastStatusAt = Date.now();
         await m.measure(
           {
-            start: () => "price watch retry",
-            end: (value: { error: string }) => value,
+            start: () => "watch targets",
+            end: (value: {
+              price: string;
+              up: string;
+              down: string;
+              venue: string;
+            }) => value,
           },
-          async () => ({ error: this.lastErrorValue! }),
+          async () => ({
+            price: priceText(price),
+            up: priceText(plan.upTarget),
+            down: priceText(plan.downTarget),
+            venue: sampled.venue,
+          }),
         );
       }
-      await sleep(this.intervalMs);
     }
   }
 

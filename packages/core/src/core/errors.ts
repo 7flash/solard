@@ -95,3 +95,31 @@ export class SimulationFailedError extends SolardError {
     );
   }
 }
+
+
+const DEFINITIVE_PRE_SUBMISSION_CODES = new Set([
+  "MISSING_CONFIG",
+  "UNKNOWN_WALLET",
+  "WALLET_CANNOT_SIGN",
+  "UNKNOWN_TOKEN",
+  "UNSUPPORTED_TOKEN",
+  "QUOTE_ASSET_MISMATCH",
+  "TRANSACTION_TOO_LARGE",
+  "SIMULATION_FAILED",
+]);
+
+/** True only when Solard can prove no transaction was submitted. */
+export function isDefinitivePreSubmissionError(error: unknown): boolean {
+  if (error && typeof error === "object" && "phase" in error && error.phase === "before-submission") return true;
+  if (error instanceof SolardError && DEFINITIVE_PRE_SUBMISSION_CODES.has(error.code))
+    return true;
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code ?? "")
+      : "";
+  if (DEFINITIVE_PRE_SUBMISSION_CODES.has(code)) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /simulation failed|transaction simulation failed|custom program error|insufficient funds|invalid transaction|invalid account|blockhash not found/i.test(
+    message,
+  );
+}

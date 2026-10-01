@@ -79,12 +79,38 @@ export type {
   ReplayTransaction,
 } from "./history/replay.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
+export type { TradeLandingPolicy } from "./tx/trade-policy.ts";
+export { ensureAdditiveSqliteColumns } from "./db/additive-migration.ts";
+export type { AdditiveSqliteColumn } from "./db/additive-migration.ts";
+export {
+  SolardError,
+  MissingConfigError,
+  UnknownWalletError,
+  WalletCannotSignError,
+  UnknownTokenError,
+  UnsupportedTokenError,
+  QuoteAssetMismatchError,
+  TransactionTooLargeError,
+  SimulationFailedError,
+  isDefinitivePreSubmissionError,
+} from "./core/errors.ts";
 export type {
   MarketHistory,
   MarketHistoryOptions,
+  RecordConfirmedTradeInput,
   SolardEventsApi,
   SolardHistoryApi,
   SolardOptions,
+  SolardDecodedTransaction,
+  SolardPosition,
+  SolardPositionQuery,
+  SolardTransactionNativeBalance,
+  SolardTransactionOptions,
+  SolardTransactionTokenBalance,
+  SolardTrade,
+  SolardTradeQuery,
+  SolardTradeSide,
+  SolardTradeStatus,
   WalletPrivateKeyExport,
   WalletPrivateKeyFormat,
 } from "./core/solard.ts";
@@ -184,6 +210,16 @@ export type {
   BuiltInstructions,
 } from "./venues/venue-plugin.ts";
 export { VenueRegistry } from "./venues/route-resolver.ts";
+export { MeteoraDbcVenue } from "./venues/meteora/dbc.ts";
+export { MeteoraDammV2Venue } from "./venues/meteora/damm-v2.ts";
+export { TradePreSubmissionError } from "./tx/trade-errors.ts";
+export { BelowMinimumError } from "./tx/trade-minimum.ts";
+export type { TradeResult, TradeAttempt } from "./tx/trade-result.ts";
+export { tradeResult } from "./tx/trade-result.ts";
+export { estimatePlanFee } from "./tx/fee-estimate.ts";
+export type { TransactionFeeEstimate } from "./tx/fee-estimate.ts";
+export type { TradeExecutionOptions } from "./tx/trade-options.ts";
+export { JupiterVenue } from "./venues/jupiter-venue.ts";
 export type {
   ClaimSourcePlugin,
   ClaimPlan,
@@ -741,6 +777,7 @@ export {
   decodePumpProgramData,
   decodePumpSwapProgramData,
   decodeRaydiumLaunchLabProgramData,
+  getSolUsdPrice,
   subscribeLaunches,
   subscribeMigrations,
   subscribeTrades,
@@ -765,7 +802,11 @@ export type {
   MigrationEvent,
   MigrationSubscription,
   MigrationVenue,
+  GetSolUsdPriceOptions,
+  SolUsdPrice,
+  SolUsdSource,
   TradeEvent,
+  TradeMarket,
   TradeSide,
   TradeSubscription,
   TradeVenue,

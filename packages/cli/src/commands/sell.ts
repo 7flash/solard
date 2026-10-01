@@ -9,6 +9,7 @@ import {
 } from "@solard/core";
 
 import { resolveTradeTargets, type TradeTargets } from "./trade-targets.ts";
+import { tradeFeeOptions } from "./trade-fees.ts";
 import { summarizeTradeRoute, type TradeRouteSummary } from "./trade-result.ts";
 import { parseVenuePreference, type TradeCommandFlags } from "./trade-venue.ts";
 
@@ -142,6 +143,7 @@ export async function runSmartSellCommand({
     }
 
     const options = {
+      ...tradeFeeOptions(flags),
       bps,
       slippageBps: intFlag(flags, "slippage-bps", 1_500),
       via: (flags.get("sender") ?? "rpc") as SenderId,
@@ -156,15 +158,22 @@ export async function runSmartSellCommand({
           ? [
               await slrd
                 .tx(target.refs[0]!)
+                .priorityFee(options.priorityFee)
                 .sell(resolution.token!.mint, options)
                 .build(),
             ]
           : await slrd
               .composeMany(target.refs)
+              .priorityFee(options.priorityFee)
               .sell(resolution.token!.mint, options)
               .build();
       const results = await Promise.all(
-        plans.map((plan) => slrd.simulatePlan(plan)),
+        plans.map(async (plan, index) => {
+          const prepared = await slrd.prepareTradePlan(target.refs[index]!, plan, options);
+          return { ...await slrd.simulatePlan(prepared.plan),
+            priorityMicroLamports: prepared.priorityMicroLamports,
+            cuLimit: prepared.plan.draft.cuLimit ?? 600_000 };
+        }),
       );
       return {
         mode: "simulation",

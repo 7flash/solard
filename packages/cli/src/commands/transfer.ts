@@ -4,9 +4,12 @@ import {
   sol,
   tokenAmount,
   transferTokenIxs,
+  estimatePlanFee,
+  tradeResult,
   type SenderId,
   type Solard,
 } from "@solard/core";
+import { tradeFeeOptions } from "./trade-fees.ts";
 
 import { resolveDestinationRef } from "../refs.ts";
 
@@ -88,11 +91,14 @@ export async function runTransferCommand({
     "cu-limit",
     tokenRef ? 30_000 : 10_000,
   );
-  const priorityMicroLamports = nonNegativeInteger(
-    flags,
-    "priority-micro-lamports",
-    0,
-  );
+  const feeOptions = tradeFeeOptions(flags);
+  const priorityMicroLamports = feeOptions.priorityFee.microLamports;
+  const executionOptions = {
+    ...feeOptions,
+    priorityFee: { cuLimit, microLamports: priorityMicroLamports },
+    skipSimulation: flags.has("skip-simulation"),
+    skipPreflight: flags.has("skip-preflight") || flags.has("skip-simulation"),
+  };
 
   if (tokenRef) {
     const amountUi = requiredFlag(flags, "amount");
@@ -138,7 +144,8 @@ export async function runTransferCommand({
       .priorityFee({ cuLimit, microLamports: priorityMicroLamports });
 
     if (flags.has("simulate-only")) {
-      const result = await slrd.simulatePlan(await composer.build());
+      const prepared = await slrd.prepareTradePlan(wallet, await composer.build(), executionOptions);
+      const result = await slrd.simulatePlan(prepared.plan);
       return {
         mode: "simulation",
         wallet,
@@ -149,16 +156,14 @@ export async function runTransferCommand({
         decimals: mintState.decimals,
         amountRaw,
         result,
+        feeEstimate: await estimatePlanFee(slrd.connection(), prepared.plan),
+        priorityMicroLamports: prepared.priorityMicroLamports,
+        cuLimit,
       };
     }
 
-    const receipt = await composer.send({
-      via,
-      kind: "transfer-token",
-      skipSimulation: flags.has("skip-simulation"),
-      skipPreflight:
-        flags.has("skip-preflight") || flags.has("skip-simulation"),
-    });
+    const execution = await slrd.executeTradePlan(wallet, () => composer.build(), via, "transfer-token", executionOptions);
+    const receipt = tradeResult(execution.receipt, execution.attempts, execution.submission.executionId);
 
     return {
       ...receipt,
@@ -179,22 +184,22 @@ export async function runTransferCommand({
     .priorityFee({ cuLimit, microLamports: priorityMicroLamports });
 
   if (flags.has("simulate-only")) {
-    const result = await slrd.simulatePlan(await composer.build());
+    const prepared = await slrd.prepareTradePlan(wallet, await composer.build(), executionOptions);
+    const result = await slrd.simulatePlan(prepared.plan);
     return {
       mode: "simulation",
       wallet,
       recipient,
       sol: amount,
       result,
+      feeEstimate: await estimatePlanFee(slrd.connection(), prepared.plan),
+      priorityMicroLamports: prepared.priorityMicroLamports,
+      cuLimit,
     };
   }
 
-  const receipt = await composer.send({
-    via,
-    kind: "transfer-sol",
-    skipSimulation: flags.has("skip-simulation"),
-    skipPreflight: flags.has("skip-preflight") || flags.has("skip-simulation"),
-  });
+  const execution = await slrd.executeTradePlan(wallet, () => composer.build(), via, "transfer-sol", executionOptions);
+  const receipt = tradeResult(execution.receipt, execution.attempts, execution.submission.executionId);
 
-  return { ...receipt, recipient };
+  return { ...receipt, recipient, wallet, sol: amount };
 }

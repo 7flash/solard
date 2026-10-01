@@ -1,33 +1,33 @@
-export type PriceFeedVenue =
-  "pump" | "pumpswap" | "raydium-launchlab" | "rpc-fallback";
+import type { SolUsdSource, TradeSide, TradeVenue } from "@solard/sdk";
 
-export type PriceFeedLaunch = {
-  type: "launch";
-  atMs: number;
-  signature: string | null;
-  slot: number | null;
-  mint: string;
-  venue: "pump" | "raydium-launchlab";
-  decimals: number;
-  supplyUi: number;
-  quoteMint: string | null;
-  pool: string | null;
-  name: string | null;
-  symbol: string | null;
-  isMayhemMode: boolean | null;
+export type PriceFeedMarket = {
+  quoteMint: string;
+  baseDecimals: number;
+  quoteDecimals: number;
+  supply: number;
+  baseReserve: number;
+  quoteReserve: number;
+  priceQuotePerToken: number;
+  marketCapQuote: number;
+  priceSol: number | null;
+  marketCapSol: number | null;
+  solUsd: number | null;
+  solUsdSource: SolUsdSource | null;
+  solUsdAtMs: number | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
 };
 
 export type PriceFeedPrice = {
   type: "price";
   atMs: number;
-  signature: string | null;
-  slot: number | null;
+  signature: string;
+  slot: number;
   mint: string;
-  venue: PriceFeedVenue;
-  priceSol: number | null;
-  priceUsd: number | null;
-  marketCapUsd: number | null;
-  source: string;
+  pool: string | null;
+  venue: TradeVenue;
+  side: TradeSide | null;
+  market: PriceFeedMarket;
 };
 
 export type PriceFeedStatus = {
@@ -37,15 +37,9 @@ export type PriceFeedStatus = {
   data?: Record<string, unknown>;
 };
 
-export type PriceFeedMessage =
-  PriceFeedLaunch | PriceFeedPrice | PriceFeedStatus;
+export type PriceFeedMessage = PriceFeedPrice | PriceFeedStatus;
 
 export type PriceFeedCommand =
-  | {
-      op: "subscribe";
-      mints?: string[];
-      launches?: boolean;
-      allPrices?: boolean;
-    }
-  | { op: "unsubscribe"; mints?: string[] }
+  | { op: "subscribe"; mints: string[] }
+  | { op: "unsubscribe"; mints: string[] }
   | { op: "ping" };

@@ -1,33 +1,14 @@
 import { configure, createMeasure } from "measure-fn";
-import { Connection } from "@solana/web3.js";
-import {
-  subscribeLaunches,
-  subscribeTrades,
-  type LaunchEvent,
-  type TradeEvent,
-  type TradeSubscription,
-} from "@solard/sdk";
+import slrd, { type TradeEvent, type TradeListener } from "@solard/sdk";
 import type {
   PriceFeedCommand,
-  PriceFeedLaunch,
   PriceFeedMessage,
   PriceFeedPrice,
 } from "./price-feed-protocol.ts";
 
 type Flags = Map<string, string>;
 type Emit = (value: string) => void;
-type Client = {
-  mints: Set<string>;
-  launches: boolean;
-  allPrices: boolean;
-};
-type MintState = {
-  supplyUi: number | null;
-  isMayhemMode: boolean | null;
-};
-
-const WSOL_MINT = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+type Client = { mints: Set<string> };
 
 function flag(flags: Flags, key: string): string | undefined {
   const value = flags.get(key);
@@ -42,87 +23,58 @@ function numberFlag(flags: Flags, key: string, fallback: number): number {
   return value;
 }
 
-function rpcUrl(flags: Flags): string {
-  const value =
-    flag(flags, "rpc") ??
-    process.env.RPC_ENDPOINT?.trim() ??
-    process.env.SOLANA_RPC_URL?.trim() ??
-    process.env.HELIUS_RPC_URL?.trim();
-  if (!value) {
+function feedAddress(flags: Flags): { host: string; port: number } {
+  if (flags.has("rpc") || flags.has("ws")) {
     throw new Error(
-      "feed serve requires RPC_ENDPOINT, SOLANA_RPC_URL, HELIUS_RPC_URL, or --rpc <url>",
+      "Set only RPC_ENDPOINT in the environment. --rpc and --ws are intentionally unsupported.",
     );
   }
-  return value;
-}
-
-function websocketUrl(flags: Flags): string | undefined {
-  return (
-    flag(flags, "ws") ??
-    process.env.SOLANA_WS_URL?.trim() ??
-    process.env.HELIUS_WS_URL?.trim()
-  );
-}
-
-function feedAddress(flags: Flags): { host: string; port: number } {
   const host = flag(flags, "host") ?? "127.0.0.1";
+  if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+    throw new Error("The trader price feed is loopback-only");
+  }
   const port = Math.trunc(numberFlag(flags, "port", 8788));
   if (!(port > 0 && port <= 65_535)) throw new Error("--port must be 1..65535");
   return { host, port };
-}
-
-function publicEndpoint(value: string): string {
-  try {
-    const url = new URL(value);
-    for (const key of [...url.searchParams.keys()]) {
-      if (/key|token|secret|auth/i.test(key)) {
-        url.searchParams.set(key, "<redacted>");
-      }
-    }
-    return url.toString();
-  } catch {
-    return value.replace(
-      /([?&](?:api-?key|token|secret|auth)=)[^&]+/gi,
-      "$1<redacted>",
-    );
-  }
 }
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function fetchJson(url: string): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5_000);
-  try {
-    const response = await fetch(url, {
-      headers: { accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
-  } finally {
-    clearTimeout(timer);
-  }
+function uniqueMints(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("mints must be an array");
+  return [...new Set(value.map((mint) => String(mint).trim()).filter(Boolean))];
 }
 
-async function loadSolUsd(): Promise<number> {
-  try {
-    const raw = (await fetchJson(
-      "https://api.coinbase.com/v2/prices/SOL-USD/spot",
-    )) as { data?: { amount?: unknown } };
-    const value = Number(raw.data?.amount);
-    if (Number.isFinite(value) && value > 0) return value;
-  } catch {}
-  const raw = (await fetchJson(
-    "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
-  )) as { solana?: { usd?: unknown } };
-  const value = Number(raw.solana?.usd);
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error("SOL/USD unavailable");
-  }
-  return value;
+function priceMessage(event: TradeEvent): PriceFeedPrice {
+  return {
+    type: "price",
+    atMs: event.atMs,
+    signature: event.signature,
+    slot: event.slot,
+    mint: event.mint,
+    pool: event.pool,
+    venue: event.venue,
+    side: event.side,
+    market: {
+      quoteMint: event.market.quoteMint,
+      baseDecimals: event.market.baseDecimals,
+      quoteDecimals: event.market.quoteDecimals,
+      supply: event.market.supply,
+      baseReserve: event.market.baseReserve,
+      quoteReserve: event.market.quoteReserve,
+      priceQuotePerToken: event.market.priceQuotePerToken,
+      marketCapQuote: event.market.marketCapQuote,
+      priceSol: event.market.priceSol,
+      marketCapSol: event.market.marketCapSol,
+      solUsd: event.market.solUsd,
+      solUsdSource: event.market.solUsdSource,
+      solUsdAtMs: event.market.solUsdAtMs,
+      priceUsd: event.market.priceUsd,
+      marketCapUsd: event.market.marketCapUsd,
+    },
+  };
 }
 
 export async function runPriceFeedServerCommand(args: {
@@ -142,27 +94,14 @@ export async function runPriceFeedServerCommand(args: {
   ): T =>
     m.sync({ start: () => label, end: (result: T) => result }, () => value);
   const { host, port } = feedAddress(args.flags);
-  const rpc = rpcUrl(args.flags);
-  const ws = websocketUrl(args.flags);
-  const includeMayhem = args.flags.has("include-mayhem");
-  const connection = new Connection(
-    rpc,
-    ws ? { commitment: "confirmed", wsEndpoint: ws } : "confirmed",
-  );
   const controller = new AbortController();
   const clients = new Map<unknown, Client>();
-  const launches = new Map<string, PriceFeedLaunch>();
+  const refs = new Map<string, number>();
   const latest = new Map<string, PriceFeedPrice>();
-  const mintState = new Map<string, MintState>();
-  const discoveredMints = new Set<string>();
-  const explicitMintRefs = new Map<string, number>();
-  let tradeSubscription: TradeSubscription | null = null;
-  let allPriceClients = 0;
-  let solUsd: number | null = null;
-  let launchCount = 0;
+  let tradeSubscription: TradeListener | null = null;
   let tradeCount = 0;
-  let priceCount = 0;
   let stopped = false;
+  let commandQueue = Promise.resolve();
 
   const send = (
     socket: { send(value: string): unknown },
@@ -173,124 +112,40 @@ export async function runPriceFeedServerCommand(args: {
     } catch {}
   };
 
-  const broadcast = (value: PriceFeedMessage): void => {
-    for (const [socket, client] of clients) {
-      const target = socket as { send(value: string): unknown };
-      if (value.type === "launch") {
-        if (client.launches) send(target, value);
-        continue;
-      }
-      if (value.type === "price") {
-        if (client.allPrices || client.mints.has(value.mint))
-          send(target, value);
-        continue;
-      }
-      send(target, value);
-    }
-  };
-
-  const shouldWatchMint = (mint: string): boolean =>
-    (explicitMintRefs.get(mint) ?? 0) > 0 ||
-    (allPriceClients > 0 && discoveredMints.has(mint));
-
-  const syncMintSubscription = async (mint: string): Promise<void> => {
-    if (!tradeSubscription) return;
-    const watched = tradeSubscription.hasToken(mint);
-    const desired = shouldWatchMint(mint);
-    if (desired && !watched) await tradeSubscription.addTokens(mint);
-    if (!desired && watched) await tradeSubscription.removeTokens(mint);
-  };
-
-  const syncDiscoveredSubscriptions = async (): Promise<void> => {
-    await Promise.allSettled(
-      [...discoveredMints].map((mint) => syncMintSubscription(mint)),
-    );
-  };
-
-  const onLaunch = async (event: LaunchEvent): Promise<void> => {
-    if (event.isMayhemMode === true && !includeMayhem) return;
-    const value: PriceFeedLaunch = {
-      type: "launch",
-      atMs: event.atMs,
-      signature: event.signature,
-      slot: event.slot,
-      mint: event.mint,
-      venue: event.venue,
-      decimals: event.decimals,
-      supplyUi: event.supplyUi,
-      quoteMint: event.quoteMint,
-      pool: event.pool,
-      name: event.name,
-      symbol: event.symbol,
-      isMayhemMode: event.isMayhemMode,
-    };
-    mintState.set(event.mint, {
-      supplyUi: event.supplyUi,
-      isMayhemMode: event.isMayhemMode,
-    });
-    launches.set(event.mint, value);
-    discoveredMints.add(event.mint);
-    launchCount += 1;
-    broadcast(value);
-    await syncMintSubscription(event.mint);
-  };
+  const status = (
+    socket: { send(value: string): unknown },
+    event: string,
+    data?: Record<string, unknown>,
+  ): void => send(socket, { type: "status", atMs: Date.now(), event, data });
 
   const onTrade = (event: TradeEvent): void => {
     tradeCount += 1;
-    if (event.priceQuote == null) return;
-    const state = mintState.get(event.mint);
-    if (state?.isMayhemMode === true && !includeMayhem) return;
-    let priceSol: number | null = null;
-    let priceUsd: number | null = null;
-    if (event.quoteMint === WSOL_MINT) {
-      priceSol = event.priceQuote;
-      priceUsd = solUsd == null ? null : event.priceQuote * solUsd;
-    } else if (event.quoteMint === USDC_MINT) {
-      priceUsd = event.priceQuote;
-      priceSol = solUsd == null ? null : event.priceQuote / solUsd;
-    }
-    const value: PriceFeedPrice = {
-      type: "price",
-      atMs: event.atMs,
-      signature: event.signature,
-      slot: event.slot,
-      mint: event.mint,
-      venue: event.venue,
-      priceSol,
-      priceUsd,
-      marketCapUsd:
-        priceUsd != null && state?.supplyUi != null
-          ? priceUsd * state.supplyUi
-          : null,
-      source: `${event.venue}-trade-event`,
-    };
+    const value = priceMessage(event);
     latest.set(event.mint, value);
-    priceCount += 1;
-    broadcast(value);
+    for (const [socket, client] of clients) {
+      if (!client.mints.has(event.mint)) continue;
+      send(socket as { send(value: string): unknown }, value);
+    }
   };
 
-  const updateExplicitMintRef = async (
-    mint: string,
-    delta: 1 | -1,
-  ): Promise<void> => {
-    const next = Math.max(0, (explicitMintRefs.get(mint) ?? 0) + delta);
-    if (next === 0) explicitMintRefs.delete(mint);
-    else explicitMintRefs.set(mint, next);
-    await syncMintSubscription(mint);
+  const addRef = async (mint: string): Promise<void> => {
+    const current = refs.get(mint) ?? 0;
+    if (current === 0) {
+      if (!tradeSubscription) throw new Error("Price feed is not ready");
+      await tradeSubscription.add(mint);
+    }
+    refs.set(mint, current + 1);
   };
 
-  const enableAllPrices = async (client: Client): Promise<void> => {
-    if (client.allPrices) return;
-    client.allPrices = true;
-    allPriceClients += 1;
-    if (allPriceClients === 1) await syncDiscoveredSubscriptions();
-  };
-
-  const disableAllPrices = async (client: Client): Promise<void> => {
-    if (!client.allPrices) return;
-    client.allPrices = false;
-    allPriceClients = Math.max(0, allPriceClients - 1);
-    if (allPriceClients === 0) await syncDiscoveredSubscriptions();
+  const removeRef = async (mint: string): Promise<void> => {
+    const current = refs.get(mint) ?? 0;
+    if (current <= 0) return;
+    if (current === 1) {
+      refs.delete(mint);
+      await tradeSubscription?.remove(mint);
+      return;
+    }
+    refs.set(mint, current - 1);
   };
 
   const applyCommand = async (
@@ -301,66 +156,56 @@ export async function runPriceFeedServerCommand(args: {
     if (!client) return;
     const target = socket as { send(value: string): unknown };
     if (command.op === "ping") {
-      send(target, { type: "status", atMs: Date.now(), event: "pong" });
+      status(target, "pong", {
+        watchedMints: client.mints.size,
+        upstreamMints: refs.size,
+      });
       return;
     }
-    const mints: string[] = [...new Set((command.mints ?? []).filter(Boolean))];
+    const mints = uniqueMints(command.mints);
     if (command.op === "subscribe") {
-      if (command.launches === true && !client.launches) {
-        client.launches = true;
-        for (const value of launches.values()) send(target, value);
-      }
-      if (command.allPrices === true && !client.allPrices) {
-        await enableAllPrices(client);
-        for (const value of latest.values()) send(target, value);
-      }
       for (const mint of mints) {
         if (!client.mints.has(mint)) {
+          await addRef(mint);
           client.mints.add(mint);
-          await updateExplicitMintRef(mint, 1);
         }
-        const value = latest.get(mint);
-        if (value) send(target, value);
+        const cached = latest.get(mint);
+        if (cached) send(target, cached);
       }
+      status(target, "subscribed", {
+        mints,
+        watchedMints: client.mints.size,
+        upstreamMints: refs.size,
+      });
       return;
     }
     for (const mint of mints) {
       if (!client.mints.delete(mint)) continue;
-      await updateExplicitMintRef(mint, -1);
+      await removeRef(mint);
     }
+    status(target, "unsubscribed", {
+      mints,
+      watchedMints: client.mints.size,
+      upstreamMints: refs.size,
+    });
   };
 
   const releaseClient = async (socket: unknown): Promise<void> => {
     const client = clients.get(socket);
     clients.delete(socket);
     if (!client) return;
-    await disableAllPrices(client);
-    await Promise.allSettled(
-      [...client.mints].map((mint) => updateExplicitMintRef(mint, -1)),
-    );
+    for (const mint of client.mints) await removeRef(mint);
   };
 
-  tradeSubscription = await subscribeTrades({
-    connection,
+  tradeSubscription = await slrd.listenTrades({
     tokens: [],
     commitment: "confirmed",
-    metadata: false,
     signal: controller.signal,
-    onTrade,
     onStatus(event, data) {
       report(`trades ${event}`, data ?? {});
     },
   });
-  const launchSubscription = await subscribeLaunches({
-    connection,
-    commitment: "confirmed",
-    metadata: false,
-    signal: controller.signal,
-    onLaunch,
-    onStatus(event, data) {
-      report(`launches ${event}`, data ?? {});
-    },
-  });
+  tradeSubscription.onTrade(onTrade);
 
   const server = Bun.serve({
     hostname: host,
@@ -376,85 +221,65 @@ export async function runPriceFeedServerCommand(args: {
       if (url.pathname === "/health") {
         return Response.json({
           ok: true,
+          service: "solard-price-feed",
           clients: clients.size,
-          launchCount,
+          upstreamMints: refs.size,
+          watchedTokens: tradeSubscription?.list().length ?? 0,
+          cachedPrices: latest.size,
           tradeCount,
-          priceCount,
-          cachedLaunches: launches.size,
-          latestPrices: latest.size,
-          discoveredMints: discoveredMints.size,
-          explicitMints: explicitMintRefs.size,
-          allPriceClients,
-          watchedTokens: tradeSubscription?.listTokens().length ?? 0,
-          solUsd,
+          subscriptions: Object.fromEntries(refs),
         });
       }
-      return new Response("Solard price feed\n");
+      return new Response("Solard trader price feed\n");
     },
     websocket: {
       open(socket) {
-        clients.set(socket, {
-          mints: new Set(),
-          launches: false,
-          allPrices: false,
+        clients.set(socket, { mints: new Set() });
+        status(socket, "ready", {
+          upstreamMints: refs.size,
         });
-        send(socket, { type: "status", atMs: Date.now(), event: "ready" });
       },
       message(socket, message) {
+        let command: PriceFeedCommand;
         try {
-          void applyCommand(
-            socket,
-            JSON.parse(String(message)) as PriceFeedCommand,
-          ).catch((error) => {
-            send(socket, {
-              type: "status",
-              atMs: Date.now(),
-              event: "client-error",
-              data: { error: errorText(error) },
-            });
-          });
+          command = JSON.parse(String(message)) as PriceFeedCommand;
+          if (
+            !command ||
+            (command.op !== "subscribe" &&
+              command.op !== "unsubscribe" &&
+              command.op !== "ping")
+          ) {
+            throw new Error("op must be subscribe, unsubscribe, or ping");
+          }
         } catch (error) {
-          send(socket, {
-            type: "status",
-            atMs: Date.now(),
-            event: "client-error",
-            data: { error: errorText(error) },
-          });
+          status(socket, "client-error", { error: errorText(error) });
+          return;
         }
+        commandQueue = commandQueue
+          .then(() => applyCommand(socket, command))
+          .catch((error) => {
+            status(socket, "client-error", { error: errorText(error) });
+          });
       },
       close(socket) {
-        void releaseClient(socket);
+        commandQueue = commandQueue
+          .then(() => releaseClient(socket))
+          .catch((error) => {
+            report("release-client-error", { error: errorText(error) });
+          });
       },
     },
   });
 
-  const refreshSolUsd = async (): Promise<void> => {
-    try {
-      solUsd = await loadSolUsd();
-    } catch (error) {
-      report("sol/usd unavailable", {
-        error: errorText(error),
-        cached: solUsd,
-      });
-    }
-  };
-
-  await refreshSolUsd();
-  const solTimer = setInterval(() => void refreshSolUsd(), 60_000);
   const heartbeat = setInterval(
     () =>
       report("heartbeat", {
         clients: clients.size,
-        launchCount,
+        upstreamMints: refs.size,
+        watchedTokens: tradeSubscription?.list().length ?? 0,
+        cachedPrices: latest.size,
         tradeCount,
-        priceCount,
-        cachedLaunches: launches.size,
-        latestPrices: latest.size,
-        discoveredMints: discoveredMints.size,
-        explicitMints: explicitMintRefs.size,
-        allPriceClients,
-        watchedTokens: tradeSubscription?.listTokens().length ?? 0,
-        solUsd,
+        subscriptions: Object.fromEntries(refs),
       }),
     Math.max(1_000, Math.trunc(numberFlag(args.flags, "heartbeat-ms", 15_000))),
   );
@@ -462,9 +287,6 @@ export async function runPriceFeedServerCommand(args: {
   report("ready", {
     url: `ws://${host}:${server.port}/ws`,
     health: `http://${host}:${server.port}/health`,
-    rpc: publicEndpoint(rpc),
-    ws: ws ? publicEndpoint(ws) : "connection-default",
-    includeMayhem,
   });
 
   const stop = (): void => {
@@ -476,20 +298,18 @@ export async function runPriceFeedServerCommand(args: {
   process.once("SIGTERM", stop);
 
   try {
-    await Promise.all([launchSubscription.closed, tradeSubscription.closed]);
+    await tradeSubscription.closed;
   } finally {
-    clearInterval(solTimer);
     clearInterval(heartbeat);
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
-    await launchSubscription.close();
     await tradeSubscription.close();
+    await commandQueue.catch(() => undefined);
     server.stop(true);
     report("stopped", {
-      launchCount,
-      tradeCount,
-      priceCount,
       clients: clients.size,
+      upstreamMints: refs.size,
+      tradeCount,
     });
   }
 }

@@ -547,6 +547,8 @@ export function createRawTransactionCachingConnection(args: {
         };
       }
       const value = Reflect.get(target, property, receiver);
+      if (!network && typeof value === "function")
+        return async () => { throw new Error(`RPC method ${String(property)} is unavailable in the offline raw transaction cache`); };
       return typeof value === "function" ? value.bind(target) : value;
     },
   }) as Connection;

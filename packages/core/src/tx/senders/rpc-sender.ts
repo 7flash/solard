@@ -8,7 +8,7 @@ export class RpcSender implements SolardSender {
   }: Parameters<SolardSender["send"]>[0]): Promise<string> {
     return await connection.sendRawTransaction(transaction.serialize(), {
       skipPreflight: options?.skipPreflight ?? false,
-      maxRetries: options?.skipPreflight ? 0 : 3,
+      maxRetries: 3,
     });
   }
 }

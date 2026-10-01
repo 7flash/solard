@@ -14,11 +14,10 @@ const policy: ValueBandPolicy = {
 
 describe("value-band strategy", () => {
   test("defaults to 0.05 / 0.10 / 0.18", () => {
-    expect(valueBandThresholds(policy)).toEqual({
-      baseSol: 0.1,
-      lowerSol: 0.05,
-      upperSol: 0.18,
-    });
+    const thresholds = valueBandThresholds(policy);
+    expect(thresholds.baseSol).toBe(0.1);
+    expect(thresholds.lowerSol).toBeCloseTo(0.05, 12);
+    expect(thresholds.upperSol).toBeCloseTo(0.18, 12);
   });
 
   test("sells at upper edge", () => {

@@ -14,7 +14,7 @@ function receiptFromStatus(
   sender: string,
   status: SignatureStatus,
 ): SendReceipt | null {
-  if (status.err) {
+  if (status.err && (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized")) {
     return {
       signature,
       slot: status.slot ?? null,
@@ -41,16 +41,17 @@ async function withTransactionMeta(
   connection: Connection,
   receipt: SendReceipt,
 ): Promise<SendReceipt> {
-  if (receipt.status !== "confirmed") return receipt;
+  if (receipt.status === "submitted") return receipt;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const transaction = await connection.getTransaction(receipt.signature, {
       commitment: "confirmed",
       maxSupportedTransactionVersion: 1,
-    });
+    }).catch(() => null);
     const meta = transaction?.meta;
     if (meta) {
       return {
         ...receipt,
+        ...(receipt.status === "failed" ? { error: `${receipt.error}\n${meta.logMessages?.join("\n") ?? ""}` } : {}),
         feeLamports: meta.fee,
         computeUnitsConsumed:
           meta.computeUnitsConsumed == null
@@ -159,7 +160,7 @@ export async function confirmSignature(
         return { signature, slot: null, sender, status: "submitted" };
       } finally {
         wake = null;
-        if (listenerId != null) {
+        if (listenerId != null && websocketReceipt == null) {
           await connection
             .removeSignatureListener(listenerId)
             .catch(() => undefined);

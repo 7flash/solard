@@ -56,10 +56,15 @@ describe("SolanaTokenHistoryRpc transaction pipeline", () => {
     let calls = 0;
     const progress: TokenHistoryBackfillProgress[] = [];
     globalThis.fetch = (async (_input, init) => {
-      calls += 1;
       const request = JSON.parse(String(init?.body ?? "[]")) as Array<{
         id: number;
       }>;
+      if (!Array.isArray(request)) {
+        // The optional provider-specific fast path is outside this batch retry
+        // test. Model a standard Solana RPC that rejects that method.
+        return Response.json({ jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } });
+      }
+      calls += 1;
       if (calls === 1) {
         return new Response("rate limited", {
           status: 429,

@@ -1,7 +1,7 @@
 import { getAccount, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { type AccountMeta, Connection, PublicKey } from "@solana/web3.js";
 import { SOL_ASSET, type QuoteAsset } from "../../core/amounts.ts";
-import { resolveTokenProgram } from "../../chain/state.ts";
+import { readMint } from "../../chain/state.ts";
 import type { TokenRow } from "../../db/schema.ts";
 import { WRAPPED_SOL_MINT } from "./constants.ts";
 import type { PumpCurve } from "./state.ts";
@@ -9,6 +9,7 @@ import { tokenMeta } from "./routing.ts";
 
 export type CurveMarketMeta = { curve: PumpCurve };
 export type PumpSwapMarketMeta = {
+  baseDecimals: number;
   pool: PublicKey;
   poolBaseAta: PublicKey;
   poolQuoteAta: PublicKey;
@@ -30,16 +31,15 @@ export async function poolQuoteAsset(
   quoteMint: PublicKey,
 ): Promise<QuoteAsset> {
   if (quoteMint.equals(WRAPPED_SOL_MINT)) return SOL_ASSET;
-  const metadata = tokenMeta(token);
-  const program = token.quoteTokenProgram
-    ? new PublicKey(token.quoteTokenProgram)
-    : await resolveTokenProgram(connection, quoteMint);
+  // quoteMint comes from the pool/curve account. Its mint owner and decimals
+  // must come from that mint account as well; persisted token metadata may be
+  // stale (notably for Token-2022 PUMP-quoted pools).
+  const mintState = await readMint(connection, quoteMint);
   return {
     kind: "spl-token",
     mint: quoteMint,
-    tokenProgram: program,
-    decimals:
-      typeof metadata.quoteDecimals === "number" ? metadata.quoteDecimals : 6,
+    tokenProgram: mintState.tokenProgram,
+    decimals: mintState.decimals,
   };
 }
 
@@ -75,9 +75,20 @@ export async function tokenAccountAmount(
   connection: Connection,
   address: PublicKey,
   tokenProgram: PublicKey,
+  expectedMint?: PublicKey,
 ): Promise<bigint> {
-  return (await getAccount(connection, address, "confirmed", tokenProgram))
-    .amount;
+  const account = await getAccount(
+    connection,
+    address,
+    "confirmed",
+    tokenProgram,
+  );
+  if (expectedMint && !account.mint.equals(expectedMint)) {
+    throw new Error(
+      `Token vault ${address.toBase58()} mint ${account.mint.toBase58()} does not match expected ${expectedMint.toBase58()}`,
+    );
+  }
+  return account.amount;
 }
 
 export async function spendableVaultLamports(

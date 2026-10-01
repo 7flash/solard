@@ -6,6 +6,7 @@ const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
 const client = readFileSync(join(import.meta.dir, "client.ts"), "utf8");
 const protocol = readFileSync(join(import.meta.dir, "protocol.ts"), "utf8");
 const defaultClient = readFileSync(join(import.meta.dir, "default.ts"), "utf8");
+const live = readFileSync(join(import.meta.dir, "live.ts"), "utf8");
 
 function exportedNames(value: string) {
   const values: string[] = [];
@@ -30,16 +31,20 @@ describe("sdk membrane", () => {
     expect(exportedNames(source)).toEqual({
       values: [
         "createSolard",
+        "default",
         "fetchTokenMetadata",
         "formatRaw",
+        "getSolUsdPrice",
+        "isDefinitivePreSubmissionError",
         "publicTokenMetadataUrl",
         "subscribeLaunches",
         "subscribeMigrations",
-        "subscribeTrades",
+        "listenTrades",
         "sol",
         "tokenAmount",
       ].sort(),
       types: [
+        "TradeLandingPolicy",
         "ClaimCreatorRewardsOptions",
         "CreatorRewardClaimPayout",
         "CreatorRewardClaimResult",
@@ -50,6 +55,7 @@ describe("sdk membrane", () => {
         "CumulativeDistributionState",
         "CumulativeEntitlement",
         "FetchTokenMetadataOptions",
+        "GetSolUsdPriceOptions",
         "HumanAmount",
         "LaunchEvent",
         "LaunchSubscription",
@@ -61,6 +67,11 @@ describe("sdk membrane", () => {
         "MarketHistory",
         "MarketHistoryOptions",
         "MarketPrice",
+        "SolUsdPrice",
+        "SolUsdSource",
+        "SubscribeLaunchesOptions",
+        "SubscribeMigrationsOptions",
+        "ListenTradesOptions",
         "MergedReplayEventStream",
         "QuoteAsset",
         "ReplayCoverage",
@@ -71,14 +82,30 @@ describe("sdk membrane", () => {
         "ReplayOptions",
         "ReplayPayout",
         "ReplayTransaction",
+        "RecordConfirmedTradeInput",
         "SendReceipt",
         "SenderId",
         "SimulationResult",
+        "SolardDecodedTransaction",
+        "SolardPosition",
+        "SolardPositionQuery",
+        "SolardTransactionNativeBalance",
+        "SolardTransactionOptions",
+        "SolardTransactionTokenBalance",
+        "SolardTrade",
+        "SolardTradeQuery",
+        "SolardTradeSide",
+        "SolardTradeStatus",
         "TradeEvent",
+        "TradeMarket",
         "TradeSide",
-        "TradeSubscription",
+        "TradeListener",
         "TradeVenue",
         "Solard",
+        "SolardBuyInput",
+        "SolardSellInput",
+        "SolardTradeExecutionOptions",
+        "SolardTradeExecutionResult",
         "SolardCanonicalEvent",
         "SolardClaimAttribution",
         "SolardClaimEvent",
@@ -133,7 +160,16 @@ describe("sdk membrane", () => {
     expect(source).toContain('export { default } from "./default.ts"');
     expect(defaultClient).toContain("instance ??= createSolard()");
     expect(defaultClient).toContain('if (key === "close")');
+    expect(defaultClient).toContain("getSolUsdPrice");
+    expect(defaultClient).toContain("listenTrades");
+    expect(defaultClient).toContain("subscribeLaunches");
+    expect(defaultClient).toContain("subscribeMigrations");
     expect(defaultClient).not.toContain("export default createSolard()");
+    expect(live).toContain("process.env.RPC_ENDPOINT");
+    expect(live).not.toContain("SOLANA_RPC_URL");
+    expect(live).not.toContain("HELIUS_RPC_URL");
+    expect(live).not.toContain("SOLANA_WS_URL");
+    expect(live).not.toContain("HELIUS_WS_URL");
   });
 
   test("does not create persistence at module import", () => {
@@ -142,6 +178,10 @@ describe("sdk membrane", () => {
     expect(client.indexOf("createCoreSolard(options)")).toBeGreaterThan(
       client.indexOf("export function createSolard"),
     );
+    expect(client).toContain(
+      "recordConfirmedTrade: core.recordConfirmedTrade.bind(core)",
+    );
+    expect(client).toContain("trades: core.trades.bind(core)");
   });
 
   test("does not expose core repositories or secret-bearing handles", () => {

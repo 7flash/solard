@@ -1,12 +1,9 @@
 import { configure, createMeasure } from "measure-fn";
-import { Connection } from "@solana/web3.js";
-import {
-  subscribeLaunches,
-  subscribeTrades,
+import slrd, {
   type LaunchEvent,
   type TradeEvent,
-  type TradeSubscription,
-} from "@solard/core";
+  type TradeListener,
+} from "@solard/sdk";
 
 type Flags = Map<string, string>;
 type Emit = (value: string) => void;
@@ -21,9 +18,6 @@ type WatchState = {
   athMarketCapUsd: number | null;
   lastNotifiedAthUsd: number | null;
 };
-
-const WSOL_MINT = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 function flag(flags: Flags, key: string): string | undefined {
   const value = flags.get(key);
@@ -66,57 +60,15 @@ function venueList(flags: Flags): VenueId[] {
   return out as VenueId[];
 }
 
-function rpcUrl(flags: Flags): string {
-  const value =
-    flag(flags, "rpc") ??
-    process.env.RPC_ENDPOINT?.trim() ??
-    process.env.SOLANA_RPC_URL?.trim() ??
-    process.env.HELIUS_RPC_URL?.trim();
-  if (!value)
+function requireSingleEndpoint(flags: Flags): void {
+  if (flags.has("rpc") || flags.has("ws"))
     throw new Error(
-      "Missing --rpc, RPC_ENDPOINT, SOLANA_RPC_URL, or HELIUS_RPC_URL",
+      "Set only RPC_ENDPOINT in the environment. --rpc and --ws are intentionally unsupported.",
     );
-  return value;
-}
-
-function wsUrl(flags: Flags): string | undefined {
-  return (
-    flag(flags, "ws") ??
-    process.env.SOLANA_WS_URL?.trim() ??
-    process.env.HELIUS_WS_URL?.trim()
-  );
-}
-
-async function fetchJson(url: string): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5_000);
-  try {
-    const response = await fetch(url, {
-      headers: { accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function loadSolUsd(): Promise<number> {
-  try {
-    const raw = (await fetchJson(
-      "https://api.coinbase.com/v2/prices/SOL-USD/spot",
-    )) as { data?: { amount?: unknown } };
-    const value = Number(raw.data?.amount);
-    if (Number.isFinite(value) && value > 0) return value;
-  } catch {}
-  const raw = (await fetchJson(
-    "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
-  )) as { solana?: { usd?: unknown } };
-  const value = Number(raw.solana?.usd);
-  if (!Number.isFinite(value) || value <= 0)
-    throw new Error("SOL/USD unavailable");
-  return value;
+  if (!process.env.RPC_ENDPOINT?.trim())
+    throw new Error(
+      "Missing RPC_ENDPOINT. Set one Solana RPC URL in RPC_ENDPOINT; WebSocket access is derived from the same endpoint.",
+    );
 }
 
 export async function runLaunchWatchCommand(args: {
@@ -153,12 +105,7 @@ export async function runLaunchWatchCommand(args: {
   const trackTtlMs = duration(flag(args.flags, "track-ttl"), 30 * 60_000);
   const showNew = args.flags.has("show-new");
   const showPrices = args.flags.has("trades") || args.flags.has("prices");
-  const rpc = rpcUrl(args.flags);
-  const ws = wsUrl(args.flags);
-  const connection = new Connection(
-    rpc,
-    ws ? { commitment: "confirmed", wsEndpoint: ws } : "confirmed",
-  );
+  requireSingleEndpoint(args.flags);
   const states = new Map<string, WatchState>();
   let launches = 0;
   let prices = 0;
@@ -166,20 +113,8 @@ export async function runLaunchWatchCommand(args: {
   let thresholdNotifications = 0;
   let athNotifications = 0;
   let ignoredMayhem = 0;
-  let solUsd: number | null = null;
   let stopped = false;
-  let tradeSubscription: TradeSubscription | null = null;
-
-  const refreshSolUsd = async () => {
-    try {
-      solUsd = await loadSolUsd();
-    } catch (error) {
-      report("sol/usd unavailable", {
-        error: error instanceof Error ? error.message : String(error),
-        cached: solUsd,
-      });
-    }
-  };
+  let tradeSubscription: TradeListener | null = null;
 
   const onLaunch = (event: LaunchEvent) => {
     if (!venues.includes(event.venue)) return;
@@ -197,7 +132,7 @@ export async function runLaunchWatchCommand(args: {
       athMarketCapUsd: null,
       lastNotifiedAthUsd: null,
     });
-    void tradeSubscription?.addTokens(event.mint);
+    void tradeSubscription?.add(event.mint);
     launches += 1;
     if (showNew)
       report("new launch", {
@@ -212,18 +147,11 @@ export async function runLaunchWatchCommand(args: {
 
   const onTrade = (event: TradeEvent) => {
     const state = states.get(event.mint);
-    if (!state || event.priceQuote == null) return;
+    if (!state) return;
     state.lastSeenAtMs = event.atMs;
-    let priceSol: number | null = null;
-    let priceUsd: number | null = null;
-    if (event.quoteMint === WSOL_MINT) {
-      priceSol = event.priceQuote;
-      priceUsd = solUsd == null ? null : event.priceQuote * solUsd;
-    } else if (event.quoteMint === USDC_MINT) {
-      priceUsd = event.priceQuote;
-      priceSol = solUsd == null ? null : event.priceQuote / solUsd;
-    }
-    const marketCapUsd = priceUsd == null ? null : priceUsd * state.supplyUi;
+    const priceSol = event.market.priceSol;
+    const priceUsd = event.market.priceUsd;
+    const marketCapUsd = event.market.marketCapUsd;
     prices += 1;
     if (showPrices)
       report("price", {
@@ -292,8 +220,7 @@ export async function runLaunchWatchCommand(args: {
   };
 
   const controller = new AbortController();
-  tradeSubscription = await subscribeTrades({
-    connection,
+  tradeSubscription = await slrd.listenTrades({
     tokens: [],
     venues: [
       ...(venues.includes("pump") ? (["pump", "pumpswap"] as const) : []),
@@ -302,13 +229,12 @@ export async function runLaunchWatchCommand(args: {
         : []),
     ],
     signal: controller.signal,
-    onTrade,
     onStatus(event, data) {
       report(`trades ${event}`, data ?? {});
     },
   });
-  const launchSubscription = await subscribeLaunches({
-    connection,
+  tradeSubscription.onTrade(onTrade);
+  const launchSubscription = await slrd.subscribeLaunches({
     venues,
     signal: controller.signal,
     onLaunch,
@@ -317,8 +243,6 @@ export async function runLaunchWatchCommand(args: {
     },
   });
 
-  await refreshSolUsd();
-  const solTimer = setInterval(() => void refreshSolUsd(), 60_000);
   const stop = () => {
     stopped = true;
     controller.abort();
@@ -326,8 +250,8 @@ export async function runLaunchWatchCommand(args: {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   report("ready", {
-    rpc,
-    ws: ws ?? "connection-default",
+    rpc: "RPC_ENDPOINT",
+    websocket: "derived-from-RPC_ENDPOINT",
     venues,
     minMarketCapUsd,
     athStepPct,
@@ -341,7 +265,7 @@ export async function runLaunchWatchCommand(args: {
       for (const [mint, state] of states) {
         if (!state.qualified && now - state.lastSeenAtMs > trackTtlMs) {
           states.delete(mint);
-          void tradeSubscription?.removeTokens(mint);
+          void tradeSubscription?.remove(mint);
         }
       }
       report("heartbeat", {
@@ -352,8 +276,7 @@ export async function runLaunchWatchCommand(args: {
         prices,
         thresholdNotifications,
         athNotifications,
-        watchedTokens: tradeSubscription?.listTokens().length ?? 0,
-        solUsd,
+        watchedTokens: tradeSubscription?.list().length ?? 0,
       });
     },
     Math.max(1_000, Math.trunc(numberFlag(args.flags, "heartbeat-ms", 15_000))),
@@ -362,7 +285,6 @@ export async function runLaunchWatchCommand(args: {
   try {
     while (!stopped) await new Promise((resolve) => setTimeout(resolve, 250));
   } finally {
-    clearInterval(solTimer);
     clearInterval(heartbeat);
     controller.abort();
     await launchSubscription.close();

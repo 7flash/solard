@@ -1,65 +1,47 @@
 #!/usr/bin/env bun
-import { Connection } from "@solana/web3.js";
 import { configure, createMeasure } from "measure-fn";
-import {
-  subscribeLaunches,
-  subscribeMigrations,
-  subscribeTrades,
-  type TradeEvent,
-} from "@solard/sdk";
+import slrd, { type TradeEvent } from "@solard/sdk";
 
 configure({ silent: false });
 const m = createMeasure("slrd:subscriptions-example", {
   maxResultLength: 2400,
 });
 
-function rpcUrl(): string {
-  const value =
-    process.env.RPC_ENDPOINT?.trim() ??
-    process.env.SOLANA_RPC_URL?.trim() ??
-    process.env.HELIUS_RPC_URL?.trim();
-  if (!value) {
-    throw new Error(
-      "Set RPC_ENDPOINT, SOLANA_RPC_URL, or HELIUS_RPC_URL before running this example.",
-    );
-  }
-  return value;
-}
-
 function printableTrade(event: TradeEvent) {
   return {
     ...event,
     baseRaw: event.baseRaw?.toString() ?? null,
     quoteRaw: event.quoteRaw?.toString() ?? null,
-    virtualBaseRaw: event.virtualBaseRaw?.toString() ?? null,
-    virtualQuoteRaw: event.virtualQuoteRaw?.toString() ?? null,
+    market: {
+      ...event.market,
+      supplyRaw: event.market.supplyRaw.toString(),
+      baseReserveRaw: event.market.baseReserveRaw.toString(),
+      quoteReserveRaw: event.market.quoteReserveRaw.toString(),
+    },
   };
 }
 
-const wsEndpoint =
-  process.env.SOLANA_WS_URL?.trim() ?? process.env.HELIUS_WS_URL?.trim();
-const connection = new Connection(
-  rpcUrl(),
-  wsEndpoint ? { commitment: "confirmed", wsEndpoint } : "confirmed",
-);
 const controller = new AbortController();
+const solUsdQuote = await slrd.getSolUsdPrice();
+m.sync(
+  { start: () => "sol-usd", end: (value: typeof solUsdQuote) => value },
+  () => solUsdQuote,
+);
 
-const trades = await subscribeTrades({
-  connection,
+const trades = await slrd.listenTrades({
   tokens: [],
   metadata: false,
   signal: controller.signal,
-  onTrade(event) {
-    const value = printableTrade(event);
-    m.sync(
-      { start: () => "trade", end: (result: typeof value) => result },
-      () => value,
-    );
-  },
+});
+trades.onTrade((event) => {
+  const value = printableTrade(event);
+  m.sync(
+    { start: () => "trade", end: (result: typeof value) => result },
+    () => value,
+  );
 });
 
-const migrations = await subscribeMigrations({
-  connection,
+const migrations = await slrd.subscribeMigrations({
   tokens: [],
   metadata: "chain",
   signal: controller.signal,
@@ -68,12 +50,11 @@ const migrations = await subscribeMigrations({
       { start: () => "migration", end: (result: typeof event) => result },
       () => event,
     );
-    await trades.addTokens(event.mint);
+    await trades.add(event.mint);
   },
 });
 
-const launches = await subscribeLaunches({
-  connection,
+const launches = await slrd.subscribeLaunches({
   metadata: "chain",
   signal: controller.signal,
   async onLaunch(event) {
@@ -82,7 +63,7 @@ const launches = await subscribeLaunches({
       { start: () => "launch", end: (result: typeof event) => result },
       () => event,
     );
-    await migrations.addTokens(event.mint);
+    await migrations.add(event.mint);
   },
 });
 

@@ -2,15 +2,25 @@ export { default } from "./default.ts";
 export { createSolard } from "./client.ts";
 export type {
   Solard,
+  SolardBuyInput,
   SolardEventsApi,
   SolardHistoryApi,
   SolardOptions,
+  SolardSellInput,
+  SolardTradeExecutionOptions,
+  SolardTradeExecutionResult,
 } from "./client.ts";
 
-export { formatRaw, sol, tokenAmount } from "@solard/core";
+export {
+  formatRaw,
+  sol,
+  tokenAmount,
+  isDefinitivePreSubmissionError,
+} from "@solard/core";
 
 export type {
   ClaimCreatorRewardsOptions,
+  TradeLandingPolicy,
   CreatorRewardClaimPayout,
   CreatorRewardClaimResult,
   CumulativeDistributionExecuteOptions,
@@ -33,9 +43,20 @@ export type {
   ReplayOptions,
   ReplayPayout,
   ReplayTransaction,
+  RecordConfirmedTradeInput,
   SendReceipt,
   SenderId,
   SimulationResult,
+  SolardDecodedTransaction,
+  SolardPosition,
+  SolardPositionQuery,
+  SolardTransactionNativeBalance,
+  SolardTransactionOptions,
+  SolardTransactionTokenBalance,
+  SolardTrade,
+  SolardTradeQuery,
+  SolardTradeSide,
+  SolardTradeStatus,
   SolardCanonicalEvent,
   SolardClaimAttribution,
   SolardClaimEvent,
@@ -54,11 +75,20 @@ export type {
 
 export {
   fetchTokenMetadata,
+  getSolUsdPrice,
   publicTokenMetadataUrl,
+} from "@solard/core";
+export {
+  listenTrades,
   subscribeLaunches,
   subscribeMigrations,
-  subscribeTrades,
-} from "@solard/core";
+} from "./live.ts";
+export type {
+  ListenTradesOptions,
+  SubscribeLaunchesOptions,
+  SubscribeMigrationsOptions,
+  TradeListener,
+} from "./live.ts";
 export type {
   LaunchEvent,
   LaunchSubscription,
@@ -67,9 +97,12 @@ export type {
   MigrationEvent,
   MigrationSubscription,
   MigrationVenue,
+  GetSolUsdPriceOptions,
+  SolUsdPrice,
+  SolUsdSource,
   TradeEvent,
+  TradeMarket,
   TradeSide,
-  TradeSubscription,
   TradeVenue,
   FetchTokenMetadataOptions,
   TokenMetadata,

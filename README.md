@@ -81,6 +81,8 @@ SOLARD_EXTERNAL_HTTP_TIMEOUT_MS
 
 Solard JSON-RPC traffic is globally rate-limited to 5 requests/second by default. Relevant overrides include `SLRD_RPC_MAX_RPS`, `SLRD_RPC_NETWORK_RETRIES`, and `SLRD_JUPITER_MAX_RPS`.
 
+SDK live subscriptions derive WebSocket access from `RPC_ENDPOINT` and check HTTP health and the WebSocket handshake before subscribing. A successful probe closes its temporary socket normally; this close is handled safely when Bun dispatches it synchronously on Windows. Genuine handshake failures include redacted endpoint diagnostics.
+
 ## Safety model
 
 Solard does not use one execution flag for every historical command. Inspect `slrd help` or the command-specific help before using funded wallets.
