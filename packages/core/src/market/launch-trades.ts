@@ -6,6 +6,9 @@ import {
   WRAPPED_SOL_MINT as WRAPPED_SOL_PUBLIC_KEY,
 } from "../venues/pump/constants.ts";
 import { fetchPool } from "../venues/pump/state.ts";
+import { CREATE_CPMM_POOL_PROGRAM } from "@raydium-io/raydium-sdk-v2";
+import { resolveCurrentMarket, type CurrentMarket } from "./current-market.ts";
+import { decodeCpmmSwap } from "./raydium-cpmm-events.ts";
 import { PumpSwapVenue } from "../venues/pump/pumpswap-venue.ts";
 import type { TokenRow } from "../db/schema.ts";
 import { readDbcMarket, dbcPrice, DYNAMIC_BONDING_CURVE_PROGRAM_ID } from "../venues/meteora/dbc.ts";
@@ -70,7 +73,7 @@ const RAYDIUM_INITIALIZE_V2_D8 = Buffer.from([
 export type LaunchVenue = "pump" | "raydium-launchlab";
 export type MigrationVenue = "pump" | "raydium-launchlab";
 export type MigrationDestination = "pumpswap" | "raydium-amm" | "raydium-cpmm";
-export type TradeVenue = "pump" | "pumpswap" | "raydium-launchlab" | "meteora-dbc" | "meteora-damm-v2";
+export type TradeVenue = "pump" | "pumpswap" | "raydium-launchlab" | "raydium-cpmm" | "meteora-dbc" | "meteora-damm-v2";
 export type TradeSide = "buy" | "sell";
 
 export type PumpDecodedEvent =
@@ -1598,7 +1601,7 @@ async function subscribeTradeStream(options: {
   onStatus?: (event: string, data?: Record<string, unknown>) => void;
 }): Promise<TradeSubscription> {
   const venues = new Set<TradeVenue>(
-    options.venues ?? ["pump", "pumpswap", "raydium-launchlab", "meteora-dbc", "meteora-damm-v2"],
+    options.venues ?? ["pump", "pumpswap", "raydium-launchlab", "raydium-cpmm", "meteora-dbc", "meteora-damm-v2"],
   );
   const commitment = options.commitment ?? "processed";
   const metadataMode = options.metadata ?? false;
@@ -1606,6 +1609,7 @@ async function subscribeTradeStream(options: {
   const states = new Map<string, TradeTokenState>();
   const metadataFetches = new Map<string, Promise<void>>();
   const pumpSwapPools = new Map<string, Promise<PumpSwapPoolIdentity>>();
+  const cpmmPools = new Map<string, Promise<CurrentMarket | null>>();
   const SUPPLY_REFRESH_MS = 5 * 60_000;
   let stopped = false;
   let resolveClosed!: () => void;
@@ -1986,6 +1990,41 @@ async function subscribeTradeStream(options: {
     void processMeteoraLogs(mint, logs, slot, "meteora-dbc", DYNAMIC_BONDING_CURVE_PROGRAM_ID, decodeDbcTrade, dbcTradesFromTransaction, emitDbcTrade);
     void processMeteoraLogs(mint, logs, slot, "meteora-damm-v2", CP_AMM_PROGRAM_ID, decodeDammV2Trade, dammV2TradesFromTransaction, emitDammV2Trade);
     for (const entry of programDataEntries(logs.logs)) {
+      if (entry.programId === CREATE_CPMM_POOL_PROGRAM.toBase58() && venues.has("raydium-cpmm")) {
+        const decoded = decodeCpmmSwap(entry.data);
+        if (!decoded || (decoded.inputMint !== mint && decoded.outputMint !== mint)) continue;
+        void (async () => {
+          try {
+            const key = `${decoded.pool}:${mint}`;
+            let pending = cpmmPools.get(key);
+            if (!pending) { pending = resolveCurrentMarket(options.connection, mint, { pool: decoded.pool }); cpmmPools.set(key, pending); }
+            const identity = await pending;
+            if (!identity || identity.venue !== "raydium-cpmm") return;
+            const isBuy = decoded.outputMint === mint;
+            const quoteMint = isBuy ? decoded.inputMint : decoded.outputMint;
+            if (identity.quoteMint !== quoteMint) return;
+            const state = states.get(mint);
+            if (!state || stopped) return;
+            state.decimals = identity.baseDecimals; state.quoteDecimals = identity.quoteDecimals;
+            state.quoteMint = identity.quoteMint; state.pool = identity.pool;
+            await refreshWatchedSupply(state);
+            if (decoded.inputReserveBefore <= 0n || decoded.outputReserveBefore <= 0n) return;
+            // These are the protocol's fee-adjusted pre-swap reserves from this
+            // exact event, never unrelated balances from a multi-pool transaction.
+            await deliver({ type: "trade", venue: "raydium-cpmm", mint, pool: identity.pool,
+              signature: logs.signature, slot, atMs: Date.now(), side: isBuy ? "buy" : "sell",
+              quoteMint, baseDecimals: identity.baseDecimals, quoteDecimals: identity.quoteDecimals,
+              baseRaw: isBuy ? decoded.outputRaw - decoded.outputTransferFee : decoded.inputRaw + decoded.inputTransferFee,
+              quoteRaw: isBuy ? decoded.inputRaw + decoded.inputTransferFee : decoded.outputRaw - decoded.outputTransferFee,
+              marketState: { supplyRaw: state.supplyRaw!, baseReserveRaw: isBuy ? decoded.outputReserveBefore : decoded.inputReserveBefore,
+                quoteReserveRaw: isBuy ? decoded.inputReserveBefore : decoded.outputReserveBefore } });
+          } catch (error) {
+            cpmmPools.delete(`${decoded.pool}:${mint}`);
+            status("raydium-cpmm-pool-resolution-error", { mint, pool: decoded.pool, error: error instanceof Error ? error.message : String(error) });
+          }
+        })();
+        continue;
+      }
       if (
         entry.programId === PUMP_PROGRAM_ID.toBase58() &&
         venues.has("pump")
@@ -2090,6 +2129,8 @@ async function subscribeTradeStream(options: {
       if (id == null) continue;
       subscriptions.delete(mint);
       states.delete(mint);
+      pumpSwapPools.clear();
+      cpmmPools.clear();
       removals.push(options.connection.removeOnLogsListener(id));
     }
     await Promise.allSettled(removals);

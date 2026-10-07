@@ -100,7 +100,7 @@ function parseHistoryRaw(rawJson: string): TokenHistoryRaw {
     const raw = JSON.parse(rawJson) as Partial<TokenHistoryRaw>;
     return {
       parserVersion: String(raw.parserVersion ?? "unknown"),
-      venue: raw.venue === "pumpswap" ? "pumpswap" : "pump-curve",
+      venue: raw.venue === "pumpswap" ? "pumpswap" : raw.venue === "raydium" ? "raydium" : "pump-curve",
       instructionKinds: Array.isArray(raw.instructionKinds)
         ? raw.instructionKinds.map(String)
         : [],

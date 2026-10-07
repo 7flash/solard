@@ -158,6 +158,7 @@ function filterIsolatedPriceAnomalies(
 function canonicalPriceSol(row: TokenHistoryTrade): number | null {
   const explicit = positive(row.priceSol);
   if (explicit != null) return explicit;
+  if (row.history.pricingStatus === "missing") return null;
   const tokenDelta = Math.abs(Number(row.tokenDeltaUi));
   const solDelta = Math.abs(Number(row.solDeltaUi));
   if (
@@ -186,7 +187,7 @@ export function buildTokenBacktestTape(input: {
     );
   }
   const options = input.options ?? {};
-  const rows = chronologicalTokenHistoryTrades(input.rows);
+  const rows = chronologicalTokenHistoryTrades(input.rows.filter((row) => row.mint === mint));
   const fromMs = Math.max(0, Number(options.fromMs ?? 0) || 0);
   const toMsRaw = Number(options.toMs ?? Number.POSITIVE_INFINITY);
   const toMs = Number.isFinite(toMsRaw)
@@ -229,6 +230,10 @@ export function buildTokenBacktestTape(input: {
       marketCapUsd: positive(row.marketCapUsd),
       source: row.source,
       confidence: row.confidence,
+      side: row.side,
+      tokenQuantityUi: Math.abs(row.tokenDeltaUi),
+      solNotional: Math.abs(row.solDeltaUi),
+      venue: row.history.venue,
     });
   }
 
@@ -311,7 +316,7 @@ export function buildTokenBacktestTapeFromCandles(input: {
     Math.trunc(options.coverageToleranceMs ?? 60_000),
   );
 
-  const rows = [...input.candles].sort(
+  const rows = input.candles.filter((row) => row.mint === mint).sort(
     (left, right) =>
       left.bucketAtMs - right.bucketAtMs ||
       left.firstSlot - right.firstSlot ||

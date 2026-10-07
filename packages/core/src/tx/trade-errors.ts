@@ -8,7 +8,7 @@ export class TradePreSubmissionError extends Error {
     this.code = typeof cause === "object" && cause !== null && "code" in cause &&
       typeof cause.code === "string" ? cause.code : "TRADE_NOT_SUBMITTED";
     if (cause && typeof cause === "object") {
-      for (const key of ["quotedMinimum", "requiredMinimum", "requiredLamports", "availableLamports"])
+      for (const key of ["quotedMinimum", "requiredMinimum", "requiredLamports", "availableLamports", "retryable", "limitPriceSol", "side"])
         if (key in cause) Object.assign(this, { [key]: (cause as Record<string, unknown>)[key] });
     }
   }

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Keypair, PublicKey, SystemProgram, type AccountInfo, type Connection } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
-import { pumpAmmJson } from "@pump-fun/pump-swap-sdk";
+import { pumpAmmJson, GLOBAL_CONFIG_PDA } from "@pump-fun/pump-swap-sdk";
 import type { TokenRow } from "../../db/schema.ts";
 import { PumpSwapVenue } from "./pumpswap-venue.ts";
 import { PUMP_AMM_PROGRAM_ID } from "./constants.ts";
@@ -10,6 +10,7 @@ import { verifyPoolTokenMetadata } from "./token-metadata.ts";
 import { Solard } from "../../core/solard.ts";
 import { PumpCurveVenue } from "./pump-curve-venue.ts";
 import { fetchCurve } from "./state.ts";
+import { snapshotSwapState } from "./live-reserves.ts";
 
 function fixture() {
   const base = Keypair.generate().publicKey;
@@ -55,6 +56,10 @@ function fixture() {
     async getAccountInfo(address: PublicKey) {
       queried.push(address.toBase58());
       return accounts.get(address.toBase58()) ?? null;
+    },
+    async getMultipleAccountsInfo(addresses: PublicKey[]) {
+      queried.push(...addresses.map(address => address.toBase58()));
+      return addresses.map(address => accounts.get(address.toBase58()) ?? null);
     },
   } as unknown as Connection;
   const token = {
@@ -120,6 +125,72 @@ test("custom pool rejects target identity and vault mint mismatches", async () =
     mint: Keypair.generate().publicKey.toBase58() } })).rejects.toThrow("does not contain token");
   context.quote.toBuffer().copy(context.accounts.get(context.baseVault.toBase58())!.data);
   await expect(venue.resolveMarket(context)).rejects.toThrow("does not match expected");
+});
+
+test("PumpSwap resolution batches cold metadata and always refreshes both vaults", async () => {
+  const context = fixture();
+  const batches: string[][] = [];
+  const original = context.connection.getMultipleAccountsInfo.bind(context.connection);
+  context.connection.getMultipleAccountsInfo = async (addresses: PublicKey[]) => {
+    batches.push(addresses.map(address => address.toBase58()));
+    return original(addresses);
+  };
+  const venue = new PumpSwapVenue();
+  await venue.resolveMarket(context);
+  expect(batches[0]).toHaveLength(4);
+  expect(context.queried).toHaveLength(5); // one pool plus one four-account batch
+  context.accounts.get(context.baseVault.toBase58())!.data.writeBigUInt64LE(400_000_000n, 64);
+  const market = await venue.resolveMarket(context);
+  expect(batches[1]).toHaveLength(2);
+  expect(market!.metadata.reserves.virtualBase).toBe(400_000_000n);
+  expect(market!.quoteAsset.tokenProgram.equals(TOKEN_2022_PROGRAM_ID)).toBe(true);
+  context.accounts.get(context.baseVault.toBase58())!.owner = TOKEN_2022_PROGRAM_ID;
+  await expect(venue.resolveMarket(context)).rejects.toThrow();
+});
+
+test("validated caller reserves skip vault reads while SDK uses fresh mint supply and config", async () => {
+  const context = fixture();
+  const globalData = Buffer.alloc(1024);
+  Buffer.from(pumpAmmJson.accounts.find(account => account.name.toLowerCase() === "globalconfig")!.discriminator).copy(globalData);
+  context.accounts.set(GLOBAL_CONFIG_PDA.toBase58(), { data: globalData, owner: PUMP_AMM_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const reserves = { pool: context.pool.toBase58(), baseMint: context.base.toBase58(), quoteMint: context.quote.toBase58(),
+    baseReserveRaw: 300_000_000n, quoteReserveRaw: 900_000_000n, slot: 100, capturedAtMs: Date.now() };
+  const batches: PublicKey[][] = [];
+  context.connection.getMultipleAccountsInfoAndContext = async (addresses: PublicKey[]) => {
+    batches.push(addresses);
+    return { context: { slot: 101 }, value: addresses.map(address => context.accounts.get(address.toBase58()) ?? null) };
+  };
+  const venue = new PumpSwapVenue();
+  const ctx = { ...context, reserves };
+  const market = (await venue.resolveMarket(ctx))!;
+  expect(context.queried).not.toContain(context.baseVault.toBase58());
+  const state = await snapshotSwapState(ctx, market);
+  expect(batches).toHaveLength(1);
+  expect(batches[0]).toHaveLength(7);
+  expect(batches[0]!.some(address => address.equals(context.baseVault))).toBe(false);
+  expect(state.poolBaseAmount.toString()).toBe("300000000");
+  expect(state.baseMintAccount.supply).toBe(1_000_000_000n);
+  expect(state.quoteTokenProgram.equals(TOKEN_2022_PROGRAM_ID)).toBe(true);
+  const quote = await venue.quoteBuy(ctx, market, { asset: market.quoteAsset, raw: 100_000n }, 500);
+  expect(quote.minimumOutputRaw).toBeGreaterThan(0n);
+  expect(batches).toHaveLength(2);
+  const built = await venue.buildBuy(ctx, market, quote);
+  expect(built.instructions.length).toBeGreaterThan(0);
+  expect(batches).toHaveLength(3);
+  const sellQuote = await venue.quoteSell(ctx, market, 100_000n, 500);
+  const sellBuilt = await venue.buildSell(ctx, market, sellQuote);
+  expect(sellBuilt.minOutputRaw).toBeGreaterThan(0n);
+  expect(batches).toHaveLength(5);
+  context.connection.getMultipleAccountsInfoAndContext = async (addresses: PublicKey[]) => ({ context: { slot: 99 }, value: addresses.map(address => context.accounts.get(address.toBase58()) ?? null) });
+  await expect(snapshotSwapState(ctx, market)).rejects.toThrow("older");
+  context.connection.getMultipleAccountsInfoAndContext = async (addresses: PublicKey[]) => ({ context: { slot: 101 }, value: addresses.map(address => context.accounts.get(address.toBase58()) ?? null) });
+  context.accounts.get(context.base.toBase58())!.owner = SystemProgram.programId;
+  await expect(snapshotSwapState(ctx, market)).rejects.toThrow();
+  context.accounts.get(context.base.toBase58())!.owner = TOKEN_PROGRAM_ID;
+  reserves.capturedAtMs = Date.now() - 3000;
+  await expect(snapshotSwapState(ctx, market)).rejects.toThrow("stale");
+  reserves.capturedAtMs = Date.now(); reserves.baseMint = Keypair.generate().publicKey.toBase58();
+  await expect(snapshotSwapState(ctx, market)).rejects.toThrow("identity mismatch");
 });
 
 test("explicit AMM routing bypasses curve accounts; closed curve PDAs allow AMM discovery", async () => {

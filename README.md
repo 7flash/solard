@@ -714,3 +714,6 @@ The workspace packages are versioned together. Internal Solard package versions 
 ## License
 
 MIT.
+# Mements capabilities
+
+The public SDK now exposes creator-fee discovery and batch claims, LaunchLab preparation/execution, migration notifications, value-band strategies, cached historical tapes/backtests, wallet ledger and token-account maintenance. See [the API handoff and coverage limits](docs/mements-capabilities.md) before integrating. These additions target the unpublished 0.2.30 source release; funded acceptance remains pending.

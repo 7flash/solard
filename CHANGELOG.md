@@ -2,7 +2,21 @@
 
 ## Unreleased
 
+- Expose read-only grouped creator-fee discovery and bounded claims for Pump/PumpSwap, LaunchLab/CPMM and eligible Meteora creator positions, with explicit unsupported/error coverage.
+- Add the LaunchLab launchpad, named platform presets, atomic SOL-funded custom-quote creator buys, shared landing and confirmed cost fields.
+- Add migration-aware SDK trade subscriptions, verified current-market discovery and mint-bearing CPMM price events. AMM v4 live prices remain unsupported.
+- Export value-band/target-weight strategy helpers and cached historical tape, sparse candles, delayed-fill simulation and parameter sweeps.
+- Add exact observed wallet ledger components with residual/partial-history reporting; batch empty-account maintenance, explicit dust burn and opt-in full-sell account closure.
+- Scope pre-generated vanity inventory to the caller's database and decode Pump's exact whitelist slot rather than following fields.
+- Funded acceptance, publish authentication, fuller launch/batch intent persistence and historical/live coverage gaps remain open; see docs/mements-capabilities.md.
+
 ## 0.2.30 — 2026-10-06
+
+- Add explicit Helius SWQOS/Max landing tiers with pre-sign tips, low initial fee bids, configurable fee floors, and simulation-derived compute limits.
+- Guard worst-case buy/sell SOL prices before signing; expose retryable definitive slippage and price rejection separately from unresolved submissions.
+- Persist signed transaction bytes for restart rebroadcast and resend identical bytes through Sender and RPC while valid, retaining finalized expiry auditing.
+- Batch PumpSwap/preflight reads, cache validated mint metadata and rent, accept recent pool reserve snapshots, and support stoppable blockhash warmup.
+- Add sticky HTTP endpoint failover, trade-feed provider health rotation, and a sliding-window rate gate with optional cross-process SQLite coordination.
 
 - Transfers now share automatic fee selection and expiry-safe landing rather
   than defaulting to zero priority and a one-shot confirmation wait. CLI results

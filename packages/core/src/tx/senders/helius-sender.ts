@@ -1,6 +1,14 @@
 import type { SolardSender } from "../sender.ts";
 import type { SenderId } from "../types.ts";
-import { MissingConfigError } from "../../core/errors.ts";
+import type { HeliusLandingTier } from "../helius-landing.ts";
+import { solardRpcFetch } from "../../chain/connection.ts";
+
+export function heliusSenderEndpoint(endpoint: string, tier: HeliusLandingTier): string {
+  const url = new URL(endpoint);
+  if (tier === "helius-swqos") url.searchParams.set("swqos_only", "true");
+  else url.searchParams.delete("swqos_only");
+  return url.toString();
+}
 
 function redactEndpoint(value: string): string {
   return value.replace(/([?&](?:api-key|apiKey)=)[^&]+/gi, "$1<redacted>");
@@ -8,14 +16,16 @@ function redactEndpoint(value: string): string {
 
 export class HeliusSender implements SolardSender {
   constructor(
-    private readonly endpoint = process.env.HELIUS_SENDER_URL,
+    private readonly endpoint = process.env.HELIUS_SENDER_URL ?? "https://sender.helius-rpc.com/fast",
     readonly id: SenderId = "helius",
+    private readonly tier: HeliusLandingTier = id === "helius-swqos" ? "helius-swqos" : "helius-max",
   ) {}
   async send({
     transaction,
+    options,
   }: Parameters<SolardSender["send"]>[0]): Promise<string> {
-    if (!this.endpoint) throw new MissingConfigError("HELIUS_SENDER_URL");
-    const response = await fetch(this.endpoint, {
+    const endpoint = heliusSenderEndpoint(this.endpoint, this.tier);
+    const response = await solardRpcFetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -24,10 +34,10 @@ export class HeliusSender implements SolardSender {
         method: "sendTransaction",
         params: [
           Buffer.from(transaction.serialize()).toString("base64"),
-          { encoding: "base64", skipPreflight: true, maxRetries: 0 },
+          { encoding: "base64", skipPreflight: options?.skipPreflight ?? true, maxRetries: 0 },
         ],
       }),
-    });
+    }, { retry429: false, retryNetwork: false });
     const raw = await response.text();
     let data: {
       result?: string;

@@ -15,6 +15,33 @@ test("market percentile, doubling, fixed prices and lamport cap", () => {
   expect(() => chooseTradeFee(normalizeLandingPolicy({ microLamports: 2_000_000 }), 600_000, [])).toThrow();
 });
 
+test("low initial landing bid doubles after proven expiry while legacy fixed price stays fixed", () => {
+  expect(chooseTradeFee(normalizeLandingPolicy({ priorityMicroLamports: 20_000 }), 200_000, [], 20_000)).toBe(40_000);
+  expect(chooseTradeFee(normalizeLandingPolicy({ microLamports: 20_000 }), 200_000, [], 20_000)).toBe(20_000);
+});
+
+test("automatic fee floor is configurable while fixed bids stay fixed", () => {
+  expect(chooseTradeFee(normalizeLandingPolicy(), 200_000, [])).toBe(100_000);
+  const low = normalizeLandingPolicy({ minMicroLamports: 0 });
+  expect(chooseTradeFee(low, 200_000, [5, 10, 20])).toBe(20);
+  expect(chooseTradeFee(low, 200_000, [], 20)).toBe(40);
+  expect(chooseTradeFee(low, 200_000, [])).toBe(0);
+  expect(chooseTradeFee(normalizeLandingPolicy({ minMicroLamports: 0, microLamports: 5 }), 200_000, [100_000], 100_000)).toBe(5);
+  for (const minMicroLamports of [-1, 1.5, Infinity])
+    expect(() => normalizeLandingPolicy({ minMicroLamports })).toThrow("minMicroLamports");
+});
+
+test("landing route, simulation sizing and fee alias are validated", () => {
+  const policy = normalizeLandingPolicy({ route: "helius-swqos", cuLimit: "auto", computeUnitMultiplier: 1.7, priorityMicroLamports: 5 });
+  expect(policy).toMatchObject({ route: "helius-swqos", cuLimit: "auto", computeUnitMultiplier: 1.7, microLamports: 5 });
+  expect(chooseTradeFee(policy, 200_000, [100_000])).toBe(5);
+  expect(normalizeLandingPolicy({ microLamports: 0, priorityMicroLamports: 5 }).microLamports).toBe(0);
+  expect(() => normalizeLandingPolicy({ route: "invalid" as never })).toThrow("route");
+  for (const cuLimit of [0, 1_400_001, 1.5]) expect(() => normalizeLandingPolicy({ cuLimit })).toThrow("cuLimit");
+  for (const computeUnitMultiplier of [0.9, 2.1, NaN]) expect(() => normalizeLandingPolicy({ computeUnitMultiplier })).toThrow("computeUnitMultiplier");
+  expect(() => normalizeLandingPolicy({ priorityMicroLamports: -1 })).toThrow("microLamports");
+});
+
 function kernel(receipts: Array<SendReceipt>) {
   const slrd: Solard = Object.create(Solard.prototype);
   const payer = Keypair.generate();

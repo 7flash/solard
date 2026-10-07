@@ -18,6 +18,12 @@ export type PrepareDeploymentArgs = {
   quoteAsset?: QuoteAsset;
   mayhemMode?: boolean;
   cashback?: boolean;
+  /** LaunchLab on-chain quote config and platform account. */
+  launchConfig?: string | PublicKey;
+  platformConfig?: string | PublicKey;
+  decimals?: number;
+  initialBuy?: RawAmount;
+  slippageBps?: number;
 };
 
 export type PreparedTokenDeployment = {

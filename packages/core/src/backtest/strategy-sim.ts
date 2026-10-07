@@ -35,6 +35,10 @@ export type BacktestTapeEvent = {
   marketCapUsd: number | null;
   source: string;
   confidence: "processed" | "confirmed" | "finalized" | "dropped";
+  side?: "buy" | "sell";
+  tokenQuantityUi?: number;
+  solNotional?: number;
+  venue?: string;
 };
 
 export type BacktestLot = {

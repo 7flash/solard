@@ -5,6 +5,11 @@ export type TradeExecutionOptions = SendOptions & {
   landing?: TradeLandingPolicy; waitForConfirmation?: boolean;
   priorityFee?: { cuLimit?: number; microLamports?: number };
   via?: SenderId | SenderId[]; intentKey?: string;
+  /** Simulation sizing is opt-in; existing explicit priorityFee.cuLimit stays fixed. */
+  computeUnits?: "auto";
+  computeUnitMultiplier?: number;
+  confirm?: { resendIntervalMs?: number; pollIntervalMs?: number; timeoutMs?: number };
+  heliusTier?: "helius-swqos" | "helius-max";
   onSubmitted?: (signature: string) => void;
   onRebroadcast?: (signature: string) => void;
   onAttempt?: (attempt: number) => void;

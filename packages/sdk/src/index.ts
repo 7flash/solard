@@ -1,5 +1,38 @@
 export { default } from "./default.ts";
 export { createSolard } from "./client.ts";
+export {
+  normalizeValueBandPolicy,
+  planValueBandDecision,
+  valueBandThresholds,
+  normalizeTargetWeightPolicy,
+  planTargetWeightRebalance,
+  buildHistoricalCandles,
+  runHistoricalStrategy,
+  sweepHistoricalStrategies,
+  LAUNCHLAB_PLATFORM_PRESETS,
+  resolveLaunchLabPlatform,
+} from "@solard/core";
+export type {
+  ValueBandPolicy,
+  ValueBandRuntimeState,
+  ValueBandDecision,
+  TargetWeightPolicy,
+  TargetWeightRebalancePlan,
+  HistoricalTradeTape,
+  HistoricalCandle,
+  HistoricalStrategy,
+  HistoricalExecutionOptions,
+  HistoricalStrategyResult,
+  CreatorFeeDiscovery,
+  CreatorFeeGroup,
+  CreatorFeeItem,
+  WalletLedger,
+  WalletLedgerEntry,
+  WalletLedgerOptions,
+  CurrentMarket,
+  PreparedTokenDeployment,
+  PrepareDeploymentArgs,
+} from "@solard/core";
 export type {
   Solard,
   SolardBuyInput,
@@ -21,6 +54,7 @@ export {
 export type {
   ClaimCreatorRewardsOptions,
   TradeLandingPolicy,
+  LivePoolReserves,
   CreatorRewardClaimPayout,
   CreatorRewardClaimResult,
   CumulativeDistributionExecuteOptions,
@@ -85,9 +119,11 @@ export {
 } from "./live.ts";
 export type {
   ListenTradesOptions,
+  LiveEndpointOptions,
   SubscribeLaunchesOptions,
   SubscribeMigrationsOptions,
   TradeListener,
+  TradeListenerMigration,
 } from "./live.ts";
 export type {
   LaunchEvent,

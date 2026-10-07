@@ -7,10 +7,17 @@ import type { QuoteAsset, RawAmount } from "../core/amounts.ts";
 import type { TokenRow } from "../db/schema.ts";
 
 export type VenueId = string;
+/** Caller-observed raw vault amounts; identity is verified on-chain before use. */
+export type LivePoolReserves = {
+  pool: string; baseMint: string; quoteMint: string;
+  baseReserveRaw: bigint; quoteReserveRaw: bigint;
+  slot: number; capturedAtMs: number; maxAgeMs?: number;
+};
 export type VenueContext = {
   connection: Connection;
   token: TokenRow;
   user: PublicKey;
+  reserves?: LivePoolReserves;
 };
 export type VenueMarket = {
   venue: VenueId;

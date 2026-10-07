@@ -21,6 +21,7 @@ import {
   type TradeLandingPolicy,
   type TradeResult,
   type TradeExecutionOptions,
+  type LivePoolReserves,
   type SenderId,
   type SolardDecodedTransaction,
   type SolardTransactionOptions,
@@ -38,6 +39,7 @@ import {
 
 export type SolardOptions = {
   rpcUrl?: string;
+  rpcUrls?: readonly string[];
   dbPath?: string;
   cacheTtlMs?: number;
 };
@@ -62,6 +64,8 @@ export type SolardEventsApi = {
 };
 
 export type SolardBuyInput = {
+  reserves?: LivePoolReserves;
+  maxPriceSol?: string | number;
   wallet: WalletRef;
   token: TokenRef;
   amount: HumanAmount | string | number;
@@ -70,6 +74,9 @@ export type SolardBuyInput = {
 };
 
 export type SolardSellInput = {
+  closeTokenAccount?: boolean;
+  reserves?: LivePoolReserves;
+  minPriceSol?: string | number;
   wallet: WalletRef;
   token: TokenRef;
   amount?: "all" | { bps: number };
@@ -81,6 +88,18 @@ export type SolardTradeExecutionOptions = TradeExecutionOptions;
 
 export type SolardTradeExecutionResult = TradeResult;
 export type Solard = {
+  resolveCurrentMarket: ReturnType<typeof createCoreSolard>["resolveCurrentMarket"];
+  getClaimableCreatorFees: ReturnType<typeof createCoreSolard>["getClaimableCreatorFees"];
+  claimAllCreatorFees: ReturnType<typeof createCoreSolard>["claimAllCreatorFees"];
+  walletLedger: ReturnType<typeof createCoreSolard>["walletLedger"];
+  historicalTape: ReturnType<typeof createCoreSolard>["historicalTape"];
+  getSupportedPumpPairs: ReturnType<typeof createCoreSolard>["getSupportedPumpPairs"];
+  listVanityMints: ReturnType<typeof createCoreSolard>["listVanityMints"];
+  releaseVanityMint: ReturnType<typeof createCoreSolard>["releaseVanityMint"];
+  closeEmptyTokenAccounts: ReturnType<typeof createCoreSolard>["closeEmptyTokenAccounts"];
+  prepareTokenDeployment: ReturnType<typeof createCoreSolard>["prepareTokenDeployment"];
+  deployToken: ReturnType<typeof createCoreSolard>["deployToken"];
+  warmBlockhash: ReturnType<typeof createCoreSolard>["warmBlockhash"];
   curveLiquidity: ReturnType<typeof createCoreSolard>["curveLiquidity"];
   maxSendableSol: ReturnType<typeof createCoreSolard>["maxSendableSol"];
   transferToken: ReturnType<typeof createCoreSolard>["transferToken"];
@@ -172,10 +191,10 @@ async function executeTrade(
 ): Promise<SolardTradeExecutionResult> {
   if (side === "buy") {
     const buy = input as SolardBuyInput;
-    return await core.buy(buy.token, buy.wallet, tradeAmount(buy.amount), { ...options, slippageBps: buy.slippageBps, minOutputRaw: buy.minOutputRaw });
+    return await core.buy(buy.token, buy.wallet, tradeAmount(buy.amount), { ...options, slippageBps: buy.slippageBps, minOutputRaw: buy.minOutputRaw, maxPriceSol: buy.maxPriceSol, reserves: buy.reserves });
   }
   const sell = input as SolardSellInput;
-  return await core.sell(sell.token, sell.wallet, { ...options, bps: sellBps(sell.amount), slippageBps: sell.slippageBps, minOutputLamports: sell.minOutputLamports });
+  return await core.sell(sell.token, sell.wallet, { ...options, bps: sellBps(sell.amount), slippageBps: sell.slippageBps, minOutputLamports: sell.minOutputLamports, minPriceSol: sell.minPriceSol, reserves: sell.reserves, closeTokenAccount: sell.closeTokenAccount });
 
 }
 
@@ -192,6 +211,18 @@ export function createSolard(options: SolardOptions = {}): Solard {
     { merge: core.events.merge },
   ) as SolardEventsApi;
   return Object.freeze({
+    resolveCurrentMarket: core.resolveCurrentMarket.bind(core),
+    getClaimableCreatorFees: core.getClaimableCreatorFees.bind(core),
+    claimAllCreatorFees: core.claimAllCreatorFees.bind(core),
+    walletLedger: core.walletLedger.bind(core),
+    historicalTape: core.historicalTape.bind(core),
+    getSupportedPumpPairs: core.getSupportedPumpPairs.bind(core),
+    listVanityMints: core.listVanityMints.bind(core),
+    releaseVanityMint: core.releaseVanityMint.bind(core),
+    closeEmptyTokenAccounts: core.closeEmptyTokenAccounts.bind(core),
+    prepareTokenDeployment: core.prepareTokenDeployment.bind(core),
+    deployToken: core.deployToken.bind(core),
+    warmBlockhash: core.warmBlockhash.bind(core),
     curveLiquidity: core.curveLiquidity.bind(core),
     maxSendableSol: core.maxSendableSol.bind(core),
     transferToken: core.transferToken.bind(core),

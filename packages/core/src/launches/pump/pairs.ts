@@ -8,6 +8,7 @@ import { PublicKey, type AccountInfo, type Connection } from "@solana/web3.js";
 import { Buffer } from "buffer";
 
 import { globalPda } from "../../venues/pump/pda.ts";
+import { PUMP_PROGRAM_ID } from "../../venues/pump/constants.ts";
 
 const GLOBAL_WHITELIST_OFFSET = 1013;
 const METAPLEX_TOKEN_METADATA_PROGRAM_ID = new PublicKey(
@@ -85,12 +86,14 @@ function parseMetaplexMetadata(
 }
 
 function whitelistTail(data: Buffer): Buffer {
-  if (data.length < GLOBAL_WHITELIST_OFFSET) {
+  if (data.length < GLOBAL_WHITELIST_OFFSET + 32) {
     throw new Error(
       `Pump Global account is ${data.length} bytes; expected at least ${GLOBAL_WHITELIST_OFFSET}.`,
     );
   }
-  return data.subarray(GLOBAL_WHITELIST_OFFSET);
+  // Official Pump Global IDL: whitelisted_quote_mints is [pubkey; 1].
+  // Creator-fee/holder-reward fields follow it; those bytes are not mints.
+  return data.subarray(GLOBAL_WHITELIST_OFFSET, GLOBAL_WHITELIST_OFFSET + 32);
 }
 
 function decodeWhitelistedQuoteMints(data: Buffer): PublicKey[] {
@@ -164,6 +167,7 @@ export async function getSupportedPumpPairs(
 ): Promise<PumpSupportedPair[]> {
   const global = await connection.getAccountInfo(globalPda(), "confirmed");
   if (!global) throw new Error("Pump Global account was not found.");
+  if (!global.owner.equals(PUMP_PROGRAM_ID) || !global.data.subarray(0, 8).equals(Buffer.from([167, 232, 232, 177, 200, 108, 114, 127]))) throw new Error("Invalid Pump Global account owner or discriminator");
   const quoteMints = decodeWhitelistedQuoteMints(Buffer.from(global.data));
   const result: PumpSupportedPair[] = [
     {

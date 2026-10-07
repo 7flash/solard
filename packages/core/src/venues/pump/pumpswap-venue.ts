@@ -9,7 +9,6 @@ import {
   type AccountMeta,
 } from "@solana/web3.js";
 import { sameAsset, type RawAmount } from "../../core/amounts.ts";
-import { readMint } from "../../chain/state.ts";
 import type { TokenRow } from "../../db/schema.ts";
 import type {
   BuiltInstructions,
@@ -30,9 +29,11 @@ import {
 import { spotPriceQuotePerToken } from "./quote.ts";
 import { resolvePumpSwapProtocolFeeRecipient, tokenMeta } from "./routing.ts";
 import { fetchCurve, fetchPool } from "./state.ts";
+import { snapshotSwapState, validateLivePoolReserves } from "./live-reserves.ts";
 import {
   extraAccounts,
-  poolQuoteAsset,
+  poolAssetsAndReserves,
+  poolMintMetadata,
   tokenAccountAmount,
   type PumpSwapMarketMeta,
 } from "./common.ts";
@@ -288,7 +289,7 @@ async function freshSdkBuy(
 }> {
   const m = market.metadata as PumpSwapMarketMeta;
   const online = new OnlinePumpAmmSdk(ctx.connection);
-  const swapState = await online.swapSolanaState(m.pool, ctx.user);
+  const swapState = ctx.reserves ? await snapshotSwapState(ctx, market) : await online.swapSolanaState(m.pool, ctx.user);
 
   // Quote the exact budget with ZERO SDK slippage. The legacy SDK expresses
   // slippage by increasing maxQuoteIn, which cannot be translated directly to
@@ -331,7 +332,7 @@ async function freshSdkSell(
 }> {
   const m = market.metadata as PumpSwapMarketMeta;
   const online = new OnlinePumpAmmSdk(ctx.connection);
-  const swapState = await online.swapSolanaState(m.pool, ctx.user);
+  const swapState = ctx.reserves ? await snapshotSwapState(ctx, market) : await online.swapSolanaState(m.pool, ctx.user);
   const instructions = await PUMP_AMM_SDK.sellBaseInput(
     swapState,
     new BN(inputRaw.toString()),
@@ -376,7 +377,7 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     const selected = solPool ?? (verified.length === 1 ? verified[0] : null);
     if (!selected) return null;
     if (!selected.baseMint.equals(mint)) throw new Error("PumpSwap discovery base mint mismatch");
-    const quote = await readMint(connection, selected.quoteMint);
+    const quote = await poolMintMetadata(connection, selected.quoteMint);
     return { venueHint: this.id, pool: selected.address.toBase58(),
       quoteMint: selected.quoteMint.toBase58(), quoteTokenProgram: quote.tokenProgram.toBase58(),
       metadataJson: JSON.stringify({ quoteDecimals: quote.decimals }), refreshedAtMs: Date.now() };
@@ -400,25 +401,9 @@ export class PumpSwapVenue implements TradeVenuePlugin {
         `PumpSwap pool ${pool.toBase58()} quote mint ${state.quoteMint.toBase58()} does not match curve quote ${curve.quoteAsset.mint.toBase58()}`,
       );
     }
-    const [baseMintState, quoteAsset] = await Promise.all([
-      readMint(ctx.connection, mint),
-      poolQuoteAsset(ctx.connection, ctx.token, state.quoteMint),
-    ]);
+    if (ctx.reserves) validateLivePoolReserves(ctx.reserves, { pool, baseMint: state.baseMint, quoteMint: state.quoteMint });
+    const { baseMintState, quoteAsset, baseReserve, rawQuoteReserve } = await poolAssetsAndReserves(ctx.connection, state, ctx.reserves);
     const baseTokenProgram = baseMintState.tokenProgram;
-    const [baseReserve, rawQuoteReserve] = await Promise.all([
-      tokenAccountAmount(
-        ctx.connection,
-        state.baseTokenAccount,
-        baseTokenProgram,
-        mint,
-      ),
-      tokenAccountAmount(
-        ctx.connection,
-        state.quoteTokenAccount,
-        quoteAsset.tokenProgram,
-        state.quoteMint,
-      ),
-    ]);
     const effectiveQuoteReserve = rawQuoteReserve + state.virtualQuoteReserves;
     if (baseReserve <= 0n || effectiveQuoteReserve <= 0n) {
       throw new Error(

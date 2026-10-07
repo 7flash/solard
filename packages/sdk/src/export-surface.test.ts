@@ -30,6 +30,10 @@ describe("sdk membrane", () => {
   test("has an exact curated root export surface", () => {
     expect(exportedNames(source)).toEqual({
       values: [
+        "normalizeValueBandPolicy", "planValueBandDecision", "valueBandThresholds",
+        "normalizeTargetWeightPolicy", "planTargetWeightRebalance",
+        "buildHistoricalCandles", "runHistoricalStrategy", "sweepHistoricalStrategies",
+        "LAUNCHLAB_PLATFORM_PRESETS", "resolveLaunchLabPlatform",
         "createSolard",
         "default",
         "fetchTokenMetadata",
@@ -44,7 +48,17 @@ describe("sdk membrane", () => {
         "tokenAmount",
       ].sort(),
       types: [
+        "TradeListenerMigration",
+        "ValueBandPolicy", "ValueBandRuntimeState", "ValueBandDecision",
+        "TargetWeightPolicy", "TargetWeightRebalancePlan",
+        "HistoricalTradeTape", "HistoricalCandle", "HistoricalStrategy",
+        "HistoricalExecutionOptions", "HistoricalStrategyResult",
+        "CreatorFeeDiscovery", "CreatorFeeGroup", "CreatorFeeItem",
+        "WalletLedger", "WalletLedgerEntry", "WalletLedgerOptions", "CurrentMarket",
+        "PreparedTokenDeployment", "PrepareDeploymentArgs",
         "TradeLandingPolicy",
+        "LiveEndpointOptions",
+        "LivePoolReserves",
         "ClaimCreatorRewardsOptions",
         "CreatorRewardClaimPayout",
         "CreatorRewardClaimResult",

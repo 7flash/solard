@@ -75,6 +75,7 @@ export type SimulationResult = {
   }>;
 };
 export type SendReceipt = {
+  tipLamports?: number;
   /** Selected/estimated fees remain separate from confirmed feeLamports. */
   feeEstimate?: import("./fee-estimate.ts").TransactionFeeEstimate;
   /** Confirmed wallet SOL principal, excluding network fees and token-account rent. */
@@ -94,6 +95,7 @@ export type SendReceipt = {
   error?: string;
 };
 export type SubmittedPlan = {
+  fallbackSenders?: Array<SenderId>;
   feeEstimate?: import("./fee-estimate.ts").TransactionFeeEstimate;
   onRebroadcast?: (signature: string) => void;
   signature: string;

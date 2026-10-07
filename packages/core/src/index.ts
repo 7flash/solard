@@ -80,6 +80,9 @@ export type {
 } from "./history/replay.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
 export type { TradeLandingPolicy } from "./tx/trade-policy.ts";
+export { PriceGuardRejected } from "./tx/price-guard.ts";
+export type { SolPrice } from "./tx/price-guard.ts";
+export type { LivePoolReserves } from "./venues/venue-plugin.ts";
 export { ensureAdditiveSqliteColumns } from "./db/additive-migration.ts";
 export type { AdditiveSqliteColumn } from "./db/additive-migration.ts";
 export {
@@ -115,6 +118,11 @@ export type {
   WalletPrivateKeyFormat,
 } from "./core/solard.ts";
 export { createTraderSolard } from "./presets/trader.ts";
+export * from "./strategy/index.ts";
+export * from "./backtest/index.ts";
+export { prepareTokenAccountMaintenance } from "./chain/token-maintenance.ts";
+export type { TokenMaintenanceOptions, TokenMaintenanceBatch, TokenMaintenancePreparation } from "./chain/token-maintenance.ts";
+export * from "./launches/launchlab/launchlab-launchpad.ts";
 
 export {
   addExternalContact,
@@ -814,3 +822,9 @@ export type {
   PumpSwapDecodedEvent,
   RaydiumLaunchLabDecodedEvent,
 } from "./market/launch-trades.ts";
+export * from "./claims/creator-fees.ts";
+export * from "./claims/raydium-creator-fees-source.ts";
+export * from "./claims/meteora-dbc-creator-fees-source.ts";
+export * from "./claims/meteora-damm-v2-creator-fees-source.ts";
+export * from "./ledger/wallet-ledger.ts";
+export * from "./market/current-market.ts";

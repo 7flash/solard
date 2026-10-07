@@ -109,10 +109,11 @@ export function listVanityMintPool(
     suffix?: string;
     status?: VanityMintPoolStatus;
   } = {},
+  database: SolardDatabase = openDatabase(),
 ): VanityMintPoolEntry[] {
   const suffix = options.suffix ? cleanVanitySuffix(options.suffix) : undefined;
 
-  return readState()
+  return readState(database)
     .entries.filter((row) => !suffix || row.suffix === suffix)
     .filter((row) => !options.status || row.status === options.status)
     .sort((left, right) => left.createdAtMs - right.createdAtMs)
@@ -122,6 +123,7 @@ export function listVanityMintPool(
 export function addVanityMintToPool(
   mint: Keypair,
   suffixInput: string,
+  database: SolardDatabase = openDatabase(),
 ): VanityMintPoolEntry {
   const suffix = cleanVanitySuffix(suffixInput);
   const address = mint.publicKey.toBase58();
@@ -132,7 +134,8 @@ export function addVanityMintToPool(
     );
   }
 
-  const db = openDatabase();
+  const db = database;
+  return db.transaction(() => {
   const state = readState(db);
   const duplicate = state.entries.find((row) => row.address === address);
   if (duplicate) {
@@ -157,6 +160,7 @@ export function addVanityMintToPool(
   state.entries.push(row);
   writeState(state, db);
   return publicEntry(row);
+  });
 }
 
 export function reserveVanityMintFromPool(
@@ -165,10 +169,12 @@ export function reserveVanityMintFromPool(
     address?: string | null;
     reason?: string | null;
   } = {},
+  database: SolardDatabase = openDatabase(),
 ): VanityMintPoolReservation {
   const suffix = cleanVanitySuffix(suffixInput);
   const requestedAddress = options.address?.trim() || null;
-  const db = openDatabase();
+  const db = database;
+  return db.transaction(() => {
   const state = readState(db);
 
   const row = state.entries.find(
@@ -207,12 +213,15 @@ export function reserveVanityMintFromPool(
     ...publicEntry(row),
     mint,
   };
+  });
 }
 
 export function releaseVanityMintReservation(
   address: string,
+  database: SolardDatabase = openDatabase(),
 ): VanityMintPoolEntry {
-  const db = openDatabase();
+  const db = database;
+  return db.transaction(() => {
   const state = readState(db);
   const row = state.entries.find((item) => item.address === address);
 
@@ -229,10 +238,12 @@ export function releaseVanityMintReservation(
   row.reservationReason = null;
   writeState(state, db);
   return publicEntry(row);
+  });
 }
 
-export function markVanityMintUsed(address: string): VanityMintPoolEntry {
-  const db = openDatabase();
+export function markVanityMintUsed(address: string, database: SolardDatabase = openDatabase()): VanityMintPoolEntry {
+  const db = database;
+  return db.transaction(() => {
   const state = readState(db);
   const row = state.entries.find((item) => item.address === address);
 
@@ -244,4 +255,5 @@ export function markVanityMintUsed(address: string): VanityMintPoolEntry {
   row.reservationReason = null;
   writeState(state, db);
   return publicEntry(row);
+  });
 }

@@ -1,5 +1,30 @@
 # @solard/core
 
+Fast landing uses the existing trade API. Choose a Helius tier explicitly; its tip is added before final simulation and signing. SWQOS reserves 5,000 lamports, Max reserves 1,000,000. These amounts are separate from the network fee and SOL principal.
+
+```ts
+const warmup = slrd.warmBlockhash({ intervalMs: 1_000 });
+const result = await slrd.buy(mint, wallet, sol("0.1"), {
+  intentKey: "I-0101:BUY:42",
+  maxPriceSol: "0.000001",
+  slippageBps: 500,
+  landing: { route: "helius-swqos", priorityMicroLamports: 20_000,
+    cuLimit: "auto", computeUnitMultiplier: 1.3, maxFeeBpsOfNotional: 500 },
+  confirm: { resendIntervalMs: 1_500, pollIntervalMs: 1_000 },
+});
+warmup.stop();
+```
+
+Automatic CU sizing probes the whole transaction including its tip, reserves measured units times the margin, and retries one compute-exhausted probe at the cluster limit. Existing explicit CU limits remain fixed. `landing.priorityMicroLamports` is an initial bid that escalates only after proven expiry; legacy `landing.microLamports` and `priorityFee.microLamports` remain fixed unless `escalateFixedFees` is enabled. `landing.minMicroLamports` controls the automatic bid floor (the compatibility default is 100,000). Confirmation polls and re-sends reuse identical signed bytes. `resumeTrade(intentKey)` can restore those bytes from the execution journal; it never creates a replacement while an outcome is uncertain.
+
+`maxPriceSol` and `minPriceSol` compare principal against the guaranteed output using verified token decimals. Rejected quotes return `PRICE_GUARD_REJECTED`, with `retryable: true`; definitive named slippage failures also permit a new quote. An unresolved result always has `retryable: false`. Bare numeric custom errors remain program errors until a venue is established.
+
+PumpSwap `reserves` accepts `{ pool, baseMint, quoteMint, baseReserveRaw, quoteReserveRaw, slot, capturedAtMs }`. Raw amounts are caller-observed vault balances, not virtual curve reserves. The SDK verifies pool/mint identities, programs, timestamp (two seconds by default) and RPC slot, then uses one batch per quote/build for current configs, pool state, mint supply/extensions and user accounts. It does not independently prove the caller's reserve values. Other venues reject this option. Without snapshots, both vault balances remain fresh; validated mint metadata and preflight rent sizes are cached with bounded lifetimes.
+
+`createTraderSolard({ rpcUrl, rpcUrls })` rotates HTTP providers on quota, auth, rate-limit and transport failures and stays on the working endpoint. Provide only endpoints for the same cluster, with public RPC last if desired. SDK `listenTrades({ rpcUrls, ... })` probes provider HTTP/WebSocket health and preserves watched tokens when switching. Launch/migration feeds currently fail over only at startup; a silent old socket can remain undetected when a new handshake is healthy.
+
+RPC requests share a sliding window: `SLRD_RPC_MAX_REQUESTS` (default 5) per `SLRD_RPC_WINDOW_MS` (default 1,100), plus `SLRD_RPC_MAX_SENDS` (default 1) per `SLRD_RPC_SEND_WINDOW_MS` (default 1,000). Set the same `SLRD_RPC_GATE_DB` path and limits in every worker to coordinate across processes. No shared database is opened when that option is omitted. Sender calls use the same send budget.
+
 Canonical Solard implementation: encrypted wallet persistence, SQLite repositories, Solana transaction composition/sending, token venues, Pump launch/trading support, groups, agents, watches and ALTs.
 
 Applications should normally import `@solard/sdk`. The CLI and SDK share this package and therefore share the same database and behavior.
