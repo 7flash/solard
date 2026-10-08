@@ -3,7 +3,8 @@ import type {
   ParsedTransactionWithMeta,
 } from "@solana/web3.js";
 
-export type TokenHistoryVenue = "pump-curve" | "pumpswap" | "raydium";
+export type TokenHistoryVenue =
+  "pump-curve" | "pumpswap" | "raydium" | "meteora-dbc" | "meteora-damm-v2";
 export type TokenHistorySide = "buy" | "sell";
 export type TokenHistoryScanKind = "curve" | "pool";
 export type TokenHistoryCommitment = "confirmed" | "finalized";

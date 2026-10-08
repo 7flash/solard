@@ -7,25 +7,24 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "baseUrl": ".",
     "paths": {
       "@solard/core": [
-        "packages/core/src/index.ts"
+        "./packages/core/src/index.ts"
       ],
       "@solard/core/*": [
-        "packages/core/src/*"
+        "./packages/core/src/*"
       ],
       "@solard/sdk": [
-        "packages/sdk/src/index.ts"
+        "./packages/sdk/src/index.ts"
       ],
       "@solard/sdk/browser": [
-        "packages/sdk/src/browser/index.ts"
+        "./packages/sdk/src/browser/index.ts"
       ],
       "@solard/cli": [
-        "packages/cli/src/index.ts"
+        "./packages/cli/src/index.ts"
       ],
       "@solard/cli/*": [
-        "packages/cli/*"
+        "./packages/cli/*"
       ]
     },
     "types": [

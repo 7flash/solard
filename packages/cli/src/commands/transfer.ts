@@ -144,7 +144,11 @@ export async function runTransferCommand({
       .priorityFee({ cuLimit, microLamports: priorityMicroLamports });
 
     if (flags.has("simulate-only")) {
-      const prepared = await slrd.prepareTradePlan(wallet, await composer.build(), executionOptions);
+      const prepared = await slrd.prepareTradePlan(
+        wallet,
+        await composer.build(),
+        executionOptions,
+      );
       const result = await slrd.simulatePlan(prepared.plan);
       return {
         mode: "simulation",
@@ -162,8 +166,18 @@ export async function runTransferCommand({
       };
     }
 
-    const execution = await slrd.executeTradePlan(wallet, () => composer.build(), via, "transfer-token", executionOptions);
-    const receipt = tradeResult(execution.receipt, execution.attempts, execution.submission.executionId);
+    const execution = await slrd.executeTradePlan(
+      wallet,
+      () => composer.build(),
+      via,
+      "transfer-token",
+      executionOptions,
+    );
+    const receipt = tradeResult(
+      execution.receipt,
+      execution.attempts,
+      execution.submission.executionId,
+    );
 
     return {
       ...receipt,
@@ -184,7 +198,11 @@ export async function runTransferCommand({
     .priorityFee({ cuLimit, microLamports: priorityMicroLamports });
 
   if (flags.has("simulate-only")) {
-    const prepared = await slrd.prepareTradePlan(wallet, await composer.build(), executionOptions);
+    const prepared = await slrd.prepareTradePlan(
+      wallet,
+      await composer.build(),
+      executionOptions,
+    );
     const result = await slrd.simulatePlan(prepared.plan);
     return {
       mode: "simulation",
@@ -198,8 +216,18 @@ export async function runTransferCommand({
     };
   }
 
-  const execution = await slrd.executeTradePlan(wallet, () => composer.build(), via, "transfer-sol", executionOptions);
-  const receipt = tradeResult(execution.receipt, execution.attempts, execution.submission.executionId);
+  const execution = await slrd.executeTradePlan(
+    wallet,
+    () => composer.build(),
+    via,
+    "transfer-sol",
+    executionOptions,
+  );
+  const receipt = tradeResult(
+    execution.receipt,
+    execution.attempts,
+    execution.submission.executionId,
+  );
 
   return { ...receipt, recipient, wallet, sol: amount };
 }

@@ -136,30 +136,30 @@ export function addVanityMintToPool(
 
   const db = database;
   return db.transaction(() => {
-  const state = readState(db);
-  const duplicate = state.entries.find((row) => row.address === address);
-  if (duplicate) {
-    throw new Error(
-      `Vanity mint ${address} is already in the pool with status ${duplicate.status}.`,
-    );
-  }
+    const state = readState(db);
+    const duplicate = state.entries.find((row) => row.address === address);
+    if (duplicate) {
+      throw new Error(
+        `Vanity mint ${address} is already in the pool with status ${duplicate.status}.`,
+      );
+    }
 
-  const secret = encryptKeypair(mint);
-  const now = Date.now();
-  const row: StoredVanityMint = {
-    address,
-    suffix,
-    ...secret,
-    status: "available",
-    createdAtMs: now,
-    reservedAtMs: null,
-    usedAtMs: null,
-    reservationReason: null,
-  };
+    const secret = encryptKeypair(mint);
+    const now = Date.now();
+    const row: StoredVanityMint = {
+      address,
+      suffix,
+      ...secret,
+      status: "available",
+      createdAtMs: now,
+      reservedAtMs: null,
+      usedAtMs: null,
+      reservationReason: null,
+    };
 
-  state.entries.push(row);
-  writeState(state, db);
-  return publicEntry(row);
+    state.entries.push(row);
+    writeState(state, db);
+    return publicEntry(row);
   });
 }
 
@@ -175,44 +175,44 @@ export function reserveVanityMintFromPool(
   const requestedAddress = options.address?.trim() || null;
   const db = database;
   return db.transaction(() => {
-  const state = readState(db);
+    const state = readState(db);
 
-  const row = state.entries.find(
-    (item) =>
-      item.status === "available" &&
-      item.suffix === suffix &&
-      (!requestedAddress || item.address === requestedAddress),
-  );
-
-  if (!row) {
-    const available = state.entries.filter(
-      (item) => item.status === "available" && item.suffix === suffix,
-    ).length;
-    throw new Error(
-      requestedAddress
-        ? `Vanity mint ${requestedAddress} is not available in suffix pool ${suffix}.`
-        : `Vanity mint pool ${suffix} has no available mints (available=${available}). ` +
-            `Generate more with: slrd vanity pool generate --suffix ${suffix} --count <n>`,
+    const row = state.entries.find(
+      (item) =>
+        item.status === "available" &&
+        item.suffix === suffix &&
+        (!requestedAddress || item.address === requestedAddress),
     );
-  }
 
-  const mint = decryptKeypair(row);
-  const derived = mint.publicKey.toBase58();
-  if (derived !== row.address) {
-    throw new Error(
-      `Vanity mint pool secret mismatch: stored=${row.address} derived=${derived}.`,
-    );
-  }
+    if (!row) {
+      const available = state.entries.filter(
+        (item) => item.status === "available" && item.suffix === suffix,
+      ).length;
+      throw new Error(
+        requestedAddress
+          ? `Vanity mint ${requestedAddress} is not available in suffix pool ${suffix}.`
+          : `Vanity mint pool ${suffix} has no available mints (available=${available}). ` +
+              `Generate more with: slrd vanity pool generate --suffix ${suffix} --count <n>`,
+      );
+    }
 
-  row.status = "reserved";
-  row.reservedAtMs = Date.now();
-  row.reservationReason = options.reason?.trim() || "launch";
-  writeState(state, db);
+    const mint = decryptKeypair(row);
+    const derived = mint.publicKey.toBase58();
+    if (derived !== row.address) {
+      throw new Error(
+        `Vanity mint pool secret mismatch: stored=${row.address} derived=${derived}.`,
+      );
+    }
 
-  return {
-    ...publicEntry(row),
-    mint,
-  };
+    row.status = "reserved";
+    row.reservedAtMs = Date.now();
+    row.reservationReason = options.reason?.trim() || "launch";
+    writeState(state, db);
+
+    return {
+      ...publicEntry(row),
+      mint,
+    };
   });
 }
 
@@ -222,38 +222,41 @@ export function releaseVanityMintReservation(
 ): VanityMintPoolEntry {
   const db = database;
   return db.transaction(() => {
-  const state = readState(db);
-  const row = state.entries.find((item) => item.address === address);
+    const state = readState(db);
+    const row = state.entries.find((item) => item.address === address);
 
-  if (!row) throw new Error(`Vanity mint is not in the pool: ${address}`);
-  if (row.status === "used") {
-    throw new Error(
-      `Vanity mint ${address} is already marked used and cannot be released.`,
-    );
-  }
-  if (row.status === "available") return publicEntry(row);
+    if (!row) throw new Error(`Vanity mint is not in the pool: ${address}`);
+    if (row.status === "used") {
+      throw new Error(
+        `Vanity mint ${address} is already marked used and cannot be released.`,
+      );
+    }
+    if (row.status === "available") return publicEntry(row);
 
-  row.status = "available";
-  row.reservedAtMs = null;
-  row.reservationReason = null;
-  writeState(state, db);
-  return publicEntry(row);
+    row.status = "available";
+    row.reservedAtMs = null;
+    row.reservationReason = null;
+    writeState(state, db);
+    return publicEntry(row);
   });
 }
 
-export function markVanityMintUsed(address: string, database: SolardDatabase = openDatabase()): VanityMintPoolEntry {
+export function markVanityMintUsed(
+  address: string,
+  database: SolardDatabase = openDatabase(),
+): VanityMintPoolEntry {
   const db = database;
   return db.transaction(() => {
-  const state = readState(db);
-  const row = state.entries.find((item) => item.address === address);
+    const state = readState(db);
+    const row = state.entries.find((item) => item.address === address);
 
-  if (!row) throw new Error(`Vanity mint is not in the pool: ${address}`);
-  if (row.status === "used") return publicEntry(row);
+    if (!row) throw new Error(`Vanity mint is not in the pool: ${address}`);
+    if (row.status === "used") return publicEntry(row);
 
-  row.status = "used";
-  row.usedAtMs = Date.now();
-  row.reservationReason = null;
-  writeState(state, db);
-  return publicEntry(row);
+    row.status = "used";
+    row.usedAtMs = Date.now();
+    row.reservationReason = null;
+    writeState(state, db);
+    return publicEntry(row);
   });
 }

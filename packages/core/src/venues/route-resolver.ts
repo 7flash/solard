@@ -1,7 +1,11 @@
 import type { Connection, PublicKey } from "@solana/web3.js";
 import { UnsupportedTokenError } from "../core/errors.ts";
 import type { TokenRow } from "../db/schema.ts";
-import type { TradeVenuePlugin, VenueMarket, LivePoolReserves } from "./venue-plugin.ts";
+import type {
+  TradeVenuePlugin,
+  VenueMarket,
+  LivePoolReserves,
+} from "./venue-plugin.ts";
 
 /** Selects one executable trade venue. It never resolves fee claims or script-level strategy behavior. */
 export class VenueRegistry {
@@ -36,9 +40,17 @@ export class VenueRegistry {
     options: { reserves?: LivePoolReserves } = {},
   ): Promise<{ plugin: TradeVenuePlugin; market: VenueMarket }> {
     for (const plugin of this.plugins) {
-      const market = await plugin.resolveMarket({ connection, token, user, ...options });
+      const market = await plugin.resolveMarket({
+        connection,
+        token,
+        user,
+        ...options,
+      });
       if (market) {
-        if (options.reserves && market.venue !== "pumpswap") throw new Error("Live reserve snapshots currently require a PumpSwap pool");
+        if (options.reserves && market.venue !== "pumpswap")
+          throw new Error(
+            "Live reserve snapshots currently require a PumpSwap pool",
+          );
         return { plugin, market };
       }
     }

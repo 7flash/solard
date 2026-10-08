@@ -161,7 +161,11 @@ function pumpSwapPoolAccount(args: {
   quoteMint: string;
 }): Buffer {
   const data = Buffer.alloc(261);
-  Buffer.from(pumpAmmJson.accounts.find((account) => account.name.toLowerCase() === "pool")!.discriminator).copy(data);
+  Buffer.from(
+    pumpAmmJson.accounts.find(
+      (account) => account.name.toLowerCase() === "pool",
+    )!.discriminator,
+  ).copy(data);
   new PublicKey(args.baseMint).toBuffer().copy(data, 43);
   new PublicKey(args.quoteMint).toBuffer().copy(data, 75);
   pubkey(70).copy(data, 139);
@@ -371,7 +375,10 @@ describe("launch trade market decoding", () => {
       async removeOnLogsListener() {}
       async getAccountInfo(address: PublicKey) {
         if (address.toBase58() !== eventPool) return null;
-        return { owner: new PublicKey(PUMPSWAP_PROGRAM), data: pumpSwapPoolAccount({ baseMint: watchedMint, quoteMint: WSOL }) };
+        return {
+          owner: new PublicKey(PUMPSWAP_PROGRAM),
+          data: pumpSwapPoolAccount({ baseMint: watchedMint, quoteMint: WSOL }),
+        };
       }
       async getTokenSupply(mint: PublicKey) {
         return mint.toBase58() === watchedMint
@@ -379,7 +386,9 @@ describe("launch trade market decoding", () => {
           : { value: { decimals: 9, amount: "0" } };
       }
       async getParsedTransaction() {
-        throw new Error("PumpSwap quote identity must not come from transaction-wide balances");
+        throw new Error(
+          "PumpSwap quote identity must not come from transaction-wide balances",
+        );
       }
     }
 
@@ -440,9 +449,18 @@ describe("launch trade market decoding", () => {
       async removeOnLogsListener() {}
       async getAccountInfo(address: PublicKey) {
         if (address.toBase58() === watchedPool)
-          return { owner: new PublicKey(PUMPSWAP_PROGRAM), data: pumpSwapPoolAccount({ baseMint: watchedMint, quoteMint: WSOL }) };
+          return {
+            owner: new PublicKey(PUMPSWAP_PROGRAM),
+            data: pumpSwapPoolAccount({
+              baseMint: watchedMint,
+              quoteMint: WSOL,
+            }),
+          };
         if (address.toBase58() === otherPool)
-          return { owner: new PublicKey(PUMPSWAP_PROGRAM), data: pumpSwapPoolAccount({ baseMint: otherMint, quoteMint: WSOL }) };
+          return {
+            owner: new PublicKey(PUMPSWAP_PROGRAM),
+            data: pumpSwapPoolAccount({ baseMint: otherMint, quoteMint: WSOL }),
+          };
         return null;
       }
       async getTokenSupply(mint: PublicKey) {
@@ -458,7 +476,8 @@ describe("launch trade market decoding", () => {
     }
 
     const trades: any[] = [];
-    const statuses: Array<{ event: string; data?: Record<string, unknown> }> = [];
+    const statuses: Array<{ event: string; data?: Record<string, unknown> }> =
+      [];
     const subscription = await subscribeTrades({
       connection: new FakeConnection() as any,
       tokens: [watchedMint],
@@ -505,10 +524,11 @@ describe("launch trade market decoding", () => {
     expect(trades[0].pool).toBe(watchedPool);
     expect(trades[0].market.supplyRaw).toBe(1_000_000_000_000_000n);
     expect(trades[0].market.marketCapSol).toBeCloseTo(1000, 8);
-    expect(statuses.some((row) => row.event === "pumpswap-pool-mismatch")).toBe(true);
+    expect(statuses.some((row) => row.event === "pumpswap-pool-mismatch")).toBe(
+      true,
+    );
     await subscription.close();
   });
-
 });
 
 test("PUMP-quoted multi-pool transaction cannot corrupt supply/capitalization or fire a strategy signal", async () => {
@@ -517,20 +537,54 @@ test("PUMP-quoted multi-pool transaction cannot corrupt supply/capitalization or
   const pool = "D47qeECvhLero1oKCkMuKZ6sgsF6QGUZKnQuHXugQFTM";
   const otherPool = "6ZTSKWDobV2jnyMmrf3vGqy1WZ62iZuQnnwycoZvSmuq";
   const quoteMint = "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn";
-  const trades: Array<Parameters<NonNullable<Parameters<typeof subscribeTrades>[0]["onTrade"]>>[0]> = [];
+  const trades: Array<
+    Parameters<NonNullable<Parameters<typeof subscribeTrades>[0]["onTrade"]>>[0]
+  > = [];
   let strategySignals = 0;
-  const verifiedSupply = await connection.getTokenSupply(new PublicKey(mint), "confirmed");
-  const subscription = await subscribeTrades({ connection, tokens: [mint], venues: ["pumpswap"], solUsd: 100,
-    quoteSol: async (quote, decimals) => { expect(quote).toBe(quoteMint); expect(decimals).toBe(6); return 0.00001; },
-    onTrade(event) { trades.push(event); if (event.market.marketCapUsd! > 1_000_000) strategySignals++; } });
-  callbacks[0]!({ err: null, signature: "pillson-nut", logs: [
-    `Program ${PUMPSWAP_PROGRAM} invoke [1]`,
-    `Program data: ${pumpSwapEvent({ side: "buy", pool: new PublicKey(otherPool).toBuffer(), poolBaseRaw: 1n,
-      poolQuoteRaw: 999_000_000_000_000n, supplyRaw: 999_000_000_000_000_000n }).toString("base64")}`,
-    `Program data: ${pumpSwapEvent({ side: "buy", pool: new PublicKey(pool).toBuffer(), poolBaseRaw: 100_000_000_000_000n,
-      poolQuoteRaw: 2_592_000_000_000n, supplyRaw: 7n }).toString("base64")}`,
-    `Program ${PUMPSWAP_PROGRAM} success`,
-  ] }, { slot: 1 });
+  const verifiedSupply = await connection.getTokenSupply(
+    new PublicKey(mint),
+    "confirmed",
+  );
+  const subscription = await subscribeTrades({
+    connection,
+    tokens: [mint],
+    venues: ["pumpswap"],
+    solUsd: 100,
+    quoteSol: async (quote, decimals) => {
+      expect(quote).toBe(quoteMint);
+      expect(decimals).toBe(6);
+      return 0.00001;
+    },
+    onTrade(event) {
+      trades.push(event);
+      if (event.market.marketCapUsd! > 1_000_000) strategySignals++;
+    },
+  });
+  callbacks[0]!(
+    {
+      err: null,
+      signature: "pillson-nut",
+      logs: [
+        `Program ${PUMPSWAP_PROGRAM} invoke [1]`,
+        `Program data: ${pumpSwapEvent({
+          side: "buy",
+          pool: new PublicKey(otherPool).toBuffer(),
+          poolBaseRaw: 1n,
+          poolQuoteRaw: 999_000_000_000_000n,
+          supplyRaw: 999_000_000_000_000_000n,
+        }).toString("base64")}`,
+        `Program data: ${pumpSwapEvent({
+          side: "buy",
+          pool: new PublicKey(pool).toBuffer(),
+          poolBaseRaw: 100_000_000_000_000n,
+          poolQuoteRaw: 2_592_000_000_000n,
+          supplyRaw: 7n,
+        }).toString("base64")}`,
+        `Program ${PUMPSWAP_PROGRAM} success`,
+      ],
+    },
+    { slot: 1 },
+  );
   await Bun.sleep(40);
   expect(trades).toHaveLength(1);
   expect(strategySignals).toBe(0);
@@ -542,18 +596,40 @@ test("PUMP-quoted multi-pool transaction cannot corrupt supply/capitalization or
   expect(market.priceQuotePerToken).toBeCloseTo(0.02592, 12);
   expect(market.priceSol).toBeCloseTo(0.0000002592, 12);
   expect(market.priceUsd).toBeCloseTo(0.00002592, 12);
-  expect(market.marketCapUsd).toBeCloseTo(market.priceUsd! * Number(verifiedSupply.value.amount) / 1e6, 6);
+  expect(market.marketCapUsd).toBeCloseTo(
+    (market.priceUsd! * Number(verifiedSupply.value.amount)) / 1e6,
+    6,
+  );
   await subscription.close();
 });
 
 test("unavailable PUMP conversion leaves SOL/USD fields unavailable", async () => {
   const { connection, callbacks } = fixtureConnection();
-  const trades: Array<Parameters<Parameters<typeof subscribeTrades>[0]["onTrade"]>[0]> = [];
-  const subscription = await subscribeTrades({ connection, tokens: ["3yLHGEma4ek25h8oRswBmYTJkTDdtGnrVn2ZuzV5pump"], venues: ["pumpswap"],
-    solUsd: 100, quoteSol: async () => null, onTrade(event) { trades.push(event); } });
-  callbacks[0]!({ err: null, signature: "no-conversion", logs: [`Program ${PUMPSWAP_PROGRAM} invoke [1]`,
-    `Program data: ${pumpSwapEvent({ side: "sell", pool: new PublicKey("D47qeECvhLero1oKCkMuKZ6sgsF6QGUZKnQuHXugQFTM").toBuffer() }).toString("base64")}`,
-    `Program ${PUMPSWAP_PROGRAM} success`] }, { slot: 1 });
+  const trades: Array<
+    Parameters<Parameters<typeof subscribeTrades>[0]["onTrade"]>[0]
+  > = [];
+  const subscription = await subscribeTrades({
+    connection,
+    tokens: ["3yLHGEma4ek25h8oRswBmYTJkTDdtGnrVn2ZuzV5pump"],
+    venues: ["pumpswap"],
+    solUsd: 100,
+    quoteSol: async () => null,
+    onTrade(event) {
+      trades.push(event);
+    },
+  });
+  callbacks[0]!(
+    {
+      err: null,
+      signature: "no-conversion",
+      logs: [
+        `Program ${PUMPSWAP_PROGRAM} invoke [1]`,
+        `Program data: ${pumpSwapEvent({ side: "sell", pool: new PublicKey("D47qeECvhLero1oKCkMuKZ6sgsF6QGUZKnQuHXugQFTM").toBuffer() }).toString("base64")}`,
+        `Program ${PUMPSWAP_PROGRAM} success`,
+      ],
+    },
+    { slot: 1 },
+  );
   await Bun.sleep(40);
   expect(trades).toHaveLength(1);
   expect(trades[0]!.market.priceQuotePerToken).toBeGreaterThan(0);

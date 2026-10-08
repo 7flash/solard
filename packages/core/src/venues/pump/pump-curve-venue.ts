@@ -54,7 +54,12 @@ export class PumpCurveVenue implements TradeVenuePlugin {
   }
 
   async resolveMarket(ctx: VenueContext): Promise<VenueMarket | null> {
-    if (ctx.token.pool || (ctx.token.venueHint && !["unknown", "pump-curve"].includes(ctx.token.venueHint))) return null;
+    if (
+      ctx.token.pool ||
+      (ctx.token.venueHint &&
+        !["unknown", "pump-curve"].includes(ctx.token.venueHint))
+    )
+      return null;
     const curve = await fetchCurve(ctx.connection, ctx.token);
     if (!curve || curve.complete) return null;
     return {

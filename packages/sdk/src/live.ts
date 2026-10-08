@@ -6,6 +6,8 @@ import {
   type TradeEvent,
   type TradeSubscription,
   type MigrationEvent,
+  createLiveTradeHistoryRecorder,
+  type LiveTradeHistoryOptions,
 } from "@solard/core";
 
 export type LiveEndpointOptions = {
@@ -17,17 +19,29 @@ export type LiveEndpointOptions = {
 export type SubscribeLaunchesOptions = Omit<
   Parameters<typeof subscribeCoreLaunches>[0],
   "connection"
-> & LiveEndpointOptions;
+> &
+  LiveEndpointOptions;
 export type SubscribeMigrationsOptions = Omit<
   Parameters<typeof subscribeCoreMigrations>[0],
   "connection"
-> & LiveEndpointOptions;
+> &
+  LiveEndpointOptions;
 export type SubscribeTradesOptions = Omit<
   Parameters<typeof subscribeCoreTrades>[0],
   "connection"
-> & LiveEndpointOptions;
+> &
+  LiveEndpointOptions;
 
-export type ListenTradesOptions = Omit<SubscribeTradesOptions, "onTrade">;
+export type ListenTradesOptions = Omit<SubscribeTradesOptions, "onTrade"> & {
+  dbPath?: string;
+  /** Enabled by default; collected live history is partial and retains commitment. */
+  history?:
+    | false
+    | Pick<
+        LiveTradeHistoryOptions,
+        "flushIntervalMs" | "batchSize" | "maxPending"
+      >;
+};
 
 export type TradeListener = {
   add(tokens: string | readonly string[]): Promise<void>;
@@ -35,11 +49,16 @@ export type TradeListener = {
   has(token: string): boolean;
   list(): string[];
   onTrade(callback: (event: TradeEvent) => void | Promise<void>): () => void;
-  onMigration(callback: (event: TradeListenerMigration) => void | Promise<void>): () => void;
+  onMigration(
+    callback: (event: TradeListenerMigration) => void | Promise<void>,
+  ): () => void;
   close(): Promise<void>;
   readonly closed: Promise<void>;
 };
-export type TradeListenerMigration = MigrationEvent & { oldPool: string | null; newPool: string };
+export type TradeListenerMigration = MigrationEvent & {
+  oldPool: string | null;
+  newPool: string;
+};
 
 type LiveConnection = {
   endpoint: string;
@@ -54,39 +73,69 @@ let readiness: { endpoint: string; promise: Promise<void> } | null = null;
 export class LiveEndpointPool {
   private active = 0;
   readonly endpoints: readonly string[];
-  constructor(endpoints: readonly string[], private readonly probe: (endpoint: string) => Promise<void> = async (endpoint) => {
-    await Promise.all([preflightRpc(endpoint), preflightWebSocket(endpoint)]);
-  }) {
+  constructor(
+    endpoints: readonly string[],
+    private readonly probe: (endpoint: string) => Promise<void> = async (
+      endpoint,
+    ) => {
+      await Promise.all([preflightRpc(endpoint), preflightWebSocket(endpoint)]);
+    },
+  ) {
     this.endpoints = [...new Set(endpoints)];
-    if (!this.endpoints.length) throw new Error("Live RPC endpoint pool cannot be empty");
+    if (!this.endpoints.length)
+      throw new Error("Live RPC endpoint pool cannot be empty");
     for (const endpoint of this.endpoints) deriveWebSocketEndpoint(endpoint);
   }
-  get endpoint(): string { return this.endpoints[this.active]!; }
+  get endpoint(): string {
+    return this.endpoints[this.active]!;
+  }
   async select(skipCurrent = false): Promise<string> {
     const start = this.active;
     let lastError: unknown;
-    for (let offset = skipCurrent ? 1 : 0; offset < this.endpoints.length + (skipCurrent ? 1 : 0); offset++) {
+    for (
+      let offset = skipCurrent ? 1 : 0;
+      offset < this.endpoints.length + (skipCurrent ? 1 : 0);
+      offset++
+    ) {
       const index = (start + offset) % this.endpoints.length;
-      try { await this.probe(this.endpoints[index]!); this.active = index; return this.endpoint; }
-      catch (error) { lastError = error; }
+      try {
+        await this.probe(this.endpoints[index]!);
+        this.active = index;
+        return this.endpoint;
+      } catch (error) {
+        lastError = error;
+      }
     }
     throw lastError;
   }
   async check(): Promise<string> {
-    try { await this.probe(this.endpoint); return this.endpoint; }
-    catch { return await this.select(true); }
+    try {
+      await this.probe(this.endpoint);
+      return this.endpoint;
+    } catch {
+      return await this.select(true);
+    }
   }
 }
 const livePools = new Map<string, LiveEndpointPool>();
-function endpointPool(options: LiveEndpointOptions): LiveEndpointPool | undefined {
+function endpointPool(
+  options: LiveEndpointOptions,
+): LiveEndpointPool | undefined {
   if (!options.rpcUrls?.length) return undefined;
   const key = JSON.stringify(options.rpcUrls);
   let pool = livePools.get(key);
-  if (!pool) { pool = new LiveEndpointPool(options.rpcUrls); livePools.set(key, pool); }
+  if (!pool) {
+    pool = new LiveEndpointPool(options.rpcUrls);
+    livePools.set(key, pool);
+  }
   return pool;
 }
 function connectionFor(endpoint: string): LiveConnection {
-  return { endpoint, websocketEndpoint: deriveWebSocketEndpoint(endpoint), connection: new Connection(endpoint, "confirmed") };
+  return {
+    endpoint,
+    websocketEndpoint: deriveWebSocketEndpoint(endpoint),
+    connection: new Connection(endpoint, "confirmed"),
+  };
 }
 
 function endpointFromEnv(): string {
@@ -289,7 +338,9 @@ async function ensureReady(endpoint: string): Promise<void> {
   }
 }
 
-async function liveConnection(options: LiveEndpointOptions = {}): Promise<LiveConnection> {
+async function liveConnection(
+  options: LiveEndpointOptions = {},
+): Promise<LiveConnection> {
   const pool = endpointPool(options);
   if (pool) return connectionFor(await pool.select());
   const endpoint = endpointFromEnv();
@@ -321,26 +372,45 @@ export async function subscribeTrades(options: SubscribeTradesOptions) {
   let live = await liveConnection(options);
   notifyReady(options, live);
   const pool = endpointPool(options);
-  if (!pool) return await subscribeCoreTrades({ ...options, connection: live.connection });
+  if (!pool)
+    return await subscribeCoreTrades({
+      ...options,
+      connection: live.connection,
+    });
   // Keep duplicate suppression across connection changes. Provider probes detect
   // dead credentials/quota; they cannot diagnose a silent old socket when a new
   // handshake to that provider remains healthy.
   const seen = new Set<string>();
   const onTrade = async (event: TradeEvent) => {
-    const key = [event.signature, event.venue, event.mint, event.pool, event.side, String(event.baseRaw), String(event.quoteRaw)].join(":");
+    const key = [
+      event.signature,
+      event.venue,
+      event.mint,
+      event.pool,
+      event.eventIndex ?? `${event.side}:${event.baseRaw}:${event.quoteRaw}`,
+    ].join(":");
     if (seen.has(key)) return;
     seen.add(key);
     if (seen.size > 4096) seen.delete(seen.values().next().value!);
     await options.onTrade(event);
   };
-  let subscription = await subscribeCoreTrades({ ...options, signal: undefined, onTrade, connection: live.connection });
+  let subscription = await subscribeCoreTrades({
+    ...options,
+    signal: undefined,
+    onTrade,
+    connection: live.connection,
+  });
   let stopped = false;
   let tail: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
-    const pending = tail.then(work, work); tail = pending.catch(() => undefined); return pending;
+    const pending = tail.then(work, work);
+    tail = pending.catch(() => undefined);
+    return pending;
   };
   let settle!: () => void;
-  const closed = new Promise<void>((resolve) => { settle = resolve; });
+  const closed = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
   const requestedInterval = options.healthCheckIntervalMs ?? 30_000;
   if (!Number.isFinite(requestedInterval) || requestedInterval < 1000) {
     await subscription.close();
@@ -357,15 +427,25 @@ export async function subscribeTrades(options: SubscribeTradesOptions) {
         if (stopped || endpoint === live.endpoint) return;
         const tokens = subscription.listTokens();
         const nextLive = connectionFor(endpoint);
-        const next = await subscribeCoreTrades({ ...options, signal: undefined, tokens, onTrade, connection: nextLive.connection });
+        const next = await subscribeCoreTrades({
+          ...options,
+          signal: undefined,
+          tokens,
+          onTrade,
+          connection: nextLive.connection,
+        });
         await subscription.close();
         subscription = next;
         live = nextLive;
         notifyReady(options, live);
       } catch (error) {
-        try { options.onStatus?.("rpc-unavailable", { error: safeMessage(error) }); } catch {}
+        try {
+          options.onStatus?.("rpc-unavailable", { error: safeMessage(error) });
+        } catch {}
       }
-    }).finally(() => { checking = false; });
+    }).finally(() => {
+      checking = false;
+    });
   }, Math.trunc(requestedInterval));
   timer.unref?.();
   const close = async () => {
@@ -373,17 +453,30 @@ export async function subscribeTrades(options: SubscribeTradesOptions) {
     stopped = true;
     clearInterval(timer);
     options.signal?.removeEventListener("abort", abort);
-    await serial(async () => { await subscription.close(); settle(); });
+    await serial(async () => {
+      await subscription.close();
+      settle();
+    });
   };
-  const abort = () => { void close(); };
+  const abort = () => {
+    void close();
+  };
   if (options.signal?.aborted) await close();
   else options.signal?.addEventListener("abort", abort, { once: true });
   return {
-    addTokens: (tokens: string | readonly string[]) => serial(async () => { if (stopped) throw new Error("Trade subscription is closed"); await subscription.addTokens(tokens); }),
-    removeTokens: (tokens: string | readonly string[]) => serial(async () => { if (!stopped) await subscription.removeTokens(tokens); }),
+    addTokens: (tokens: string | readonly string[]) =>
+      serial(async () => {
+        if (stopped) throw new Error("Trade subscription is closed");
+        await subscription.addTokens(tokens);
+      }),
+    removeTokens: (tokens: string | readonly string[]) =>
+      serial(async () => {
+        if (!stopped) await subscription.removeTokens(tokens);
+      }),
     hasToken: (token: string) => !stopped && subscription.hasToken(token),
-    listTokens: () => stopped ? [] : subscription.listTokens(),
-    close, closed,
+    listTokens: () => (stopped ? [] : subscription.listTokens()),
+    close,
+    closed,
   } satisfies TradeSubscription;
 }
 
@@ -408,19 +501,45 @@ export async function listenTrades(
   options: ListenTradesOptions,
 ): Promise<TradeListener> {
   const callbacks = new Set<(event: TradeEvent) => void | Promise<void>>();
+  const history =
+    options.history === false
+      ? undefined
+      : createLiveTradeHistoryRecorder({
+          ...options.history,
+          dbPath: options.dbPath,
+          commitment: options.commitment,
+          onStatus: options.onStatus,
+        });
   const pending: TradeEvent[] = [];
-  const migrationCallbacks = new Set<(event: TradeListenerMigration) => void | Promise<void>>();
+  const migrationCallbacks = new Set<
+    (event: TradeListenerMigration) => void | Promise<void>
+  >();
   const pendingMigrations: TradeListenerMigration[] = [];
   const watched = new Set(options.tokens);
   const lastPools = new Map<string, string | null>();
   let subscription: TradeSubscription;
   let migrations: Awaited<ReturnType<typeof subscribeMigrations>> | undefined;
   let stopped = false;
+  let resolveClosed!: () => void;
+  let rejectClosed!: (error: unknown) => void;
+  const closed = new Promise<void>((resolve, reject) => {
+    resolveClosed = resolve;
+    rejectClosed = reject;
+  });
+  void closed.catch(() => undefined);
   let tail: Promise<unknown> = Promise.resolve();
-  const serial = <T>(work: () => Promise<T>): Promise<T> => { const job = tail.then(work, work); tail = job.catch(() => undefined); return job; };
+  const serial = <T>(work: () => Promise<T>): Promise<T> => {
+    const job = tail.then(work, work);
+    tail = job.catch(() => undefined);
+    return job;
+  };
   const onMigration = async (event: MigrationEvent) => {
     if (stopped || !watched.has(event.mint)) return;
-    const migration = { ...event, oldPool: lastPools.get(event.mint) ?? null, newPool: event.pool };
+    const migration = {
+      ...event,
+      oldPool: lastPools.get(event.mint) ?? null,
+      newPool: event.pool,
+    };
     lastPools.set(event.mint, event.pool);
     await serial(async () => {
       if (stopped || !watched.has(event.mint)) return;
@@ -429,12 +548,24 @@ export async function listenTrades(
       await subscription.removeTokens(event.mint);
       await subscription.addTokens(event.mint);
     });
-    if (!migrationCallbacks.size) { pendingMigrations.push(migration); if (pendingMigrations.length > 1000) pendingMigrations.shift(); }
-    else await Promise.all([...migrationCallbacks].map(callback => callback(migration)));
+    if (!migrationCallbacks.size) {
+      pendingMigrations.push(migration);
+      if (pendingMigrations.length > 1000) pendingMigrations.shift();
+    } else
+      await Promise.all(
+        [...migrationCallbacks].map((callback) => callback(migration)),
+      );
   };
   const dispatch = async (event: TradeEvent) => {
     if (!watched.has(event.mint) || stopped) return;
     lastPools.set(event.mint, event.pool);
+    try {
+      await history?.record(event);
+    } catch (error) {
+      options.onStatus?.("history-persistence-error", {
+        error: safeMessage(error),
+      });
+    }
     if (callbacks.size === 0) {
       pending.push(event);
       if (pending.length > 1_000) pending.shift();
@@ -448,28 +579,94 @@ export async function listenTrades(
   };
   const onStatus = (event: string, data?: Record<string, unknown>) => {
     options.onStatus?.(event, data);
-    if (event === "rpc-ready" && migrations && !stopped) void serial(async () => {
-      if (stopped) return;
-      const next = await subscribeMigrations({ rpcUrls: options.rpcUrls, tokens: [...watched], commitment: options.commitment, metadata: options.metadata, onMigration, onStatus: options.onStatus });
-      await migrations?.close(); migrations = next;
-    }).catch(error => options.onStatus?.("migration-resubscribe-error", { error: safeMessage(error) }));
+    if (event === "rpc-ready" && migrations && !stopped)
+      void serial(async () => {
+        if (stopped) return;
+        const next = await subscribeMigrations({
+          rpcUrls: options.rpcUrls,
+          tokens: [...watched],
+          commitment: options.commitment,
+          metadata: options.metadata,
+          onMigration,
+          onStatus: options.onStatus,
+        });
+        await migrations?.close();
+        migrations = next;
+      }).catch((error) =>
+        options.onStatus?.("migration-resubscribe-error", {
+          error: safeMessage(error),
+        }),
+      );
   };
-  subscription = await subscribeTrades({ ...options, signal: undefined, onStatus, onTrade: dispatch });
-  try { migrations = await subscribeMigrations({ rpcUrls: options.rpcUrls, tokens: [...watched], commitment: options.commitment, metadata: options.metadata, onMigration, onStatus: options.onStatus }); }
-  catch (error) { await subscription.close(); throw error; }
+  try {
+    subscription = await subscribeTrades({
+      ...options,
+      signal: undefined,
+      onStatus,
+      onTrade: dispatch,
+    });
+  } catch (error) {
+    await history?.close();
+    throw error;
+  }
+  try {
+    migrations = await subscribeMigrations({
+      rpcUrls: options.rpcUrls,
+      tokens: [...watched],
+      commitment: options.commitment,
+      metadata: options.metadata,
+      onMigration,
+      onStatus: options.onStatus,
+    });
+  } catch (error) {
+    await subscription.close();
+    await history?.close();
+    throw error;
+  }
   const close = async () => {
-    if (stopped) return;
-    stopped = true; options.signal?.removeEventListener("abort", abort);
-    await serial(async () => { await Promise.all([subscription.close(), migrations?.close()]); watched.clear(); });
+    if (stopped) return await closed;
+    stopped = true;
+    options.signal?.removeEventListener("abort", abort);
+    try {
+      await serial(async () => {
+        await Promise.all([subscription.close(), migrations?.close()]);
+        watched.clear();
+        await history?.close();
+      });
+      resolveClosed();
+    } catch (error) {
+      rejectClosed(error);
+      throw error;
+    }
   };
-  const abort = () => { void close(); };
+  const abort = () => {
+    void close();
+  };
   if (options.signal?.aborted) await close();
   else options.signal?.addEventListener("abort", abort, { once: true });
   return {
-    add: (tokens) => serial(async () => { if (stopped) throw new Error("Trade listener is closed"); const values = typeof tokens === "string" ? [tokens] : [...tokens]; await subscription.addTokens(values); await migrations!.addTokens(values); values.forEach(token => watched.add(token)); }),
-    remove: (tokens) => serial(async () => { const values = typeof tokens === "string" ? [tokens] : [...tokens]; values.forEach(token => { watched.delete(token); lastPools.delete(token); }); await Promise.all([subscription.removeTokens(values), migrations!.removeTokens(values)]); }),
+    add: (tokens) =>
+      serial(async () => {
+        if (stopped) throw new Error("Trade listener is closed");
+        const values = typeof tokens === "string" ? [tokens] : [...tokens];
+        await subscription.addTokens(values);
+        await migrations!.addTokens(values);
+        values.forEach((token) => watched.add(token));
+      }),
+    remove: (tokens) =>
+      serial(async () => {
+        const values = typeof tokens === "string" ? [tokens] : [...tokens];
+        values.forEach((token) => {
+          watched.delete(token);
+          lastPools.delete(token);
+        });
+        await Promise.all([
+          subscription.removeTokens(values),
+          migrations!.removeTokens(values),
+        ]);
+      }),
     has: (token) => !stopped && watched.has(token),
-    list: () => stopped ? [] : [...watched],
+    list: () => (stopped ? [] : [...watched]),
     onTrade(callback) {
       callbacks.add(callback);
       if (pending.length) {
@@ -482,12 +679,17 @@ export async function listenTrades(
     },
     onMigration(callback) {
       migrationCallbacks.add(callback);
-      if (pendingMigrations.length) { const rows = pendingMigrations.splice(0); void Promise.resolve().then(async () => { for (const event of rows) await callback(event); }); }
+      if (pendingMigrations.length) {
+        const rows = pendingMigrations.splice(0);
+        void Promise.resolve().then(async () => {
+          for (const event of rows) await callback(event);
+        });
+      }
       return () => migrationCallbacks.delete(callback);
     },
     close,
     get closed() {
-      return subscription.closed;
+      return closed;
     },
   };
 }

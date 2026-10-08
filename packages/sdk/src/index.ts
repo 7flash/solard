@@ -13,6 +13,8 @@ export {
   resolveLaunchLabPlatform,
 } from "@solard/core";
 export type {
+  SellEconomics,
+  SupportedLaunchLabPair,
   ValueBandPolicy,
   ValueBandRuntimeState,
   ValueBandDecision,

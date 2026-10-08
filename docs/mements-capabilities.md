@@ -1,6 +1,28 @@
 # Mements capability handoff — 2026-10-07
 
-These changes are local source changes for the unpublished 0.2.30 release. They are not present in installed 0.2.29. No dependency source patches or new dependencies were added. Funded mainnet launches, claims and migration acceptance have not been run.
+The registry has 0.2.31; the additional exact-sell, economic-sell and live-history changes below are being prepared for 0.2.32. No dependency source patches or new external dependencies were added. Funded mainnet launches, claims and migration acceptance have not been run.
+
+## Exact position sells and live history (0.2.32)
+
+```ts
+const plan = await core.tx(wallet)
+  .priorityFee({ cuLimit: 200_000, microLamports: 20_000 })
+  .sell(mint, { amountRaw: positionTokensRaw, slippageBps: 500 })
+  .build();
+// SDK convenience form:
+const result = await slrd.sell({
+  token: mint, wallet, amountRaw: positionTokensRaw,
+  slippageBps: 500, minOutputLamports: strategyMinimum,
+}, { intentKey: "position:SELL:42" });
+```
+
+`amountRaw` is a positive bigint or integer string in raw token units. It is mutually exclusive with an explicit BPS size. It preserves the exact quantity instead of rounding a fraction of the whole wallet balance. Account closure is allowed only when that quantity is the entire current token-account balance. Submitted sells must have expected final SOL output greater than their selected network fee plus tip; otherwise they fail before broadcast with `UNECONOMIC_SELL`. This check does not predict net profit after rent, token transfer fees or subsequent price movement. For strategy targets, continue using `minOutputLamports`.
+
+Configured `slrd.listenTrades({ tokens: [mint] })` inherits the client's RPC endpoints and database path. It records verified live events and sparse one-second candles by default, flushes buffered rows when closed, and accepts `history: false` to disable recording. Standalone `listenTrades` accepts an explicit `dbPath`. Collection starts with the subscription; existing empty history tables are not automatically historical backfills. Duplicate event indices are deduplicated, distinct legs are retained, and prices with unavailable quote conversion remain null. Collected history retains its commitment and is partial, with reserve spot prices rather than wallet fill prices. Use historical backfill for gaps and inspect coverage before backtesting.
+
+The 0.2.31 type migration is documented in CHANGELOG.md: convenience trade statuses are `confirmed`/`failed`/`unresolved`, `.message` replaces `.error`, and listener adapters implement `onMigration`. An unresolved result must be reconciled before another trade.
+
+The low-latency feed defaults to processed commitment. Backtests must explicitly opt into processed observations (`includeProcessed: true`) to use that collected tail, or use a confirmed/finalized subscription or backfill. A processed observation can be rolled back. An abrupt process kill can lose the current unflushed batch; `flushIntervalMs` controls that collection window.
 
 ## Creator fees
 
@@ -41,6 +63,8 @@ const launched = await slrd.deployToken("launchlab", wallet, args, {
 ```
 
 Supply an already uploaded metadata URI; no LaunchLab upload endpoint is invented. `launchConfig` and `platformConfig` may be explicit on-chain addresses. The named platform IDs were checked against official Raydium/Stonk sources; preparation reads on-chain config and fee settings. Platform restrictions still apply and simulation must succeed. Reward/community presets are not a promise that every optional platform mode is supported.
+
+In 0.2.32, `slrd.getSupportedLaunchLabPairs("stonkfun")` returns verified quote mint/program/decimals and launch config identities. `launchParametersRequireValidation` means the platform has additional parameter constraints; selecting that quote is insufficient to prove a particular launch is allowed. Native LaunchLab curve buy/sell routing is registered before Jupiter. Graduated curves fall through to other venues, and unsupported token extensions fail explicitly. Native SOL trades use an isolated temporary WSOL account so they do not consume existing WSOL holdings.
 
 `initialBuy` spends an explicit amount already denominated in the pool quote. `creatorBuySol` instead funds from SOL. For custom quotes, create → SOL-to-quote funding → new-token buy are instructions in one transaction, and the second swap consumes only the funding route's guaranteed output. Per-leg slippage is split conservatively. Existing unrelated quote holdings are not budgeted into the buy; surplus output may remain as quote tokens. A missing funding route or oversized transaction fails before submission. Suitable lookup tables may still be required.
 

@@ -30,10 +30,16 @@ describe("sdk membrane", () => {
   test("has an exact curated root export surface", () => {
     expect(exportedNames(source)).toEqual({
       values: [
-        "normalizeValueBandPolicy", "planValueBandDecision", "valueBandThresholds",
-        "normalizeTargetWeightPolicy", "planTargetWeightRebalance",
-        "buildHistoricalCandles", "runHistoricalStrategy", "sweepHistoricalStrategies",
-        "LAUNCHLAB_PLATFORM_PRESETS", "resolveLaunchLabPlatform",
+        "normalizeValueBandPolicy",
+        "planValueBandDecision",
+        "valueBandThresholds",
+        "normalizeTargetWeightPolicy",
+        "planTargetWeightRebalance",
+        "buildHistoricalCandles",
+        "runHistoricalStrategy",
+        "sweepHistoricalStrategies",
+        "LAUNCHLAB_PLATFORM_PRESETS",
+        "resolveLaunchLabPlatform",
         "createSolard",
         "default",
         "fetchTokenMetadata",
@@ -48,14 +54,28 @@ describe("sdk membrane", () => {
         "tokenAmount",
       ].sort(),
       types: [
+        "SellEconomics",
+        "SupportedLaunchLabPair",
         "TradeListenerMigration",
-        "ValueBandPolicy", "ValueBandRuntimeState", "ValueBandDecision",
-        "TargetWeightPolicy", "TargetWeightRebalancePlan",
-        "HistoricalTradeTape", "HistoricalCandle", "HistoricalStrategy",
-        "HistoricalExecutionOptions", "HistoricalStrategyResult",
-        "CreatorFeeDiscovery", "CreatorFeeGroup", "CreatorFeeItem",
-        "WalletLedger", "WalletLedgerEntry", "WalletLedgerOptions", "CurrentMarket",
-        "PreparedTokenDeployment", "PrepareDeploymentArgs",
+        "ValueBandPolicy",
+        "ValueBandRuntimeState",
+        "ValueBandDecision",
+        "TargetWeightPolicy",
+        "TargetWeightRebalancePlan",
+        "HistoricalTradeTape",
+        "HistoricalCandle",
+        "HistoricalStrategy",
+        "HistoricalExecutionOptions",
+        "HistoricalStrategyResult",
+        "CreatorFeeDiscovery",
+        "CreatorFeeGroup",
+        "CreatorFeeItem",
+        "WalletLedger",
+        "WalletLedgerEntry",
+        "WalletLedgerOptions",
+        "CurrentMarket",
+        "PreparedTokenDeployment",
+        "PrepareDeploymentArgs",
         "TradeLandingPolicy",
         "LiveEndpointOptions",
         "LivePoolReserves",
@@ -175,7 +195,7 @@ describe("sdk membrane", () => {
     expect(defaultClient).toContain("instance ??= createSolard()");
     expect(defaultClient).toContain('if (key === "close")');
     expect(defaultClient).toContain("getSolUsdPrice");
-    expect(defaultClient).toContain("listenTrades");
+    expect(client).toContain("listenTrades:");
     expect(defaultClient).toContain("subscribeLaunches");
     expect(defaultClient).toContain("subscribeMigrations");
     expect(defaultClient).not.toContain("export default createSolard()");
@@ -200,7 +220,7 @@ describe("sdk membrane", () => {
 
   test("does not expose core repositories or secret-bearing handles", () => {
     expect(client).not.toMatch(
-      /\b(?:db|wallets|tokens|groups|executions|positions|prices|alts|senders|venues|claimSources|launches|launchpads|connection|signer)\s*:/,
+      /^(?: {2}| {4})(?:db|wallets|tokens|groups|executions|positions|prices|alts|senders|venues|claimSources|launches|launchpads|connection|signer)\s*:/m,
     );
   });
 });

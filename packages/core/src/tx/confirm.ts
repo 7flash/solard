@@ -14,7 +14,11 @@ function receiptFromStatus(
   sender: string,
   status: SignatureStatus,
 ): SendReceipt | null {
-  if (status.err && (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized")) {
+  if (
+    status.err &&
+    (status.confirmationStatus === "confirmed" ||
+      status.confirmationStatus === "finalized")
+  ) {
     return {
       signature,
       slot: status.slot ?? null,
@@ -43,15 +47,19 @@ async function withTransactionMeta(
 ): Promise<SendReceipt> {
   if (receipt.status === "submitted") return receipt;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const transaction = await connection.getTransaction(receipt.signature, {
-      commitment: "confirmed",
-      maxSupportedTransactionVersion: 1,
-    }).catch(() => null);
+    const transaction = await connection
+      .getTransaction(receipt.signature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 1,
+      })
+      .catch(() => null);
     const meta = transaction?.meta;
     if (meta) {
       return {
         ...receipt,
-        ...(receipt.status === "failed" ? { error: `${receipt.error}\n${meta.logMessages?.join("\n") ?? ""}` } : {}),
+        ...(receipt.status === "failed"
+          ? { error: `${receipt.error}\n${meta.logMessages?.join("\n") ?? ""}` }
+          : {}),
         feeLamports: meta.fee,
         computeUnitsConsumed:
           meta.computeUnitsConsumed == null

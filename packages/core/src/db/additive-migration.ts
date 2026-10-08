@@ -21,7 +21,9 @@ function columnDefinition(value: string): string {
   // SQLite ADD COLUMN deliberately cannot add PRIMARY KEY/UNIQUE and has
   // restrictions around non-constant defaults. Keep this helper additive-only.
   if (/\b(?:PRIMARY\s+KEY|UNIQUE)\b/i.test(normalized))
-    throw new Error("Additive SQLite columns cannot introduce PRIMARY KEY or UNIQUE constraints");
+    throw new Error(
+      "Additive SQLite columns cannot introduce PRIMARY KEY or UNIQUE constraints",
+    );
   return normalized;
 }
 
@@ -40,12 +42,16 @@ export function ensureAdditiveSqliteColumns(
   try {
     const tableName = identifier(table);
     const present = new Set(
-      (db.query(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>).map(
-        (row) => row.name,
-      ),
+      (
+        db.query(`PRAGMA table_info(${tableName})`).all() as Array<{
+          name: string;
+        }>
+      ).map((row) => row.name),
     );
     if (present.size === 0)
-      throw new Error(`SQLite table ${table} does not exist; additive migration requires an existing table`);
+      throw new Error(
+        `SQLite table ${table} does not exist; additive migration requires an existing table`,
+      );
 
     const added: string[] = [];
     const existing: string[] = [];
@@ -57,9 +63,13 @@ export function ensureAdditiveSqliteColumns(
         }
         const columnName = identifier(column.name);
         const definition = columnDefinition(column.definition);
-        db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+        db.exec(
+          `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`,
+        );
         if (column.backfill !== undefined)
-          db.query(`UPDATE ${tableName} SET ${columnName} = ? WHERE ${columnName} IS NULL`).run(column.backfill);
+          db.query(
+            `UPDATE ${tableName} SET ${columnName} = ? WHERE ${columnName} IS NULL`,
+          ).run(column.backfill);
         present.add(column.name);
         added.push(column.name);
       }

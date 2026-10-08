@@ -235,6 +235,14 @@ function randomJitoTipAccount(): string {
   ]!;
 }
 
+function heliusLandingTier(
+  endpoint: string | undefined,
+): "helius-swqos" | "helius-max" {
+  return endpoint && new URL(endpoint).searchParams.get("swqos_only") === "true"
+    ? "helius-swqos"
+    : "helius-max";
+}
+
 function envString(name: string): string | undefined {
   const primary = process.env[name]?.trim();
   if (primary) return primary;
@@ -335,7 +343,10 @@ export function pumpLaunchEnvironment(): PumpLaunchEnvironment {
     ? requireEnv("HELIUS_TIP_ACCOUNT")
     : envString("HELIUS_TIP_ACCOUNT");
   const tipLamports = usesHeliusSender
-    ? bigintEnv("HELIUS_TIP_LAMPORTS", 200_000n)
+    ? bigintEnv(
+        "HELIUS_TIP_LAMPORTS",
+        heliusLandingTier(senderUrl) === "helius-swqos" ? 5_000n : 1_000_000n,
+      )
     : 0n;
   const jitoUrl = "https://mainnet.block-engine.jito.wtf";
   const configuredJitoTipAccount = envString("JITO_TIP_ACCOUNT");
@@ -387,7 +398,13 @@ export function installPumpLaunchSenders(
   env: PumpLaunchEnvironment,
 ): void {
   if (env.senderUrl) {
-    slrd.registerSender(new HeliusSender(env.senderUrl, "helius-fast"));
+    slrd.registerSender(
+      new HeliusSender(
+        env.senderUrl,
+        "helius-fast",
+        heliusLandingTier(env.senderUrl),
+      ),
+    );
   }
 
   slrd.registerSender(
@@ -443,8 +460,8 @@ export function validateHeliusTip(args: {
   validateOptionalTipAddress(args.tip.account);
   if (!args.live) return;
 
-  const swqosOnly = Boolean(args.endpoint?.includes("swqos_only=true"));
-  const minimum = swqosOnly ? 5_000n : 200_000n;
+  const minimum =
+    heliusLandingTier(args.endpoint) === "helius-swqos" ? 5_000n : 1_000_000n;
 
   if (!args.tip.account || args.tip.lamports == null) {
     throw new Error(
@@ -725,13 +742,49 @@ function launchBuilder(args: {
     });
   }
 
-  builder
-    .addMany(args.deployment.instructions, {
-      kind: args.kind,
+  builder.addMany(args.deployment.instructions, {
+    kind: args.kind,
+    mint: args.deployment.mint.publicKey,
+    meta: {
+      alias: args.alias,
+      symbol: args.symbol,
+      quoteMint: args.deployment.quoteAsset.mint.toBase58(),
+      creatorBuySolLamports:
+        args.deployment.metadata?.creatorBuySolLamports ?? null,
+    },
+  });
+  const signers = new Map(
+    [args.deployment.mint, ...args.deployment.signers].map((signer) => [
+      signer.publicKey.toBase58(),
+      signer,
+    ]),
+  );
+  for (const signer of signers.values()) builder.withSigner(signer);
+  // Atomic quote funding is already part of deployment.instructions. Retain
+  // its action metadata (including provider ALTs) without appending its swaps twice.
+  if (Array.isArray(args.deployment.metadata?.fundingActions))
+    for (const action of args.deployment.metadata.fundingActions)
+      builder.addMany([], action);
+  if (
+    args.initialBuyer &&
+    args.deployment.metadata?.creatorBuySolLamports != null
+  ) {
+    builder.addMany([], {
+      kind: `${args.kind}:initial-buy`,
       mint: args.deployment.mint.publicKey,
-      meta: { alias: args.alias, symbol: args.symbol },
-    })
-    .withSigner(args.deployment.mint);
+      meta: {
+        role: "creator",
+        buyer: args.initialBuyer.address,
+        spendLamports: args.initialBuyer.spendLamports.toString(),
+        reserveLamports: args.initialBuyer.reserveLamports.toString(),
+        quoteMint: args.deployment.quoteAsset.mint.toBase58(),
+        quoteInputRaw: args.deployment.metadata.initialBuyRaw,
+        minimumOutputRaw: args.deployment.metadata.minimumOutputRaw,
+        expectedOutputRaw: args.deployment.metadata.expectedOutputRaw,
+        funding: "atomic-sol-to-quote",
+      },
+    });
+  }
 
   if (args.initialBuy && args.initialBuyer) {
     builder.addMany(args.initialBuy.instructions, {
@@ -904,15 +957,19 @@ export async function preparePumpTokenLaunch(args: {
 
   const payer = args.slrd.signer(args.creatorWallet).publicKey;
   const quoteAsset = args.quoteAsset ?? SOL_ASSET;
-  const hasSequentialBuys =
-    args.creatorBuyLamports > 0n ||
-    args.traders.some((trader) => trader.spendLamports > 0n);
-  if (!sameAsset(quoteAsset, SOL_ASSET) && hasSequentialBuys) {
+  const customQuote = !sameAsset(quoteAsset, SOL_ASSET);
+  if (customQuote && args.traders.length > 0) {
     throw new Error(
-      "Pump non-SOL quote launches currently support deploy-only creation. " +
-        "--creator-buy-sol, --buyer-group, and buy-plan amounts are SOL-denominated and cannot be reused as quote-token amounts.",
+      "Pump non-SOL quote launches support an atomic SOL-funded creator buy. " +
+        "Custom-quote follower/buyer-group bundles are unsupported; SOL follower budgets cannot be reused as quote-token amounts.",
     );
   }
+  const creator = await loadCreatorAllocation({
+    slrd: args.slrd,
+    wallet: args.creatorWallet,
+    spendLamports: args.creatorBuyLamports,
+    reserveLamports: args.creatorReserveLamports,
+  });
 
   const deployment = await args.slrd.prepareTokenDeployment(
     "pump",
@@ -926,22 +983,21 @@ export async function preparePumpTokenLaunch(args: {
       mint: args.mint,
       mayhemMode: args.mayhemMode ?? args.token.mayhemMode ?? false,
       cashback: args.cashback ?? args.token.cashback ?? false,
+      ...(customQuote && creator
+        ? {
+            creatorBuySol: rawAmount(creator.spendLamports, SOL_ASSET),
+            slippageBps: args.slippageBps,
+          }
+        : {}),
     },
   );
 
-  const creator = await loadCreatorAllocation({
-    slrd: args.slrd,
-    wallet: args.creatorWallet,
-    spendLamports: args.creatorBuyLamports,
-    reserveLamports: args.creatorReserveLamports,
-  });
-
   let state: PendingMarketState | null = null;
   let initialBuy: PreparedPendingBuy | null = null;
-  if (creator || args.traders.length > 0) {
+  if (!customQuote && (creator || args.traders.length > 0)) {
     state = await args.slrd.initialPendingMarketState("pump", deployment);
   }
-  if (creator) {
+  if (creator && !customQuote) {
     initialBuy = await args.slrd.preparePendingBuy(
       "pump",
       deployment,
@@ -952,6 +1008,14 @@ export async function preparePumpTokenLaunch(args: {
     );
     state = initialBuy.nextState;
   }
+  const atomicCreatorMinimum =
+    customQuote && creator
+      ? BigInt(String(deployment.metadata?.minimumOutputRaw ?? "0"))
+      : null;
+  if (atomicCreatorMinimum !== null && atomicCreatorMinimum <= 0n)
+    throw new Error(
+      "Atomic SOL-funded custom-quote creator buy has no guaranteed target output",
+    );
 
   const deploymentSender = String(args.senderPolicy.deploymentSender);
   // Jito bundle tips belong in the final buyer transaction. Keeping the
@@ -1050,13 +1114,14 @@ export async function preparePumpTokenLaunch(args: {
     traderPlans,
     traderLanes,
     expectedOutputByWallet: [
-      ...(creator && initialBuy
+      ...(creator && (initialBuy || atomicCreatorMinimum !== null)
         ? [
             {
               role: creator.role,
               address: creator.address,
               spendLamports: creator.spendLamports,
-              minimumOutputRaw: initialBuy.minimumOutputRaw,
+              minimumOutputRaw:
+                initialBuy?.minimumOutputRaw ?? atomicCreatorMinimum!,
               submission: `initial-buy-in-create:${String(args.senderPolicy.deploymentSender)}`,
             },
           ]

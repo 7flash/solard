@@ -1,6 +1,6 @@
 {
   "name": "@solard/cli",
-  "version": "0.2.30",
+  "version": "0.2.33",
   "description": "Command-line interface for the Solard SDK.",
   "type": "module",
   "main": "./src/index.ts",
@@ -19,8 +19,8 @@
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
-    "@solard/core": "0.2.30",
-    "@solard/sdk": "0.2.30",
+    "@solard/core": "0.2.33",
+    "@solard/sdk": "0.2.33",
     "bs58": "^6.0.0",
     "measure-fn": "5.2.0"
   },

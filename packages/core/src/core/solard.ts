@@ -71,26 +71,65 @@ import {
   QuoteAssetMismatchError,
   isDefinitivePreSubmissionError,
 } from "../core/errors.ts";
-import { verifyPoolTokenMetadata, mergeTokenMetadataJson } from "../venues/pump/token-metadata.ts";
+import {
+  verifyPoolTokenMetadata,
+  mergeTokenMetadataJson,
+} from "../venues/pump/token-metadata.ts";
 import { TradePreSubmissionError } from "../tx/trade-errors.ts";
 import { TradeIntentStore } from "../tx/trade-intent.ts";
 import { checkPlanBalance } from "../tx/balance-preflight.ts";
 import { estimatePlanFee } from "../tx/fee-estimate.ts";
-import { isComputeExhausted, simulationComputeLimit } from "../tx/compute-sizing.ts";
+import {
+  assertEconomicSell,
+  selectedPriorityFeeLamports,
+} from "../tx/sell-economics.ts";
+import {
+  isComputeExhausted,
+  simulationComputeLimit,
+} from "../tx/compute-sizing.ts";
 import { addHeliusLandingTip } from "../tx/helius-landing.ts";
-import { prepareTokenAccountMaintenance, type TokenMaintenanceOptions } from "../chain/token-maintenance.ts";
-import { getClaimableCreatorFees as discoverCreatorFees, batchCreatorFeePlans } from "../claims/creator-fees.ts";
+import {
+  prepareTokenAccountMaintenance,
+  type TokenMaintenanceOptions,
+} from "../chain/token-maintenance.ts";
+import {
+  getClaimableCreatorFees as discoverCreatorFees,
+  batchCreatorFeePlans,
+} from "../claims/creator-fees.ts";
 import { loadHistoricalTradeTape } from "../backtest/historical.ts";
 import type { TokenBacktestTapeOptions } from "../backtest/tape.ts";
 import { resolveCurrentMarket as loadCurrentMarket } from "../market/current-market.ts";
-import { walletLedger as loadWalletLedger, walletLedgerEntry, type WalletLedgerOptions, type WalletLedgerEntry } from "../ledger/wallet-ledger.ts";
+import {
+  walletLedger as loadWalletLedger,
+  walletLedgerEntry,
+  type WalletLedgerOptions,
+  type WalletLedgerEntry,
+} from "../ledger/wallet-ledger.ts";
 import { createRawTransactionCachingConnection } from "../events/raw-transaction-cache.ts";
 import { getSupportedPumpPairs as loadPumpPairs } from "../launches/pump/pairs.ts";
-import { listVanityMintPool, reserveVanityMintFromPool, releaseVanityMintReservation, markVanityMintUsed } from "../launches/pump/vanity-pool.ts";
+import { getSupportedLaunchLabPairs as loadLaunchLabPairs } from "../launches/raydium/launchlab-pairs.ts";
+import {
+  listVanityMintPool,
+  reserveVanityMintFromPool,
+  releaseVanityMintReservation,
+  markVanityMintUsed,
+} from "../launches/pump/vanity-pool.ts";
 import { fetchCurve } from "../venues/pump/state.ts";
-import { failedTrade, tradeResult, type TradeResult } from "../tx/trade-result.ts";
-import { notifyTrade, type TradeExecutionOptions } from "../tx/trade-options.ts";
-import { chooseTradeFee, normalizeLandingPolicy, runTradeAttempts, type TradeLandingPolicy } from "../tx/trade-policy.ts";
+import {
+  failedTrade,
+  tradeResult,
+  type TradeResult,
+} from "../tx/trade-result.ts";
+import {
+  notifyTrade,
+  type TradeExecutionOptions,
+} from "../tx/trade-options.ts";
+import {
+  chooseTradeFee,
+  normalizeLandingPolicy,
+  runTradeAttempts,
+  type TradeLandingPolicy,
+} from "../tx/trade-policy.ts";
 import { inspectExpiredSubmission } from "../tx/expiry.ts";
 import { optionalDecimals } from "../core/decimals.ts";
 import type { GroupRef, TokenRef, WalletRef } from "../core/refs.ts";
@@ -425,7 +464,11 @@ function signedPlanSignature(plan: PlannedTransaction): string {
   return bs58.encode(bytes);
 }
 function tradeTokenKey(token: TokenRef): string {
-  return typeof token === "string" ? token : token instanceof PublicKey ? token.toBase58() : token.mint;
+  return typeof token === "string"
+    ? token
+    : token instanceof PublicKey
+      ? token.toBase58()
+      : token.mint;
 }
 
 function definitiveSubmissionFailure(error: unknown): boolean {
@@ -843,7 +886,9 @@ export class Solard implements ComposerHost {
     this.prices = new PriceRepo(this.db);
     this.alts = new AltRepo(this.db);
     this.agentRepo = new AgentRepo(this.db);
-    this.chain = new SolardConnection(options.rpcUrl, "confirmed", { rpcUrls: options.rpcUrls });
+    this.chain = new SolardConnection(options.rpcUrl, "confirmed", {
+      rpcUrls: options.rpcUrls,
+    });
     this.cache = new AccountCache(options.cacheTtlMs);
     this.watcher = new SolardWatcher(this.db, () => this.connection());
     this.meteora = new MeteoraDlmmService({
@@ -944,7 +989,12 @@ export class Solard implements ComposerHost {
     const sol = transactionSolFill(tx, execution.walletAddress);
     if (!sol) return;
     const meta = executionMeta(execution.metaJson);
-    const tipLamports = typeof meta.landingTipLamports === "number" && Number.isSafeInteger(meta.landingTipLamports) && meta.landingTipLamports >= 0 ? BigInt(meta.landingTipLamports) : 0n;
+    const tipLamports =
+      typeof meta.landingTipLamports === "number" &&
+      Number.isSafeInteger(meta.landingTipLamports) &&
+      meta.landingTipLamports >= 0
+        ? BigInt(meta.landingTipLamports)
+        : 0n;
     const principalLamports = sol.economicLamports + tipLamports;
     if (
       (side === "buy" && principalLamports >= 0n) ||
@@ -1356,8 +1406,13 @@ export class Solard implements ComposerHost {
         const mintState = await readMint(chain, mint, this.cache);
         const inspected = await this.venues.inspect(chain, mint);
         const candidate = {
-          ...inspected, ...metadata, mint: mint.toBase58(),
-          metadataJson: mergeTokenMetadataJson(inspected?.metadataJson, metadata.metadataJson),
+          ...inspected,
+          ...metadata,
+          mint: mint.toBase58(),
+          metadataJson: mergeTokenMetadataJson(
+            inspected?.metadataJson,
+            metadata.metadataJson,
+          ),
         };
         const verifiedQuote = await verifyPoolTokenMetadata(chain, candidate);
         return this.tokens.upsert({
@@ -1381,17 +1436,29 @@ export class Solard implements ComposerHost {
     const mint = new PublicKey(token.mint);
     const mintState = await readMint(this.connection(), mint, this.cache);
     const inspected = await this.venues.inspect(this.connection(), mint);
-    const preservePool = token.pool && (
-      token.venueHint === "pumpswap" || token.venueHint === "meteora-damm-v2" ||
-      (token.venueHint === "meteora-dbc" && inspected?.venueHint !== "meteora-damm-v2")
-    );
+    const preservePool =
+      token.pool &&
+      (token.venueHint === "pumpswap" ||
+        token.venueHint === "meteora-damm-v2" ||
+        (token.venueHint === "meteora-dbc" &&
+          inspected?.venueHint !== "meteora-damm-v2"));
     const candidate = {
-      ...token, ...inspected, mint: token.mint,
-      pool: preservePool ? token.pool : inspected?.pool ?? token.pool,
-      venueHint: preservePool ? token.venueHint : inspected?.venueHint ?? token.venueHint,
-      metadataJson: mergeTokenMetadataJson(token.metadataJson, inspected?.metadataJson),
+      ...token,
+      ...inspected,
+      mint: token.mint,
+      pool: preservePool ? token.pool : (inspected?.pool ?? token.pool),
+      venueHint: preservePool
+        ? token.venueHint
+        : (inspected?.venueHint ?? token.venueHint),
+      metadataJson: mergeTokenMetadataJson(
+        token.metadataJson,
+        inspected?.metadataJson,
+      ),
     };
-    const verifiedQuote = await verifyPoolTokenMetadata(this.connection(), candidate);
+    const verifiedQuote = await verifyPoolTokenMetadata(
+      this.connection(),
+      candidate,
+    );
     return this.tokens.upsert({
       ...candidate,
       ...verifiedQuote,
@@ -1402,7 +1469,13 @@ export class Solard implements ComposerHost {
     });
   }
 
-  async route(token: TokenRow, user: PublicKey, options: { reserves?: import("../venues/venue-plugin.ts").LivePoolReserves } = {}) {
+  async route(
+    token: TokenRow,
+    user: PublicKey,
+    options: {
+      reserves?: import("../venues/venue-plugin.ts").LivePoolReserves;
+    } = {},
+  ) {
     return await this.venues.resolve(this.connection(), token, user, options);
   }
   async resolveClaim(token: TokenRow, user: PublicKey): Promise<ClaimPlan> {
@@ -1411,53 +1484,150 @@ export class Solard implements ComposerHost {
   }
   /** Read-only discovery uses the public wallet identity, never a signer. */
   async walletLedger(wallet: WalletRef, options: WalletLedgerOptions = {}) {
-    return await loadWalletLedger(createRawTransactionCachingConnection({ connection: this.connection(), database: this.db }), this.wallets.resolve(wallet).address, options);
+    return await loadWalletLedger(
+      createRawTransactionCachingConnection({
+        connection: this.connection(),
+        database: this.db,
+      }),
+      this.wallets.resolve(wallet).address,
+      options,
+    );
   }
-  async historicalTape(token: TokenRef, options: TokenBacktestTapeOptions & MarketHistoryOptions = {}) {
+  async historicalTape(
+    token: TokenRef,
+    options: TokenBacktestTapeOptions & MarketHistoryOptions = {},
+  ) {
     await this.marketHistory(token, options);
     const resolved = await this.resolveReplayToken(token);
-    return loadHistoricalTradeTape(resolved.mint, options, new SqliteTokenHistoryRepository(this.db));
+    return loadHistoricalTradeTape(
+      resolved.mint,
+      options,
+      new SqliteTokenHistoryRepository(this.db),
+    );
   }
-  async resolveCurrentMarket(token: TokenRef, options: { pool?: string | PublicKey } = {}) {
+  async resolveCurrentMarket(
+    token: TokenRef,
+    options: { pool?: string | PublicKey } = {},
+  ) {
     const resolved = await this.resolveReplayToken(token);
-    if (options.pool) return await loadCurrentMarket(this.connection(), resolved.mint, options);
+    if (options.pool)
+      return await loadCurrentMarket(this.connection(), resolved.mint, options);
     if (resolved.pool) {
-      const known = await loadCurrentMarket(this.connection(), resolved.mint, {pool: resolved.pool});
+      const known = await loadCurrentMarket(this.connection(), resolved.mint, {
+        pool: resolved.pool,
+      });
       if (known) return known;
     }
     return await loadCurrentMarket(this.connection(), resolved.mint);
   }
-  async getClaimableCreatorFees(wallet: WalletRef, options: { tokens?: readonly TokenRef[] } = {}) {
+  async getClaimableCreatorFees(
+    wallet: WalletRef,
+    options: { tokens?: readonly TokenRef[] } = {},
+  ) {
     const address = this.wallets.resolve(wallet).address;
-    const tokens = options.tokens ? await Promise.all(options.tokens.map((ref) => this.resolveTokenForExecution(ref))) : this.tokens.list();
-    return await discoverCreatorFees(this.connection(), address, tokens, this.claimSources.list());
+    const tokens = options.tokens
+      ? await Promise.all(
+          options.tokens.map((ref) => this.resolveTokenForExecution(ref)),
+        )
+      : this.tokens.list();
+    return await discoverCreatorFees(
+      this.connection(),
+      address,
+      tokens,
+      this.claimSources.list(),
+    );
   }
 
-  async claimAllCreatorFees(wallet: WalletRef, options: TradeExecutionOptions & { tokens?: readonly TokenRef[]; maxInstructions?: number } = {}) {
+  async claimAllCreatorFees(
+    wallet: WalletRef,
+    options: TradeExecutionOptions & {
+      tokens?: readonly TokenRef[];
+      maxInstructions?: number;
+    } = {},
+  ) {
     const discovery = await this.getClaimableCreatorFees(wallet, options);
-    const batches = batchCreatorFeePlans(discovery.plans, options.maxInstructions ?? 12);
-    const receipts: Array<{ sources: Array<string>; result: TradeResult; payout: WalletLedgerEntry | null }> = [];
+    const batches = batchCreatorFeePlans(
+      discovery.plans,
+      options.maxInstructions ?? 12,
+    );
+    const receipts: Array<{
+      sources: Array<string>;
+      result: TradeResult;
+      payout: WalletLedgerEntry | null;
+    }> = [];
     for (let index = 0; index < batches.length; index++) {
       const claims = batches[index]!;
-      const draft: TransactionDraft = { instructions: claims.flatMap((claim) => claim.instructions), signers: [], trackedAccounts: [{ address: this.signer(wallet).publicKey, kind: "sol" }],
-        actions: claims.map((claim) => ({ kind: "creator-claim", meta: { source: claim.source, quoteMint: claim.quoteAsset.mint.toBase58(), estimatedClaimRaw: claim.estimatedClaimRaw.toString(), ...(claim.meta ?? {}) } })) };
-      const intentKey = options.intentKey ? `${options.intentKey}:claim:${index}` : undefined;
-      const result = await this.runReliableTrade(wallet, intentKey, JSON.stringify(draft.actions), async () => {
-        const execution = await this.executeTradePlan(wallet, () => this.compile(this.signer(wallet), draft),
-          options.landing?.route ?? (Array.isArray(options.via) ? options.via[0] : options.via) ?? "rpc", "claim", { ...options, intentKey });
-        return tradeResult(execution.receipt, execution.attempts, execution.submission.executionId);
-      });
+      const draft: TransactionDraft = {
+        instructions: claims.flatMap((claim) => claim.instructions),
+        signers: [],
+        trackedAccounts: [
+          { address: this.signer(wallet).publicKey, kind: "sol" },
+        ],
+        actions: claims.map((claim) => ({
+          kind: "creator-claim",
+          meta: {
+            source: claim.source,
+            quoteMint: claim.quoteAsset.mint.toBase58(),
+            estimatedClaimRaw: claim.estimatedClaimRaw.toString(),
+            ...(claim.meta ?? {}),
+          },
+        })),
+      };
+      const intentKey = options.intentKey
+        ? `${options.intentKey}:claim:${index}`
+        : undefined;
+      const result = await this.runReliableTrade(
+        wallet,
+        intentKey,
+        JSON.stringify(draft.actions),
+        async () => {
+          const execution = await this.executeTradePlan(
+            wallet,
+            () => this.compile(this.signer(wallet), draft),
+            options.landing?.route ??
+              (Array.isArray(options.via) ? options.via[0] : options.via) ??
+              "rpc",
+            "claim",
+            { ...options, intentKey },
+          );
+          return tradeResult(
+            execution.receipt,
+            execution.attempts,
+            execution.submission.executionId,
+          );
+        },
+      );
       let payout: WalletLedgerEntry | null = null;
       if (result.status === "confirmed" && result.signature) {
         try {
-          const transaction = await this.connection().getParsedTransaction(result.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 1 });
-          if (transaction) payout = walletLedgerEntry(transaction, this.wallets.resolve(wallet).address, result.signature);
-        } catch { /* Payout stays unknown if confirmed metadata is unavailable. */ }
+          const transaction = await this.connection().getParsedTransaction(
+            result.signature,
+            { commitment: "confirmed", maxSupportedTransactionVersion: 1 },
+          );
+          if (transaction)
+            payout = walletLedgerEntry(
+              transaction,
+              this.wallets.resolve(wallet).address,
+              result.signature,
+            );
+        } catch {
+          /* Payout stays unknown if confirmed metadata is unavailable. */
+        }
       }
-      receipts.push({ sources: claims.map((claim) => claim.source), result, payout });
+      receipts.push({
+        sources: claims.map((claim) => claim.source),
+        result,
+        payout,
+      });
       if (result.status === "unresolved") break;
     }
-    return { discovery, receipts, complete: receipts.length === batches.length && receipts.every((row) => row.result.status !== "unresolved") };
+    return {
+      discovery,
+      receipts,
+      complete:
+        receipts.length === batches.length &&
+        receipts.every((row) => row.result.status !== "unresolved"),
+    };
   }
   async waitForLaunch(
     sourceId: string,
@@ -1480,46 +1650,110 @@ export class Solard implements ComposerHost {
   async prepareTokenDeployment(
     launchpadId: string,
     wallet: WalletRef,
-    args: Omit<PrepareDeploymentArgs, "user"> & { vanitySuffix?: string; creatorBuySol?: HumanAmount },
+    args: Omit<PrepareDeploymentArgs, "user"> & {
+      vanitySuffix?: string;
+      creatorBuySol?: HumanAmount;
+    },
   ): Promise<PreparedTokenDeployment> {
     const user = this.signer(wallet).publicKey;
-    if (args.vanitySuffix && args.mint) throw new Error("Choose a mint or a vanity suffix, not both");
-    const reserved = args.vanitySuffix ? reserveVanityMintFromPool(args.vanitySuffix, { reason: `deployment:${launchpadId}` }, this.db) : null;
+    if (args.vanitySuffix && args.mint)
+      throw new Error("Choose a mint or a vanity suffix, not both");
+    const reserved = args.vanitySuffix
+      ? reserveVanityMintFromPool(
+          args.vanitySuffix,
+          { reason: `deployment:${launchpadId}` },
+          this.db,
+        )
+      : null;
     try {
-      if (args.creatorBuySol && args.initialBuy) throw new Error("Choose creatorBuySol or initialBuy");
-      const budget = args.creatorBuySol ? toRawAmount(args.creatorBuySol) : null;
-      if (budget && (!sameAsset(budget.asset, SOL_ASSET) || budget.raw <= 0n)) throw new Error("creatorBuySol requires a positive SOL budget");
+      if (args.creatorBuySol && args.initialBuy)
+        throw new Error("Choose creatorBuySol or initialBuy");
+      const budget = args.creatorBuySol
+        ? toRawAmount(args.creatorBuySol)
+        : null;
+      if (budget && (!sameAsset(budget.asset, SOL_ASSET) || budget.raw <= 0n))
+        throw new Error("creatorBuySol requires a positive SOL budget");
       const plugin = this.launchpads.resolve(launchpadId);
-      let deployment = await plugin.prepareDeployment(this.connection(), { ...args, mint: reserved?.mint ?? args.mint, user });
+      let deployment = await plugin.prepareDeployment(this.connection(), {
+        ...args,
+        mint: reserved?.mint ?? args.mint,
+        user,
+      });
       if (budget) {
         if (deployment.quoteAsset.kind === "native-sol") {
-          deployment = await plugin.prepareDeployment(this.connection(), { ...args, mint: deployment.mint, initialBuy: budget, user });
+          deployment = await plugin.prepareDeployment(this.connection(), {
+            ...args,
+            mint: deployment.mint,
+            initialBuy: budget,
+            user,
+          });
         } else {
           const total = args.slippageBps ?? 500;
-          if (!Number.isSafeInteger(total) || total < 0 || total >= 10_000) throw new Error("Invalid slippageBps");
+          if (!Number.isSafeInteger(total) || total < 0 || total >= 10_000)
+            throw new Error("Invalid slippageBps");
           const leg = Math.floor((1 - Math.sqrt(1 - total / 10_000)) * 10_000);
-          const funding = await this.tx(wallet).buy(deployment.quoteAsset.mint, budget, { slippageBps: leg }).materializedDraft();
+          const funding = await this.tx(wallet)
+            .buy(deployment.quoteAsset.mint, budget, { slippageBps: leg })
+            .materializedDraft();
           const action = funding.actions.find((item) => item.kind === "buy");
           const minimum = BigInt(String(action?.meta?.minOutputRaw ?? "0"));
-          if (minimum <= 0n) throw new Error("Quote funding route has no guaranteed output");
-          const state = await this.initialPendingMarketState(launchpadId, deployment);
-          const buy = await this.preparePendingBuy(launchpadId, deployment, wallet, rawAmount(minimum, deployment.quoteAsset), state, { slippageBps: leg });
-          deployment.instructions.push(...funding.instructions, ...buy.instructions);
+          if (minimum <= 0n)
+            throw new Error("Quote funding route has no guaranteed output");
+          const state = await this.initialPendingMarketState(
+            launchpadId,
+            deployment,
+          );
+          const buy = await this.preparePendingBuy(
+            launchpadId,
+            deployment,
+            wallet,
+            rawAmount(minimum, deployment.quoteAsset),
+            state,
+            { slippageBps: leg },
+          );
+          deployment.instructions.push(
+            ...funding.instructions,
+            ...buy.instructions,
+          );
           deployment.signers.push(...funding.signers);
-          deployment.metadata = { ...deployment.metadata, fundingActions: funding.actions, initialBuyRaw: minimum.toString(), minimumOutputRaw: buy.minimumOutputRaw.toString(), expectedOutputRaw: buy.expectedOutputRaw.toString() };
+          deployment.metadata = {
+            ...deployment.metadata,
+            fundingActions: funding.actions,
+            initialBuyRaw: minimum.toString(),
+            minimumOutputRaw: buy.minimumOutputRaw.toString(),
+            expectedOutputRaw: buy.expectedOutputRaw.toString(),
+          };
         }
-        deployment.metadata = { ...deployment.metadata, creatorBuySolLamports: budget.raw.toString() };
+        deployment.metadata = {
+          ...deployment.metadata,
+          creatorBuySolLamports: budget.raw.toString(),
+        };
       }
-      if (reserved) deployment.metadata = { ...deployment.metadata, vanityMintPoolAddress: reserved.address };
+      if (reserved)
+        deployment.metadata = {
+          ...deployment.metadata,
+          vanityMintPoolAddress: reserved.address,
+        };
       return deployment;
     } catch (error) {
       if (reserved) releaseVanityMintReservation(reserved.address, this.db);
-      throw error instanceof TradePreSubmissionError ? error : new TradePreSubmissionError(error);
+      throw error instanceof TradePreSubmissionError
+        ? error
+        : new TradePreSubmissionError(error);
     }
   }
-  getSupportedPumpPairs() { return loadPumpPairs(this.connection()); }
-  listVanityMints(options: Parameters<typeof listVanityMintPool>[0] = {}) { return listVanityMintPool(options, this.db); }
-  releaseVanityMint(address: string) { return releaseVanityMintReservation(address, this.db); }
+  getSupportedPumpPairs() {
+    return loadPumpPairs(this.connection());
+  }
+  getSupportedLaunchLabPairs(platformConfig: string | PublicKey) {
+    return loadLaunchLabPairs(this.connection(), platformConfig);
+  }
+  listVanityMints(options: Parameters<typeof listVanityMintPool>[0] = {}) {
+    return listVanityMintPool(options, this.db);
+  }
+  releaseVanityMint(address: string) {
+    return releaseVanityMintReservation(address, this.db);
+  }
   async initialPendingMarketState(
     launchpadId: string,
     deployment: PreparedTokenDeployment,
@@ -1570,48 +1804,117 @@ export class Solard implements ComposerHost {
   async deployToken(
     launchpadId: string,
     wallet: WalletRef,
-    args: Omit<PrepareDeploymentArgs, "user"> & { vanitySuffix?: string; creatorBuySol?: HumanAmount },
+    args: Omit<PrepareDeploymentArgs, "user"> & {
+      vanitySuffix?: string;
+      creatorBuySol?: HumanAmount;
+    },
     options: TradeExecutionOptions & { alias?: string } = {},
   ): Promise<{
     deployment: PreparedTokenDeployment;
     token: TokenRow | null;
     receipt: SendReceipt;
     result: TradeResult;
-    costs: { networkFeeLamports: bigint | null; tipLamports: bigint | null; tokenAccountRentDeltaLamports: bigint | null; creatorBuyBudgetLamports: bigint | null; solDeltaLamports: bigint | null; residualLamports: bigint | null; targetTokenDeltaRaw: bigint | null };
+    costs: {
+      networkFeeLamports: bigint | null;
+      tipLamports: bigint | null;
+      tokenAccountRentDeltaLamports: bigint | null;
+      creatorBuyBudgetLamports: bigint | null;
+      solDeltaLamports: bigint | null;
+      residualLamports: bigint | null;
+      targetTokenDeltaRaw: bigint | null;
+    };
   }> {
-    if (options.intentKey) throw new TradePreSubmissionError(Object.assign(new Error("Launch intent keys require a persisted prepared deployment and are not supported by deployToken yet"), { code: "UNSUPPORTED_LAUNCH_INTENT" }));
+    if (options.intentKey)
+      throw new TradePreSubmissionError(
+        Object.assign(
+          new Error(
+            "Launch intent keys require a persisted prepared deployment and are not supported by deployToken yet",
+          ),
+          { code: "UNSUPPORTED_LAUNCH_INTENT" },
+        ),
+      );
     const deployment = await this.prepareTokenDeployment(
       launchpadId,
       wallet,
       args,
     );
     const build = () => {
-      const builder = this.transaction(wallet)
-      .addMany(deployment.instructions, {
-        kind: "deploy-token",
-        mint: deployment.mint.publicKey,
-        meta: { launchpad: launchpadId, name: args.name, symbol: args.symbol },
-      });
+      const builder = this.transaction(wallet).addMany(
+        deployment.instructions,
+        {
+          kind: "deploy-token",
+          mint: deployment.mint.publicKey,
+          meta: {
+            launchpad: launchpadId,
+            name: args.name,
+            symbol: args.symbol,
+          },
+        },
+      );
       for (const signer of deployment.signers) builder.withSigner(signer);
       return builder.build();
     };
-    const execution = await this.executeTradePlan(wallet, build, options.landing?.route ?? (Array.isArray(options.via) ? options.via[0] : options.via) ?? "rpc", "deploy-token", options);
+    const execution = await this.executeTradePlan(
+      wallet,
+      build,
+      options.landing?.route ??
+        (Array.isArray(options.via) ? options.via[0] : options.via) ??
+        "rpc",
+      "deploy-token",
+      options,
+    );
     const receipt = execution.receipt;
-    if (receipt.status === "confirmed" && deployment.metadata?.vanityMintPoolAddress) markVanityMintUsed(String(deployment.metadata.vanityMintPoolAddress), this.db);
-    const result = tradeResult(receipt, execution.attempts, execution.submission.executionId);
+    if (
+      receipt.status === "confirmed" &&
+      deployment.metadata?.vanityMintPoolAddress
+    )
+      markVanityMintUsed(
+        String(deployment.metadata.vanityMintPoolAddress),
+        this.db,
+      );
+    const result = tradeResult(
+      receipt,
+      execution.attempts,
+      execution.submission.executionId,
+    );
     let ledger: WalletLedgerEntry | null = null;
     if (receipt.status !== "submitted") {
       try {
-        const transaction = await this.connection().getParsedTransaction(receipt.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 1 });
-        if (transaction) ledger = walletLedgerEntry(transaction, deployment.user, receipt.signature);
-      } catch { /* Confirmed accounting remains unavailable when RPC metadata is unavailable. */ }
+        const transaction = await this.connection().getParsedTransaction(
+          receipt.signature,
+          { commitment: "confirmed", maxSupportedTransactionVersion: 1 },
+        );
+        if (transaction)
+          ledger = walletLedgerEntry(
+            transaction,
+            deployment.user,
+            receipt.signature,
+          );
+      } catch {
+        /* Confirmed accounting remains unavailable when RPC metadata is unavailable. */
+      }
     }
-    const costs = { networkFeeLamports: ledger?.networkFeeLamports ?? result.networkFeeLamports,
-      tipLamports: ledger?.tipLamports ?? null, tokenAccountRentDeltaLamports: ledger?.components.tokenAccountRent ?? null,
-      creatorBuyBudgetLamports: deployment.metadata?.creatorBuySolLamports == null ? null : BigInt(String(deployment.metadata.creatorBuySolLamports)),
-      solDeltaLamports: ledger?.solDeltaLamports ?? null, residualLamports: ledger?.components.residual ?? null,
-      targetTokenDeltaRaw: ledger?.tokenDeltas.find(delta => delta.mint === deployment.mint.publicKey.toBase58())?.deltaRaw ?? null };
-    const token = receipt.status === "confirmed" ? this.persistPreparedDeployment(deployment, options.alias) : null;
+    const costs = {
+      networkFeeLamports:
+        ledger?.networkFeeLamports ?? result.networkFeeLamports,
+      tipLamports: ledger?.tipLamports ?? null,
+      tokenAccountRentDeltaLamports:
+        ledger?.components.tokenAccountRent ?? null,
+      creatorBuyBudgetLamports:
+        deployment.metadata?.creatorBuySolLamports == null
+          ? null
+          : BigInt(String(deployment.metadata.creatorBuySolLamports)),
+      solDeltaLamports: ledger?.solDeltaLamports ?? null,
+      residualLamports: ledger?.components.residual ?? null,
+      targetTokenDeltaRaw:
+        ledger?.tokenDeltas.find(
+          (delta) => delta.mint === deployment.mint.publicKey.toBase58(),
+        )?.deltaRaw ?? null,
+    };
+    const token =
+      receipt.status === "confirmed"
+        ? this.persistPreparedDeployment(deployment, options.alias)
+        : null;
     return { deployment, token, receipt, result, costs };
   }
   groupWallets(name: GroupRef): WalletRef[] {
@@ -2066,10 +2369,20 @@ export class Solard implements ComposerHost {
     plan: PlannedTransaction,
     via: SenderId,
     kind = "transaction",
-    options: SendOptions & { intentKey?: string; fallbackSenders?: SenderId[]; onSubmitted?: (signature: string) => void; onRebroadcast?: (signature: string) => void } = {},
+    options: SendOptions & {
+      intentKey?: string;
+      fallbackSenders?: SenderId[];
+      onSubmitted?: (signature: string) => void;
+      onRebroadcast?: (signature: string) => void;
+    } = {},
   ): Promise<SubmittedPlan> {
-    try { await checkPlanBalance(this.connection(), plan); }
-    catch (error) { throw error instanceof TradePreSubmissionError ? error : new TradePreSubmissionError(error); }
+    try {
+      await checkPlanBalance(this.connection(), plan);
+    } catch (error) {
+      throw error instanceof TradePreSubmissionError
+        ? error
+        : new TradePreSubmissionError(error);
+    }
     let simulation: SimulationResult | null = null;
     if (!options.skipSimulation) {
       simulation = await measured(
@@ -2078,9 +2391,11 @@ export class Solard implements ComposerHost {
         async () => {
           const result = await this.simulatePlan(plan);
           if (!result.success)
-            throw new TradePreSubmissionError(new Error(
-              `Simulation failed: ${JSON.stringify(result.error)}\n${result.diagnostics?.message ?? ""}\n${result.logs.join("\n")}`,
-            ));
+            throw new TradePreSubmissionError(
+              new Error(
+                `Simulation failed: ${JSON.stringify(result.error)}\n${result.diagnostics?.message ?? ""}\n${result.logs.join("\n")}`,
+              ),
+            );
           return result;
         },
         simulationLog,
@@ -2088,6 +2403,25 @@ export class Solard implements ComposerHost {
     }
     const signature = signedPlanSignature(plan);
     const feeEstimate = await estimatePlanFee(this.connection(), plan);
+    try {
+      if (plan.draft.actions.some((action) => action.kind === "sell"))
+        assertEconomicSell(plan.draft, {
+          networkFeeLamports:
+            feeEstimate.estimatedNetworkFeeLamports ??
+            BigInt(
+              5_000 *
+                (plan.transaction.message.header.numRequiredSignatures ?? 1),
+            ) +
+              selectedPriorityFeeLamports(
+                feeEstimate.cuLimit,
+                feeEstimate.priorityMicroLamports,
+              ),
+        });
+    } catch (error) {
+      throw error instanceof TradePreSubmissionError
+        ? error
+        : new TradePreSubmissionError(error);
+    }
     let execution = this.executions.findBySignature(signature);
     if (!execution) {
       execution = this.executions.create(
@@ -2109,8 +2443,15 @@ export class Solard implements ComposerHost {
             feeEstimate,
             recentBlockhash: plan.recentBlockhash,
             lastValidBlockHeight: plan.lastValidBlockHeight,
-            signedTransactionBase64: Buffer.from(plan.transaction.serialize()).toString("base64"),
-            landingTipLamports: plan.draft.actions.filter((action) => action.kind === "landing-tip").reduce((total, action) => total + Number(action.meta?.lamports ?? 0), 0),
+            signedTransactionBase64: Buffer.from(
+              plan.transaction.serialize(),
+            ).toString("base64"),
+            landingTipLamports: plan.draft.actions
+              .filter((action) => action.kind === "landing-tip")
+              .reduce(
+                (total, action) => total + Number(action.meta?.lamports ?? 0),
+                0,
+              ),
           }),
         },
         plan.draft.actions,
@@ -2132,10 +2473,17 @@ export class Solard implements ComposerHost {
       fallbackSenders: options.fallbackSenders,
       feeEstimate,
     };
-    if (options.intentKey) new TradeIntentStore(this.db).update(options.intentKey, (intent) => {
-      if (!intent.submissions.some((row) => row.signature === signature))
-        intent.submissions.push({ signature, executionId: execution!.id, sender: String(via), lastValidBlockHeight: plan.lastValidBlockHeight, priorityMicroLamports: plan.draft.cuPriceMicroLamports ?? 0 });
-    });
+    if (options.intentKey)
+      new TradeIntentStore(this.db).update(options.intentKey, (intent) => {
+        if (!intent.submissions.some((row) => row.signature === signature))
+          intent.submissions.push({
+            signature,
+            executionId: execution!.id,
+            sender: String(via),
+            lastValidBlockHeight: plan.lastValidBlockHeight,
+            priorityMicroLamports: plan.draft.cuPriceMicroLamports ?? 0,
+          });
+      });
     return await measured(
       m,
       `submit ${via}`,
@@ -2170,11 +2518,22 @@ export class Solard implements ComposerHost {
             return submission;
           for (const sender of options.fallbackSenders ?? []) {
             try {
-              const returned = await this.senders.resolve(sender).send({ connection: this.connection(), transaction: plan.transaction, options: { ...options, skipPreflight: true } });
-              if (returned !== signature) throw new Error("Fallback sender returned a different signature");
+              const returned = await this.senders
+                .resolve(sender)
+                .send({
+                  connection: this.connection(),
+                  transaction: plan.transaction,
+                  options: { ...options, skipPreflight: true },
+                });
+              if (returned !== signature)
+                throw new Error(
+                  "Fallback sender returned a different signature",
+                );
               notifyTrade(() => options.onRebroadcast?.(signature));
               return submission;
-            } catch { /* Same signed bytes only; sender failure leaves original uncertain. */ }
+            } catch {
+              /* Same signed bytes only; sender failure leaves original uncertain. */
+            }
           }
           if (String(via) !== "rpc") {
             this.executions.update(execution!, {
@@ -2241,9 +2600,11 @@ export class Solard implements ComposerHost {
   ): Promise<SendReceipt> {
     const execution = this.executions.get(submission.executionId);
     if (
-      rebroadcast && submission.sender === "rpc" &&
+      rebroadcast &&
+      submission.sender === "rpc" &&
       !(await waitForSignatureSeen(this.connection(), submission.signature)) &&
-      await this.connection().getBlockHeight("confirmed") <= submission.plan.lastValidBlockHeight
+      (await this.connection().getBlockHeight("confirmed")) <=
+        submission.plan.lastValidBlockHeight
     ) {
       try {
         const returned = await this.senders.resolve("rpc").send({
@@ -2374,19 +2735,35 @@ export class Solard implements ComposerHost {
       if (blockHeight <= submission.plan.lastValidBlockHeight) {
         if (Date.now() >= nextResend) {
           nextResend = Date.now() + resendIntervalMs;
-          const senders = new Set([submission.sender, ...(submission.fallbackSenders ?? []), "rpc"]);
-          await Promise.allSettled([...senders].map(async (sender) => {
-            const returned = await this.senders.resolve(sender).send({ connection: this.connection(),
-              transaction: submission.plan.transaction, options: { skipPreflight: true, skipSimulation: true } });
-            if (returned !== submission.signature) throw new Error("Rebroadcast signature mismatch");
-            notifyTrade(() => submission.onRebroadcast?.(submission.signature));
-          }));
+          const senders = new Set([
+            submission.sender,
+            ...(submission.fallbackSenders ?? []),
+            "rpc",
+          ]);
+          await Promise.allSettled(
+            [...senders].map(async (sender) => {
+              const returned = await this.senders
+                .resolve(sender)
+                .send({
+                  connection: this.connection(),
+                  transaction: submission.plan.transaction,
+                  options: { skipPreflight: true, skipSimulation: true },
+                });
+              if (returned !== submission.signature)
+                throw new Error("Rebroadcast signature mismatch");
+              notifyTrade(() =>
+                submission.onRebroadcast?.(submission.signature),
+              );
+            }),
+          );
         }
         continue;
       }
 
       const expiry = await inspectExpiredSubmission(
-        this.connection(), submission.signature, submission.plan.lastValidBlockHeight,
+        this.connection(),
+        submission.signature,
+        submission.plan.lastValidBlockHeight,
       );
       if (expiry !== "expired-unobserved") {
         await sleep(500);
@@ -2413,10 +2790,17 @@ export class Solard implements ComposerHost {
     }
     const error = `Transaction ${submission.signature} settlement timed out; reconciliation required. Do not repeat this trade until its outcome is known.`;
     this.executions.update(this.executions.get(submission.executionId), {
-      status: "submitted", error,
+      status: "submitted",
+      error,
     });
-    return { signature: submission.signature, slot: null, sender: submission.sender,
-      status: "submitted", retryable: false, error };
+    return {
+      signature: submission.signature,
+      slot: null,
+      sender: submission.sender,
+      status: "submitted",
+      retryable: false,
+      error,
+    };
   }
 
   async sendPlan(
@@ -2430,32 +2814,104 @@ export class Solard implements ComposerHost {
   }
 
   /** Apply the same fee policy for simulation and live trade construction. */
-  async prepareTradePlan(wallet: WalletRef, draftPlan: PlannedTransaction,
-    options: TradeExecutionOptions = {}, previousFee?: number) {
-    const policy = normalizeLandingPolicy({ ...options.landing, microLamports: options.priorityFee?.microLamports ?? options.landing?.microLamports });
-    const tier = options.heliusTier ?? (policy.route === "helius-swqos" || policy.route === "helius-max" ? policy.route : undefined);
-    if (tier) draftPlan = { ...draftPlan, draft: addHeliusLandingTip(draftPlan.draft, draftPlan.payer, tier).draft };
-    let computeLimit = options.priorityFee?.cuLimit ?? (typeof options.landing?.cuLimit === "number" ? options.landing.cuLimit : draftPlan.draft.cuLimit ?? 600_000);
-    if (options.computeUnits === "auto" || options.landing?.cuLimit === "auto") {
-      if (options.skipSimulation) throw new Error("Automatic compute sizing requires simulation");
-      const multiplier = options.computeUnitMultiplier ?? options.landing?.computeUnitMultiplier ?? 1.3;
-      let probe = await this.compile(this.signer(wallet), { ...draftPlan.draft, cuLimit: computeLimit });
+  async prepareTradePlan(
+    wallet: WalletRef,
+    draftPlan: PlannedTransaction,
+    options: TradeExecutionOptions = {},
+    previousFee?: number,
+  ) {
+    const policy = normalizeLandingPolicy({
+      ...options.landing,
+      microLamports:
+        options.priorityFee?.microLamports ?? options.landing?.microLamports,
+    });
+    const tier =
+      options.heliusTier ??
+      (policy.route === "helius-swqos" || policy.route === "helius-max"
+        ? policy.route
+        : undefined);
+    if (tier)
+      draftPlan = {
+        ...draftPlan,
+        draft: addHeliusLandingTip(draftPlan.draft, draftPlan.payer, tier)
+          .draft,
+      };
+    let computeLimit =
+      options.priorityFee?.cuLimit ??
+      (typeof options.landing?.cuLimit === "number"
+        ? options.landing.cuLimit
+        : (draftPlan.draft.cuLimit ?? 600_000));
+    if (
+      options.computeUnits === "auto" ||
+      options.landing?.cuLimit === "auto"
+    ) {
+      if (options.skipSimulation)
+        throw new Error("Automatic compute sizing requires simulation");
+      const multiplier =
+        options.computeUnitMultiplier ??
+        options.landing?.computeUnitMultiplier ??
+        1.3;
+      let probe = await this.compile(this.signer(wallet), {
+        ...draftPlan.draft,
+        cuLimit: computeLimit,
+      });
       let simulation = await this.simulatePlan(probe);
       if (isComputeExhausted(simulation) && computeLimit < 1_400_000) {
-        probe = await this.compile(this.signer(wallet), { ...draftPlan.draft, cuLimit: 1_400_000 });
+        probe = await this.compile(this.signer(wallet), {
+          ...draftPlan.draft,
+          cuLimit: 1_400_000,
+        });
         simulation = await this.simulatePlan(probe);
       }
-      if (!simulation.success) throw new Error(`Simulation failed: ${JSON.stringify(simulation.error)}\n${simulation.logs.join("\n")}`);
+      if (!simulation.success)
+        throw new Error(
+          `Simulation failed: ${JSON.stringify(simulation.error)}\n${simulation.logs.join("\n")}`,
+        );
       computeLimit = simulationComputeLimit(simulation, multiplier);
     }
     if (policy.maxFeeBpsOfNotional != null) {
-      const notional = draftPlan.draft.actions.reduce((total, action) => total + BigInt(String(action.kind === "buy" ? action.meta?.inputRaw ?? 0 : action.kind === "sell" ? action.meta?.minOutputRaw ?? 0 : 0)), 0n);
-      const tipLamports = draftPlan.draft.actions.filter((action) => action.kind === "landing-tip").reduce((total, action) => total + BigInt(String(action.meta?.lamports ?? 0)), 0n);
-      const networkBaseEstimate = BigInt(5_000 * (draftPlan.transaction?.message.header.numRequiredSignatures ?? 1)) + tipLamports;
-      const totalCap = notional * BigInt(policy.maxFeeBpsOfNotional) / 10_000n;
-      if (networkBaseEstimate > totalCap) throw Object.assign(new Error("Estimated base fee exceeds landing.maxFeeBpsOfNotional"), { code: "FEE_CAP_EXCEEDED" });
-      const relativeCap = totalCap > networkBaseEstimate ? totalCap - networkBaseEstimate : 0n;
-      policy.maxPriorityFeeLamports = Math.min(policy.maxPriorityFeeLamports, Number(relativeCap > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : relativeCap));
+      const notional = draftPlan.draft.actions.reduce(
+        (total, action) =>
+          total +
+          BigInt(
+            String(
+              action.kind === "buy"
+                ? (action.meta?.inputRaw ?? 0)
+                : action.kind === "sell"
+                  ? (action.meta?.minOutputRaw ?? 0)
+                  : 0,
+            ),
+          ),
+        0n,
+      );
+      const tipLamports = draftPlan.draft.actions
+        .filter((action) => action.kind === "landing-tip")
+        .reduce(
+          (total, action) => total + BigInt(String(action.meta?.lamports ?? 0)),
+          0n,
+        );
+      const networkBaseEstimate =
+        BigInt(
+          5_000 *
+            (draftPlan.transaction?.message.header.numRequiredSignatures ?? 1),
+        ) + tipLamports;
+      const totalCap =
+        (notional * BigInt(policy.maxFeeBpsOfNotional)) / 10_000n;
+      if (networkBaseEstimate > totalCap)
+        throw Object.assign(
+          new Error("Estimated base fee exceeds landing.maxFeeBpsOfNotional"),
+          { code: "FEE_CAP_EXCEEDED" },
+        );
+      const relativeCap =
+        totalCap > networkBaseEstimate ? totalCap - networkBaseEstimate : 0n;
+      policy.maxPriorityFeeLamports = Math.min(
+        policy.maxPriorityFeeLamports,
+        Number(
+          relativeCap > BigInt(Number.MAX_SAFE_INTEGER)
+            ? BigInt(Number.MAX_SAFE_INTEGER)
+            : relativeCap,
+        ),
+      );
     }
     let samples: number[] = [];
     if (policy.microLamports == null) {
@@ -2465,15 +2921,31 @@ export class Solard implements ComposerHost {
           if (key.isWritable) writable.set(key.pubkey.toBase58(), key.pubkey);
       const addresses = [...writable.values()];
       try {
-        samples = (await this.connection().getRecentPrioritizationFees(
-          addresses.length <= 128 ? { lockedWritableAccounts: addresses } : undefined,
-        )).map((row) => row.prioritizationFee);
+        samples = (
+          await this.connection().getRecentPrioritizationFees(
+            addresses.length <= 128
+              ? { lockedWritableAccounts: addresses }
+              : undefined,
+          )
+        ).map((row) => row.prioritizationFee);
       } catch {}
     }
     const fee = chooseTradeFee(policy, computeLimit, samples, previousFee);
     const plan = await this.compile(this.signer(wallet), {
-      ...draftPlan.draft, cuLimit: computeLimit, cuPriceMicroLamports: fee,
+      ...draftPlan.draft,
+      cuLimit: computeLimit,
+      cuPriceMicroLamports: fee,
     });
+    // Solana's base fee is 5,000 lamports per signature; the final submission
+    // also rechecks against getFeeForMessage before creating the journal entry.
+    if (plan.draft.actions.some((action) => action.kind === "sell"))
+      assertEconomicSell(plan.draft, {
+        networkFeeLamports:
+          BigInt(
+            5_000 *
+              (plan.transaction?.message?.header?.numRequiredSignatures ?? 1),
+          ) + selectedPriorityFeeLamports(computeLimit, fee),
+      });
     return { plan, priorityMicroLamports: fee };
   }
 
@@ -2482,17 +2954,34 @@ export class Solard implements ComposerHost {
     wallet: WalletRef,
     buildPlan: () => Promise<PlannedTransaction>,
     via: SenderId,
-    kind: "buy" | "sell" | "transfer-sol" | "transfer-token" | "claim" | "deploy-token",
+    kind:
+      | "buy"
+      | "sell"
+      | "transfer-sol"
+      | "transfer-token"
+      | "claim"
+      | "deploy-token",
     options: TradeExecutionOptions = {},
   ) {
     let policy: ReturnType<typeof normalizeLandingPolicy>;
     try {
-      policy = normalizeLandingPolicy({ ...options.landing, microLamports: options.priorityFee?.microLamports ?? options.landing?.microLamports });
+      policy = normalizeLandingPolicy({
+        ...options.landing,
+        microLamports:
+          options.priorityFee?.microLamports ?? options.landing?.microLamports,
+      });
       for (const [name, value] of Object.entries(options.confirm ?? {}))
-        if (value != null && (!Number.isFinite(value) || value < 1_000)) throw new Error(`confirm.${name} must be at least 1000ms`);
-    } catch (error) { throw new TradePreSubmissionError(error); }
+        if (value != null && (!Number.isFinite(value) || value < 1_000))
+          throw new Error(`confirm.${name} must be at least 1000ms`);
+    } catch (error) {
+      throw new TradePreSubmissionError(error);
+    }
     let previousFee: number | undefined;
-    const attempts: Array<{ executionId: number; signature: string; priorityMicroLamports: number }> = [];
+    const attempts: Array<{
+      executionId: number;
+      signature: string;
+      priorityMicroLamports: number;
+    }> = [];
     const submit = async (attempt: number) => {
       notifyTrade(() => options.onAttempt?.(attempt + 1));
       if (attempt > 0) {
@@ -2503,16 +2992,27 @@ export class Solard implements ComposerHost {
       let fee: number;
       try {
         const draftPlan = await buildPlan();
-        const prepared = await this.prepareTradePlan(wallet, draftPlan, options, previousFee);
+        const prepared = await this.prepareTradePlan(
+          wallet,
+          draftPlan,
+          options,
+          previousFee,
+        );
         fee = prepared.priorityMicroLamports;
         plan = prepared.plan;
       } catch (error) {
         throw new TradePreSubmissionError(error);
       }
-      const submission = await this.submitPlan(plan, via, kind, { ...options, fallbackSenders: Array.isArray(options.via) ? options.via.slice(1) : [] });
+      const submission = await this.submitPlan(plan, via, kind, {
+        ...options,
+        fallbackSenders: Array.isArray(options.via) ? options.via.slice(1) : [],
+      });
       previousFee = fee;
-      attempts.push({ executionId: submission.executionId, signature: submission.signature,
-        priorityMicroLamports: fee });
+      attempts.push({
+        executionId: submission.executionId,
+        signature: submission.signature,
+        priorityMicroLamports: fee,
+      });
       return submission;
     };
     const result = await runTradeAttempts(
@@ -2521,27 +3021,57 @@ export class Solard implements ComposerHost {
         try {
           return await submit(attempt);
         } catch (error) {
-          if (kind !== "buy" || options.skipSimulation || !isPumpSwap6040SimulationError(error)) throw error;
+          if (
+            kind !== "buy" ||
+            options.skipSimulation ||
+            !isPumpSwap6040SimulationError(error)
+          )
+            throw error;
           this.cache.invalidate();
           return await submit(attempt);
         }
       },
-      async (submission): Promise<SendReceipt> => options.waitForConfirmation === false
-        ? { signature: submission.signature, sender: submission.sender, status: "submitted", slot: null }
-        : await this.settleSubmission(submission, options.confirm?.pollIntervalMs ?? 1_000,
-            options.confirm?.timeoutMs ?? 180_000, options.confirm?.resendIntervalMs ?? 1_500),
+      async (submission): Promise<SendReceipt> =>
+        options.waitForConfirmation === false
+          ? {
+              signature: submission.signature,
+              sender: submission.sender,
+              status: "submitted",
+              slot: null,
+            }
+          : await this.settleSubmission(
+              submission,
+              options.confirm?.pollIntervalMs ?? 1_000,
+              options.confirm?.timeoutMs ?? 180_000,
+              options.confirm?.resendIntervalMs ?? 1_500,
+            ),
     );
     if (result.receipt.status === "confirmed") {
       try {
-        const fill = storedTradeFill(this.executions.get(result.submission.executionId));
-        if (fill) result.receipt = { ...result.receipt,
-          solPrincipalDeltaLamports: BigInt(fill.economicLamports),
-          targetTokenDeltaRaw: BigInt(fill.tokenDeltaRaw),
-          networkFeeLamports: BigInt(fill.networkFeeLamports) };
-      } catch { /* Preserve confirmation if accounting storage is unavailable. */ }
+        const fill = storedTradeFill(
+          this.executions.get(result.submission.executionId),
+        );
+        if (fill)
+          result.receipt = {
+            ...result.receipt,
+            solPrincipalDeltaLamports: BigInt(fill.economicLamports),
+            targetTokenDeltaRaw: BigInt(fill.tokenDeltaRaw),
+            networkFeeLamports: BigInt(fill.networkFeeLamports),
+          };
+      } catch {
+        /* Preserve confirmation if accounting storage is unavailable. */
+      }
     }
-    result.receipt = { ...result.receipt, feeEstimate: result.submission.feeEstimate,
-      tipLamports: (result.submission.plan?.draft?.actions ?? []).filter((action) => action.kind === "landing-tip").reduce((total, action) => total + Number(action.meta?.lamports ?? 0), 0) };
+    result.receipt = {
+      ...result.receipt,
+      feeEstimate: result.submission.feeEstimate,
+      tipLamports: (result.submission.plan?.draft?.actions ?? [])
+        .filter((action) => action.kind === "landing-tip")
+        .reduce(
+          (total, action) => total + Number(action.meta?.lamports ?? 0),
+          0,
+        ),
+    };
     return { ...result, attempts };
   }
 
@@ -2549,16 +3079,52 @@ export class Solard implements ComposerHost {
     token: TokenRef,
     wallet: WalletRef,
     amount: HumanAmount,
-    options: TradeExecutionOptions & { slippageBps?: number; minOutputRaw?: bigint | string; maxPriceSol?: string | number; reserves?: import("../venues/venue-plugin.ts").LivePoolReserves } = {},
+    options: TradeExecutionOptions & {
+      slippageBps?: number;
+      minOutputRaw?: bigint | string;
+      maxPriceSol?: string | number;
+      reserves?: import("../venues/venue-plugin.ts").LivePoolReserves;
+    } = {},
   ) {
-    const outcome = await this.runReliableTrade(wallet, options.intentKey, JSON.stringify(["buy", tradeTokenKey(token), toRawAmount(amount).raw.toString(), options.minOutputRaw?.toString(), options.slippageBps, options.maxPriceSol], (_key, value) => typeof value === "bigint" ? value.toString() : value), async () => {
-    const result = await this.executeTradePlan(wallet,
-      () => this.tx(wallet).priorityFee(options.priorityFee ?? {}).buy(token, amount, options).build(),
-      options.landing?.route ?? options.heliusTier ?? (Array.isArray(options.via) ? options.via[0] : options.via) ?? "rpc", "buy", options);
-    const settled = tradeResult(result.receipt, result.attempts, result.submission.executionId);
-    return settled;
-    });
-    notifyTrade(() => options.onSettled?.(outcome)); return outcome;
+    const outcome = await this.runReliableTrade(
+      wallet,
+      options.intentKey,
+      JSON.stringify(
+        [
+          "buy",
+          tradeTokenKey(token),
+          toRawAmount(amount).raw.toString(),
+          options.minOutputRaw?.toString(),
+          options.slippageBps,
+          options.maxPriceSol,
+        ],
+        (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+      ),
+      async () => {
+        const result = await this.executeTradePlan(
+          wallet,
+          () =>
+            this.tx(wallet)
+              .priorityFee(options.priorityFee ?? {})
+              .buy(token, amount, options)
+              .build(),
+          options.landing?.route ??
+            options.heliusTier ??
+            (Array.isArray(options.via) ? options.via[0] : options.via) ??
+            "rpc",
+          "buy",
+          options,
+        );
+        const settled = tradeResult(
+          result.receipt,
+          result.attempts,
+          result.submission.executionId,
+        );
+        return settled;
+      },
+    );
+    notifyTrade(() => options.onSettled?.(outcome));
+    return outcome;
   }
   async buyMany(
     token: TokenRef,
@@ -2575,9 +3141,15 @@ export class Solard implements ComposerHost {
     } = {},
   ) {
     if (!isBundleSender(this.senders.resolve(options.via ?? "rpc"))) {
-      if (!wallets.length) throw new Error("Cannot trade with an empty wallet list");
-      return { sender: String(options.via ?? "rpc"), mode: "parallel" as const,
-        receipts: await Promise.all(wallets.map((wallet) => this.buy(token, wallet, amount, options))) };
+      if (!wallets.length)
+        throw new Error("Cannot trade with an empty wallet list");
+      return {
+        sender: String(options.via ?? "rpc"),
+        mode: "parallel" as const,
+        receipts: await Promise.all(
+          wallets.map((wallet) => this.buy(token, wallet, amount, options)),
+        ),
+      };
     }
     return await this.composeMany(wallets)
       .priorityFee(options.priorityFee ?? {})
@@ -2592,201 +3164,581 @@ export class Solard implements ComposerHost {
   async sell(
     token: TokenRef,
     wallet: WalletRef,
-    options: TradeExecutionOptions & { bps?: number; slippageBps?: number; minOutputLamports?: bigint | string; minPriceSol?: string | number; reserves?: import("../venues/venue-plugin.ts").LivePoolReserves; closeTokenAccount?: boolean } = {},
+    options: TradeExecutionOptions & {
+      bps?: number;
+      amountRaw?: bigint | string;
+      slippageBps?: number;
+      minOutputLamports?: bigint | string;
+      minPriceSol?: string | number;
+      reserves?: import("../venues/venue-plugin.ts").LivePoolReserves;
+      closeTokenAccount?: boolean;
+    } = {},
   ) {
-    const outcome = await this.runReliableTrade(wallet, options.intentKey, JSON.stringify(["sell", tradeTokenKey(token), options.bps ?? 10_000, options.minOutputLamports?.toString(), options.slippageBps, options.minPriceSol, options.closeTokenAccount]), async () => {
-    const result = await this.executeTradePlan(wallet,
-      () => this.tx(wallet).priorityFee(options.priorityFee ?? {}).sell(token, options).build(),
-      options.landing?.route ?? options.heliusTier ?? (Array.isArray(options.via) ? options.via[0] : options.via) ?? "rpc", "sell", options);
-    const settled = tradeResult(result.receipt, result.attempts, result.submission.executionId);
-    return settled;
-    });
-    notifyTrade(() => options.onSettled?.(outcome)); return outcome;
+    const outcome = await this.runReliableTrade(
+      wallet,
+      options.intentKey,
+      JSON.stringify([
+        "sell",
+        tradeTokenKey(token),
+        options.amountRaw == null ? (options.bps ?? 10_000) : null,
+        options.minOutputLamports?.toString(),
+        options.slippageBps,
+        options.minPriceSol,
+        options.closeTokenAccount,
+        options.amountRaw?.toString(),
+      ]),
+      async () => {
+        const result = await this.executeTradePlan(
+          wallet,
+          () =>
+            this.tx(wallet)
+              .priorityFee(options.priorityFee ?? {})
+              .sell(token, options)
+              .build(),
+          options.landing?.route ??
+            options.heliusTier ??
+            (Array.isArray(options.via) ? options.via[0] : options.via) ??
+            "rpc",
+          "sell",
+          options,
+        );
+        const settled = tradeResult(
+          result.receipt,
+          result.attempts,
+          result.submission.executionId,
+        );
+        return settled;
+      },
+    );
+    notifyTrade(() => options.onSettled?.(outcome));
+    return outcome;
   }
   /** Serializes convenience trades in this process; intent keys arbitrate across processes. */
-  private static readonly walletTradeQueues = new Map<string, Promise<unknown>>();
-  async runReliableTrade(wallet: WalletRef, intentKey: string | undefined, fingerprint: string, operation: () => Promise<TradeResult>): Promise<TradeResult> {
+  private static readonly walletTradeQueues = new Map<
+    string,
+    Promise<unknown>
+  >();
+  async runReliableTrade(
+    wallet: WalletRef,
+    intentKey: string | undefined,
+    fingerprint: string,
+    operation: () => Promise<TradeResult>,
+  ): Promise<TradeResult> {
     // Resolve public identity before any signing; harnesses may override signer.
     let address: string;
-    try { address = this.signer(wallet).publicKey.toBase58(); }
-    catch (error) { return failedTrade(new TradePreSubmissionError(error)); }
+    try {
+      address = this.signer(wallet).publicKey.toBase58();
+    } catch (error) {
+      return failedTrade(new TradePreSubmissionError(error));
+    }
     const queueKey = `${this.dbPath ?? "local"}:${address}`;
-    const previous = Solard.walletTradeQueues.get(queueKey) ?? Promise.resolve();
-    const pending = previous.catch(() => {}).then(async () => {
-      const store = intentKey ? new TradeIntentStore(this.db) : null;
-      if (store && intentKey && !store.claim(intentKey, fingerprint, address)) {
-        const existing = store.get(intentKey)!;
-        if (existing.fingerprint !== fingerprint || existing.wallet !== address)
-          return failedTrade(Object.assign(new Error("intentKey already belongs to another trade"), { code: "INTENT_CONFLICT" }));
-        return await this.resumeTrade(intentKey);
-      }
-      let result: TradeResult;
-      try { result = await operation(); }
-      catch (error) {
-        const intent = intentKey ? store?.get(intentKey) : null;
-        if (intent?.submissions.length && !isDefinitivePreSubmissionError(error)) {
-          return await this.resumeTrade(intentKey!);
+    const previous =
+      Solard.walletTradeQueues.get(queueKey) ?? Promise.resolve();
+    const pending = previous
+      .catch(() => {})
+      .then(async () => {
+        const store = intentKey ? new TradeIntentStore(this.db) : null;
+        if (
+          store &&
+          intentKey &&
+          !store.claim(intentKey, fingerprint, address)
+        ) {
+          const existing = store.get(intentKey)!;
+          if (
+            existing.fingerprint !== fingerprint ||
+            existing.wallet !== address
+          )
+            return failedTrade(
+              Object.assign(
+                new Error("intentKey already belongs to another trade"),
+                { code: "INTENT_CONFLICT" },
+              ),
+            );
+          return await this.resumeTrade(intentKey);
         }
-        result = failedTrade(error);
-        if (!isDefinitivePreSubmissionError(error)) result = { ...result, status: "unresolved", phase: "unknown", code: "UNRESOLVED", retryable: false };
-      }
-      if (store && intentKey) {
-        try { store.update(intentKey, (intent) => { intent.result = result; }); }
-        catch { /* Signed intent history remains durable; preserve known on-chain outcome. */ }
-      }
-      return result;
-    });
+        let result: TradeResult;
+        try {
+          result = await operation();
+        } catch (error) {
+          const intent = intentKey ? store?.get(intentKey) : null;
+          if (
+            intent?.submissions.length &&
+            !isDefinitivePreSubmissionError(error)
+          ) {
+            return await this.resumeTrade(intentKey!);
+          }
+          result = failedTrade(error);
+          if (!isDefinitivePreSubmissionError(error))
+            result = {
+              ...result,
+              status: "unresolved",
+              phase: "unknown",
+              code: "UNRESOLVED",
+              retryable: false,
+            };
+        }
+        if (store && intentKey) {
+          try {
+            store.update(intentKey, (intent) => {
+              intent.result = result;
+            });
+          } catch {
+            /* Signed intent history remains durable; preserve known on-chain outcome. */
+          }
+        }
+        return result;
+      });
     Solard.walletTradeQueues.set(queueKey, pending);
-    try { return await pending; }
-    finally { if (Solard.walletTradeQueues.get(queueKey) === pending) Solard.walletTradeQueues.delete(queueKey); }
+    try {
+      return await pending;
+    } finally {
+      if (Solard.walletTradeQueues.get(queueKey) === pending)
+        Solard.walletTradeQueues.delete(queueKey);
+    }
   }
   async resumeTrade(intentKey: string): Promise<TradeResult> {
-    const store = new TradeIntentStore(this.db); const intent = store.get(intentKey);
-    if (!intent) return failedTrade(Object.assign(new Error("Unknown trade intent"), { code: "UNKNOWN_INTENT" }));
-    if (intent.result && intent.result.status !== "unresolved") return intent.result;
-    const attempts = intent.submissions.map(({ executionId, signature, priorityMicroLamports }) => ({ executionId, signature, priorityMicroLamports }));
+    const store = new TradeIntentStore(this.db);
+    const intent = store.get(intentKey);
+    if (!intent)
+      return failedTrade(
+        Object.assign(new Error("Unknown trade intent"), {
+          code: "UNKNOWN_INTENT",
+        }),
+      );
+    if (intent.result && intent.result.status !== "unresolved")
+      return intent.result;
+    const attempts = intent.submissions.map(
+      ({ executionId, signature, priorityMicroLamports }) => ({
+        executionId,
+        signature,
+        priorityMicroLamports,
+      }),
+    );
     const last = intent.submissions.at(-1);
-    if (!last) return { ...failedTrade(new Error("Intent was reserved before submission; manual recovery required")), status: "unresolved", phase: "unknown", code: "UNRESOLVED" };
+    if (!last)
+      return {
+        ...failedTrade(
+          new Error(
+            "Intent was reserved before submission; manual recovery required",
+          ),
+        ),
+        status: "unresolved",
+        phase: "unknown",
+        code: "UNRESOLVED",
+      };
     let receipt: SendReceipt;
-    try { receipt = await this.confirmSignature(last.signature, last.sender, 1_000); }
-    catch { receipt = { status: "submitted", signature: last.signature, sender: last.sender, slot: null }; }
+    try {
+      receipt = await this.confirmSignature(last.signature, last.sender, 1_000);
+    } catch {
+      receipt = {
+        status: "submitted",
+        signature: last.signature,
+        sender: last.sender,
+        slot: null,
+      };
+    }
     if (receipt.status === "submitted") {
       try {
         const execution = this.executions.get(last.executionId);
         const meta = executionMeta(execution.metaJson);
-        if (typeof meta.signedTransactionBase64 === "string" && meta.recentBlockhash &&
-            meta.lastValidBlockHeight === last.lastValidBlockHeight) {
-          const transaction = VersionedTransaction.deserialize(Buffer.from(meta.signedTransactionBase64, "base64"));
+        if (
+          typeof meta.signedTransactionBase64 === "string" &&
+          meta.recentBlockhash &&
+          meta.lastValidBlockHeight === last.lastValidBlockHeight
+        ) {
+          const transaction = VersionedTransaction.deserialize(
+            Buffer.from(meta.signedTransactionBase64, "base64"),
+          );
           const payer = transaction.message.staticAccountKeys[0]!;
-          const plan: PlannedTransaction = { transaction, payer,
-            recentBlockhash: transaction.message.recentBlockhash, lastValidBlockHeight: last.lastValidBlockHeight,
-            serializedSize: transaction.serialize().length, lookupTables: [],
-            draft: { instructions: [], signers: [], actions: [], trackedAccounts: [] } };
-          if (plan.recentBlockhash !== meta.recentBlockhash || signedPlanSignature(plan) !== last.signature)
+          const plan: PlannedTransaction = {
+            transaction,
+            payer,
+            recentBlockhash: transaction.message.recentBlockhash,
+            lastValidBlockHeight: last.lastValidBlockHeight,
+            serializedSize: transaction.serialize().length,
+            lookupTables: [],
+            draft: {
+              instructions: [],
+              signers: [],
+              actions: [],
+              trackedAccounts: [],
+            },
+          };
+          if (
+            plan.recentBlockhash !== meta.recentBlockhash ||
+            signedPlanSignature(plan) !== last.signature
+          )
             throw new Error("Stored transaction identity mismatch");
-          receipt = await this.settleSubmission({ signature: last.signature, sender: last.sender,
-            executionId: last.executionId, plan });
+          receipt = await this.settleSubmission({
+            signature: last.signature,
+            sender: last.sender,
+            executionId: last.executionId,
+            plan,
+          });
         }
-      } catch { /* Retain the original uncertainty when journal transport is unavailable. */ }
+      } catch {
+        /* Retain the original uncertainty when journal transport is unavailable. */
+      }
     }
-    if (receipt.status === "submitted" && await inspectExpiredSubmission(this.connection(), last.signature, last.lastValidBlockHeight) === "expired-unobserved") {
-      receipt = { ...receipt, status: "failed", retryable: true, error: "Transaction expired at finalized block height; history proves absence" };
+    if (
+      receipt.status === "submitted" &&
+      (await inspectExpiredSubmission(
+        this.connection(),
+        last.signature,
+        last.lastValidBlockHeight,
+      )) === "expired-unobserved"
+    ) {
+      receipt = {
+        ...receipt,
+        status: "failed",
+        retryable: true,
+        error:
+          "Transaction expired at finalized block height; history proves absence",
+      };
     }
     if (receipt.status === "confirmed") {
       try {
         const fill = storedTradeFill(this.executions.get(last.executionId));
-        if (fill) receipt = { ...receipt, solPrincipalDeltaLamports: BigInt(fill.economicLamports), targetTokenDeltaRaw: BigInt(fill.tokenDeltaRaw), networkFeeLamports: BigInt(fill.networkFeeLamports) };
-      } catch { /* Accounting unavailability cannot erase known confirmation. */ }
+        if (fill)
+          receipt = {
+            ...receipt,
+            solPrincipalDeltaLamports: BigInt(fill.economicLamports),
+            targetTokenDeltaRaw: BigInt(fill.tokenDeltaRaw),
+            networkFeeLamports: BigInt(fill.networkFeeLamports),
+          };
+      } catch {
+        /* Accounting unavailability cannot erase known confirmation. */
+      }
     }
     const result = tradeResult(receipt, attempts, last.executionId);
-    store.update(intentKey, (row) => { row.result = result; });
+    store.update(intentKey, (row) => {
+      row.result = result;
+    });
     return result;
   }
-  reconcile(intentKey: string) { return this.resumeTrade(intentKey); }
-  async closeEmptyTokenAccounts(wallet: WalletRef, options: TokenMaintenanceOptions & TradeExecutionOptions = {}) {
+  reconcile(intentKey: string) {
+    return this.resumeTrade(intentKey);
+  }
+  async closeEmptyTokenAccounts(
+    wallet: WalletRef,
+    options: TokenMaintenanceOptions & TradeExecutionOptions = {},
+  ) {
     const owner = this.signer(wallet).publicKey;
-    const prepared = await prepareTokenAccountMaintenance(this.connection(), owner, await listOwnedTokenAccounts(this.connection(), owner), options);
-    const receipts: Array<{ accounts: typeof prepared.batches[number]["accounts"]; result: TradeResult; reclaimedLamports: bigint | null }> = [];
+    const prepared = await prepareTokenAccountMaintenance(
+      this.connection(),
+      owner,
+      await listOwnedTokenAccounts(this.connection(), owner),
+      options,
+    );
+    const receipts: Array<{
+      accounts: (typeof prepared.batches)[number]["accounts"];
+      result: TradeResult;
+      reclaimedLamports: bigint | null;
+    }> = [];
     for (let index = 0; index < prepared.batches.length; index++) {
       const batch = prepared.batches[index]!;
-      const intentKey = options.intentKey ? `${options.intentKey}:maintenance:${index}` : undefined;
-      const result = await this.runReliableTrade(wallet, intentKey, JSON.stringify(batch.accounts.map((row) => [row.address, row.burnedRaw.toString()])), async () => {
-        const execution = await this.executeTradePlan(wallet, () => this.compile(this.signer(wallet), batch.draft),
-          options.landing?.route ?? (Array.isArray(options.via) ? options.via[0] : options.via) ?? "rpc", "transfer-token", { ...options, intentKey });
-        return tradeResult(execution.receipt, execution.attempts, execution.submission.executionId);
-      });
-      let reclaimedLamports: bigint | null = result.status === "failed" ? 0n : null;
+      const intentKey = options.intentKey
+        ? `${options.intentKey}:maintenance:${index}`
+        : undefined;
+      const result = await this.runReliableTrade(
+        wallet,
+        intentKey,
+        JSON.stringify(
+          batch.accounts.map((row) => [row.address, row.burnedRaw.toString()]),
+        ),
+        async () => {
+          const execution = await this.executeTradePlan(
+            wallet,
+            () => this.compile(this.signer(wallet), batch.draft),
+            options.landing?.route ??
+              (Array.isArray(options.via) ? options.via[0] : options.via) ??
+              "rpc",
+            "transfer-token",
+            { ...options, intentKey },
+          );
+          return tradeResult(
+            execution.receipt,
+            execution.attempts,
+            execution.submission.executionId,
+          );
+        },
+      );
+      let reclaimedLamports: bigint | null =
+        result.status === "failed" ? 0n : null;
       if (result.status === "confirmed" && result.signature) {
         try {
-          const transaction = await this.connection().getParsedTransaction(result.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 1 });
+          const transaction = await this.connection().getParsedTransaction(
+            result.signature,
+            { commitment: "confirmed", maxSupportedTransactionVersion: 1 },
+          );
           if (transaction?.meta && !transaction.meta.err) {
-            const keys = transaction.transaction.message.accountKeys.map((key) => key.pubkey.toBase58());
+            const keys = transaction.transaction.message.accountKeys.map(
+              (key) => key.pubkey.toBase58(),
+            );
             reclaimedLamports = batch.accounts.reduce((sum, account) => {
               const position = keys.indexOf(account.address);
-              return position >= 0 && transaction.meta!.postBalances[position] === 0 ? sum + BigInt(transaction.meta!.preBalances[position] ?? 0) : sum;
+              return position >= 0 &&
+                transaction.meta!.postBalances[position] === 0
+                ? sum + BigInt(transaction.meta!.preBalances[position] ?? 0)
+                : sum;
             }, 0n);
           }
-        } catch { /* Confirmed accounting can be recovered from the ledger later. */ }
+        } catch {
+          /* Confirmed accounting can be recovered from the ledger later. */
+        }
       }
       receipts.push({ accounts: batch.accounts, result, reclaimedLamports });
       if (result.status === "unresolved") break;
     }
-    return { receipts, skipped: prepared.skipped, complete: receipts.length === prepared.batches.length && receipts.every((row) => row.result.status !== "unresolved") };
+    return {
+      receipts,
+      skipped: prepared.skipped,
+      complete:
+        receipts.length === prepared.batches.length &&
+        receipts.every((row) => row.result.status !== "unresolved"),
+    };
   }
   async curveLiquidity(tokenRef: TokenRef) {
     const token = await this.resolveTokenForExecution(tokenRef);
     const curve = await fetchCurve(this.connection(), token);
     if (!curve) return null;
-    return { address: curve.address.toBase58(), quoteMint: curve.quoteAsset.mint.toBase58(), quoteDecimals: curve.quoteAsset.decimals,
-      virtualBaseReserveRaw: curve.virtualBase, virtualQuoteReserveRaw: curve.virtualQuote,
-      realBaseReserveRaw: curve.realBase, realQuoteReserveRaw: curve.realQuote,
-      totalSupplyRaw: curve.totalSupply, complete: curve.complete };
+    return {
+      address: curve.address.toBase58(),
+      quoteMint: curve.quoteAsset.mint.toBase58(),
+      quoteDecimals: curve.quoteAsset.decimals,
+      virtualBaseReserveRaw: curve.virtualBase,
+      virtualQuoteReserveRaw: curve.virtualQuote,
+      realBaseReserveRaw: curve.realBase,
+      realQuoteReserveRaw: curve.realQuote,
+      totalSupplyRaw: curve.totalSupply,
+      complete: curve.complete,
+    };
   }
-  async maxSendableSol(wallet: WalletRef, options: { keepForSells?: boolean | number; reserveLamports?: bigint } = {}): Promise<bigint> {
+  async maxSendableSol(
+    wallet: WalletRef,
+    options: { keepForSells?: boolean | number; reserveLamports?: bigint } = {},
+  ): Promise<bigint> {
     const payer = this.signer(wallet).publicKey;
     const connection = this.connection();
     const latest = await connection.getLatestBlockhash("confirmed");
-    const message = new TransactionMessage({ payerKey: payer, recentBlockhash: latest.blockhash, instructions: [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
-      SystemProgram.transfer({ fromPubkey: payer, toPubkey: PublicKey.default, lamports: 0 }),
-    ] }).compileToV0Message();
+    const message = new TransactionMessage({
+      payerKey: payer,
+      recentBlockhash: latest.blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+        SystemProgram.transfer({
+          fromPubkey: payer,
+          toPubkey: PublicKey.default,
+          lamports: 0,
+        }),
+      ],
+    }).compileToV0Message();
     const fee = (await connection.getFeeForMessage(message, "confirmed")).value;
-    if (fee == null) throw new TradePreSubmissionError(new Error("Unable to estimate withdrawal fee"));
+    if (fee == null)
+      throw new TradePreSubmissionError(
+        new Error("Unable to estimate withdrawal fee"),
+      );
     const balance = BigInt(await connection.getBalance(payer, "confirmed"));
-    const reserve = options.reserveLamports ?? (typeof options.keepForSells === "number" ? BigInt(options.keepForSells) : options.keepForSells ? BigInt((await this.tokenAccounts(wallet)).filter((row) => row.amountRaw > 0n).length) * 2_100_000n : 0n);
+    const reserve =
+      options.reserveLamports ??
+      (typeof options.keepForSells === "number"
+        ? BigInt(options.keepForSells)
+        : options.keepForSells
+          ? BigInt(
+              (await this.tokenAccounts(wallet)).filter(
+                (row) => row.amountRaw > 0n,
+              ).length,
+            ) * 2_100_000n
+          : 0n);
     if (reserve < 0n) throw new Error("Withdrawal reserve cannot be negative");
     const available = balance - BigInt(fee) - reserve;
     return available > 0n ? available : 0n;
   }
-  async transferToken(wallet: WalletRef, mint: TokenRef, destination: string | PublicKey, amount: bigint | "all", options: TradeExecutionOptions = {}): Promise<TradeResult> {
-    return this.runReliableTrade(wallet, options.intentKey, JSON.stringify(["transfer-token", String(mint), String(destination), String(amount)]), async () => {
-      const plan = await this.tx(wallet).priorityFee(options.priorityFee ?? {}).transferToken(mint, destination, amount).build();
-      const submission = await this.submitPlan(plan, (Array.isArray(options.via) ? options.via[0] : options.via) ?? "rpc", "transfer-token", options);
-      const receipt = options.waitForConfirmation === false ? { signature: submission.signature, sender: submission.sender, status: "submitted" as const, slot: null } : await this.settleSubmission(submission);
-      return tradeResult(receipt, [], submission.executionId);
-    });
+  async transferToken(
+    wallet: WalletRef,
+    mint: TokenRef,
+    destination: string | PublicKey,
+    amount: bigint | "all",
+    options: TradeExecutionOptions = {},
+  ): Promise<TradeResult> {
+    return this.runReliableTrade(
+      wallet,
+      options.intentKey,
+      JSON.stringify([
+        "transfer-token",
+        String(mint),
+        String(destination),
+        String(amount),
+      ]),
+      async () => {
+        const plan = await this.tx(wallet)
+          .priorityFee(options.priorityFee ?? {})
+          .transferToken(mint, destination, amount)
+          .build();
+        const submission = await this.submitPlan(
+          plan,
+          (Array.isArray(options.via) ? options.via[0] : options.via) ?? "rpc",
+          "transfer-token",
+          options,
+        );
+        const receipt =
+          options.waitForConfirmation === false
+            ? {
+                signature: submission.signature,
+                sender: submission.sender,
+                status: "submitted" as const,
+                slot: null,
+              }
+            : await this.settleSubmission(submission);
+        return tradeResult(receipt, [], submission.executionId);
+      },
+    );
   }
-  async exitWallet(wallet: WalletRef, destination: string | PublicKey, options: TradeExecutionOptions = {}) {
-    const report: Array<{ mint: string; operation: "sell" | "transfer" | "unsupported"; result?: TradeResult; message?: string }> = [];
+  async exitWallet(
+    wallet: WalletRef,
+    destination: string | PublicKey,
+    options: TradeExecutionOptions = {},
+  ) {
+    const report: Array<{
+      mint: string;
+      operation: "sell" | "transfer" | "unsupported";
+      result?: TradeResult;
+      message?: string;
+    }> = [];
     const accounts = await this.tokenAccounts(wallet);
     const seenMints = new Set<string>();
     for (const account of accounts.filter((row) => row.amountRaw > 0n)) {
       if (seenMints.has(account.mint)) continue;
       seenMints.add(account.mint);
-      const sold = account.isAssociated ? await this.sell(account.mint, wallet, { ...options, intentKey: options.intentKey ? `${options.intentKey}:${account.mint}:sell` : undefined }) : failedTrade(Object.assign(new Error("Non-associated balance requires transfer"), { code: "NO_ROUTE" }));
+      const sold = account.isAssociated
+        ? await this.sell(account.mint, wallet, {
+            ...options,
+            intentKey: options.intentKey
+              ? `${options.intentKey}:${account.mint}:sell`
+              : undefined,
+          })
+        : failedTrade(
+            Object.assign(
+              new Error("Non-associated balance requires transfer"),
+              { code: "NO_ROUTE" },
+            ),
+          );
       if (sold.status === "confirmed") {
         report.push({ mint: account.mint, operation: "sell", result: sold });
-        if (!accounts.some((row) => row.mint === account.mint && !row.isAssociated && row.amountRaw > 0n)) continue;
+        if (
+          !accounts.some(
+            (row) =>
+              row.mint === account.mint &&
+              !row.isAssociated &&
+              row.amountRaw > 0n,
+          )
+        )
+          continue;
       }
-      if (sold.status === "unresolved") { report.push({ mint: account.mint, operation: "sell", result: sold }); return { status: "unresolved" as const, tokens: report, withdrawal: null }; }
-      const transferred = await this.transferToken(wallet, account.mint, destination, "all", { ...options, intentKey: options.intentKey ? `${options.intentKey}:${account.mint}:transfer` : undefined });
-      report.push({ mint: account.mint, operation: "transfer", result: transferred });
-      if (transferred.status !== "confirmed") return { status: transferred.status, tokens: report, withdrawal: null };
+      if (sold.status === "unresolved") {
+        report.push({ mint: account.mint, operation: "sell", result: sold });
+        return {
+          status: "unresolved" as const,
+          tokens: report,
+          withdrawal: null,
+        };
+      }
+      const transferred = await this.transferToken(
+        wallet,
+        account.mint,
+        destination,
+        "all",
+        {
+          ...options,
+          intentKey: options.intentKey
+            ? `${options.intentKey}:${account.mint}:transfer`
+            : undefined,
+        },
+      );
+      report.push({
+        mint: account.mint,
+        operation: "transfer",
+        result: transferred,
+      });
+      if (transferred.status !== "confirmed")
+        return { status: transferred.status, tokens: report, withdrawal: null };
     }
-    const withdrawal = await this.runReliableTrade(wallet, options.intentKey ? `${options.intentKey}:withdraw` : undefined, JSON.stringify(["withdraw", String(destination)]), async () => {
-      const amount = await this.maxSendableSol(wallet);
-      if (!amount) return failedTrade(Object.assign(new Error("No spendable SOL remains"), { code: "INSUFFICIENT_SOL" }));
-      const plan = await this.tx(wallet).transferSol(destination, { raw: amount, asset: SOL_ASSET }).build();
-      const submission = await this.submitPlan(plan, "rpc", "transfer-sol", {});
-      return tradeResult(await this.settleSubmission(submission), [], submission.executionId);
-    });
-    return { status: report.some((row) => row.operation === "unsupported") ? "partial" as const : withdrawal.status, tokens: report, withdrawal };
+    const withdrawal = await this.runReliableTrade(
+      wallet,
+      options.intentKey ? `${options.intentKey}:withdraw` : undefined,
+      JSON.stringify(["withdraw", String(destination)]),
+      async () => {
+        const amount = await this.maxSendableSol(wallet);
+        if (!amount)
+          return failedTrade(
+            Object.assign(new Error("No spendable SOL remains"), {
+              code: "INSUFFICIENT_SOL",
+            }),
+          );
+        const plan = await this.tx(wallet)
+          .transferSol(destination, { raw: amount, asset: SOL_ASSET })
+          .build();
+        const submission = await this.submitPlan(
+          plan,
+          "rpc",
+          "transfer-sol",
+          {},
+        );
+        return tradeResult(
+          await this.settleSubmission(submission),
+          [],
+          submission.executionId,
+        );
+      },
+    );
+    return {
+      status: report.some((row) => row.operation === "unsupported")
+        ? ("partial" as const)
+        : withdrawal.status,
+      tokens: report,
+      withdrawal,
+    };
   }
-  async quote(input: { side: "buy" | "sell"; token: TokenRef; wallet: WalletRef; amount?: HumanAmount; bps?: number; slippageBps?: number; priorityFee?: { cuLimit?: number; microLamports?: number } }) {
+  async quote(input: {
+    side: "buy" | "sell";
+    token: TokenRef;
+    wallet: WalletRef;
+    amount?: HumanAmount;
+    bps?: number;
+    amountRaw?: bigint | string;
+    slippageBps?: number;
+    priorityFee?: { cuLimit?: number; microLamports?: number };
+  }) {
     const composer = this.tx(input.wallet).priorityFee(input.priorityFee ?? {});
     if (input.side === "buy") {
-      if (!input.amount) throw new TradePreSubmissionError(new Error("Buy quote requires amount"));
+      if (!input.amount)
+        throw new TradePreSubmissionError(
+          new Error("Buy quote requires amount"),
+        );
       composer.buy(input.token, input.amount, input);
     } else composer.sell(input.token, input);
     try {
       const draft = await composer.materializedDraft();
       const action = draft.actions.find((row) => row.kind === input.side)!;
-      return { venue: String(action.meta?.venue), inputRaw: BigInt(String(action.meta?.inputRaw)),
-        expectedOutputRaw: action.meta?.expectedOutputRaw != null ? BigInt(String(action.meta.expectedOutputRaw)) : null,
+      return {
+        venue: String(action.meta?.venue),
+        inputRaw: BigInt(String(action.meta?.inputRaw)),
+        expectedOutputRaw:
+          action.meta?.expectedOutputRaw != null
+            ? BigInt(String(action.meta.expectedOutputRaw))
+            : null,
         minOutputRaw: BigInt(String(action.meta?.minOutputRaw)),
-        priorityFeeLamports: (BigInt(draft.cuLimit ?? 600_000) * BigInt(draft.cuPriceMicroLamports ?? 100_000) + 999_999n) / 1_000_000n,
-        networkBaseFeeEstimateLamports: 5_000n };
-    } catch (error) { throw new TradePreSubmissionError(error); }
+        priorityFeeLamports:
+          (BigInt(draft.cuLimit ?? 600_000) *
+            BigInt(draft.cuPriceMicroLamports ?? 100_000) +
+            999_999n) /
+          1_000_000n,
+        networkBaseFeeEstimateLamports: 5_000n,
+      };
+    } catch (error) {
+      throw new TradePreSubmissionError(error);
+    }
   }
   async sellMany(
     token: TokenRef,
@@ -2803,9 +3755,15 @@ export class Solard implements ComposerHost {
     } = {},
   ) {
     if (!isBundleSender(this.senders.resolve(options.via ?? "rpc"))) {
-      if (!wallets.length) throw new Error("Cannot trade with an empty wallet list");
-      return { sender: String(options.via ?? "rpc"), mode: "parallel" as const,
-        receipts: await Promise.all(wallets.map((wallet) => this.sell(token, wallet, options))) };
+      if (!wallets.length)
+        throw new Error("Cannot trade with an empty wallet list");
+      return {
+        sender: String(options.via ?? "rpc"),
+        mode: "parallel" as const,
+        receipts: await Promise.all(
+          wallets.map((wallet) => this.sell(token, wallet, options)),
+        ),
+      };
     }
     return await this.composeMany(wallets)
       .priorityFee(options.priorityFee ?? {})

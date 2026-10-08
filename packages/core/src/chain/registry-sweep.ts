@@ -162,10 +162,10 @@ function resolveDestination(slrd: Solard, value: string): PublicKey {
   const contact = findExternalContact(input);
   if (contact) return new PublicKey(contact.address);
   throw new Error(
-      `Unknown sweep destination "${input}". ` +
-        `Use a valid Solana address, a stored wallet name, or register it first with ` +
-        `slrd contact add <name> <address>.`,
-    );
+    `Unknown sweep destination "${input}". ` +
+      `Use a valid Solana address, a stored wallet name, or register it first with ` +
+      `slrd contact add <name> <address>.`,
+  );
 }
 
 function explicitKeepLamportsFor(

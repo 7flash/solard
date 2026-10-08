@@ -40,7 +40,8 @@ export class PumpCreatorFeesSource implements ClaimSourcePlugin {
         ? new PublicKey(ctx.token.pool)
         : pumpSwapPoolPda(mint, curve!.quoteAsset.mint);
       const pool = await fetchPool(ctx.connection, poolAddress);
-      if (!pool.baseMint.equals(mint)) throw new Error("Creator-fee pool base mint mismatch");
+      if (!pool.baseMint.equals(mint))
+        throw new Error("Creator-fee pool base mint mismatch");
       quoteAsset = await poolQuoteAsset(
         ctx.connection,
         ctx.token,
@@ -51,10 +52,19 @@ export class PumpCreatorFeesSource implements ClaimSourcePlugin {
       includeAmm = true;
     }
     if (!creator || !quoteAsset) return null;
-    const userShare = sharing?.shareholders.find((holder) => holder.address.equals(ctx.user));
-    if (shared ? !userShare : !creator.equals(ctx.user) && !coinCreator?.equals(ctx.user)) return null;
+    const userShare = sharing?.shareholders.find((holder) =>
+      holder.address.equals(ctx.user),
+    );
+    if (
+      shared
+        ? !userShare
+        : !creator.equals(ctx.user) && !coinCreator?.equals(ctx.user)
+    )
+      return null;
     if (shared && coinCreator && !coinCreator.equals(sharingConfigPda(mint)))
-      throw new Error("PumpSwap fee creator does not match sharing configuration");
+      throw new Error(
+        "PumpSwap fee creator does not match sharing configuration",
+      );
 
     const vaultOwner = shared ? sharingConfigPda(mint) : creator;
     let pumpVaultRaw = 0n;
@@ -106,14 +116,17 @@ export class PumpCreatorFeesSource implements ClaimSourcePlugin {
     // For sharing configs the AMM sweep runs before distribution. For SOL paired pools,
     // transfer_creator_fees_to_pump_v2 unwraps the AMM WSOL balance into the Pump vault,
     // so the shareholder distribution can fund a later SOL buy in the same transaction.
-    const eligiblePumpRaw = shared || creator.equals(ctx.user) ? pumpVaultRaw : 0n;
-    const eligibleAmmRaw = shared || coinCreator?.equals(ctx.user) ? ammVaultRaw : 0n;
+    const eligiblePumpRaw =
+      shared || creator.equals(ctx.user) ? pumpVaultRaw : 0n;
+    const eligibleAmmRaw =
+      shared || coinCreator?.equals(ctx.user) ? ammVaultRaw : 0n;
     const estimatedClaimRaw = eligiblePumpRaw + eligibleAmmRaw;
     const spendableByUserRaw = shared
       ? userShare
         ? (estimatedClaimRaw * BigInt(userShare.shareBps)) / 10_000n
         : 0n
-      : eligiblePumpRaw + (quoteAsset.kind === "spl-token" ? eligibleAmmRaw : 0n);
+      : eligiblePumpRaw +
+        (quoteAsset.kind === "spl-token" ? eligibleAmmRaw : 0n);
     const nonSpendableClaimRaw = shared
       ? estimatedClaimRaw - spendableByUserRaw
       : quoteAsset.kind === "native-sol"
@@ -153,8 +166,34 @@ export class PumpCreatorFeesSource implements ClaimSourcePlugin {
         eligibility: shared ? "shareholder" : "creator",
         attribution: shared ? "mint-sharing-vault" : "shared-creator-vault",
         claimComponents: [
-          { key: `pump:${creatorVaultPda(vaultOwner).toBase58()}:${quoteAsset.mint.toBase58()}`, amountRaw: (shared ? eligiblePumpRaw * BigInt(userShare!.shareBps) / 10_000n : eligiblePumpRaw).toString(), spendableRaw: (shared ? eligiblePumpRaw * BigInt(userShare!.shareBps) / 10_000n : eligiblePumpRaw).toString() },
-          ...(coinCreator ? [{ key: `pumpswap:${ammCreatorVaultPda(coinCreator).toBase58()}:${quoteAsset.mint.toBase58()}`, amountRaw: (shared ? eligibleAmmRaw * BigInt(userShare!.shareBps) / 10_000n : eligibleAmmRaw).toString(), spendableRaw: (shared ? eligibleAmmRaw * BigInt(userShare!.shareBps) / 10_000n : quoteAsset.kind === "native-sol" ? 0n : eligibleAmmRaw).toString() }] : []),
+          {
+            key: `pump:${creatorVaultPda(vaultOwner).toBase58()}:${quoteAsset.mint.toBase58()}`,
+            amountRaw: (shared
+              ? (eligiblePumpRaw * BigInt(userShare!.shareBps)) / 10_000n
+              : eligiblePumpRaw
+            ).toString(),
+            spendableRaw: (shared
+              ? (eligiblePumpRaw * BigInt(userShare!.shareBps)) / 10_000n
+              : eligiblePumpRaw
+            ).toString(),
+          },
+          ...(coinCreator
+            ? [
+                {
+                  key: `pumpswap:${ammCreatorVaultPda(coinCreator).toBase58()}:${quoteAsset.mint.toBase58()}`,
+                  amountRaw: (shared
+                    ? (eligibleAmmRaw * BigInt(userShare!.shareBps)) / 10_000n
+                    : eligibleAmmRaw
+                  ).toString(),
+                  spendableRaw: (shared
+                    ? (eligibleAmmRaw * BigInt(userShare!.shareBps)) / 10_000n
+                    : quoteAsset.kind === "native-sol"
+                      ? 0n
+                      : eligibleAmmRaw
+                  ).toString(),
+                },
+              ]
+            : []),
         ],
         path: shared
           ? "sharing-config"

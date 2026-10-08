@@ -77,23 +77,28 @@ export async function simulatePlanned(
     };
     if (simulation.value.err === "AccountNotFound") {
       const address = plan.transaction.message.staticAccountKeys[0]!.toBase58();
-      const feePayer: NonNullable<SimulationResult["diagnostics"]>["feePayer"] = {
-        address, exists: null, lamports: null,
-      };
+      const feePayer: NonNullable<SimulationResult["diagnostics"]>["feePayer"] =
+        {
+          address,
+          exists: null,
+          lamports: null,
+        };
       try {
         const account = await connection.getAccountInfo(
-          plan.transaction.message.staticAccountKeys[0]!, "confirmed",
+          plan.transaction.message.staticAccountKeys[0]!,
+          "confirmed",
         );
         feePayer.exists = account != null;
         feePayer.lamports = account?.lamports ?? null;
       } catch {}
       result.diagnostics = {
         feePayer,
-        message: feePayer.exists === false
-          ? `Fee payer ${address} has no SOL account at confirmed commitment on this RPC cluster. It must be funded with SOL before it can pay transaction fees; an existing token account does not fund the fee payer.`
-          : feePayer.exists === true
-            ? `Fee payer ${address} exists at confirmed commitment with ${feePayer.lamports} lamports. Simulation reported AccountNotFound; check simulation-bank/RPC account visibility before changing the route.`
-            : `Simulation reported AccountNotFound for fee payer ${address}; its account could not be checked. Verify its SOL account and the RPC cluster.`,
+        message:
+          feePayer.exists === false
+            ? `Fee payer ${address} has no SOL account at confirmed commitment on this RPC cluster. It must be funded with SOL before it can pay transaction fees; an existing token account does not fund the fee payer.`
+            : feePayer.exists === true
+              ? `Fee payer ${address} exists at confirmed commitment with ${feePayer.lamports} lamports. Simulation reported AccountNotFound; check simulation-bank/RPC account visibility before changing the route.`
+              : `Simulation reported AccountNotFound for fee payer ${address}; its account could not be checked. Verify its SOL account and the RPC cluster.`,
       };
     }
     return {

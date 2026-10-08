@@ -1,26 +1,41 @@
 import { expect, test } from "bun:test";
-import { Keypair, TransactionMessage, VersionedTransaction, SystemProgram, type Connection } from "@solana/web3.js";
+import {
+  Keypair,
+  TransactionMessage,
+  VersionedTransaction,
+  SystemProgram,
+  type Connection,
+} from "@solana/web3.js";
 import { simulatePlanned } from "./simulate.ts";
 import { Solard } from "../core/solard.ts";
 import type { PlannedTransaction } from "../tx/types.ts";
 
-function fixture(error: string | null, account: "missing" | "existing" | "unavailable") {
+function fixture(
+  error: string | null,
+  account: "missing" | "existing" | "unavailable",
+) {
   const payer = Keypair.generate().publicKey;
-  const message = new TransactionMessage({ payerKey: payer,
-    recentBlockhash: SystemProgram.programId.toBase58(), instructions: [],
+  const message = new TransactionMessage({
+    payerKey: payer,
+    recentBlockhash: SystemProgram.programId.toBase58(),
+    instructions: [],
   }).compileToV0Message();
   const plan: PlannedTransaction = {
     transaction: new VersionedTransaction(message),
     draft: { instructions: [], signers: [], actions: [], trackedAccounts: [] },
-    lookupTables: [], serializedSize: 0,
+    lookupTables: [],
+    serializedSize: 0,
     // The diagnostic must use the actual compiled payer, not a stale plan field.
     payer: Keypair.generate().publicKey,
-    recentBlockhash: SystemProgram.programId.toBase58(), lastValidBlockHeight: 0,
+    recentBlockhash: SystemProgram.programId.toBase58(),
+    lastValidBlockHeight: 0,
   };
   let reads = 0;
   const connection = {
     async simulateTransaction() {
-      return { value: { err: error, logs: [], unitsConsumed: 0, accounts: [] } };
+      return {
+        value: { err: error, logs: [], unitsConsumed: 0, accounts: [] },
+      };
     },
     async getAccountInfo(address: typeof payer) {
       reads += 1;
@@ -38,7 +53,9 @@ test("AccountNotFound identifies an absent compiled fee payer without changing r
   expect(result.error).toBe("AccountNotFound");
   expect(result.logs).toEqual([]);
   expect(result.diagnostics!.feePayer).toEqual({
-    address: context.payer.toBase58(), exists: false, lamports: null,
+    address: context.payer.toBase58(),
+    exists: false,
+    lamports: null,
   });
   expect(result.diagnostics!.message).toContain("has no SOL account");
 });
@@ -72,8 +89,21 @@ test("submission stops before simulation/broadcast when actual compiled payer la
   const context = fixture("AccountNotFound", "missing");
   const slrd: Solard = Object.create(Solard.prototype);
   let simulations = 0;
-  slrd.connection = () => ({ getBalance: async (payer) => { expect(payer.equals(context.payer)).toBe(true); return 0; }, getFeeForMessage: async () => ({ value: 5000 }) }) as unknown as Connection;
-  slrd.simulatePlan = async () => { simulations++; return await simulatePlanned(context.connection, context.plan); };
-  await expect(slrd.submitPlan(context.plan, "rpc")).rejects.toMatchObject({ code: "INSUFFICIENT_SOL", phase: "before-submission" });
+  slrd.connection = () =>
+    ({
+      getBalance: async (payer) => {
+        expect(payer.equals(context.payer)).toBe(true);
+        return 0;
+      },
+      getFeeForMessage: async () => ({ value: 5000 }),
+    }) as unknown as Connection;
+  slrd.simulatePlan = async () => {
+    simulations++;
+    return await simulatePlanned(context.connection, context.plan);
+  };
+  await expect(slrd.submitPlan(context.plan, "rpc")).rejects.toMatchObject({
+    code: "INSUFFICIENT_SOL",
+    phase: "before-submission",
+  });
   expect(simulations).toBe(0);
 });

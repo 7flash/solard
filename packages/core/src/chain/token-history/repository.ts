@@ -38,6 +38,11 @@ export type TokenHistoryPersistProgress = {
 
 export interface TokenHistoryRepository {
   loadTrades(mint: string): TokenHistoryTrade[];
+  loadTradesInWindow?(
+    mint: string,
+    fromMs: number,
+    toMs: number,
+  ): TokenHistoryTrade[];
   loadCandles1s(mint: string): TokenHistoryCandle1s[];
   countTrades(mint: string): number;
   getCoverage(mint: string): TokenHistoryCoverage | null;
@@ -100,7 +105,14 @@ function parseHistoryRaw(rawJson: string): TokenHistoryRaw {
     const raw = JSON.parse(rawJson) as Partial<TokenHistoryRaw>;
     return {
       parserVersion: String(raw.parserVersion ?? "unknown"),
-      venue: raw.venue === "pumpswap" ? "pumpswap" : raw.venue === "raydium" ? "raydium" : "pump-curve",
+      venue:
+        raw.venue === "pumpswap"
+          ? "pumpswap"
+          : raw.venue === "raydium"
+            ? "raydium"
+            : raw.venue === "meteora-dbc" || raw.venue === "meteora-damm-v2"
+              ? raw.venue
+              : "pump-curve",
       instructionKinds: Array.isArray(raw.instructionKinds)
         ? raw.instructionKinds.map(String)
         : [],
@@ -160,7 +172,19 @@ function parseHistoryRaw(rawJson: string): TokenHistoryRaw {
 }
 
 function toDomainTrade(row: TokenTrade): TokenHistoryTrade {
-  return { ...row, history: parseHistoryRaw(row.rawJson) } as TokenHistoryTrade;
+  const nullableNumber = (value: unknown) =>
+    value == null
+      ? null
+      : Number.isFinite(Number(value))
+        ? Number(value)
+        : null;
+  return {
+    ...row,
+    priceSol: nullableNumber(row.priceSol),
+    priceUsd: nullableNumber(row.priceUsd),
+    marketCapUsd: nullableNumber(row.marketCapUsd),
+    history: parseHistoryRaw(row.rawJson),
+  } as TokenHistoryTrade;
 }
 
 function toStoredTrade(row: TokenHistoryTrade): TokenTrade {
@@ -170,6 +194,70 @@ function toStoredTrade(row: TokenHistoryTrade): TokenTrade {
 
 export class SqliteTokenHistoryRepository implements TokenHistoryRepository {
   constructor(private readonly database: HistoryDatabase) {}
+  loadTradesInWindow(
+    mint: string,
+    fromMs: number,
+    toMs: number,
+  ): TokenHistoryTrade[] {
+    return (
+      this.database.tokenHistoryTradesV1
+        .select()
+        .where({
+          mint: requiredMint(mint),
+          tradedAtMs: { $gte: fromMs, $lt: toMs },
+        })
+        .all() as TokenTrade[]
+    )
+      .map(toDomainTrade)
+      .sort(compareTokenHistoryTrades);
+  }
+  /** Keep the first live observation and never downgrade its commitment. */
+  persistLiveTrades(
+    rows: readonly TokenHistoryTrade[],
+  ): PersistTokenHistoryResult {
+    let result: PersistTokenHistoryResult = { inserted: 0, updated: 0 };
+    this.database.transaction(() => {
+      const existing = new Map(
+        (
+          this.database.tokenHistoryTradesV1
+            .select()
+            .whereIn(
+              "eventKey",
+              rows.map((row) => row.eventKey),
+            )
+            .all() as TokenTrade[]
+        ).map((row) => [row.eventKey, toDomainTrade(row)]),
+      );
+      const historical = new Set(
+        (
+          this.database.tokenHistoryTradesV1
+            .select("signature", "mint", "source")
+            .whereIn("signature", [
+              ...new Set(rows.map((row) => row.signature)),
+            ])
+            .all() as Array<Pick<TokenTrade, "signature" | "mint" | "source">>
+        )
+          .filter((row) => row.source !== "live-trade-stream")
+          .map((row) => `${row.signature}:${row.mint}`),
+      );
+      const rank = { processed: 0, confirmed: 1, finalized: 2, dropped: -1 };
+      const accepted = rows.flatMap((row) => {
+        if (historical.has(`${row.signature}:${row.mint}`)) return [];
+        const before = existing.get(row.eventKey);
+        if (!before) return [row];
+        if (rank[row.confidence] <= rank[before.confidence]) return [];
+        return [
+          {
+            ...before,
+            confidence: row.confidence,
+            updatedAtMs: row.updatedAtMs,
+          },
+        ];
+      });
+      if (accepted.length) result = this.persistTrades(accepted);
+    });
+    return result;
+  }
 
   loadTrades(mintInput: string): TokenHistoryTrade[] {
     const mint = requiredMint(mintInput);
@@ -296,6 +384,17 @@ export class SqliteTokenHistoryRepository implements TokenHistoryRepository {
             );
             this.database.transaction(() => {
               for (const row of batch) {
+                // RPC backfill supersedes provisional live observations of this
+                // transaction/mint, whose event keys use a different identity.
+                if (row.source !== "live-trade-stream")
+                  this.database.tokenHistoryTradesV1
+                    .delete()
+                    .where({
+                      signature: row.signature,
+                      mint: row.mint,
+                      source: "live-trade-stream",
+                    })
+                    .exec();
                 const stored = toStoredTrade(row);
                 this.database.tokenHistoryTradesV1.upsert(stored, {
                   on: "eventKey",

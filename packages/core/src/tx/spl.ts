@@ -41,13 +41,15 @@ export function transferTokenIxs(args: {
   source: PublicKey;
   destination: PublicKey;
 } {
-  const source = args.source ?? getAssociatedTokenAddressSync(
-    args.mint,
-    args.owner,
-    false,
-    args.tokenProgram,
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-  );
+  const source =
+    args.source ??
+    getAssociatedTokenAddressSync(
+      args.mint,
+      args.owner,
+      false,
+      args.tokenProgram,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+    );
   const destination = getAssociatedTokenAddressSync(
     args.mint,
     args.recipient,

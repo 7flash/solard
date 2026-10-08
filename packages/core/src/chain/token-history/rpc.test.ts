@@ -62,7 +62,11 @@ describe("SolanaTokenHistoryRpc transaction pipeline", () => {
       if (!Array.isArray(request)) {
         // The optional provider-specific fast path is outside this batch retry
         // test. Model a standard Solana RPC that rejects that method.
-        return Response.json({ jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32601, message: "Method not found" },
+        });
       }
       calls += 1;
       if (calls === 1) {

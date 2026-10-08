@@ -121,8 +121,14 @@ export { createTraderSolard } from "./presets/trader.ts";
 export * from "./strategy/index.ts";
 export * from "./backtest/index.ts";
 export { prepareTokenAccountMaintenance } from "./chain/token-maintenance.ts";
-export type { TokenMaintenanceOptions, TokenMaintenanceBatch, TokenMaintenancePreparation } from "./chain/token-maintenance.ts";
+export type {
+  TokenMaintenanceOptions,
+  TokenMaintenanceBatch,
+  TokenMaintenancePreparation,
+} from "./chain/token-maintenance.ts";
 export * from "./launches/launchlab/launchlab-launchpad.ts";
+export * from "./launches/raydium/launchlab-pairs.ts";
+export * from "./venues/raydium/launchlab-venue.ts";
 
 export {
   addExternalContact,
@@ -828,3 +834,5 @@ export * from "./claims/meteora-dbc-creator-fees-source.ts";
 export * from "./claims/meteora-damm-v2-creator-fees-source.ts";
 export * from "./ledger/wallet-ledger.ts";
 export * from "./market/current-market.ts";
+export * from "./market/live-trade-history.ts";
+export * from "./tx/sell-economics.ts";

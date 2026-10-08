@@ -5,6 +5,7 @@ import { MeteoraDammV2Venue } from "../venues/meteora/damm-v2.ts";
 import { trace } from "../core/trace.ts";
 import { JupiterVenue } from "../venues/jupiter-venue.ts";
 import { LaunchLabTokenLaunchpad } from "../launches/launchlab/launchlab-launchpad.ts";
+import { LaunchLabVenue } from "../venues/raydium/launchlab-venue.ts";
 import { RaydiumCreatorFeesSource } from "../claims/raydium-creator-fees-source.ts";
 import { MeteoraDbcCreatorFeesSource } from "../claims/meteora-dbc-creator-fees-source.ts";
 import { MeteoraDammV2CreatorFeesSource } from "../claims/meteora-damm-v2-creator-fees-source.ts";
@@ -21,6 +22,7 @@ export function createTraderSolard(options: SolardOptions = {}): Solard {
   slrd.registerClaimSource(new MeteoraDammV2CreatorFeesSource());
   slrd.registerVenue(new MeteoraDbcVenue());
   slrd.registerVenue(new MeteoraDammV2Venue());
+  slrd.registerVenue(new LaunchLabVenue());
   slrd.registerVenue(new JupiterVenue());
   trace("preset: ready");
   return slrd;

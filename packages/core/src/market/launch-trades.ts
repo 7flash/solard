@@ -11,10 +11,26 @@ import { resolveCurrentMarket, type CurrentMarket } from "./current-market.ts";
 import { decodeCpmmSwap } from "./raydium-cpmm-events.ts";
 import { PumpSwapVenue } from "../venues/pump/pumpswap-venue.ts";
 import type { TokenRow } from "../db/schema.ts";
-import { readDbcMarket, dbcPrice, DYNAMIC_BONDING_CURVE_PROGRAM_ID } from "../venues/meteora/dbc.ts";
-import { decodeDbcTrade, dbcTradesFromTransaction, type DbcTradeEvent } from "../venues/meteora/dbc-events.ts";
-import { readDammV2Market, dammV2Price, CP_AMM_PROGRAM_ID } from "../venues/meteora/damm-v2.ts";
-import { decodeDammV2Trade, dammV2TradesFromTransaction, type DammV2TradeEvent } from "../venues/meteora/damm-v2-events.ts";
+import {
+  readDbcMarket,
+  dbcPrice,
+  DYNAMIC_BONDING_CURVE_PROGRAM_ID,
+} from "../venues/meteora/dbc.ts";
+import {
+  decodeDbcTrade,
+  dbcTradesFromTransaction,
+  type DbcTradeEvent,
+} from "../venues/meteora/dbc-events.ts";
+import {
+  readDammV2Market,
+  dammV2Price,
+  CP_AMM_PROGRAM_ID,
+} from "../venues/meteora/damm-v2.ts";
+import {
+  decodeDammV2Trade,
+  dammV2TradesFromTransaction,
+  type DammV2TradeEvent,
+} from "../venues/meteora/damm-v2-events.ts";
 import {
   fetchTokenMetadata,
   type TokenMetadata,
@@ -73,7 +89,13 @@ const RAYDIUM_INITIALIZE_V2_D8 = Buffer.from([
 export type LaunchVenue = "pump" | "raydium-launchlab";
 export type MigrationVenue = "pump" | "raydium-launchlab";
 export type MigrationDestination = "pumpswap" | "raydium-amm" | "raydium-cpmm";
-export type TradeVenue = "pump" | "pumpswap" | "raydium-launchlab" | "raydium-cpmm" | "meteora-dbc" | "meteora-damm-v2";
+export type TradeVenue =
+  | "pump"
+  | "pumpswap"
+  | "raydium-launchlab"
+  | "raydium-cpmm"
+  | "meteora-dbc"
+  | "meteora-damm-v2";
 export type TradeSide = "buy" | "sell";
 
 export type PumpDecodedEvent =
@@ -206,6 +228,8 @@ export type TradeMarket = {
 };
 
 export type TradeEvent = {
+  eventIndex?: number;
+  timestampSource?: "program-event" | "observed";
   type: "trade";
   venue: TradeVenue;
   signature: string;
@@ -229,6 +253,8 @@ type MarketState = {
 };
 
 type InternalTradeEvent = {
+  eventIndex?: number;
+  timestampSource?: "program-event" | "observed";
   type: "trade";
   venue: TradeVenue;
   signature: string;
@@ -662,13 +688,21 @@ function marketMetrics(
   quoteDecimalsValue: number,
   marginalPrice?: number,
 ): { priceQuotePerToken: number; marketCapQuote: number } | null {
-  const priceQuotePerToken = marginalPrice ?? priceQuote(
-    baseReserveRaw,
-    quoteReserveRaw,
-    baseDecimals,
-    quoteDecimalsValue,
-  );
-  if (priceQuotePerToken == null || !Number.isFinite(priceQuotePerToken) || priceQuotePerToken <= 0 || supplyRaw <= 0n) return null;
+  const priceQuotePerToken =
+    marginalPrice ??
+    priceQuote(
+      baseReserveRaw,
+      quoteReserveRaw,
+      baseDecimals,
+      quoteDecimalsValue,
+    );
+  if (
+    priceQuotePerToken == null ||
+    !Number.isFinite(priceQuotePerToken) ||
+    priceQuotePerToken <= 0 ||
+    supplyRaw <= 0n
+  )
+    return null;
   const supplyUi = Number(supplyRaw) / 10 ** baseDecimals;
   const marketCapQuote = priceQuotePerToken * supplyUi;
   if (!Number.isFinite(marketCapQuote) || marketCapQuote <= 0) return null;
@@ -719,7 +753,11 @@ function tradeMarketFromTradeEvent(
       priceSol = priceUsd / solUsd.price;
       marketCapSol = marketCapUsd / solUsd.price;
     }
-  } else if (quoteSolPerToken != null && Number.isFinite(quoteSolPerToken) && quoteSolPerToken > 0) {
+  } else if (
+    quoteSolPerToken != null &&
+    Number.isFinite(quoteSolPerToken) &&
+    quoteSolPerToken > 0
+  ) {
     priceSol = metrics.priceQuotePerToken * quoteSolPerToken;
     marketCapSol = metrics.marketCapQuote * quoteSolPerToken;
     if (solUsd) {
@@ -1601,7 +1639,14 @@ async function subscribeTradeStream(options: {
   onStatus?: (event: string, data?: Record<string, unknown>) => void;
 }): Promise<TradeSubscription> {
   const venues = new Set<TradeVenue>(
-    options.venues ?? ["pump", "pumpswap", "raydium-launchlab", "raydium-cpmm", "meteora-dbc", "meteora-damm-v2"],
+    options.venues ?? [
+      "pump",
+      "pumpswap",
+      "raydium-launchlab",
+      "raydium-cpmm",
+      "meteora-dbc",
+      "meteora-damm-v2",
+    ],
   );
   const commitment = options.commitment ?? "processed";
   const metadataMode = options.metadata ?? false;
@@ -1751,6 +1796,7 @@ async function subscribeTradeStream(options: {
     signature: string,
     slot: number,
     decoded: Extract<PumpDecodedEvent, { kind: "trade" }>,
+    eventIndex: number,
   ) => {
     if (decoded.mint !== mint) return;
     const current = states.get(mint);
@@ -1768,6 +1814,8 @@ async function subscribeTradeStream(options: {
       type: "trade",
       venue: "pump",
       signature,
+      eventIndex,
+      timestampSource: "program-event",
       slot,
       atMs: decoded.atMs,
       mint,
@@ -1794,6 +1842,7 @@ async function subscribeTradeStream(options: {
     signature: string,
     slot: number,
     decoded: Extract<PumpSwapDecodedEvent, { kind: "trade" }>,
+    eventIndex: number,
   ) => {
     let identity: PumpSwapPoolIdentity;
     try {
@@ -1844,6 +1893,8 @@ async function subscribeTradeStream(options: {
       type: "trade",
       venue: "pumpswap",
       signature,
+      eventIndex,
+      timestampSource: "program-event",
       slot,
       atMs: decoded.atMs,
       mint,
@@ -1865,12 +1916,25 @@ async function subscribeTradeStream(options: {
     });
   };
 
-  const emitDbcTrade = async (mint: string, signature: string, slot: number, decoded: DbcTradeEvent) => {
+  const emitDbcTrade = async (
+    mint: string,
+    signature: string,
+    slot: number,
+    decoded: DbcTradeEvent,
+    eventIndex: number,
+  ) => {
     try {
       const market = await readDbcMarket(options.connection, decoded.pool);
       const poolState = market.virtualPool.poolState;
-      if (poolState.baseMint.toBase58() !== mint || !poolState.config.equals(decoded.config)) {
-        status("meteora-dbc-pool-mismatch", { mint, pool: decoded.pool.toBase58(), signature });
+      if (
+        poolState.baseMint.toBase58() !== mint ||
+        !poolState.config.equals(decoded.config)
+      ) {
+        status("meteora-dbc-pool-mismatch", {
+          mint,
+          pool: decoded.pool.toBase58(),
+          signature,
+        });
         return;
       }
       const state = states.get(mint);
@@ -1879,46 +1943,98 @@ async function subscribeTradeStream(options: {
       state.quoteMint = market.config.quoteMint.toBase58();
       state.quoteDecimals = market.quoteDecimals;
       await refreshWatchedSupply(state);
-      await deliver({ type: "trade", venue: "meteora-dbc", signature, slot, atMs: decoded.atMs,
-        mint, pool: state.pool, side: decoded.sell ? "sell" : "buy",
-        quoteMint: state.quoteMint, baseDecimals: market.baseDecimals, quoteDecimals: market.quoteDecimals,
+      await deliver({
+        type: "trade",
+        venue: "meteora-dbc",
+        signature,
+        slot,
+        eventIndex,
+        timestampSource: "observed",
+        atMs: decoded.atMs,
+        mint,
+        pool: state.pool,
+        side: decoded.sell ? "sell" : "buy",
+        quoteMint: state.quoteMint,
+        baseDecimals: market.baseDecimals,
+        quoteDecimals: market.quoteDecimals,
         baseRaw: decoded.sell ? decoded.inputRaw : decoded.outputRaw,
         quoteRaw: decoded.sell ? decoded.outputRaw : decoded.inputRaw,
-        marketState: { supplyRaw: state.supplyRaw!,
+        marketState: {
+          supplyRaw: state.supplyRaw!,
           baseReserveRaw: BigInt(poolState.baseReserve.toString()),
           quoteReserveRaw: BigInt(poolState.quoteReserve.toString()),
-          priceQuotePerToken: dbcPrice(market, decoded.nextSqrtPrice) } });
+          priceQuotePerToken: dbcPrice(market, decoded.nextSqrtPrice),
+        },
+      });
     } catch (error) {
-      status("meteora-dbc-enrichment-error", { mint, signature, error: error instanceof Error ? error.message : String(error) });
+      status("meteora-dbc-enrichment-error", {
+        mint,
+        signature,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 
-  const emitDammV2Trade = async (mint: string, signature: string, slot: number, decoded: DammV2TradeEvent) => {
+  const emitDammV2Trade = async (
+    mint: string,
+    signature: string,
+    slot: number,
+    decoded: DammV2TradeEvent,
+    eventIndex: number,
+  ) => {
     try {
       const market = await readDammV2Market(options.connection, decoded.pool);
       const base = new PublicKey(mint);
-      if (!market.state.tokenAMint.equals(base) && !market.state.tokenBMint.equals(base)) {
-        status("meteora-damm-v2-pool-mismatch", { mint, pool: decoded.pool.toBase58(), signature });
+      if (
+        !market.state.tokenAMint.equals(base) &&
+        !market.state.tokenBMint.equals(base)
+      ) {
+        status("meteora-damm-v2-pool-mismatch", {
+          mint,
+          pool: decoded.pool.toBase58(),
+          signature,
+        });
         return;
       }
       const state = states.get(mint);
       if (!state || stopped || !subscriptions.has(mint)) return;
       const baseIsA = market.state.tokenAMint.equals(base);
       state.pool = decoded.pool.toBase58();
-      state.quoteMint = (baseIsA ? market.state.tokenBMint : market.state.tokenAMint).toBase58();
+      state.quoteMint = (
+        baseIsA ? market.state.tokenBMint : market.state.tokenAMint
+      ).toBase58();
       state.quoteDecimals = baseIsA ? market.decimalsB : market.decimalsA;
       await refreshWatchedSupply(state);
       const sell = baseIsA === decoded.aToB;
-      await deliver({ type: "trade", venue: "meteora-damm-v2", signature, slot, atMs: decoded.atMs,
-        mint, pool: state.pool, side: sell ? "sell" : "buy", quoteMint: state.quoteMint,
-        baseDecimals: baseIsA ? market.decimalsA : market.decimalsB, quoteDecimals: state.quoteDecimals,
-        baseRaw: sell ? decoded.inputRaw : decoded.outputRaw, quoteRaw: sell ? decoded.outputRaw : decoded.inputRaw,
-        marketState: { supplyRaw: state.supplyRaw!,
+      await deliver({
+        type: "trade",
+        venue: "meteora-damm-v2",
+        signature,
+        slot,
+        eventIndex,
+        timestampSource: "observed",
+        atMs: decoded.atMs,
+        mint,
+        pool: state.pool,
+        side: sell ? "sell" : "buy",
+        quoteMint: state.quoteMint,
+        baseDecimals: baseIsA ? market.decimalsA : market.decimalsB,
+        quoteDecimals: state.quoteDecimals,
+        baseRaw: sell ? decoded.inputRaw : decoded.outputRaw,
+        quoteRaw: sell ? decoded.outputRaw : decoded.inputRaw,
+        marketState: {
+          supplyRaw: state.supplyRaw!,
           baseReserveRaw: baseIsA ? decoded.reserveA : decoded.reserveB,
           quoteReserveRaw: baseIsA ? decoded.reserveB : decoded.reserveA,
-          priceQuotePerToken: dammV2Price(market, base, decoded.nextSqrtPrice) } });
+          priceQuotePerToken: dammV2Price(market, base, decoded.nextSqrtPrice),
+        },
+      });
     } catch (error) {
-      status("meteora-damm-v2-enrichment-error", { mint, signature, error: error instanceof Error ? error.message : String(error) });
+      status("meteora-damm-v2-enrichment-error", {
+        mint,
+        signature,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 
@@ -1927,6 +2043,7 @@ async function subscribeTradeStream(options: {
     signature: string,
     slot: number,
     decoded: Extract<RaydiumLaunchLabDecodedEvent, { kind: "trade" }>,
+    eventIndex: number,
   ) => {
     const current = states.get(mint);
     if (current) current.pool = decoded.pool;
@@ -1937,8 +2054,10 @@ async function subscribeTradeStream(options: {
       type: "trade",
       venue: "raydium-launchlab",
       signature,
+      eventIndex,
       slot,
       atMs: Date.now(),
+      timestampSource: "observed",
       mint,
       pool: decoded.pool,
       side: decoded.side,
@@ -1961,23 +2080,70 @@ async function subscribeTradeStream(options: {
   };
 
   const processMeteoraLogs = async <Event>(
-    mint: string, logs: { logs: string[]; signature: string }, slot: number, venue: TradeVenue, program: PublicKey,
+    mint: string,
+    logs: { logs: string[]; signature: string },
+    slot: number,
+    venue: TradeVenue,
+    program: PublicKey,
     decode: (connection: Connection, data: Buffer) => Event | null,
-    fromTransaction: (connection: Connection, transaction: ParsedTransactionWithMeta) => Array<Event>,
-    emit: (mint: string, signature: string, slot: number, event: Event) => Promise<void>,
+    fromTransaction: (
+      connection: Connection,
+      transaction: ParsedTransactionWithMeta,
+    ) => Array<Event>,
+    emit: (
+      mint: string,
+      signature: string,
+      slot: number,
+      event: Event,
+      eventIndex: number,
+    ) => Promise<void>,
   ) => {
-    if (!venues.has(venue) || !logs.logs.some((line) => line.startsWith(`Program ${program.toBase58()} invoke`))) return;
+    if (
+      !venues.has(venue) ||
+      !logs.logs.some((line) =>
+        line.startsWith(`Program ${program.toBase58()} invoke`),
+      )
+    )
+      return;
     try {
-      const decodedLogs = programDataEntries(logs.logs).filter((entry) => entry.programId === program.toBase58())
-        .map((entry) => decode(options.connection, Buffer.from(entry.data))).filter((event): event is Event => event !== null);
-      const transaction = decodedLogs.length ? null : await options.connection.getParsedTransaction(logs.signature, {
-        commitment: "confirmed", maxSupportedTransactionVersion: 1,
-      });
-      const events = decodedLogs.length ? decodedLogs : transaction ? fromTransaction(options.connection, transaction) : [];
-      if (!transaction && !decodedLogs.length) status(`${venue}-transaction-unavailable`, { mint, signature: logs.signature });
-      for (const event of events) await emit(mint, logs.signature, slot, event);
+      const decodedLogs = programDataEntries(logs.logs)
+        .map((entry, eventIndex) => ({
+          event:
+            entry.programId === program.toBase58()
+              ? decode(options.connection, Buffer.from(entry.data))
+              : null,
+          eventIndex,
+        }))
+        .filter(
+          (row): row is { event: Event; eventIndex: number } =>
+            row.event !== null,
+        );
+      const transaction = decodedLogs.length
+        ? null
+        : await options.connection.getParsedTransaction(logs.signature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 1,
+          });
+      const events = decodedLogs.length
+        ? decodedLogs
+        : transaction
+          ? fromTransaction(options.connection, transaction).map(
+              (event, eventIndex) => ({ event, eventIndex }),
+            )
+          : [];
+      if (!transaction && !decodedLogs.length)
+        status(`${venue}-transaction-unavailable`, {
+          mint,
+          signature: logs.signature,
+        });
+      for (const row of events)
+        await emit(mint, logs.signature, slot, row.event, row.eventIndex);
     } catch (error) {
-      status(`${venue}-event-error`, { mint, signature: logs.signature, error: error instanceof Error ? error.message : String(error) });
+      status(`${venue}-event-error`, {
+        mint,
+        signature: logs.signature,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 
@@ -1987,17 +2153,47 @@ async function subscribeTradeStream(options: {
     slot: number,
   ) => {
     if (logs.err || stopped || !subscriptions.has(mint)) return;
-    void processMeteoraLogs(mint, logs, slot, "meteora-dbc", DYNAMIC_BONDING_CURVE_PROGRAM_ID, decodeDbcTrade, dbcTradesFromTransaction, emitDbcTrade);
-    void processMeteoraLogs(mint, logs, slot, "meteora-damm-v2", CP_AMM_PROGRAM_ID, decodeDammV2Trade, dammV2TradesFromTransaction, emitDammV2Trade);
-    for (const entry of programDataEntries(logs.logs)) {
-      if (entry.programId === CREATE_CPMM_POOL_PROGRAM.toBase58() && venues.has("raydium-cpmm")) {
+    void processMeteoraLogs(
+      mint,
+      logs,
+      slot,
+      "meteora-dbc",
+      DYNAMIC_BONDING_CURVE_PROGRAM_ID,
+      decodeDbcTrade,
+      dbcTradesFromTransaction,
+      emitDbcTrade,
+    );
+    void processMeteoraLogs(
+      mint,
+      logs,
+      slot,
+      "meteora-damm-v2",
+      CP_AMM_PROGRAM_ID,
+      decodeDammV2Trade,
+      dammV2TradesFromTransaction,
+      emitDammV2Trade,
+    );
+    for (const [eventIndex, entry] of programDataEntries(logs.logs).entries()) {
+      if (
+        entry.programId === CREATE_CPMM_POOL_PROGRAM.toBase58() &&
+        venues.has("raydium-cpmm")
+      ) {
         const decoded = decodeCpmmSwap(entry.data);
-        if (!decoded || (decoded.inputMint !== mint && decoded.outputMint !== mint)) continue;
+        if (
+          !decoded ||
+          (decoded.inputMint !== mint && decoded.outputMint !== mint)
+        )
+          continue;
         void (async () => {
           try {
             const key = `${decoded.pool}:${mint}`;
             let pending = cpmmPools.get(key);
-            if (!pending) { pending = resolveCurrentMarket(options.connection, mint, { pool: decoded.pool }); cpmmPools.set(key, pending); }
+            if (!pending) {
+              pending = resolveCurrentMarket(options.connection, mint, {
+                pool: decoded.pool,
+              });
+              cpmmPools.set(key, pending);
+            }
             const identity = await pending;
             if (!identity || identity.venue !== "raydium-cpmm") return;
             const isBuy = decoded.outputMint === mint;
@@ -2005,22 +2201,55 @@ async function subscribeTradeStream(options: {
             if (identity.quoteMint !== quoteMint) return;
             const state = states.get(mint);
             if (!state || stopped) return;
-            state.decimals = identity.baseDecimals; state.quoteDecimals = identity.quoteDecimals;
-            state.quoteMint = identity.quoteMint; state.pool = identity.pool;
+            state.decimals = identity.baseDecimals;
+            state.quoteDecimals = identity.quoteDecimals;
+            state.quoteMint = identity.quoteMint;
+            state.pool = identity.pool;
             await refreshWatchedSupply(state);
-            if (decoded.inputReserveBefore <= 0n || decoded.outputReserveBefore <= 0n) return;
+            if (
+              decoded.inputReserveBefore <= 0n ||
+              decoded.outputReserveBefore <= 0n
+            )
+              return;
             // These are the protocol's fee-adjusted pre-swap reserves from this
             // exact event, never unrelated balances from a multi-pool transaction.
-            await deliver({ type: "trade", venue: "raydium-cpmm", mint, pool: identity.pool,
-              signature: logs.signature, slot, atMs: Date.now(), side: isBuy ? "buy" : "sell",
-              quoteMint, baseDecimals: identity.baseDecimals, quoteDecimals: identity.quoteDecimals,
-              baseRaw: isBuy ? decoded.outputRaw - decoded.outputTransferFee : decoded.inputRaw + decoded.inputTransferFee,
-              quoteRaw: isBuy ? decoded.inputRaw + decoded.inputTransferFee : decoded.outputRaw - decoded.outputTransferFee,
-              marketState: { supplyRaw: state.supplyRaw!, baseReserveRaw: isBuy ? decoded.outputReserveBefore : decoded.inputReserveBefore,
-                quoteReserveRaw: isBuy ? decoded.inputReserveBefore : decoded.outputReserveBefore } });
+            await deliver({
+              type: "trade",
+              venue: "raydium-cpmm",
+              mint,
+              pool: identity.pool,
+              signature: logs.signature,
+              slot,
+              eventIndex,
+              timestampSource: "observed",
+              atMs: Date.now(),
+              side: isBuy ? "buy" : "sell",
+              quoteMint,
+              baseDecimals: identity.baseDecimals,
+              quoteDecimals: identity.quoteDecimals,
+              baseRaw: isBuy
+                ? decoded.outputRaw - decoded.outputTransferFee
+                : decoded.inputRaw + decoded.inputTransferFee,
+              quoteRaw: isBuy
+                ? decoded.inputRaw + decoded.inputTransferFee
+                : decoded.outputRaw - decoded.outputTransferFee,
+              marketState: {
+                supplyRaw: state.supplyRaw!,
+                baseReserveRaw: isBuy
+                  ? decoded.outputReserveBefore
+                  : decoded.inputReserveBefore,
+                quoteReserveRaw: isBuy
+                  ? decoded.inputReserveBefore
+                  : decoded.outputReserveBefore,
+              },
+            });
           } catch (error) {
             cpmmPools.delete(`${decoded.pool}:${mint}`);
-            status("raydium-cpmm-pool-resolution-error", { mint, pool: decoded.pool, error: error instanceof Error ? error.message : String(error) });
+            status("raydium-cpmm-pool-resolution-error", {
+              mint,
+              pool: decoded.pool,
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         })();
         continue;
@@ -2042,7 +2271,7 @@ async function subscribeTradeStream(options: {
           continue;
         }
         if (decoded.kind === "trade")
-          void emitPumpTrade(mint, logs.signature, slot, decoded);
+          void emitPumpTrade(mint, logs.signature, slot, decoded, eventIndex);
         continue;
       }
       if (
@@ -2075,7 +2304,7 @@ async function subscribeTradeStream(options: {
           })();
           continue;
         }
-        void emitPumpSwapTrade(mint, logs.signature, slot, decoded);
+        void emitPumpSwapTrade(mint, logs.signature, slot, decoded, eventIndex);
         continue;
       }
       if (
@@ -2090,7 +2319,13 @@ async function subscribeTradeStream(options: {
           void ensureMetadata(mint, logs.signature);
           continue;
         }
-        void emitLaunchLabTrade(mint, logs.signature, slot, decoded);
+        void emitLaunchLabTrade(
+          mint,
+          logs.signature,
+          slot,
+          decoded,
+          eventIndex,
+        );
       }
     }
   };
@@ -2197,12 +2432,24 @@ function quoteSolLoader(
     const request = (async () => {
       try {
         const venue = new PumpSwapVenue();
-        const inspected = await venue.inspectToken(connection, new PublicKey(mint));
+        const inspected = await venue.inspectToken(
+          connection,
+          new PublicKey(mint),
+        );
         if (inspected?.quoteMint === WRAPPED_SOL_MINT) {
           const token = { ...inspected, mint } as TokenRow;
-          const market = await venue.resolveMarket({ connection, token, user: PublicKey.default });
+          const market = await venue.resolveMarket({
+            connection,
+            token,
+            user: PublicKey.default,
+          });
           if (market) {
-            const price = (await venue.price({ connection, token, user: PublicKey.default }, market)).priceQuotePerToken;
+            const price = (
+              await venue.price(
+                { connection, token, user: PublicKey.default },
+                market,
+              )
+            ).priceQuotePerToken;
             if (Number.isFinite(price) && price > 0) {
               cache.set(mint, { value: price, atMs: Date.now() });
               return price;
@@ -2266,7 +2513,8 @@ export async function subscribeTrades(options: {
     Math.max(1_000, Math.trunc(options.solUsdRefreshMs ?? 15_000)),
     status,
   );
-  const getQuoteSol = options.quoteSol ?? quoteSolLoader(options.connection, status);
+  const getQuoteSol =
+    options.quoteSol ?? quoteSolLoader(options.connection, status);
   return await subscribeTradeStream({
     connection: options.connection,
     tokens: options.tokens,
@@ -2303,6 +2551,8 @@ export async function subscribeTrades(options: {
         venue: internal.venue,
         signature: internal.signature,
         slot: internal.slot,
+        eventIndex: internal.eventIndex,
+        timestampSource: internal.timestampSource,
         atMs: internal.atMs,
         mint: internal.mint,
         pool: internal.pool,

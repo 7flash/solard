@@ -1,4 +1,8 @@
-import { getAssociatedTokenAddressSync, getAccount, getTransferFeeAmount } from "@solana/spl-token";
+import {
+  getAssociatedTokenAddressSync,
+  getAccount,
+  getTransferFeeAmount,
+} from "@solana/spl-token";
 import { PublicKey, type Connection } from "@solana/web3.js";
 import type { HumanAmount } from "../core/amounts.ts";
 import { rawAmount, sameAsset, toRawAmount } from "../core/amounts.ts";
@@ -11,7 +15,11 @@ import { TradePreSubmissionError } from "./trade-errors.ts";
 import type { TokenRef, WalletRef } from "../core/refs.ts";
 import type { TokenRow } from "../db/schema.ts";
 import type { ClaimPlan } from "../claims/claim-source.ts";
-import type { TradeVenuePlugin, VenueMarket, LivePoolReserves } from "../venues/venue-plugin.ts";
+import type {
+  TradeVenuePlugin,
+  VenueMarket,
+  LivePoolReserves,
+} from "../venues/venue-plugin.ts";
 import {
   closeTokenAccountIx,
   transferSolIx,
@@ -61,7 +69,6 @@ function legSlippageBps(totalBps: number): number {
   // combined minimum at least as strict as the caller's end-to-end limit.
   return Math.floor((1 - Math.sqrt(1 - total / 10_000)) * 10_000);
 }
-
 
 /** Generic transaction sugar for one-off actions. Trading strategies belong in scripts that import slrd. */
 export class TransactionComposer extends TransactionBuilder {
@@ -132,7 +139,12 @@ export class TransactionComposer extends TransactionBuilder {
   buy(
     ref: TokenRef,
     amount: HumanAmount,
-    options: { slippageBps?: number; minOutputRaw?: bigint | string; maxPriceSol?: SolPrice; reserves?: LivePoolReserves } = {},
+    options: {
+      slippageBps?: number;
+      minOutputRaw?: bigint | string;
+      maxPriceSol?: SolPrice;
+      reserves?: LivePoolReserves;
+    } = {},
   ): this {
     return this.addOperation(async (ctx, tx) => {
       const token = await this.composerHost.resolveTokenForExecution(ref);
@@ -149,7 +161,10 @@ export class TransactionComposer extends TransactionBuilder {
       let fundingRoute: Record<string, unknown> | null = null;
 
       if (!sameAsset(input.asset, market.quoteAsset)) {
-        if (input.asset.kind !== "native-sol" || market.quoteAsset.kind !== "spl-token")
+        if (
+          input.asset.kind !== "native-sol" ||
+          market.quoteAsset.kind !== "spl-token"
+        )
           throw new QuoteAssetMismatchError(
             input.asset.mint.toBase58(),
             market.quoteAsset.mint.toBase58(),
@@ -217,18 +232,37 @@ export class TransactionComposer extends TransactionBuilder {
         ? legSlippageBps(totalSlippageBps)
         : totalSlippageBps;
       const quote = await plugin.quoteBuy(
-        { connection: this.composerHost.connection(), token, user: tx.payer(), reserves: options.reserves },
+        {
+          connection: this.composerHost.connection(),
+          token,
+          user: tx.payer(),
+          reserves: options.reserves,
+        },
         market,
         quoteInput,
         targetSlippageBps,
       );
       const built = await plugin.buildBuy(
-        { connection: this.composerHost.connection(), token, user: tx.payer(), reserves: options.reserves },
+        {
+          connection: this.composerHost.connection(),
+          token,
+          user: tx.payer(),
+          reserves: options.reserves,
+        },
         market,
         quote,
       );
-      assertTradeMinimum(built.minOutputRaw ?? quote.minimumOutputRaw, options.minOutputRaw);
-      assertTradePrice("buy", input.raw, built.minOutputRaw ?? quote.minimumOutputRaw, token.decimals, options.maxPriceSol);
+      assertTradeMinimum(
+        built.minOutputRaw ?? quote.minimumOutputRaw,
+        options.minOutputRaw,
+      );
+      assertTradePrice(
+        "buy",
+        input.raw,
+        built.minOutputRaw ?? quote.minimumOutputRaw,
+        token.decimals,
+        options.maxPriceSol,
+      );
       tx.addMany(built.instructions, {
         kind: "buy",
         mint: market.mint,
@@ -236,15 +270,23 @@ export class TransactionComposer extends TransactionBuilder {
           venue: market.venue,
           inputRaw: input.raw.toString(),
           quoteInputRaw: quoteInput.raw.toString(),
-          minOutputRaw: (built.minOutputRaw ?? quote.minimumOutputRaw).toString(),
+          minOutputRaw: (
+            built.minOutputRaw ?? quote.minimumOutputRaw
+          ).toString(),
           totalSlippageBps,
           ...(fundingRoute ? { fundingRoute } : {}),
           ...(quote.meta ?? {}),
           ...(built.meta ?? {}),
-          expectedOutputRaw: (built.expectedOutputRaw ?? quote.expectedOutputRaw).toString(),
+          expectedOutputRaw: (
+            built.expectedOutputRaw ?? quote.expectedOutputRaw
+          ).toString(),
         },
       });
-      ctx.lastBuy = { token, market, minimumOutputRaw: built.minOutputRaw ?? quote.minimumOutputRaw };
+      ctx.lastBuy = {
+        token,
+        market,
+        minimumOutputRaw: built.minOutputRaw ?? quote.minimumOutputRaw,
+      };
       tx.track({
         address: getAssociatedTokenAddressSync(
           market.mint,
@@ -262,7 +304,15 @@ export class TransactionComposer extends TransactionBuilder {
 
   sell(
     ref: TokenRef,
-    options: { bps?: number; slippageBps?: number; minOutputLamports?: bigint | string; minPriceSol?: SolPrice; reserves?: LivePoolReserves; closeTokenAccount?: boolean } = {},
+    options: {
+      bps?: number;
+      amountRaw?: bigint | string;
+      slippageBps?: number;
+      minOutputLamports?: bigint | string;
+      minPriceSol?: SolPrice;
+      reserves?: LivePoolReserves;
+      closeTokenAccount?: boolean;
+    } = {},
   ): this {
     return this.addOperation(async (_ctx, tx) => {
       const token = await this.composerHost.resolveTokenForExecution(ref);
@@ -276,21 +326,60 @@ export class TransactionComposer extends TransactionBuilder {
         token,
         market.baseTokenProgram,
       );
-      const input = (balance * BigInt(options.bps ?? 10_000)) / 10_000n;
+      if (options.amountRaw !== undefined && options.bps !== undefined)
+        throw new Error("sell amountRaw and bps are mutually exclusive");
+      let input: bigint;
+      if (options.amountRaw !== undefined) {
+        if (
+          typeof options.amountRaw !== "bigint" &&
+          (typeof options.amountRaw !== "string" ||
+            !/^\d+$/.test(options.amountRaw))
+        )
+          throw new Error("sell amountRaw must be a positive raw integer");
+        input = BigInt(options.amountRaw);
+        if (input <= 0n)
+          throw new Error("sell amountRaw must be a positive raw integer");
+        if (input > balance)
+          throw Object.assign(
+            new Error(
+              `Requested sell amount ${input} exceeds token balance ${balance}`,
+            ),
+            { code: "INSUFFICIENT_TOKEN_BALANCE" },
+          );
+      } else {
+        const bps = options.bps ?? 10_000;
+        if (!Number.isInteger(bps) || bps < 1 || bps > 10_000)
+          throw new Error("sell bps must be an integer between 1 and 10000");
+        input = (balance * BigInt(bps)) / 10_000n;
+      }
       if (input <= 0n) throw new Error("No tokens available to sell");
+      if (options.closeTokenAccount && input !== balance)
+        throw new Error(
+          "closeTokenAccount requires selling the entire token-account balance",
+        );
       const totalSlippageBps = options.slippageBps ?? 1500;
       const needsExitRouting = market.quoteAsset.kind === "spl-token";
       const targetSlippageBps = needsExitRouting
         ? legSlippageBps(totalSlippageBps)
         : totalSlippageBps;
       const quote = await plugin.quoteSell(
-        { connection: this.composerHost.connection(), token, user: tx.payer(), reserves: options.reserves },
+        {
+          connection: this.composerHost.connection(),
+          token,
+          user: tx.payer(),
+          reserves: options.reserves,
+        },
         market,
         input,
         targetSlippageBps,
       );
       const built = await plugin.buildSell(
-        { connection: this.composerHost.connection(), token, user: tx.payer(), reserves: options.reserves },
+        {
+          connection: this.composerHost.connection(),
+          token,
+          user: tx.payer(),
+          reserves: options.reserves,
+        },
         market,
         quote,
       );
@@ -325,8 +414,17 @@ export class TransactionComposer extends TransactionBuilder {
           exit.market,
           exitQuote,
         );
-        assertTradeMinimum(exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw, options.minOutputLamports);
-        assertTradePrice("sell", input, exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw, token.decimals, options.minPriceSol);
+        assertTradeMinimum(
+          exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw,
+          options.minOutputLamports,
+        );
+        assertTradePrice(
+          "sell",
+          input,
+          exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw,
+          token.decimals,
+          options.minPriceSol,
+        );
         tx.addMany(built.instructions);
         tx.addMany(exitBuilt.instructions, {
           kind: "sell",
@@ -334,10 +432,18 @@ export class TransactionComposer extends TransactionBuilder {
           meta: {
             venue: market.venue,
             inputRaw: input.toString(),
-            guaranteedIntermediateRaw: (built.minOutputRaw ?? quote.minimumOutputRaw).toString(),
-            minSolOutputRaw: (exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw).toString(),
-            minOutputRaw: (exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw).toString(),
-            expectedOutputRaw: (exitBuilt.expectedOutputRaw ?? exitQuote.expectedOutputRaw).toString(),
+            guaranteedIntermediateRaw: (
+              built.minOutputRaw ?? quote.minimumOutputRaw
+            ).toString(),
+            minSolOutputRaw: (
+              exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw
+            ).toString(),
+            minOutputRaw: (
+              exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw
+            ).toString(),
+            expectedOutputRaw: (
+              exitBuilt.expectedOutputRaw ?? exitQuote.expectedOutputRaw
+            ).toString(),
             totalSlippageBps,
             exitRoute: {
               venue: exit.market.venue,
@@ -359,28 +465,63 @@ export class TransactionComposer extends TransactionBuilder {
         });
         tx.track({ address: tx.payer(), kind: "sol" });
       } else {
-        assertTradeMinimum(built.minOutputRaw ?? quote.minimumOutputRaw, options.minOutputLamports);
-        assertTradePrice("sell", input, built.minOutputRaw ?? quote.minimumOutputRaw, token.decimals, options.minPriceSol);
+        assertTradeMinimum(
+          built.minOutputRaw ?? quote.minimumOutputRaw,
+          options.minOutputLamports,
+        );
+        assertTradePrice(
+          "sell",
+          input,
+          built.minOutputRaw ?? quote.minimumOutputRaw,
+          token.decimals,
+          options.minPriceSol,
+        );
         tx.addMany(built.instructions, {
           kind: "sell",
           mint: market.mint,
           meta: {
             venue: market.venue,
             inputRaw: input.toString(),
-            minOutputRaw: (built.minOutputRaw ?? quote.minimumOutputRaw).toString(),
+            minOutputRaw: (
+              built.minOutputRaw ?? quote.minimumOutputRaw
+            ).toString(),
             totalSlippageBps,
             ...(built.meta ?? {}),
-            expectedOutputRaw: (built.expectedOutputRaw ?? quote.expectedOutputRaw).toString(),
+            expectedOutputRaw: (
+              built.expectedOutputRaw ?? quote.expectedOutputRaw
+            ).toString(),
           },
         });
       }
       void exitRoute;
       if (options.closeTokenAccount) {
-        if ((options.bps ?? 10_000) !== 10_000 || input !== balance) throw new Error("closeTokenAccount requires a full-position sell");
-        const address = getAssociatedTokenAddressSync(market.mint, tx.payer(), false, market.baseTokenProgram);
-        const account = await getAccount(this.composerHost.connection(), address, "confirmed", market.baseTokenProgram);
-        if (!(account.closeAuthority ?? account.owner).equals(tx.payer()) || (getTransferFeeAmount(account)?.withheldAmount ?? 0n) > 0n) throw new Error("Token account cannot be closed by this wallet or contains withheld fees");
-        tx.add(closeTokenAccountIx({ account: address, owner: tx.payer(), tokenProgram: market.baseTokenProgram }), { kind: "close-token-account", mint: market.mint });
+        const address = getAssociatedTokenAddressSync(
+          market.mint,
+          tx.payer(),
+          false,
+          market.baseTokenProgram,
+        );
+        const account = await getAccount(
+          this.composerHost.connection(),
+          address,
+          "confirmed",
+          market.baseTokenProgram,
+        );
+        if (
+          !(account.closeAuthority ?? account.owner).equals(tx.payer()) ||
+          (getTransferFeeAmount(account)?.withheldAmount ?? 0n) > 0n
+        )
+          throw new Error(
+            "Token account cannot be closed by this wallet or contains withheld fees",
+          );
+        tx.add(
+          closeTokenAccountIx({
+            account: address,
+            owner: tx.payer(),
+            tokenProgram: market.baseTokenProgram,
+          }),
+          { kind: "close-token-account", mint: market.mint },
+        );
       }
       tx.track({
         address: getAssociatedTokenAddressSync(
@@ -491,33 +632,47 @@ export class TransactionComposer extends TransactionBuilder {
       const market = { mint, baseTokenProgram: info.tokenProgram };
       const destination =
         typeof recipient === "string" ? new PublicKey(recipient) : recipient;
-      const sources = amountRaw === "all"
-        ? (await listOwnedTokenAccounts(this.composerHost.connection(), tx.payer())).filter((account) => account.mint === token.mint && account.amountRaw > 0n).map((account) => ({ source: new PublicKey(account.address), amount: account.amountRaw }))
-        : [{ source: undefined, amount: amountRaw }];
+      const sources =
+        amountRaw === "all"
+          ? (
+              await listOwnedTokenAccounts(
+                this.composerHost.connection(),
+                tx.payer(),
+              )
+            )
+              .filter(
+                (account) =>
+                  account.mint === token.mint && account.amountRaw > 0n,
+              )
+              .map((account) => ({
+                source: new PublicKey(account.address),
+                amount: account.amountRaw,
+              }))
+          : [{ source: undefined, amount: amountRaw }];
       if (!sources.length) throw new Error("No tokens available to transfer");
       for (const source of sources) {
-      const transferAmount = source.amount;
-      const transfer = transferTokenIxs({
-        payer: tx.payer(),
-        owner: tx.payer(),
-        recipient: destination,
-        mint: market.mint,
-        amountRaw: transferAmount,
-        decimals: info.decimals,
-        tokenProgram: market.baseTokenProgram,
-        source: source.source,
-      });
-      tx.addMany(transfer.instructions, {
-        kind: "transfer-token",
-        mint: market.mint,
-        recipient: destination,
-        meta: { raw: transferAmount.toString() },
-      });
-      tx.track({
-        address: transfer.destination,
-        kind: "token",
-        mint: market.mint,
-      });
+        const transferAmount = source.amount;
+        const transfer = transferTokenIxs({
+          payer: tx.payer(),
+          owner: tx.payer(),
+          recipient: destination,
+          mint: market.mint,
+          amountRaw: transferAmount,
+          decimals: info.decimals,
+          tokenProgram: market.baseTokenProgram,
+          source: source.source,
+        });
+        tx.addMany(transfer.instructions, {
+          kind: "transfer-token",
+          mint: market.mint,
+          recipient: destination,
+          meta: { raw: transferAmount.toString() },
+        });
+        tx.track({
+          address: transfer.destination,
+          kind: "token",
+          mint: market.mint,
+        });
       }
     });
   }
@@ -772,14 +927,27 @@ export class BatchComposer {
   buy(
     token: TokenRef,
     amount: HumanAmount,
-    options?: { slippageBps?: number; minOutputRaw?: bigint | string; maxPriceSol?: SolPrice; reserves?: LivePoolReserves },
+    options?: {
+      slippageBps?: number;
+      minOutputRaw?: bigint | string;
+      maxPriceSol?: SolPrice;
+      reserves?: LivePoolReserves;
+    },
   ): this {
     this.composers.forEach((tx) => tx.buy(token, amount, options));
     return this;
   }
   sell(
     token: TokenRef,
-    options?: { bps?: number; slippageBps?: number; minOutputLamports?: bigint | string; minPriceSol?: SolPrice; reserves?: LivePoolReserves },
+    options?: {
+      bps?: number;
+      amountRaw?: bigint | string;
+      slippageBps?: number;
+      minOutputLamports?: bigint | string;
+      minPriceSol?: SolPrice;
+      reserves?: LivePoolReserves;
+      closeTokenAccount?: boolean;
+    },
   ): this {
     this.composers.forEach((tx) => tx.sell(token, options));
     return this;

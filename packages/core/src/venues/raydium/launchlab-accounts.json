@@ -1,0 +1,71 @@
+{
+  "source": "https://raw.githubusercontent.com/raydium-io/raydium-idl/master/raydium_launchpad/raydium_launchpad.json",
+  "address": "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj",
+  "accounts": [
+    {
+      "name": "GlobalConfig",
+      "discriminator": [
+        149,
+        8,
+        156,
+        202,
+        160,
+        252,
+        176,
+        217
+      ]
+    },
+    {
+      "name": "PlatformConfig",
+      "discriminator": [
+        160,
+        78,
+        128,
+        0,
+        248,
+        83,
+        230,
+        160
+      ]
+    },
+    {
+      "name": "PlatformGlobalAccess",
+      "discriminator": [
+        174,
+        147,
+        132,
+        240,
+        137,
+        219,
+        243,
+        16
+      ]
+    },
+    {
+      "name": "PoolState",
+      "discriminator": [
+        247,
+        237,
+        227,
+        245,
+        215,
+        195,
+        222,
+        70
+      ]
+    },
+    {
+      "name": "VestingRecord",
+      "discriminator": [
+        106,
+        243,
+        221,
+        205,
+        230,
+        126,
+        85,
+        83
+      ]
+    }
+  ]
+}

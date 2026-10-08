@@ -39,6 +39,17 @@ console.log(wallet.address);
 
 `SLRD_MASTER_KEY` is required when wallet secret material must be encrypted/decrypted.
 
+Sell an exact raw token amount through the composer (0.2.32):
+
+```ts
+const plan = await slrd.tx(wallet)
+  .sell(mint, { amountRaw: "1000000", slippageBps: 500 })
+  .build();
+```
+
+`amountRaw` accepts a positive integer string or bigint, is mutually exclusive
+with `bps`, and uses mint raw units (one token for a six-decimal mint above).
+
 ## Trade priority fees and confirmation
 
 Direct `buy`, `sell`, `buyMany`, and `sellMany` accept the same priority-fee

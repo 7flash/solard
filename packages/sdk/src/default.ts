@@ -1,14 +1,9 @@
 import { getSolUsdPrice } from "@solard/core";
-import {
-  listenTrades,
-  subscribeLaunches,
-  subscribeMigrations,
-} from "./live.ts";
+import { subscribeLaunches, subscribeMigrations } from "./live.ts";
 import { createSolard, type Solard } from "./client.ts";
 
 type DefaultSolard = Solard & {
   getSolUsdPrice: typeof getSolUsdPrice;
-  listenTrades: typeof listenTrades;
   subscribeLaunches: typeof subscribeLaunches;
   subscribeMigrations: typeof subscribeMigrations;
 };
@@ -22,7 +17,6 @@ function client(): Solard {
 
 const operations = {
   getSolUsdPrice,
-  listenTrades,
   subscribeLaunches,
   subscribeMigrations,
 } as const;

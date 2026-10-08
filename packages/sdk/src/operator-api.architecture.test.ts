@@ -14,7 +14,9 @@ describe("operator api", () => {
   test("uses one object-form trade api", () => {
     expect(client).toContain("input: SolardBuyInput");
     expect(client).toContain("input: SolardSellInput");
-    expect(client).toContain("SolardTradeExecutionOptions = TradeExecutionOptions");
+    expect(client).toContain(
+      "SolardTradeExecutionOptions = TradeExecutionOptions",
+    );
     expect(client).toContain("exportPrivateKey");
     expect(client).toContain("getTransaction(");
   });

@@ -1,6 +1,6 @@
 {
   "name": "@solard/sdk",
-  "version": "0.2.30",
+  "version": "0.2.33",
   "description": "Public Solard SDK for wallets, trading, history, live market subscriptions and token metadata.",
   "type": "module",
   "main": "./src/index.ts",
@@ -27,7 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
-    "@solard/core": "0.2.30"
+    "@solard/core": "0.2.33"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.browser.json",

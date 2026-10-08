@@ -108,10 +108,19 @@ export async function assembleTransaction(args: {
       };
       // Load registered tables before signing. Previously Solard attempted to sign the
       // oversized uncompressed message first, which throws before ALT fallback runs.
-      const allAltAddresses = [...new Map([...args.altAddresses,
-        ...args.draft.actions.flatMap((action) =>
-          (Array.isArray(action.meta?.lookupTableAddresses) ? action.meta.lookupTableAddresses : []).map((address) => new PublicKey(String(address)))),
-      ].map((address) => [address.toBase58(), address])).values()];
+      const allAltAddresses = [
+        ...new Map(
+          [
+            ...args.altAddresses,
+            ...args.draft.actions.flatMap((action) =>
+              (Array.isArray(action.meta?.lookupTableAddresses)
+                ? action.meta.lookupTableAddresses
+                : []
+              ).map((address) => new PublicKey(String(address))),
+            ),
+          ].map((address) => [address.toBase58(), address]),
+        ).values(),
+      ];
       const tables = allAltAddresses.length
         ? await fetchLookupTables(args.connection, allAltAddresses)
         : [];

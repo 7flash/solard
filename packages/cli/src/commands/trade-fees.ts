@@ -10,9 +10,15 @@ export function tradeFeeOptions(flags: ReadonlyMap<string, string>) {
   };
   const cuLimit = number("cu-limit");
   const microLamports = number("priority-micro-lamports");
-  if (cuLimit != null && (!Number.isInteger(cuLimit) || cuLimit < 1 || cuLimit > 1_400_000))
+  if (
+    cuLimit != null &&
+    (!Number.isInteger(cuLimit) || cuLimit < 1 || cuLimit > 1_400_000)
+  )
     throw new Error("--cu-limit must be an integer between 1 and 1400000");
-  if (microLamports != null && (!Number.isSafeInteger(microLamports) || microLamports < 0))
+  if (
+    microLamports != null &&
+    (!Number.isSafeInteger(microLamports) || microLamports < 0)
+  )
     throw new Error("--priority-micro-lamports must be a non-negative integer");
   const landing: TradeLandingPolicy = {
     maxAttempts: number("trade-attempts"),

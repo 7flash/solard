@@ -22,7 +22,9 @@ export function resolveDestinationRef(
 ): ResolvedDestinationRef {
   const input = value.trim();
   // A literal address needs no contact database lookup or schema initialization.
-  try { return { input, address: new PublicKey(input).toBase58() }; } catch {}
+  try {
+    return { input, address: new PublicKey(input).toBase58() };
+  } catch {}
   const contact = findExternalContact(input);
 
   let walletAddress: string | null = null;

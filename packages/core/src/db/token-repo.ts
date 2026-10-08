@@ -10,16 +10,25 @@ const m = measure("tokens");
 function numericTokenRow(row: TokenRow): TokenRow {
   // The installed ORM maps nullable numbers to TEXT. Preserve its mutable row
   // proxy while restoring the SDK's numeric metadata contract at the boundary.
-  return new Proxy(row, { get(target, property, receiver) {
-    const value = Reflect.get(target, property, receiver);
-    if ((property === "decimals" || property === "refreshedAtMs") && value != null) {
-      const numeric = Number(value);
-      if (!Number.isSafeInteger(numeric) || numeric < 0 || (property === "decimals" && numeric > 255))
-        throw new Error(`Invalid persisted token ${String(property)}`);
-      return numeric;
-    }
-    return value;
-  } });
+  return new Proxy(row, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (
+        (property === "decimals" || property === "refreshedAtMs") &&
+        value != null
+      ) {
+        const numeric = Number(value);
+        if (
+          !Number.isSafeInteger(numeric) ||
+          numeric < 0 ||
+          (property === "decimals" && numeric > 255)
+        )
+          throw new Error(`Invalid persisted token ${String(property)}`);
+        return numeric;
+      }
+      return value;
+    },
+  });
 }
 function normalizeName(value: string): string {
   return value.startsWith("$") ? value.slice(1) : value;
@@ -49,31 +58,35 @@ export class TokenRepo {
           Object.assign(existing, input, { updatedAtMs: now });
           return numericTokenRow(existing);
         }
-        return numericTokenRow(this.db.tokens.insert({
-          mint: input.mint,
-          name: input.name ?? null,
-          symbol: input.symbol ?? null,
-          decimals: input.decimals ?? null,
-          createKind: input.createKind ?? "unknown",
-          creator: input.creator ?? null,
-          quoteMint: input.quoteMint ?? null,
-          quoteTokenProgram: input.quoteTokenProgram ?? null,
-          baseTokenProgram: input.baseTokenProgram ?? null,
-          bondingCurve: input.bondingCurve ?? null,
-          pool: input.pool ?? null,
-          sharingConfig: input.sharingConfig ?? null,
-          venueHint: input.venueHint ?? "unknown",
-          metadataJson: input.metadataJson ?? null,
-          refreshedAtMs: input.refreshedAtMs ?? null,
-          createdAtMs: now,
-          updatedAtMs: now,
-        }) as TokenRow);
+        return numericTokenRow(
+          this.db.tokens.insert({
+            mint: input.mint,
+            name: input.name ?? null,
+            symbol: input.symbol ?? null,
+            decimals: input.decimals ?? null,
+            createKind: input.createKind ?? "unknown",
+            creator: input.creator ?? null,
+            quoteMint: input.quoteMint ?? null,
+            quoteTokenProgram: input.quoteTokenProgram ?? null,
+            baseTokenProgram: input.baseTokenProgram ?? null,
+            bondingCurve: input.bondingCurve ?? null,
+            pool: input.pool ?? null,
+            sharingConfig: input.sharingConfig ?? null,
+            venueHint: input.venueHint ?? "unknown",
+            metadataJson: input.metadataJson ?? null,
+            refreshedAtMs: input.refreshedAtMs ?? null,
+            createdAtMs: now,
+            updatedAtMs: now,
+          }) as TokenRow,
+        );
       },
       tokenLog,
     );
   }
   list(): TokenRow[] {
-    return (this.db.tokens.select().orderBy("id", "desc").all() as TokenRow[]).map(numericTokenRow);
+    return (
+      this.db.tokens.select().orderBy("id", "desc").all() as TokenRow[]
+    ).map(numericTokenRow);
   }
   resolve(ref: TokenRef): TokenRow {
     if (typeof ref !== "string" && !(ref instanceof PublicKey)) return ref;

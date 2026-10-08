@@ -24,7 +24,17 @@ export const TokenSchema = z.object({
   bondingCurve: z.string().nullable().default(null),
   pool: z.string().nullable().default(null),
   sharingConfig: z.string().nullable().default(null),
-  venueHint: z.enum(["unknown", "pump-curve", "pumpswap", "meteora-dbc", "meteora-damm-v2", "jupiter"]).default("unknown"),
+  venueHint: z
+    .enum([
+      "unknown",
+      "pump-curve",
+      "pumpswap",
+      "meteora-dbc",
+      "meteora-damm-v2",
+      "jupiter",
+      "raydium-launchlab",
+    ])
+    .default("unknown"),
   metadataJson: z.string().nullable().default(null),
   refreshedAtMs: z.number().nullable().default(null),
   createdAtMs: z.number(),

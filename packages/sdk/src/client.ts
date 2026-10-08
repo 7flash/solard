@@ -35,7 +35,13 @@ import {
   type WalletRef,
   type WalletPrivateKeyExport,
   type WalletPrivateKeyFormat,
+  TradePreSubmissionError,
 } from "@solard/core";
+import {
+  listenTrades as openTradeListener,
+  type ListenTradesOptions,
+  type TradeListener,
+} from "./live.ts";
 
 export type SolardOptions = {
   rpcUrl?: string;
@@ -79,7 +85,9 @@ export type SolardSellInput = {
   minPriceSol?: string | number;
   wallet: WalletRef;
   token: TokenRef;
-  amount?: "all" | { bps: number };
+  amount?: "all" | { bps: number } | { raw: bigint | string };
+  /** Exact raw token units; mutually exclusive with amount. */
+  amountRaw?: bigint | string;
   slippageBps?: number;
   minOutputLamports?: bigint | string;
 };
@@ -88,16 +96,36 @@ export type SolardTradeExecutionOptions = TradeExecutionOptions;
 
 export type SolardTradeExecutionResult = TradeResult;
 export type Solard = {
-  resolveCurrentMarket: ReturnType<typeof createCoreSolard>["resolveCurrentMarket"];
-  getClaimableCreatorFees: ReturnType<typeof createCoreSolard>["getClaimableCreatorFees"];
-  claimAllCreatorFees: ReturnType<typeof createCoreSolard>["claimAllCreatorFees"];
+  listenTrades(
+    options?: Omit<ListenTradesOptions, "tokens"> & {
+      tokens?: readonly string[];
+    },
+  ): Promise<TradeListener>;
+  resolveCurrentMarket: ReturnType<
+    typeof createCoreSolard
+  >["resolveCurrentMarket"];
+  getClaimableCreatorFees: ReturnType<
+    typeof createCoreSolard
+  >["getClaimableCreatorFees"];
+  claimAllCreatorFees: ReturnType<
+    typeof createCoreSolard
+  >["claimAllCreatorFees"];
   walletLedger: ReturnType<typeof createCoreSolard>["walletLedger"];
   historicalTape: ReturnType<typeof createCoreSolard>["historicalTape"];
-  getSupportedPumpPairs: ReturnType<typeof createCoreSolard>["getSupportedPumpPairs"];
+  getSupportedPumpPairs: ReturnType<
+    typeof createCoreSolard
+  >["getSupportedPumpPairs"];
+  getSupportedLaunchLabPairs: ReturnType<
+    typeof createCoreSolard
+  >["getSupportedLaunchLabPairs"];
   listVanityMints: ReturnType<typeof createCoreSolard>["listVanityMints"];
   releaseVanityMint: ReturnType<typeof createCoreSolard>["releaseVanityMint"];
-  closeEmptyTokenAccounts: ReturnType<typeof createCoreSolard>["closeEmptyTokenAccounts"];
-  prepareTokenDeployment: ReturnType<typeof createCoreSolard>["prepareTokenDeployment"];
+  closeEmptyTokenAccounts: ReturnType<
+    typeof createCoreSolard
+  >["closeEmptyTokenAccounts"];
+  prepareTokenDeployment: ReturnType<
+    typeof createCoreSolard
+  >["prepareTokenDeployment"];
   deployToken: ReturnType<typeof createCoreSolard>["deployToken"];
   warmBlockhash: ReturnType<typeof createCoreSolard>["warmBlockhash"];
   curveLiquidity: ReturnType<typeof createCoreSolard>["curveLiquidity"];
@@ -174,14 +202,37 @@ function tradeAmount(value: HumanAmount | string | number): HumanAmount {
     : value;
 }
 
-function sellBps(value: SolardSellInput["amount"]): number {
-  if (value == null || value === "all") return 10_000;
-  const bps = Math.trunc(value.bps);
-  if (!(bps > 0 && bps <= 10_000))
+function sellSize(input: SolardSellInput): {
+  bps?: number;
+  amountRaw?: bigint | string;
+} {
+  const value = input.amount;
+  if (input.amountRaw !== undefined && value !== undefined)
+    throw new Error("sell amountRaw and amount are mutually exclusive");
+  const raw =
+    input.amountRaw !== undefined
+      ? input.amountRaw
+      : typeof value === "object" && value !== null && "raw" in value
+        ? value.raw
+        : undefined;
+  if (raw !== undefined) {
+    if (typeof value === "object" && value !== null && "bps" in value)
+      throw new Error("sell raw and bps are mutually exclusive");
+    if (
+      (typeof raw !== "bigint" &&
+        (typeof raw !== "string" || !/^\d+$/.test(raw))) ||
+      BigInt(raw) <= 0n
+    )
+      throw new Error("sell amountRaw must be a positive raw integer");
+    return { amountRaw: raw };
+  }
+  if (value == null || value === "all") return { bps: 10_000 };
+  if (!("bps" in value)) throw new Error("sell amount must specify bps or raw");
+  const bps = value.bps;
+  if (!Number.isInteger(bps) || !(bps > 0 && bps <= 10_000))
     throw new Error("sell amount.bps must be between 1 and 10000");
-  return bps;
+  return { bps };
 }
-
 
 async function executeTrade(
   core: ReturnType<typeof createCoreSolard>,
@@ -191,11 +242,30 @@ async function executeTrade(
 ): Promise<SolardTradeExecutionResult> {
   if (side === "buy") {
     const buy = input as SolardBuyInput;
-    return await core.buy(buy.token, buy.wallet, tradeAmount(buy.amount), { ...options, slippageBps: buy.slippageBps, minOutputRaw: buy.minOutputRaw, maxPriceSol: buy.maxPriceSol, reserves: buy.reserves });
+    return await core.buy(buy.token, buy.wallet, tradeAmount(buy.amount), {
+      ...options,
+      slippageBps: buy.slippageBps,
+      minOutputRaw: buy.minOutputRaw,
+      maxPriceSol: buy.maxPriceSol,
+      reserves: buy.reserves,
+    });
   }
   const sell = input as SolardSellInput;
-  return await core.sell(sell.token, sell.wallet, { ...options, bps: sellBps(sell.amount), slippageBps: sell.slippageBps, minOutputLamports: sell.minOutputLamports, minPriceSol: sell.minPriceSol, reserves: sell.reserves, closeTokenAccount: sell.closeTokenAccount });
-
+  let size: ReturnType<typeof sellSize>;
+  try {
+    size = sellSize(sell);
+  } catch (error) {
+    throw new TradePreSubmissionError(error);
+  }
+  return await core.sell(sell.token, sell.wallet, {
+    ...options,
+    ...size,
+    slippageBps: sell.slippageBps,
+    minOutputLamports: sell.minOutputLamports,
+    minPriceSol: sell.minPriceSol,
+    reserves: sell.reserves,
+    closeTokenAccount: sell.closeTokenAccount,
+  });
 }
 
 export function createSolard(options: SolardOptions = {}): Solard {
@@ -211,12 +281,25 @@ export function createSolard(options: SolardOptions = {}): Solard {
     { merge: core.events.merge },
   ) as SolardEventsApi;
   return Object.freeze({
+    listenTrades: (
+      listenerOptions: Omit<ListenTradesOptions, "tokens"> & {
+        tokens?: readonly string[];
+      } = {},
+    ) =>
+      openTradeListener({
+        rpcUrls:
+          options.rpcUrls ?? (options.rpcUrl ? [options.rpcUrl] : undefined),
+        dbPath: options.dbPath,
+        ...listenerOptions,
+        tokens: listenerOptions.tokens ?? [],
+      }),
     resolveCurrentMarket: core.resolveCurrentMarket.bind(core),
     getClaimableCreatorFees: core.getClaimableCreatorFees.bind(core),
     claimAllCreatorFees: core.claimAllCreatorFees.bind(core),
     walletLedger: core.walletLedger.bind(core),
     historicalTape: core.historicalTape.bind(core),
     getSupportedPumpPairs: core.getSupportedPumpPairs.bind(core),
+    getSupportedLaunchLabPairs: core.getSupportedLaunchLabPairs.bind(core),
     listVanityMints: core.listVanityMints.bind(core),
     releaseVanityMint: core.releaseVanityMint.bind(core),
     closeEmptyTokenAccounts: core.closeEmptyTokenAccounts.bind(core),

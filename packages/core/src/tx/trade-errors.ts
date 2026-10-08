@@ -5,11 +5,36 @@ export class TradePreSubmissionError extends Error {
   constructor(cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = "TradePreSubmissionError";
-    this.code = typeof cause === "object" && cause !== null && "code" in cause &&
-      typeof cause.code === "string" ? cause.code : "TRADE_NOT_SUBMITTED";
-    if (cause && typeof cause === "object") {
-      for (const key of ["quotedMinimum", "requiredMinimum", "requiredLamports", "availableLamports", "retryable", "limitPriceSol", "side"])
-        if (key in cause) Object.assign(this, { [key]: (cause as Record<string, unknown>)[key] });
+    let code = "TRADE_NOT_SUBMITTED";
+    let current = cause;
+    const seen = new Set<object>();
+    for (
+      let depth = 0;
+      depth < 8 && current && typeof current === "object" && !seen.has(current);
+      depth++
+    ) {
+      seen.add(current);
+      const value = current as Record<string, unknown>;
+      if (code === "TRADE_NOT_SUBMITTED" && typeof value.code === "string")
+        code = value.code;
+      for (const key of [
+        "quotedMinimum",
+        "requiredMinimum",
+        "requiredLamports",
+        "availableLamports",
+        "retryable",
+        "limitPriceSol",
+        "side",
+        "expectedOutputLamports",
+        "networkFeeLamports",
+        "tipLamports",
+        "requiredOutputLamports",
+        "outputSource",
+      ])
+        if (key in value && !(key in this))
+          Object.assign(this, { [key]: value[key] });
+      current = value.cause;
     }
+    this.code = code;
   }
 }

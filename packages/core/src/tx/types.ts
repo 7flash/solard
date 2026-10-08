@@ -52,7 +52,11 @@ export type SimulationResult = {
   /** Best-effort fee-payer account check after AccountNotFound, separate from program logs. */
   diagnostics?: {
     message: string;
-    feePayer: { address: string; exists: boolean | null; lamports: number | null };
+    feePayer: {
+      address: string;
+      exists: boolean | null;
+      lamports: number | null;
+    };
   };
   accountChanges: Array<{
     address: string;

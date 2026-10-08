@@ -3,7 +3,10 @@ import type { SenderId } from "../types.ts";
 import type { HeliusLandingTier } from "../helius-landing.ts";
 import { solardRpcFetch } from "../../chain/connection.ts";
 
-export function heliusSenderEndpoint(endpoint: string, tier: HeliusLandingTier): string {
+export function heliusSenderEndpoint(
+  endpoint: string,
+  tier: HeliusLandingTier,
+): string {
   const url = new URL(endpoint);
   if (tier === "helius-swqos") url.searchParams.set("swqos_only", "true");
   else url.searchParams.delete("swqos_only");
@@ -16,28 +19,39 @@ function redactEndpoint(value: string): string {
 
 export class HeliusSender implements SolardSender {
   constructor(
-    private readonly endpoint = process.env.HELIUS_SENDER_URL ?? "https://sender.helius-rpc.com/fast",
+    private readonly endpoint = process.env.HELIUS_SENDER_URL ??
+      "https://sender.helius-rpc.com/fast",
     readonly id: SenderId = "helius",
-    private readonly tier: HeliusLandingTier = id === "helius-swqos" ? "helius-swqos" : "helius-max",
+    private readonly tier: HeliusLandingTier = id === "helius-swqos"
+      ? "helius-swqos"
+      : "helius-max",
   ) {}
   async send({
     transaction,
     options,
   }: Parameters<SolardSender["send"]>[0]): Promise<string> {
     const endpoint = heliusSenderEndpoint(this.endpoint, this.tier);
-    const response = await solardRpcFetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: String(Date.now()),
-        method: "sendTransaction",
-        params: [
-          Buffer.from(transaction.serialize()).toString("base64"),
-          { encoding: "base64", skipPreflight: options?.skipPreflight ?? true, maxRetries: 0 },
-        ],
-      }),
-    }, { retry429: false, retryNetwork: false });
+    const response = await solardRpcFetch(
+      endpoint,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: String(Date.now()),
+          method: "sendTransaction",
+          params: [
+            Buffer.from(transaction.serialize()).toString("base64"),
+            {
+              encoding: "base64",
+              skipPreflight: options?.skipPreflight ?? true,
+              maxRetries: 0,
+            },
+          ],
+        }),
+      },
+      { retry429: false, retryNetwork: false },
+    );
     const raw = await response.text();
     let data: {
       result?: string;

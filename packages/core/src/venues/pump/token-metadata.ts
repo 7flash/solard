@@ -6,7 +6,9 @@ import { tokenAccountAmount } from "./common.ts";
 import { readDbcMarket } from "../meteora/dbc.ts";
 import { readDammV2Market } from "../meteora/damm-v2.ts";
 
-export function mergeTokenMetadataJson(...values: Array<string | null | undefined>): string {
+export function mergeTokenMetadataJson(
+  ...values: Array<string | null | undefined>
+): string {
   const merged: Record<string, unknown> = {};
   for (const value of values) {
     if (!value) continue;
@@ -19,30 +21,59 @@ export function mergeTokenMetadataJson(...values: Array<string | null | undefine
 }
 
 /** Pool identity and mint ownership take precedence over cached caller hints. */
-export async function verifyPoolTokenMetadata(connection: Connection, token: Partial<TokenRow>) {
+export async function verifyPoolTokenMetadata(
+  connection: Connection,
+  token: Partial<TokenRow>,
+) {
   let quoteMint = token.quoteMint ? new PublicKey(token.quoteMint) : null;
   if (token.venueHint === "meteora-damm-v2" && token.pool) {
-    const market = await readDammV2Market(connection, new PublicKey(token.pool));
-    if (![market.state.tokenAMint.toBase58(), market.state.tokenBMint.toBase58()].includes(token.mint ?? ""))
+    const market = await readDammV2Market(
+      connection,
+      new PublicKey(token.pool),
+    );
+    if (
+      ![
+        market.state.tokenAMint.toBase58(),
+        market.state.tokenBMint.toBase58(),
+      ].includes(token.mint ?? "")
+    )
       throw new Error("Configured Meteora DAMM v2 pool mint mismatch");
-    quoteMint = market.state.tokenAMint.toBase58() === token.mint ? market.state.tokenBMint : market.state.tokenAMint;
+    quoteMint =
+      market.state.tokenAMint.toBase58() === token.mint
+        ? market.state.tokenBMint
+        : market.state.tokenAMint;
   }
   if (token.venueHint === "meteora-dbc" && token.pool) {
     const market = await readDbcMarket(connection, new PublicKey(token.pool));
     if (market.virtualPool.poolState.baseMint.toBase58() !== token.mint)
-      throw new Error("Configured Meteora DBC pool base mint does not match token");
+      throw new Error(
+        "Configured Meteora DBC pool base mint does not match token",
+      );
     quoteMint = market.config.quoteMint;
   }
   if (token.venueHint === "pumpswap" && token.pool) {
     const pool = await fetchPool(connection, new PublicKey(token.pool));
     if (pool.baseMint.toBase58() !== token.mint)
-      throw new Error("Configured PumpSwap pool base mint does not match token");
+      throw new Error(
+        "Configured PumpSwap pool base mint does not match token",
+      );
     const [base, quote] = await Promise.all([
-      readMint(connection, pool.baseMint), readMint(connection, pool.quoteMint),
+      readMint(connection, pool.baseMint),
+      readMint(connection, pool.quoteMint),
     ]);
     await Promise.all([
-      tokenAccountAmount(connection, pool.baseTokenAccount, base.tokenProgram, pool.baseMint),
-      tokenAccountAmount(connection, pool.quoteTokenAccount, quote.tokenProgram, pool.quoteMint),
+      tokenAccountAmount(
+        connection,
+        pool.baseTokenAccount,
+        base.tokenProgram,
+        pool.baseMint,
+      ),
+      tokenAccountAmount(
+        connection,
+        pool.quoteTokenAccount,
+        quote.tokenProgram,
+        pool.quoteMint,
+      ),
     ]);
     quoteMint = pool.quoteMint;
   }
@@ -51,6 +82,9 @@ export async function verifyPoolTokenMetadata(connection: Connection, token: Par
   return {
     quoteMint: quoteMint.toBase58(),
     quoteTokenProgram: quote.tokenProgram.toBase58(),
-    metadataJson: mergeTokenMetadataJson(token.metadataJson, JSON.stringify({ quoteDecimals: quote.decimals })),
+    metadataJson: mergeTokenMetadataJson(
+      token.metadataJson,
+      JSON.stringify({ quoteDecimals: quote.decimals }),
+    ),
   };
 }

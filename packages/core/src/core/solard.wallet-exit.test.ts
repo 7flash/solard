@@ -5,27 +5,91 @@ import { tradeResult, failedTrade } from "../tx/trade-result.ts";
 import { fixtureConnection } from "../venues/meteora/fixtures/connection.ts";
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 test("unsellable token all transfer builds from actual account without resolving a trade route", async () => {
-  const core: Solard = Object.create(Solard.prototype); const payer = Keypair.generate();
+  const core: Solard = Object.create(Solard.prototype);
+  const payer = Keypair.generate();
   const mint = "3yLHGEma4ek25h8oRswBmYTJkTDdtGnrVn2ZuzV5pump";
-  const source = Keypair.generate().publicKey; const { connection } = fixtureConnection();
-  connection.getParsedTokenAccountsByOwner = async (_owner, filter) => ({ context: { slot: 1 }, value: "programId" in filter && filter.programId.equals(TOKEN_2022_PROGRAM_ID) ? [{ pubkey: source, account: { lamports: 1, data: { parsed: { info: { mint, owner: payer.publicKey.toBase58(), tokenAmount: { amount: "42", decimals: 6 } } } } } }] : [] }) as any;
-  core.signer = () => payer; core.connection = () => connection; core.resolveTokenForExecution = async () => ({ mint }) as any;
-  let routes = 0; core.route = async () => { routes++; throw new Error("No route"); };
-  const draft = await core.tx("wallet").transferToken(mint, Keypair.generate().publicKey, "all").materializedDraft();
-  expect(routes).toBe(0); expect(draft.actions[0]!.meta?.raw).toBe("42"); expect(draft.instructions[1]!.keys[0]!.pubkey.equals(source)).toBe(true);
+  const source = Keypair.generate().publicKey;
+  const { connection } = fixtureConnection();
+  connection.getParsedTokenAccountsByOwner = async (_owner, filter) =>
+    ({
+      context: { slot: 1 },
+      value:
+        "programId" in filter && filter.programId.equals(TOKEN_2022_PROGRAM_ID)
+          ? [
+              {
+                pubkey: source,
+                account: {
+                  lamports: 1,
+                  data: {
+                    parsed: {
+                      info: {
+                        mint,
+                        owner: payer.publicKey.toBase58(),
+                        tokenAmount: { amount: "42", decimals: 6 },
+                      },
+                    },
+                  },
+                },
+              },
+            ]
+          : [],
+    }) as any;
+  core.signer = () => payer;
+  core.connection = () => connection;
+  core.resolveTokenForExecution = async () => ({ mint }) as any;
+  let routes = 0;
+  core.route = async () => {
+    routes++;
+    throw new Error("No route");
+  };
+  const draft = await core
+    .tx("wallet")
+    .transferToken(mint, Keypair.generate().publicKey, "all")
+    .materializedDraft();
+  expect(routes).toBe(0);
+  expect(draft.actions[0]!.meta?.raw).toBe("42");
+  expect(draft.instructions[1]!.keys[0]!.pubkey.equals(source)).toBe(true);
 });
 test("exit reports transfer for unsellable token and stops on unresolved sell", async () => {
-  const core: Solard = Object.create(Solard.prototype); core.signer = () => Keypair.generate();
-  core.tokenAccounts = async () => [{ mint: "unsellable", amountRaw: 1n, isAssociated: true }] as any;
-  core.sell = async () => failedTrade(Object.assign(new Error("No route"), { code: "NO_ROUTE" }));
-  let transfers = 0; core.transferToken = async () => { transfers++; return tradeResult({ signature: "transfer", sender: "rpc", slot: 1, status: "confirmed" }); };
+  const core: Solard = Object.create(Solard.prototype);
+  core.signer = () => Keypair.generate();
+  core.tokenAccounts = async () =>
+    [{ mint: "unsellable", amountRaw: 1n, isAssociated: true }] as any;
+  core.sell = async () =>
+    failedTrade(Object.assign(new Error("No route"), { code: "NO_ROUTE" }));
+  let transfers = 0;
+  core.transferToken = async () => {
+    transfers++;
+    return tradeResult({
+      signature: "transfer",
+      sender: "rpc",
+      slot: 1,
+      status: "confirmed",
+    });
+  };
   core.maxSendableSol = async () => 1n;
   core.tx = () => ({ transferSol: () => ({ build: async () => ({}) }) }) as any;
-  core.submitPlan = async () => ({ signature: "withdraw", sender: "rpc", executionId: 1, plan: {} }) as any;
-  core.settleSubmission = async () => ({ signature: "withdraw", sender: "rpc", slot: 1, status: "confirmed" });
+  core.submitPlan = async () =>
+    ({ signature: "withdraw", sender: "rpc", executionId: 1, plan: {} }) as any;
+  core.settleSubmission = async () => ({
+    signature: "withdraw",
+    sender: "rpc",
+    slot: 1,
+    status: "confirmed",
+  });
   const exited = await core.exitWallet("wallet", Keypair.generate().publicKey);
-  expect(transfers).toBe(1); expect(exited.tokens[0]!.operation).toBe("transfer"); expect(exited.withdrawal?.signature).toBe("withdraw");
-  core.sell = async () => tradeResult({ signature: "pending", sender: "rpc", slot: null, status: "submitted" });
+  expect(transfers).toBe(1);
+  expect(exited.tokens[0]!.operation).toBe("transfer");
+  expect(exited.withdrawal?.signature).toBe("withdraw");
+  core.sell = async () =>
+    tradeResult({
+      signature: "pending",
+      sender: "rpc",
+      slot: null,
+      status: "submitted",
+    });
   const pending = await core.exitWallet("wallet", Keypair.generate().publicKey);
-  expect(pending.status).toBe("unresolved"); expect(pending.withdrawal).toBeNull(); expect(transfers).toBe(1);
+  expect(pending.status).toBe("unresolved");
+  expect(pending.withdrawal).toBeNull();
+  expect(transfers).toBe(1);
 });

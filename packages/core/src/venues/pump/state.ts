@@ -6,7 +6,11 @@ import { readMint } from "../../chain/state.ts";
 import { pumpAmmJson } from "@pump-fun/pump-swap-sdk";
 import type { TokenRow } from "../../db/schema.ts";
 import { bondingCurvePda, globalPda, sharingConfigPda } from "./pda.ts";
-import { WRAPPED_SOL_MINT, PUMP_AMM_PROGRAM_ID, PUMP_PROGRAM_ID } from "./constants.ts";
+import {
+  WRAPPED_SOL_MINT,
+  PUMP_AMM_PROGRAM_ID,
+  PUMP_PROGRAM_ID,
+} from "./constants.ts";
 
 export type PumpCurve = {
   address: PublicKey;
@@ -117,9 +121,15 @@ export async function fetchCurve(
   if (!account) return null;
   // A migrated/closed curve PDA can remain a zero-data System account. It is
   // absent as a curve and must allow AMM discovery, rather than blocking it.
-  if (account.owner.equals(SystemProgram.programId) && account.data.length === 0) return null;
+  if (
+    account.owner.equals(SystemProgram.programId) &&
+    account.data.length === 0
+  )
+    return null;
   if (!account.owner.equals(PUMP_PROGRAM_ID))
-    throw new Error(`Bonding curve ${address.toBase58()} has unexpected program owner`);
+    throw new Error(
+      `Bonding curve ${address.toBase58()} has unexpected program owner`,
+    );
 
   const curve = decodeCurve(address, Buffer.from(account.data), token);
   // Token rows can outlive a migration or be created from partial launch data.
@@ -144,10 +154,21 @@ export async function fetchPool(
   if (!account)
     throw new Error(`PumpSwap pool not found: ${address.toBase58()}`);
   if (!account.owner.equals(PUMP_AMM_PROGRAM_ID))
-    throw new Error(`PumpSwap pool ${address.toBase58()} has unexpected program owner`);
-  const poolAccount = pumpAmmJson.accounts.find((entry) => entry.name.toLowerCase() === "pool");
-  if (!poolAccount || !Buffer.from(account.data).subarray(0, 8).equals(Buffer.from(poolAccount.discriminator)))
-    throw new Error(`PumpSwap pool ${address.toBase58()} has invalid account discriminator`);
+    throw new Error(
+      `PumpSwap pool ${address.toBase58()} has unexpected program owner`,
+    );
+  const poolAccount = pumpAmmJson.accounts.find(
+    (entry) => entry.name.toLowerCase() === "pool",
+  );
+  if (
+    !poolAccount ||
+    !Buffer.from(account.data)
+      .subarray(0, 8)
+      .equals(Buffer.from(poolAccount.discriminator))
+  )
+    throw new Error(
+      `PumpSwap pool ${address.toBase58()} has invalid account discriminator`,
+    );
   return decodePool(address, Buffer.from(account.data));
 }
 export async function hasSharingConfig(

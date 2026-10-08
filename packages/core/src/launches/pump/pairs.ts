@@ -167,7 +167,13 @@ export async function getSupportedPumpPairs(
 ): Promise<PumpSupportedPair[]> {
   const global = await connection.getAccountInfo(globalPda(), "confirmed");
   if (!global) throw new Error("Pump Global account was not found.");
-  if (!global.owner.equals(PUMP_PROGRAM_ID) || !global.data.subarray(0, 8).equals(Buffer.from([167, 232, 232, 177, 200, 108, 114, 127]))) throw new Error("Invalid Pump Global account owner or discriminator");
+  if (
+    !global.owner.equals(PUMP_PROGRAM_ID) ||
+    !global.data
+      .subarray(0, 8)
+      .equals(Buffer.from([167, 232, 232, 177, 200, 108, 114, 127]))
+  )
+    throw new Error("Invalid Pump Global account owner or discriminator");
   const quoteMints = decodeWhitelistedQuoteMints(Buffer.from(global.data));
   const result: PumpSupportedPair[] = [
     {

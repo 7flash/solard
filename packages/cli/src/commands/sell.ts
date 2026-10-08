@@ -169,10 +169,16 @@ export async function runSmartSellCommand({
               .build();
       const results = await Promise.all(
         plans.map(async (plan, index) => {
-          const prepared = await slrd.prepareTradePlan(target.refs[index]!, plan, options);
-          return { ...await slrd.simulatePlan(prepared.plan),
+          const prepared = await slrd.prepareTradePlan(
+            target.refs[index]!,
+            plan,
+            options,
+          );
+          return {
+            ...(await slrd.simulatePlan(prepared.plan)),
             priorityMicroLamports: prepared.priorityMicroLamports,
-            cuLimit: prepared.plan.draft.cuLimit ?? 600_000 };
+            cuLimit: prepared.plan.draft.cuLimit ?? 600_000,
+          };
         }),
       );
       return {

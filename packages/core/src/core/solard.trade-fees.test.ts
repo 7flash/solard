@@ -13,22 +13,36 @@ function harness(failFirstBuy = false) {
   const drafts: Array<TransactionDraft> = [];
   const payer = Keypair.generate();
   slrd.signer = () => payer;
-  slrd.compile = async (_payer, draft) => ({ payer: payer.publicKey, draft } as PlannedTransaction);
-  slrd.connection = () => ({ async getRecentPrioritizationFees() { return []; } } as unknown as ReturnType<Solard["connection"]>);
+  slrd.compile = async (_payer, draft) =>
+    ({ payer: payer.publicKey, draft }) as PlannedTransaction;
+  slrd.connection = () =>
+    ({
+      async getRecentPrioritizationFees() {
+        return [];
+      },
+    }) as unknown as ReturnType<Solard["connection"]>;
   Object.defineProperty(slrd, "cache", { value: { invalidate() {} } });
   slrd.submitPlan = async (plan) => {
     if (failFirstBuy && drafts.length === 1)
       throw new Error("Simulation failed: BuySlippageBelowMinBaseAmountOut");
     return { plan, signature: "test-signature", sender: "rpc", executionId: 1 };
   };
-  slrd.settleSubmission = async () => ({ signature: "test-signature", sender: "rpc", slot: null, status: "submitted" });
+  slrd.settleSubmission = async () => ({
+    signature: "test-signature",
+    sender: "rpc",
+    slot: null,
+    status: "submitted",
+  });
   slrd.tx = (wallet) => {
     const composer = new TransactionComposer(slrd, wallet);
     composer.buy = () => composer;
     composer.sell = () => composer;
     composer.build = async () => {
       drafts.push(composer.snapshot());
-      return { payer: payer.publicKey, draft: composer.snapshot() } as PlannedTransaction;
+      return {
+        payer: payer.publicKey,
+        draft: composer.snapshot(),
+      } as PlannedTransaction;
     };
     return composer;
   };

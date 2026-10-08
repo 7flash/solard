@@ -96,7 +96,6 @@ export class SimulationFailedError extends SolardError {
   }
 }
 
-
 const DEFINITIVE_PRE_SUBMISSION_CODES = new Set([
   "MISSING_CONFIG",
   "UNKNOWN_WALLET",
@@ -110,8 +109,17 @@ const DEFINITIVE_PRE_SUBMISSION_CODES = new Set([
 
 /** True only when Solard can prove no transaction was submitted. */
 export function isDefinitivePreSubmissionError(error: unknown): boolean {
-  if (error && typeof error === "object" && "phase" in error && error.phase === "before-submission") return true;
-  if (error instanceof SolardError && DEFINITIVE_PRE_SUBMISSION_CODES.has(error.code))
+  if (
+    error &&
+    typeof error === "object" &&
+    "phase" in error &&
+    error.phase === "before-submission"
+  )
+    return true;
+  if (
+    error instanceof SolardError &&
+    DEFINITIVE_PRE_SUBMISSION_CODES.has(error.code)
+  )
     return true;
   const code =
     error && typeof error === "object" && "code" in error

@@ -187,7 +187,9 @@ export function buildTokenBacktestTape(input: {
     );
   }
   const options = input.options ?? {};
-  const rows = chronologicalTokenHistoryTrades(input.rows.filter((row) => row.mint === mint));
+  const rows = chronologicalTokenHistoryTrades(
+    input.rows.filter((row) => row.mint === mint),
+  );
   const fromMs = Math.max(0, Number(options.fromMs ?? 0) || 0);
   const toMsRaw = Number(options.toMs ?? Number.POSITIVE_INFINITY);
   const toMs = Number.isFinite(toMsRaw)
@@ -316,12 +318,14 @@ export function buildTokenBacktestTapeFromCandles(input: {
     Math.trunc(options.coverageToleranceMs ?? 60_000),
   );
 
-  const rows = input.candles.filter((row) => row.mint === mint).sort(
-    (left, right) =>
-      left.bucketAtMs - right.bucketAtMs ||
-      left.firstSlot - right.firstSlot ||
-      left.candleKey.localeCompare(right.candleKey),
-  );
+  const rows = input.candles
+    .filter((row) => row.mint === mint)
+    .sort(
+      (left, right) =>
+        left.bucketAtMs - right.bucketAtMs ||
+        left.firstSlot - right.firstSlot ||
+        left.candleKey.localeCompare(right.candleKey),
+    );
   const candidateEvents: BacktestTapeEvent[] = [];
   for (const row of rows) {
     const eventAtMs = row.bucketAtMs + 999;
