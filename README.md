@@ -13,6 +13,29 @@ The CLI command is `slrd` (with `solard` as an alias). Applications should norma
 
 Solard is intentionally capability-oriented. Protocol access, deterministic parsing, transaction preparation, simulation, execution boundaries, and persistence belong in Solard. Strategy, scoring, scheduling, autonomous loops, prompts, and application policy belong outside the kernel.
 
+## Custom-quote live-price and unsigned acceptance (candidate, not funded)
+
+PumpSwap discovery probes bounded canonical pool PDAs first and, for noncanonical
+creators, up to 12 recent mint signatures with at most 80 candidate accounts per
+transaction, stopping when a verified route is found. Positive pool identities
+are cached for five minutes; reserve reads remain fresh. Candidates require
+verified on-chain pool ownership, discriminator, actual mint programs and
+decimals, vault mint identities and positive reserves.
+Missing historical RPC coverage can yield a missing route rather than a
+fabricated price; provider pagination or independently verified explicit pool
+metadata remains a supported fallback. A discovered route is not guaranteed
+best execution or sufficient liquidity.
+
+`createSolard().simulateUnsignedBuy({payer, mint, sol: "0.001", slippageBps: 500})`
+uses a public payer identity, never reads a managed-wallet secret, and returns
+an unsigned v0 plan with protected per-leg minima plus RPC simulation.
+Oversized routes try independently verified active ALT accounts referenced by
+recent pool activity. If no usable table exists, the caller may request
+`proposeUnsignedBuyLookupTable(args)` for separate review-only creation and
+extension messages. Nothing creates, registers, signs or broadcasts an ALT.
+Rebuild the swap against activated tables and repeat simulation before any
+funded transaction. No funded execution is established by unsigned simulation.
+
 ## Requirements
 
 - Bun `>= 1.1.0`
@@ -717,3 +740,7 @@ MIT.
 # Mements capabilities
 
 The public SDK now exposes creator-fee discovery and batch claims, LaunchLab preparation/execution, migration notifications, value-band strategies, cached historical tapes/backtests, wallet ledger and token-account maintenance. See [the API handoff and coverage limits](docs/mements-capabilities.md) before integrating. These additions target the unpublished 0.2.30 source release; funded acceptance remains pending.
+
+Custom Pump quote trades use atomic venue legs. Quote funding and exit chains are limited to four venues including the target; repeated mints reject with `CONVERSION_UNAVAILABLE`. Each next leg spends only the preceding guaranteed minimum, preserving unrelated quote holdings. Plan `fundingRoute.legs` / `exitRoute.legs` record per-leg raw inputs, minima and slippage; the target action retains total SOL input or guaranteed final SOL output. This uses individual venue instructions, with each venue charging its own fees; it does not implement PumpSwap `multi_hop_swap`. Custom-quote curve trades create the buyback quote ATA idempotently with the verified quote token program.
+
+Read-only SEEDCAT mainnet verification is reproducible with `bun run scripts/verify-seedcat-plans.ts`. The captured custom-quote buy/sell instruction fixture validates quote eligibility, Token-2022 programs, and meaningful per-leg minima. Without lookup tables the observed plans measured 1,657/1,547 wire bytes; assembly rejects with `TransactionTooLargeError` and lookup candidates before accessing a signing key. This construction check does not establish funded simulation or live execution acceptance.

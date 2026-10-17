@@ -295,3 +295,16 @@ test("Helius launch defaults match the selected tier minimum and explicit tips r
       else process.env[keys[index]!] = previous[index];
   }
 });
+
+
+test("custom-quote launch refuses missing atomic funding even when create instructions exist", async () => {
+  const value = fixture();
+  const previous = value.host.prepareTokenDeployment;
+  value.host.prepareTokenDeployment = async (...params: unknown[]) => {
+    const deployment = await previous.apply(value.host, params);
+    return { ...deployment, metadata: { creatorBuySolLamports: "1000000", minimumOutputRaw: "900" } };
+  };
+  await expect(preparePumpTokenLaunch(args(value)))
+    .rejects.toThrow("missing protected atomic creator funding");
+  expect(value.calls.compiled).toHaveLength(0);
+});

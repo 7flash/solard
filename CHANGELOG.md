@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Try canonical PumpSwap candidates before bounded transaction history, inspect noncanonical candidates incrementally, and retain verified pool identities for five minutes. Report RPC provider failures separately from absent routes and run unsigned-buy acceptance independently of the live feed.
+- Candidate noncanonical PumpSwap mint-activity discovery, native conversion, read-only unsigned buy simulation, and verified existing ALT selection. Pending local mainnet acceptance; no funded execution.
+
+## 0.2.34 — 2026-10-09
+
+- Validate parsed RPC version-1 responses with the complete response-body validator while preserving their actual version; the captured SEEDCAT response covers web3.js 1.98.4.
+- Resolve Pump quote identity and decimals from verified curve/mint accounts without parsed transaction enrichment. Convert eligible quote curves and PumpSwap pools through bounded verified reserves, with explicit unsupported metadata, migration-gap and missing-conversion reasons.
+- Pack and install matching release archives in a fresh Bun project; verify SDK/core runtime exports and installed SDK live/readiness tests before publishing.
+- Export `createTraderSolard` from the SDK as the core trader factory. The configured application facade remains `createSolard`.
+- Declare core's direct `measure-fn` 5.3.1 runtime dependency; isolated installation exposed missing serialization exports through the previous accidental transitive dependency.
+- Synchronize all release manifests and internal dependency pins. No funded mainnet acceptance is claimed.
+
+- Bound executable custom-quote funding/exit chains to four venues with cycle rejection and observable per-leg guaranteed minima; support quote coins still on curves and listed non-SOL quote conversion through registered venues. Preserve aggregate SOL guards and unrelated wallet holdings.
+- Create custom-quote Pump curve buyback ATAs idempotently with the actual quote token program before buy/sell instructions.
+
 ## 0.2.32 — 2026-10-08
 
 - Exact sells: composer/core accept `amountRaw: bigint | string`; SDK accepts `amountRaw` or `amount: { raw }`. Explicit `bps` and exact amounts are mutually exclusive. Exact raw units are validated against the wallet's token-account balance and preserved in plan metadata and intent fingerprints.

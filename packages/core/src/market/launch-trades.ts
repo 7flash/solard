@@ -5,11 +5,15 @@ import {
   PUMP_PROGRAM_ID,
   WRAPPED_SOL_MINT as WRAPPED_SOL_PUBLIC_KEY,
 } from "../venues/pump/constants.ts";
-import { fetchPool } from "../venues/pump/state.ts";
+import { fetchPool, fetchCurve } from "../venues/pump/state.ts";
+import { getCompatibleParsedTransaction, type CompatibleParsedTransaction } from "../chain/parsed-transaction.ts";
+import { poolMintMetadata, poolAssetsAndReserves } from "../venues/pump/common.ts";
+import { spotPriceQuotePerToken } from "../venues/pump/quote.ts";
+import { getSupportedPumpPairs } from "../launches/pump/pairs.ts";
 import { CREATE_CPMM_POOL_PROGRAM } from "@raydium-io/raydium-sdk-v2";
 import { resolveCurrentMarket, type CurrentMarket } from "./current-market.ts";
 import { decodeCpmmSwap } from "./raydium-cpmm-events.ts";
-import { PumpSwapVenue } from "../venues/pump/pumpswap-venue.ts";
+import { PumpSwapVenue, isPumpDiscoveryProviderFailure } from "../venues/pump/pumpswap-venue.ts";
 import type { TokenRow } from "../db/schema.ts";
 import {
   readDbcMarket,
@@ -40,7 +44,6 @@ import {
   PublicKey,
   type Commitment,
   type Connection,
-  type ParsedTransactionWithMeta,
 } from "@solana/web3.js";
 
 const RAYDIUM_LAUNCHLAB_PROGRAM_ID = new PublicKey(
@@ -913,7 +916,7 @@ function keyText(value: unknown): string | null {
   return null;
 }
 
-function instructions(tx: ParsedTransactionWithMeta): unknown[] {
+function instructions(tx: CompatibleParsedTransaction): unknown[] {
   const outer =
     (tx.transaction.message as unknown as { instructions?: unknown[] })
       .instructions ?? [];
@@ -923,7 +926,7 @@ function instructions(tx: ParsedTransactionWithMeta): unknown[] {
   return [...outer, ...inner];
 }
 
-function initializedMints(tx: ParsedTransactionWithMeta): string[] {
+function initializedMints(tx: CompatibleParsedTransaction): string[] {
   const out = new Set<string>();
   for (const value of instructions(tx)) {
     const parsed = (
@@ -961,7 +964,7 @@ function tokenBalances(rows: readonly unknown[] | null | undefined) {
 }
 
 function supplyFromTransaction(
-  tx: ParsedTransactionWithMeta,
+  tx: CompatibleParsedTransaction,
   mint: string,
 ): { decimals: number; supplyUi: number } | null {
   const rows = tokenBalances(tx.meta?.postTokenBalances).filter(
@@ -1045,7 +1048,7 @@ function tokenList(value: string | readonly string[]): string[] {
 }
 
 function quoteFromTransaction(
-  tx: ParsedTransactionWithMeta,
+  tx: CompatibleParsedTransaction,
   mint: string,
 ): { mint: string; decimals: number } | null {
   const rows = [
@@ -1086,7 +1089,7 @@ function instructionData(
 }
 
 function findInstruction(
-  tx: ParsedTransactionWithMeta,
+  tx: CompatibleParsedTransaction,
   programId: PublicKey,
   discriminators: readonly Buffer[],
 ): { accounts: string[]; data: Buffer } | null {
@@ -1104,7 +1107,7 @@ function findInstruction(
 }
 
 function launchLabQuoteFromTransaction(
-  tx: ParsedTransactionWithMeta,
+  tx: CompatibleParsedTransaction,
   mint: string,
   pool?: string | null,
 ): { mint: string; decimals: number | null } | null {
@@ -1152,14 +1155,14 @@ function launchLabQuoteFromTransaction(
 async function loadParsedTransaction(
   connection: Connection,
   signature: string,
-): Promise<ParsedTransactionWithMeta | null> {
+): Promise<CompatibleParsedTransaction | null> {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
-      const tx = await connection.getParsedTransaction(signature, {
+      const tx = await getCompatibleParsedTransaction(connection, signature, {
         commitment: "confirmed",
         maxSupportedTransactionVersion: 1,
       });
-      if (tx) return tx as ParsedTransactionWithMeta;
+      if (tx) return tx as CompatibleParsedTransaction;
     } catch {
       if (attempt === 5)
         throw new Error(`Could not load migration transaction ${signature}`);
@@ -1279,12 +1282,12 @@ export async function subscribeLaunches(options: {
     if (launchLabFetches.has(signature) || stopped) return;
     launchLabFetches.add(signature);
     try {
-      const tx = await options.connection.getParsedTransaction(signature, {
+      const tx = await getCompatibleParsedTransaction(options.connection, signature, {
         commitment: "confirmed",
         maxSupportedTransactionVersion: 1,
       });
       if (!tx || stopped) return;
-      const parsed = tx as ParsedTransactionWithMeta;
+      const parsed = tx as CompatibleParsedTransaction;
       const mint = initializedMints(parsed)[0];
       if (!mint) return;
       let supply = supplyFromTransaction(parsed, mint);
@@ -1654,6 +1657,7 @@ async function subscribeTradeStream(options: {
   const states = new Map<string, TradeTokenState>();
   const metadataFetches = new Map<string, Promise<void>>();
   const pumpSwapPools = new Map<string, Promise<PumpSwapPoolIdentity>>();
+  const pumpQuoteMetadata = new Map<string, Promise<{ mint: string; decimals: number }>>();
   const cpmmPools = new Map<string, Promise<CurrentMarket | null>>();
   const SUPPLY_REFRESH_MS = 5 * 60_000;
   let stopped = false;
@@ -1755,12 +1759,12 @@ async function subscribeTradeStream(options: {
           signature &&
           (state.quoteMint == null || state.quoteDecimals == null)
         ) {
-          const tx = await options.connection.getParsedTransaction(signature, {
+          const tx = await getCompatibleParsedTransaction(options.connection, signature, {
             commitment: "confirmed",
             maxSupportedTransactionVersion: 1,
           });
           if (tx) {
-            const parsed = tx as ParsedTransactionWithMeta;
+            const parsed = tx as CompatibleParsedTransaction;
             const quote =
               launchLabQuoteFromTransaction(parsed, mint, state.pool) ??
               quoteFromTransaction(parsed, mint);
@@ -1801,14 +1805,40 @@ async function subscribeTradeStream(options: {
     if (decoded.mint !== mint) return;
     const current = states.get(mint);
     if (current) {
-      current.quoteMint = decoded.quoteMint;
-      current.quoteDecimals =
-        current.quoteDecimals ?? quoteDecimals(decoded.quoteMint);
+      try {
+        let pending = pumpQuoteMetadata.get(mint);
+        if (!pending) {
+          pending = (async () => {
+            const curve = await fetchCurve(options.connection, { mint } as TokenRow);
+            if (!curve) throw new Error("Pump curve metadata unavailable during migration");
+            return curve.quoteAsset.kind === "native-sol"
+              ? { mint: WRAPPED_SOL_MINT, decimals: 9 }
+              : { mint: curve.quoteAsset.mint.toBase58(), decimals: curve.quoteAsset.decimals };
+          })();
+          pumpQuoteMetadata.set(mint, pending);
+        }
+        const quote = await pending;
+        if (quote.mint !== decoded.quoteMint) {
+          pumpQuoteMetadata.delete(mint);
+          status("pump-quote-metadata-mismatch", { mint, signature, curveQuoteMint: quote.mint, eventQuoteMint: decoded.quoteMint });
+          return;
+        }
+        current.quoteMint = quote.mint;
+        current.quoteDecimals = quote.decimals;
+      } catch (error) {
+        pumpQuoteMetadata.delete(mint);
+        status("pump-quote-metadata-unavailable", { mint, signature, error: String(error) });
+        return;
+      }
     }
-    await ensureMetadata(mint, signature);
+    await ensureMetadata(mint);
     const state = states.get(mint);
     if (!state || stopped || !subscriptions.has(mint)) return;
-    const baseDecimals = state.decimals ?? 6;
+    if (state.decimals == null || state.supplyRaw == null) {
+      status("pump-base-metadata-unavailable", { mint, signature });
+      return;
+    }
+    const baseDecimals = state.decimals;
     const qDecimals = state.quoteDecimals;
     await deliver({
       type: "trade",
@@ -2088,7 +2118,7 @@ async function subscribeTradeStream(options: {
     decode: (connection: Connection, data: Buffer) => Event | null,
     fromTransaction: (
       connection: Connection,
-      transaction: ParsedTransactionWithMeta,
+      transaction: CompatibleParsedTransaction,
     ) => Array<Event>,
     emit: (
       mint: string,
@@ -2120,7 +2150,7 @@ async function subscribeTradeStream(options: {
         );
       const transaction = decodedLogs.length
         ? null
-        : await options.connection.getParsedTransaction(logs.signature, {
+        : await getCompatibleParsedTransaction(options.connection, logs.signature, {
             commitment: "confirmed",
             maxSupportedTransactionVersion: 1,
           });
@@ -2178,7 +2208,7 @@ async function subscribeTradeStream(options: {
         entry.programId === CREATE_CPMM_POOL_PROGRAM.toBase58() &&
         venues.has("raydium-cpmm")
       ) {
-        const decoded = decodeCpmmSwap(entry.data);
+        const decoded = decodeCpmmSwap(Buffer.from(entry.data));
         if (
           !decoded ||
           (decoded.inputMint !== mint && decoded.outputMint !== mint)
@@ -2415,57 +2445,122 @@ async function subscribeTradeStream(options: {
   };
 }
 
-function quoteSolLoader(
+export function quoteSolLoader(
   connection: Connection,
   status: (event: string, data?: Record<string, unknown>) => void,
   maxAgeMs = 15_000,
 ) {
   const cache = new Map<string, { value: number | null; atMs: number }>();
   const pending = new Map<string, Promise<number | null>>();
-  return async (mint: string, decimals: number): Promise<number | null> => {
+  let supportedPairs: Promise<Set<string>> | null = null;
+  const load = async (mint: string, decimals: number, visited = new Set<string>()): Promise<number | null> => {
     if (mint === WRAPPED_SOL_MINT) return 1;
+    if (visited.has(mint) || visited.size >= 3) {
+      status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: "cycle-or-depth-limit" });
+      return null;
+    }
+    const path = new Set(visited).add(mint);
     const now = Date.now();
-    const cached = cache.get(mint);
+    const cached = visited.size === 0 ? cache.get(mint) : undefined;
     if (cached && now - cached.atMs < maxAgeMs) return cached.value;
-    const active = pending.get(mint);
+    const active = visited.size === 0 ? pending.get(mint) : null;
     if (active) return await active;
     const request = (async () => {
+      let migrating = false;
+      let poolResolved = false;
+      try {
+        const curve = await fetchCurve(connection, { mint } as TokenRow);
+        migrating = curve?.complete === true;
+        if (curve) {
+          if (curve.isMayhemMode) {
+            status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: "mayhem-quote-prohibited" });
+            return null;
+          }
+          if (curve.quoteAsset.kind !== "native-sol") {
+            supportedPairs ??= getSupportedPumpPairs(connection).then(pairs => new Set(pairs.map(pair => pair.mint))).catch(error => { supportedPairs = null; throw error; });
+            if (!(await supportedPairs).has(curve.quoteAsset.mint.toBase58())) {
+              status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: "nested-pump-quote-prohibited" });
+              return null;
+            }
+          }
+        }
+        if (curve && !curve.complete) {
+          if (curve.virtualBase <= 0n || curve.virtualQuote <= 0n || curve.realBase <= 0n)
+            throw new Error("Quote curve has no eligible reserves");
+          const base = await poolMintMetadata(connection, new PublicKey(mint));
+          const conversion = await load(curve.quoteAsset.mint.toBase58(), curve.quoteAsset.decimals, path);
+          if (conversion == null) return null;
+          const value = Number(curve.virtualQuote) / 10 ** curve.quoteAsset.decimals / (Number(curve.virtualBase) / 10 ** base.decimals) * conversion;
+          if (Number.isFinite(value) && value > 0) {
+            if (visited.size === 0) cache.set(mint, { value, atMs: Date.now() });
+            return value;
+          }
+        }
+      } catch (error) {
+        status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: "unsupported-metadata", error: String(error) });
+        return null;
+      }
       try {
         const venue = new PumpSwapVenue();
         const inspected = await venue.inspectToken(
           connection,
           new PublicKey(mint),
         );
-        if (inspected?.quoteMint === WRAPPED_SOL_MINT) {
-          const token = { ...inspected, mint } as TokenRow;
-          const market = await venue.resolveMarket({
-            connection,
-            token,
-            user: PublicKey.default,
-          });
-          if (market) {
-            const price = (
-              await venue.price(
-                { connection, token, user: PublicKey.default },
-                market,
-              )
-            ).priceQuotePerToken;
-            if (Number.isFinite(price) && price > 0) {
-              cache.set(mint, { value: price, atMs: Date.now() });
-              return price;
+        if (inspected?.quoteMint) {
+          if (!inspected.pool) throw new Error("Inspected PumpSwap pool address missing");
+          const pool = await fetchPool(connection, new PublicKey(inspected.pool));
+          poolResolved = true;
+          if (pool.isMayhemMode) {
+            status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: "mayhem-quote-prohibited" });
+            return null;
+          }
+          if (!pool.quoteMint.equals(WRAPPED_SOL_PUBLIC_KEY)) {
+            supportedPairs ??= getSupportedPumpPairs(connection).then(pairs => new Set(pairs.map(pair => pair.mint))).catch(error => { supportedPairs = null; throw error; });
+            let listed: Set<string>;
+            try { listed = await supportedPairs; } catch (error) {
+              status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: "unsupported-metadata", error: String(error) });
+              return null;
+            }
+            if (!listed.has(pool.quoteMint.toBase58())) {
+              status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: "nested-pump-quote-prohibited" });
+              return null;
             }
           }
+          const reserves = await poolAssetsAndReserves(connection, pool);
+          const effectiveQuote = reserves.rawQuoteReserve + pool.virtualQuoteReserves;
+          if (reserves.baseReserve <= 0n || effectiveQuote <= 0n)
+            throw new Error("No verified positive conversion reserves");
+          const quotePrice = spotPriceQuotePerToken({
+            virtualBase: reserves.baseReserve,
+            virtualQuote: effectiveQuote,
+          }, reserves.baseMintState.decimals, reserves.quoteAsset.decimals);
+          const quoteMint = reserves.quoteAsset.mint.toBase58();
+          const conversion = await load(quoteMint, reserves.quoteAsset.decimals, path);
+          const price = conversion == null ? NaN : quotePrice * conversion;
+          if (Number.isFinite(price) && price > 0) {
+            if (visited.size === 0) cache.set(mint, { value: price, atMs: Date.now() });
+            return price;
+          }
         }
-      } catch {
-        // If no supported direct SOL pool is available, try the verified
-        // executable quote route below. Unavailability remains null.
+      } catch (error) {
+        if (isPumpDiscoveryProviderFailure(error)) {
+          status("quote-sol-conversion-unavailable", { quoteMint: mint,
+            reason: "rpc-provider-unavailable", code: "RPC_PROVIDER_UNAVAILABLE" });
+          return null;
+        }
+        // A genuine unsupported native route may still use an external quote.
+      }
+      if (migrating || poolResolved) {
+        status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: poolResolved ? "missing-conversion" : "migration-gap" });
+        return null;
       }
       try {
         // Quote a modest notional to avoid a zero-lamport route while limiting
         // price impact. This is an executable-route conversion, not an inferred
         // transaction-balance ratio.
         const units = 100n;
-        const amountRaw = units * 10n ** BigInt(decimals);
+        const verified = await poolMintMetadata(connection, new PublicKey(mint));
+        const amountRaw = units * 10n ** BigInt(verified.decimals);
         const quote = await quoteJupiterSwap({
           inputMint: mint,
           outputMint: WRAPPED_SOL_MINT,
@@ -2473,20 +2568,21 @@ function quoteSolLoader(
         });
         const value = Number(quote.outAmountRaw) / 1e9 / Number(units);
         const resolved = Number.isFinite(value) && value > 0 ? value : null;
-        cache.set(mint, { value: resolved, atMs: Date.now() });
+        if (visited.size === 0) cache.set(mint, { value: resolved, atMs: Date.now() });
         return resolved;
       } catch (error) {
-        cache.set(mint, { value: null, atMs: Date.now() });
+        if (visited.size === 0) cache.set(mint, { value: null, atMs: Date.now() });
         status("quote-sol-conversion-unavailable", {
           quoteMint: mint,
           error: error instanceof Error ? error.message : String(error),
         });
         return null;
       }
-    })().finally(() => pending.delete(mint));
-    pending.set(mint, request);
+    })().finally(() => { if (visited.size === 0) pending.delete(mint); });
+    if (visited.size === 0) pending.set(mint, request);
     return await request;
   };
+  return (mint: string, decimals: number) => load(mint, decimals);
 }
 
 export async function subscribeTrades(options: {
@@ -2538,6 +2634,8 @@ export async function subscribeTrades(options: {
         solUsd,
         quoteSolPerToken,
       );
+      if (options.quoteSol && market && internal.quoteMint !== WRAPPED_SOL_MINT && internal.quoteMint !== USDC_MINT && quoteSolPerToken == null)
+        status("quote-sol-conversion-unavailable", { quoteMint: internal.quoteMint, mint: internal.mint, reason: "missing-conversion" });
       if (!market) {
         status("trade-market-incomplete", {
           venue: internal.venue,

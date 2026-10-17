@@ -29,6 +29,8 @@ import {
 import { spotPriceQuotePerToken } from "./quote.ts";
 import { resolvePumpSwapProtocolFeeRecipient, tokenMeta } from "./routing.ts";
 import { fetchCurve, fetchPool } from "./state.ts";
+import { getCompatibleParsedTransaction } from "../../chain/parsed-transaction.ts";
+import { getSupportedPumpPairs } from "../../launches/pump/pairs.ts";
 import {
   snapshotSwapState,
   validateLivePoolReserves,
@@ -367,6 +369,121 @@ function quoteSlippageBps(quote: QuoteResult): number {
   return typeof value === "number" && Number.isInteger(value) ? value : 1_500;
 }
 
+/** RPC-portable, bounded candidate discovery. Ordinary PumpSwap pools have
+ * creator-selected PDAs, so canonical Pump launch PDAs are only a fast path.
+ * Recent mint signatures are a bounded index of actual program activity; every
+ * account key is independently checked against the AMM owner/discriminator.
+ * This never uses a full getProgramAccounts scan or trusts transaction metadata.
+ */
+export function isPumpDiscoveryProviderFailure(error: unknown): boolean {
+  const value = error instanceof Error ? error.message : String(error);
+  return /\b(?:HTTP )?(?:403|429)\b|Request blocked|Too Many Requests|quota|rate.limit|\-32602/i.test(value);
+}
+
+const discoveryCache = new WeakMap<VenueContext["connection"], Map<string, {
+  expires: number; promise: Promise<Awaited<ReturnType<typeof fetchPool>> | null>;
+}>>();
+export async function discoverPumpSwapPool(
+  connection: VenueContext["connection"], mint: PublicKey,
+): Promise<Awaited<ReturnType<typeof fetchPool>> | null> {
+  let entries = discoveryCache.get(connection);
+  if (!entries) { entries = new Map(); discoveryCache.set(connection, entries); }
+  const key = mint.toBase58();
+  const cached = entries.get(key);
+  if (cached && Date.now() < cached.expires) return cached.promise;
+  const promise = (async () => {
+    const curve = await fetchCurve(connection, { mint: key } as TokenRow);
+    const quotes = new Map<string, PublicKey>([[WRAPPED_SOL_MINT.toBase58(), WRAPPED_SOL_MINT]]);
+    if (curve) quotes.set(curve.quoteAsset.mint.toBase58(), curve.quoteAsset.mint);
+    const supported = await getSupportedPumpPairs(connection);
+    for (const pair of supported.slice(0, 12)) {
+      const address = new PublicKey(pair.mint);
+      quotes.set(pair.mint, address);
+    }
+    if (supported.length > 12) throw new Error("Pump quote candidate bound exceeded");
+    const candidates = new Map<string, PublicKey>();
+    for (const quote of quotes.values()) {
+      for (let index = 0; index < 8; index++) {
+        const address = pumpSwapPoolPda(mint, quote, index);
+        candidates.set(address.toBase58(), address);
+      }
+    }
+    // Prefer a small, known set of canonical candidates before attempting history.
+    // A positive identity is cached longer; each consumer still refreshes vaults.
+    const verified: Array<{ pool: Awaited<ReturnType<typeof fetchPool>>; quoteReserve: bigint; baseReserve: bigint }> = [];
+    const inspected = new Set<string>();
+    const inspect = async (addresses: PublicKey[]) => {
+      for (let offset = 0; offset < addresses.length; offset += 40) {
+        const chunk = addresses.slice(offset, offset + 40);
+        const infos = await connection.getMultipleAccountsInfo(chunk, "confirmed");
+        for (let index = 0; index < chunk.length; index++) {
+          const address = chunk[index]!;
+          if (!infos[index]?.owner.equals(PUMP_AMM_PROGRAM_ID) || inspected.has(address.toBase58())) continue;
+          inspected.add(address.toBase58());
+          let pool: Awaited<ReturnType<typeof fetchPool>>;
+          try { pool = await fetchPool(connection, address); }
+          catch { continue; }
+          if (!pool.baseMint.equals(mint) || !quotes.has(pool.quoteMint.toBase58())) continue;
+          try {
+            const state = await poolAssetsAndReserves(connection, pool);
+            if (state.baseReserve <= 0n || state.rawQuoteReserve <= 0n) continue;
+            verified.push({ pool, baseReserve: state.baseReserve, quoteReserve: state.rawQuoteReserve });
+          } catch (error) {
+            // A corrupt pool is not a valid candidate. Provider failures are not
+            // evidence of corrupt metadata and must remain observable.
+            if (isPumpDiscoveryProviderFailure(error)) throw error;
+          }
+        }
+      }
+    };
+    await inspect([...candidates.values()]);
+    // A migrated curve's canonical pool is authoritative. An unrelated
+    // canonical candidate does not prove a noncanonical token's best route.
+    if (!verified.length && typeof connection.getSignaturesForAddress === "function") {
+      const signatures = await connection.getSignaturesForAddress(mint, { limit: 12 }, "confirmed");
+      const historyCandidates = new Map<string, PublicKey>();
+      for (const item of signatures.slice(0, 12)) {
+        let tx;
+        try {
+          tx = await getCompatibleParsedTransaction(connection, item.signature, {
+            commitment: "confirmed", maxSupportedTransactionVersion: 1,
+          });
+        } catch (error) {
+          if (isPumpDiscoveryProviderFailure(error)) throw error;
+          continue;
+        }
+        if (!tx || tx.meta?.err) continue;
+        for (const row of tx.transaction.message.accountKeys.slice(0, 80)) {
+          const address = row.pubkey instanceof PublicKey ? row.pubkey : new PublicKey(row.pubkey);
+          if (!candidates.has(address.toBase58())) historyCandidates.set(address.toBase58(), address);
+          if (historyCandidates.size >= 80) break;
+        }
+        // Validate each small sample immediately; don't spend a full history
+        // window before testing the candidates already found.
+        await inspect([...historyCandidates.values()]);
+        historyCandidates.clear();
+        if (verified.length) break;
+      }
+    }
+    const desired = curve?.quoteAsset.mint.toBase58() ?? WRAPPED_SOL_MINT.toBase58();
+    verified.sort((a, b) =>
+      Number(b.pool.quoteMint.toBase58() === desired) - Number(a.pool.quoteMint.toBase58() === desired) ||
+      Number(b.pool.quoteMint.equals(WRAPPED_SOL_MINT)) - Number(a.pool.quoteMint.equals(WRAPPED_SOL_MINT)) ||
+      // Compare base-normalized quote liquidity only within the same quote mint.
+      (a.pool.quoteMint.equals(b.pool.quoteMint)
+        ? (a.quoteReserve === b.quoteReserve ? 0 : a.quoteReserve > b.quoteReserve ? -1 : 1)
+        : a.pool.quoteMint.toBase58().localeCompare(b.pool.quoteMint.toBase58())) ||
+      a.pool.address.toBase58().localeCompare(b.pool.address.toBase58()));
+    return verified[0]?.pool ?? null;
+  })();
+  entries.set(key, { expires: Date.now() + 15_000, promise });
+  try {
+    const selected = await promise;
+    if (selected) entries.set(key, { expires: Date.now() + 300_000, promise: Promise.resolve(selected) });
+    return selected;
+  } catch (error) { entries.delete(key); throw error; }
+}
+
 /** Canonical PumpSwap AMM only. It is a separate swappable venue plugin from the launch curve. */
 export class PumpSwapVenue implements TradeVenuePlugin {
   readonly id = "pumpswap";
@@ -375,40 +492,8 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     connection: VenueContext["connection"],
     mint: PublicKey,
   ): Promise<Partial<TokenRow> | null> {
-    const pools = await connection.getProgramAccounts(PUMP_AMM_PROGRAM_ID, {
-      commitment: "confirmed",
-      filters: [{ memcmp: { offset: 43, bytes: mint.toBase58() } }],
-    });
-    const verified = await Promise.all(
-      pools.map(async ({ pubkey }) => fetchPool(connection, pubkey)),
-    );
-    const solPools = verified.filter(
-      (pool) =>
-        pool.baseMint.equals(mint) && pool.quoteMint.equals(WRAPPED_SOL_MINT),
-    );
-    const ranked = await Promise.all(
-      solPools.map(async (pool) => ({
-        pool,
-        quoteReserve: await tokenAccountAmount(
-          connection,
-          pool.quoteTokenAccount,
-          TOKEN_PROGRAM_ID,
-          WRAPPED_SOL_MINT,
-        ),
-      })),
-    );
-    ranked.sort((a, b) =>
-      a.quoteReserve === b.quoteReserve
-        ? a.pool.address.toBase58().localeCompare(b.pool.address.toBase58())
-        : a.quoteReserve > b.quoteReserve
-          ? -1
-          : 1,
-    );
-    const solPool = ranked.find((row) => row.quoteReserve > 0n)?.pool;
-    const selected = solPool ?? (verified.length === 1 ? verified[0] : null);
+    const selected = await discoverPumpSwapPool(connection, mint);
     if (!selected) return null;
-    if (!selected.baseMint.equals(mint))
-      throw new Error("PumpSwap discovery base mint mismatch");
     const quote = await poolMintMetadata(connection, selected.quoteMint);
     return {
       venueHint: this.id,
@@ -429,11 +514,10 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     const curve = ctx.token.pool
       ? null
       : await fetchCurve(ctx.connection, ctx.token);
-    if (!ctx.token.pool && !curve?.complete) return null;
     const mint = new PublicKey(ctx.token.mint);
-    const pool = ctx.token.pool
-      ? new PublicKey(ctx.token.pool)
-      : pumpSwapPoolPda(mint, curve!.quoteAsset.mint);
+    const discovered = ctx.token.pool ? null : await discoverPumpSwapPool(ctx.connection, mint);
+    if (!ctx.token.pool && !discovered) return null;
+    const pool = ctx.token.pool ? new PublicKey(ctx.token.pool) : discovered!.address;
     const state = await fetchPool(ctx.connection, pool);
     if (!state.baseMint.equals(mint))
       throw new Error(

@@ -41,6 +41,7 @@ describe("sdk membrane", () => {
         "LAUNCHLAB_PLATFORM_PRESETS",
         "resolveLaunchLabPlatform",
         "createSolard",
+        "createTraderSolard",
         "default",
         "fetchTokenMetadata",
         "formatRaw",

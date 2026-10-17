@@ -6,11 +6,11 @@
   ],
   "scripts": {
     "build": "bun run --filter '*' build",
-    "typecheck": "bun run --filter '*' typecheck",
+    "typecheck": "bun run scripts/typecheck.mjs",
     "test": "bun test packages/core/src packages/sdk/src packages/cli/src",
     "cli": "bun run packages/cli/bin/solard.ts",
     "pub:bump": "bun run scripts/release-version.mjs patch",
-    "pub:verify": "bun run scripts/verify-release.mjs",
+    "pub:verify": "bun run scripts/verify-release.mjs && bun run scripts/verify-release-archives.mjs",
     "pub:lock": "bun install --lockfile-only",
     "pub:core": "cd packages/core && bun publish --access public --no-git-checks",
     "pub:sdk": "cd packages/sdk && bun publish --access public --no-git-checks",

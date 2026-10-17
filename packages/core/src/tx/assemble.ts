@@ -29,7 +29,77 @@ async function fetchLookupTables(
         ).value,
     ),
   );
-  return rows.filter((row): row is AddressLookupTableAccount => row != null);
+  return rows.filter((row): row is AddressLookupTableAccount => row != null && row.isActive());
+}
+
+/** Extract existing ALT references from version-compatible parsed messages. Account
+ * addresses in a parsed message are NOT themselves proof of ALT existence.
+ * Raw RPC account keys in the same transaction are checked through the ALT
+ * program, and only active tables with useful addresses are returned.
+ */
+export async function discoverRouteLookupTables(
+  connection: Connection, draft: TransactionDraft, payer: PublicKey,
+): Promise<PublicKey[]> {
+  if (typeof connection.getSignaturesForAddress !== "function") return [];
+  const covered = new Set(lookupCandidates(payer, draft).map(key => key.toBase58()));
+  const pools = new Map<string, PublicKey>();
+  const add = (value: unknown) => {
+    if (typeof value !== "string") return;
+    try { const key = new PublicKey(value); pools.set(value, key); } catch {}
+  };
+  for (const action of draft.actions) {
+    const meta = action.meta ?? {};
+    add(meta.pool); add(meta.targetPool); add(meta.fundingPool);
+    for (const routeName of ["fundingRoute", "exitRoute"] as const) {
+      const route = meta[routeName] as Record<string, unknown> | undefined;
+      const legs = Array.isArray(route?.legs) ? route.legs : [];
+      for (const leg of legs) {
+        if (!leg || typeof leg !== "object") continue;
+        const row = leg as Record<string, unknown>;
+        add(row.pool);
+        add((row.builtMeta as Record<string, unknown> | undefined)?.pool);
+      }
+    }
+  }
+  const candidates = new Map<string, PublicKey>();
+  // Discover lookup table keys in v0/v1 parsed message keys using the loaded
+  // addresses of a historical transaction only as candidates, then verify
+  // each account's actual owner and ALT program deserialization on-chain.
+  for (const pool of [...pools.values()].slice(0, 4)) {
+    let signatures;
+    try { signatures = await connection.getSignaturesForAddress(pool, { limit: 8 }, "confirmed"); }
+    catch { continue; }
+    for (const { signature } of signatures.slice(0, 8)) {
+      try {
+        // Raw _rpcRequest keeps the actual version 1 and does not invoke
+        // web3.js' older getTransaction version-discriminator validator.
+        const rpc = connection as Connection & {
+          _rpcRequest?: (method: string, params: unknown[]) => Promise<{
+            result?: { version?: unknown; transaction?: { message?: { addressTableLookups?:
+              { accountKey: string }[] } } } }>;
+        };
+        if (!rpc._rpcRequest) continue;
+        const result = (await rpc._rpcRequest("getTransaction", [signature, {
+          encoding: "json", commitment: "confirmed", maxSupportedTransactionVersion: 1,
+        }])).result;
+        if (!result || ![undefined, "legacy", 0, 1].includes(result.version as string | number | undefined))
+          continue;
+        for (const lookup of result.transaction?.message?.addressTableLookups ?? []) {
+          const key = new PublicKey(lookup.accountKey);
+          if (candidates.size < 32) candidates.set(key.toBase58(), key);
+        }
+      } catch { continue; }
+    }
+  }
+  if (!candidates.size) return [];
+  let tables: AddressLookupTableAccount[];
+  try { tables = await fetchLookupTables(connection, [...candidates.values()]); }
+  catch { return []; }
+  return tables.map(table => ({ table,
+    count: table.state.addresses.filter(key => covered.has(key.toBase58())).length,
+  })).filter(row => row.count >= 2)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 4).map(row => row.table.key);
 }
 
 function uniqueSigners(payer: Keypair, signers: Keypair[]): Keypair[] {
@@ -84,7 +154,8 @@ function isSizeFailure(error: unknown): boolean {
 export async function assembleTransaction(args: {
   connection: Connection;
   blockhash: BlockhashCache;
-  payer: Keypair;
+  payer: Keypair | PublicKey;
+  unsigned?: boolean;
   draft: TransactionDraft;
   altAddresses: PublicKey[];
 }): Promise<PlannedTransaction> {
@@ -121,50 +192,51 @@ export async function assembleTransaction(args: {
           ].map((address) => [address.toBase58(), address]),
         ).values(),
       ];
-      const tables = allAltAddresses.length
-        ? await fetchLookupTables(args.connection, allAltAddresses)
-        : [];
-      const make = () => {
-        const message = new TransactionMessage({
-          payerKey: args.payer.publicKey,
-          recentBlockhash: latest.blockhash,
-          instructions: draft.instructions,
-        }).compileToV0Message(tables);
+      const payerKey = args.payer instanceof PublicKey ? args.payer : args.payer.publicKey;
+      if (!args.unsigned && args.payer instanceof PublicKey)
+        throw new Error("Public-only payer requires unsigned mode");
+      let tables = allAltAddresses.length
+        ? await fetchLookupTables(args.connection, allAltAddresses) : [];
+      const make = (selected: AddressLookupTableAccount[]) => {
+        const message = new TransactionMessage({ payerKey,
+          recentBlockhash: latest.blockhash, instructions: draft.instructions,
+        }).compileToV0Message(selected);
         const tx = new VersionedTransaction(message);
-        return tx;
+        return { tx, size: tx.serialize().length };
       };
-      let transaction: VersionedTransaction;
-      let size: number;
-      try {
-        transaction = make();
-        size = transaction.serialize().length;
-      } catch (error) {
-        if (!isSizeFailure(error)) throw error;
-        const candidates = lookupCandidates(
-          args.payer.publicKey,
-          args.draft,
-        ).map((address) => address.toBase58());
-        throw new TransactionTooLargeError(null, tables.length, candidates);
+      let transaction: VersionedTransaction | undefined;
+      let size: number | null = null;
+      try { const built = make(tables); transaction = built.tx; size = built.size; }
+      catch (error) { if (!isSizeFailure(error)) throw error; }
+      if (size == null || size > PACKET_LIMIT) {
+        // History lookup errors must never replace a clear TOO_LARGE result.
+        let found: PublicKey[] = [];
+        try { found = await discoverRouteLookupTables(args.connection, args.draft, payerKey); }
+        catch { /* retain packet-size error */ }
+        const extra = found.filter(key => !tables.some(table => table.key.equals(key)));
+        if (extra.length) {
+          try {
+            tables = [...tables, ...await fetchLookupTables(args.connection, extra)];
+            const built = make(tables); transaction = built.tx; size = built.size;
+          } catch (error) { if (!isSizeFailure(error)) throw error; }
+        }
       }
-      if (size > PACKET_LIMIT) {
-        const candidates = lookupCandidates(
-          args.payer.publicKey,
-          args.draft,
-        ).map((address) => address.toBase58());
-        throw new TransactionTooLargeError(size, tables.length, candidates);
+      if (!transaction || size == null || size > PACKET_LIMIT) {
+        throw new TransactionTooLargeError(size, tables.length,
+          lookupCandidates(payerKey, args.draft).map(key => key.toBase58()));
       }
-      transaction.sign(uniqueSigners(args.payer, args.draft.signers));
+      if (!args.unsigned) transaction.sign(uniqueSigners(args.payer as Keypair, args.draft.signers));
       plan = {
         transaction,
         draft: args.draft,
         lookupTables: tables,
         serializedSize: size,
-        payer: args.payer.publicKey,
+        payer: payerKey,
         recentBlockhash: latest.blockhash,
         lastValidBlockHeight: latest.lastValidBlockHeight,
       };
       return {
-        payer: args.payer.publicKey.toBase58(),
+        payer: payerKey.toBase58(),
         instructions: draft.instructions.length,
         actions: args.draft.actions.length,
         lookupTables: tables.length,

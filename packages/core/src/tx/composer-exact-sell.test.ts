@@ -12,6 +12,8 @@ import {
 } from "@solana/spl-token";
 import { SOL_ASSET, type QuoteAsset } from "../core/amounts.ts";
 import { defaultPumpQuoteShell } from "../venues/pump/common.ts";
+import { globalPda, bondingCurvePda } from "../venues/pump/pda.ts";
+import { PUMP_PROGRAM_ID } from "../venues/pump/constants.ts";
 import type {
   TradeVenuePlugin,
   VenueMarket,
@@ -22,7 +24,7 @@ import { TransactionComposer, type ComposerHost } from "./composer.ts";
 const payer = NATIVE_MINT;
 const mint = new PublicKey(new Uint8Array(32).fill(1));
 const quoteMint = new PublicKey(new Uint8Array(32).fill(2));
-function fixture(venue = "pumpswap", custom = false, balance = 1_000_000n) {
+function fixture(venue = "pumpswap", custom = false, balance = 1_000_000n, chain = false, cycle = false, eligibleCurve?: boolean) {
   const calls: Array<bigint> = [];
   const quoteAsset: QuoteAsset = custom
     ? {
@@ -44,6 +46,16 @@ function fixture(venue = "pumpswap", custom = false, balance = 1_000_000n) {
   }
   const plugin = {
     id: venue,
+    async quoteBuy(_ctx: unknown, selected: VenueMarket, input: { raw: bigint }) {
+      calls.push(input.raw);
+      return { venue, quoteAsset: selected.quoteAsset, inputRaw: input.raw, minimumOutputRaw: input.raw * 2n, expectedOutputRaw: input.raw * 3n };
+    },
+    async buildBuy(_ctx: unknown, selected: VenueMarket, quote: QuoteResult) {
+      const data = Buffer.alloc(8);
+      data.writeBigUInt64LE(quote.inputRaw);
+      return { venue, quoteAsset: selected.quoteAsset, minOutputRaw: quote.minimumOutputRaw,
+        instructions: [new TransactionInstruction({ programId: PublicKey.default, keys: [], data })] };
+    },
     async quoteSell(
       _ctx: unknown,
       selected: VenueMarket,
@@ -105,7 +117,9 @@ function fixture(venue = "pumpswap", custom = false, balance = 1_000_000n) {
         market:
           token.mint === mint.toBase58()
             ? market(mint, quoteAsset)
-            : market(quoteMint, SOL_ASSET),
+            : chain && token.mint === quoteMint.toBase58()
+              ? market(quoteMint, { ...quoteAsset, mint: cycle ? mint : new PublicKey(new Uint8Array(32).fill(9)) })
+              : market(new PublicKey(token.mint), SOL_ASSET),
       };
     },
     async tokenBalance() {
@@ -113,7 +127,18 @@ function fixture(venue = "pumpswap", custom = false, balance = 1_000_000n) {
     },
     connection() {
       return {
-        async getAccountInfo() {
+        async getAccountInfo(address: PublicKey) {
+          if (address.equals(globalPda())) {
+            const data = Buffer.alloc(1045);
+            (eligibleCurve == null ? quoteMint : new PublicKey(new Uint8Array(32).fill(9))).toBuffer().copy(data, 1013);
+            return { data, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 };
+          }
+          if (eligibleCurve != null && address.equals(bondingCurvePda(quoteMint))) {
+            const data = Buffer.alloc(115);
+            Buffer.from([23, 183, 248, 55, 96, 216, 172, 96]).copy(data);
+            data[81] = eligibleCurve ? 0 : 1;
+            return { data, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 };
+          }
           return {
             data: account,
             owner: TOKEN_PROGRAM_ID,
@@ -160,6 +185,40 @@ test("custom-quote sell preserves the exact first leg and guaranteed SOL metadat
     inputRaw: "284725",
     minOutputRaw: "1138900",
   });
+});
+
+test("listed non-SOL quote chains preserve per-leg minima and aggregate SOL for both directions", async () => {
+  const buy = fixture("listed-quote", true, 1_000_000n, true);
+  const buyDraft = await buy.tx().buy(mint, { sol: "0.001" }).materializedDraft();
+  expect(buy.calls).toEqual([1_000_000n, 2_000_000n, 4_000_000n]);
+  expect(buyDraft.actions).toHaveLength(1);
+  expect(buyDraft.actions[0]!.meta).toMatchObject({ inputRaw: "1000000", minOutputRaw: "8000000" });
+  const funding = buyDraft.actions[0]!.meta!.fundingRoute as { legs: { minOutputRaw: string }[] };
+  expect(funding.legs.map(leg => leg.minOutputRaw)).toEqual(["2000000", "4000000"]);
+  const sell = fixture("listed-quote", true, 1_000_000n, true);
+  const sellDraft = await sell.tx().sell(mint, { amountRaw: 100n }).materializedDraft();
+  expect(sell.calls).toEqual([100n, 200n, 400n]);
+  expect(sellDraft.actions).toHaveLength(1);
+  expect(sellDraft.actions[0]!.meta).toMatchObject({ inputRaw: "100", minOutputRaw: "800", minSolOutputRaw: "800" });
+});
+
+test("quote conversion cycles reject before constructing funding trades", async () => {
+  const f = fixture("listed-quote", true, 1_000_000n, true, true);
+  await expect(f.tx().buy(mint, { sol: "0.001" }).materializedDraft()).rejects.toThrow("cycle or depth");
+  expect(f.calls).toHaveLength(0);
+});
+
+test("unmigrated Pump quote curves execute both directions while mayhem quotes reject", async () => {
+  const buy = fixture("pump-curve", true, 1_000_000n, false, false, true);
+  const draft = await buy.tx().buy(mint, { sol: "0.001" }).materializedDraft();
+  expect(buy.calls).toEqual([1_000_000n, 2_000_000n]);
+  expect(draft.actions[0]!.meta).toMatchObject({ inputRaw: "1000000", minOutputRaw: "4000000" });
+  const sell = fixture("pump-curve", true, 1_000_000n, false, false, true);
+  await sell.tx().sell(mint, { amountRaw: 100n }).materializedDraft();
+  expect(sell.calls).toEqual([100n, 200n]);
+  const mayhem = fixture("pump-curve", true, 1_000_000n, false, false, false);
+  await expect(mayhem.tx().buy(mint, { sol: "0.001" }).materializedDraft()).rejects.toThrow("mayhem");
+  expect(mayhem.calls).toHaveLength(0);
 });
 
 test("invalid or oversized exact amounts reject before quote construction", async () => {

@@ -101,6 +101,9 @@ export type Solard = {
       tokens?: readonly string[];
     },
   ): Promise<TradeListener>;
+  prepareUnsignedBuy: ReturnType<typeof createCoreSolard>["prepareUnsignedBuy"];
+  simulateUnsignedBuy: ReturnType<typeof createCoreSolard>["simulateUnsignedBuy"];
+  proposeUnsignedBuyLookupTable: ReturnType<typeof createCoreSolard>["proposeUnsignedBuyLookupTable"];
   resolveCurrentMarket: ReturnType<
     typeof createCoreSolard
   >["resolveCurrentMarket"];
@@ -293,6 +296,9 @@ export function createSolard(options: SolardOptions = {}): Solard {
         ...listenerOptions,
         tokens: listenerOptions.tokens ?? [],
       }),
+    prepareUnsignedBuy: core.prepareUnsignedBuy.bind(core),
+    simulateUnsignedBuy: core.simulateUnsignedBuy.bind(core),
+    proposeUnsignedBuyLookupTable: core.proposeUnsignedBuyLookupTable.bind(core),
     resolveCurrentMarket: core.resolveCurrentMarket.bind(core),
     getClaimableCreatorFees: core.getClaimableCreatorFees.bind(core),
     claimAllCreatorFees: core.claimAllCreatorFees.bind(core),

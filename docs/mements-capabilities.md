@@ -1,6 +1,20 @@
-# Mements capability handoff — 2026-10-07
+# Mements capability handoff — 2026-10-09
 
-The registry has 0.2.31; the additional exact-sell, economic-sell and live-history changes below are being prepared for 0.2.32. No dependency source patches or new external dependencies were added. Funded mainnet launches, claims and migration acceptance have not been run.
+Publication is blocked by npm authentication. Both npm and Bun rejected the core upload, and npm's access check reports an invalid token. No 0.2.34 package was published. Tested archives are retained under `dist/releases/0.2.34`; registry archive verification must follow successful publication.
+
+Matching 0.2.34 packages are being prepared. `bun run pub:verify` packs all four packages, installs the actual archives outside the workspace, checks SDK/core runtime factories and runs installed SDK live/readiness tests. Audit registry archives with `bun run scripts/verify-release-archives.mjs --registry=0.2.33`. The currently downloaded 0.2.33 core archive includes the history-recorder export, but its SDK lacks the requested `createTraderSolard` export; 0.2.34 adds it.
+
+Local 0.2.34 archive verification passed the SDK/core runtime imports, all seven installed live/readiness and client-listener tests, and 299 installed core tests. Core now declares its direct `measure-fn` 5.3.1 dependency, whose published serialization exports are required by logging. This is a package repair; applications need no dependency-source patch.
+
+The initial workspace test baseline passed 321 tests. Existing dependency type collisions involving web3.js, measure-fn and Node types plus PumpPlugin diagnostics still affect typechecking. The root typecheck script now invokes packages directly on Windows. Funded mainnet acceptance remains outstanding.
+
+Read-only mainnet validation returned the supplied SEEDCAT signature at slot 454653827 with transaction version 1 preserved. The captured response reproduces the web3.js 1.98.4 validator rejection. SEEDCAT's actual curve resolves quote mint `EWHUpE77cW4qP5QctYsscD8hoXArfw7bV33TTfFApump`, six decimals, and verified SOL conversion without a Jupiter key (about 2.37e-8 SOL per quote token at capture time). Replaying that signature's logs with current chain metadata and parsed enrichment deliberately unavailable emitted SOL prices and supply-based capitalization. Its USD values used a fixed SOL/USD input of $100 for validation.
+
+Replay proves metadata and price construction for that event; a 45-second real WebSocket observation received no fresh ticks, so fresh live SEEDCAT delivery remains unverified. No funded buy/sell cycle was run. Keep application price, minimum-output and unresolved-submission guards.
+
+Read-only SEEDCAT construction verified Token-2022 quote selection and protected outputs for a 0.001 SOL buy and a hypothetical sell of the buy minimum. One capture protected 799,988,973,209 target raw on the buy and 844,409 lamports on the sell; these quotes move with reserves. Without lookup tables, plans measured 1,657/1,547 bytes and fail with `TransactionTooLargeError` before accessing the signer. Lookup candidates are exposed, but these plans were not simulated, signed or submitted. Applications need suitable lookup tables for this route.
+
+The exact-sell, economic-sell and live-history changes below were prepared for 0.2.32 and are included in the 0.2.34 release candidate. Funded mainnet launches, claims and migration acceptance have not been run.
 
 ## Exact position sells and live history (0.2.32)
 

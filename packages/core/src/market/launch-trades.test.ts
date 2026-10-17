@@ -2,13 +2,147 @@ import { describe, expect, test } from "bun:test";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
 import { pumpAmmJson } from "@pump-fun/pump-swap-sdk";
+import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { bondingCurvePda, globalPda } from "../venues/pump/pda.ts";
+import { PUMP_PROGRAM_ID } from "../venues/pump/constants.ts";
+import { PUMP_CURVE_DISCRIMINATOR } from "../venues/pump/state.ts";
 import { fixtureConnection } from "../venues/meteora/fixtures/connection.ts";
 import {
   decodePumpProgramData,
   decodePumpSwapProgramData,
   decodeRaydiumLaunchLabProgramData,
   subscribeTrades,
+  quoteSolLoader,
 } from "./launch-trades.ts";
+
+test("custom Pump curve quote metadata survives unavailable parsed transactions", async () => {
+  const { connection, accounts, callbacks } = fixtureConnection();
+  const mint = new PublicKey(Buffer.alloc(32, 30));
+  const quote = new PublicKey(Buffer.alloc(32, 35));
+  const mintData = (decimals: number) => {
+    const data = Buffer.alloc(82);
+    data.writeBigUInt64LE(1_000_000_000_000_000n, 36);
+    data[44] = decimals;
+    data[45] = 1;
+    return { data, owner: TOKEN_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 };
+  };
+  accounts.set(mint.toBase58(), mintData(6));
+  accounts.set(quote.toBase58(), mintData(8));
+  const curveData = Buffer.alloc(115);
+  PUMP_CURVE_DISCRIMINATOR.copy(curveData);
+  quote.toBuffer().copy(curveData, 83);
+  accounts.set(bondingCurvePda(mint).toBase58(), { data: curveData, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  let parsedCalls = 0;
+  connection.getParsedTransaction = async () => { parsedCalls++; throw new Error("unavailable parsed RPC"); };
+  const trades: Array<Parameters<Parameters<typeof subscribeTrades>[0]["onTrade"]>[0]> = [];
+  const statuses: Array<string> = [];
+  const subscription = await subscribeTrades({ connection, tokens: [mint.toBase58()], venues: ["pump"], solUsd: 100, quoteSol: async () => 0.01, onStatus: event => statuses.push(event), onTrade: event => { trades.push(event); } });
+  callbacks[0]!({ err: null, signature: "custom-curve", logs: [`Program ${PUMP_PROGRAM_ID} invoke [1]`, `Program data: ${pumpTradeEvent().toString("base64")}`, `Program ${PUMP_PROGRAM_ID} success`] }, { slot: 42 });
+  await Bun.sleep(40);
+  expect(parsedCalls).toBe(0);
+  expect(trades).toHaveLength(1);
+  expect(trades[0]!.market.quoteMint).toBe(quote.toBase58());
+  expect(trades[0]!.market.quoteDecimals).toBe(8);
+  expect(trades[0]!.market.supplyRaw).toBe(1_000_000_000_000_000n);
+  expect(trades[0]!.market.priceSol).toBeGreaterThan(0);
+  const mismatched = pumpTradeEvent();
+  Buffer.alloc(32, 36).copy(mismatched, mismatched.indexOf(Buffer.alloc(32, 35)));
+  callbacks[0]!({ err: null, signature: "mismatched-quote", logs: [`Program ${PUMP_PROGRAM_ID} invoke [1]`, `Program data: ${mismatched.toString("base64")}`, `Program ${PUMP_PROGRAM_ID} success`] }, { slot: 43 });
+  await Bun.sleep(40);
+  expect(trades).toHaveLength(1);
+  expect(statuses).toContain("pump-quote-metadata-mismatch");
+  await subscription.close();
+});
+
+test("eligible unmigrated quote curve converts through verified virtual reserves without Jupiter", async () => {
+  const { connection, accounts } = fixtureConnection();
+  const mint = new PublicKey(Buffer.alloc(32, 90));
+  const mintData = Buffer.alloc(82);
+  mintData[44] = 6;
+  mintData[45] = 1;
+  accounts.set(mint.toBase58(), { data: mintData, owner: TOKEN_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const data = Buffer.alloc(115);
+  PUMP_CURVE_DISCRIMINATOR.copy(data);
+  data.writeBigUInt64LE(100_000_000n, 8);
+  data.writeBigUInt64LE(2_000_000_000n, 16);
+  data.writeBigUInt64LE(100_000_000n, 24);
+  accounts.set(bondingCurvePda(mint).toBase58(), { data, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const load = quoteSolLoader(connection, () => {});
+  expect(await load(mint.toBase58(), 9)).toBeCloseTo(0.02);
+});
+
+test("mayhem, nested Pump quotes, and migration gaps remain explicit unavailable conversions", async () => {
+  for (const [mode, reason] of [["mayhem", "mayhem-quote-prohibited"], ["nested", "nested-pump-quote-prohibited"], ["migrated", "migration-gap"]] as const) {
+    const { connection, accounts } = fixtureConnection();
+    const mint = new PublicKey(Buffer.alloc(32, 91));
+    const data = Buffer.alloc(115);
+    PUMP_CURVE_DISCRIMINATOR.copy(data);
+    data[81] = mode === "mayhem" ? 1 : 0;
+    data[48] = mode === "migrated" ? 1 : 0;
+    if (mode === "nested") {
+      const quote = new PublicKey("pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn");
+      quote.toBuffer().copy(data, 83);
+      const global = Buffer.alloc(1045);
+      Buffer.from([167, 232, 232, 177, 200, 108, 114, 127]).copy(global);
+      accounts.set(globalPda().toBase58(), { data: global, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+    }
+    accounts.set(bondingCurvePda(mint).toBase58(), { data, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+    const statuses: Array<Record<string, unknown> | undefined> = [];
+    expect(await quoteSolLoader(connection, (_event, status) => statuses.push(status))(mint.toBase58(), 6)).toBeNull();
+    expect(statuses.some(status => status?.reason === reason)).toBe(true);
+  }
+});
+
+test("a curve quoted in an actual Global-listed mint converts through verified SOL reserves", async () => {
+  const { connection, accounts } = fixtureConnection();
+  const mint = new PublicKey(Buffer.alloc(32, 92));
+  const quote = new PublicKey("pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn");
+  const quoteCurve = Buffer.alloc(115);
+  PUMP_CURVE_DISCRIMINATOR.copy(quoteCurve);
+  quoteCurve.writeBigUInt64LE(100_000_000n, 8);
+  quoteCurve.writeBigUInt64LE(2_000_000_000n, 16);
+  quoteCurve.writeBigUInt64LE(100_000_000n, 24);
+  accounts.set(bondingCurvePda(quote).toBase58(), { data: quoteCurve, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const global = Buffer.alloc(1045);
+  Buffer.from([167, 232, 232, 177, 200, 108, 114, 127]).copy(global);
+  quote.toBuffer().copy(global, 1013);
+  accounts.set(globalPda().toBase58(), { data: global, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const mintData = Buffer.alloc(82);
+  mintData[44] = 6; mintData[45] = 1;
+  accounts.set(mint.toBase58(), { data: mintData, owner: TOKEN_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const data = Buffer.alloc(115);
+  PUMP_CURVE_DISCRIMINATOR.copy(data);
+  quote.toBuffer().copy(data, 83);
+  data.writeBigUInt64LE(100_000_000n, 8);
+  data.writeBigUInt64LE(200_000_000n, 16);
+  data.writeBigUInt64LE(100_000_000n, 24);
+  accounts.set(bondingCurvePda(mint).toBase58(), { data, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const load = quoteSolLoader(connection, () => {});
+  const quotePrice = await load(quote.toBase58(), 6);
+  expect(quotePrice).toBeGreaterThan(0);
+  expect(await load(mint.toBase58(), 6)).toBeCloseTo(quotePrice! * 2, 12);
+});
+
+test("recursive listed quote cycles stop without deadlocking or cached path shortcuts", async () => {
+  const { connection, accounts } = fixtureConnection();
+  const mint = new PublicKey(Buffer.alloc(32, 93));
+  const mintData = Buffer.alloc(82);
+  mintData[44] = 6; mintData[45] = 1;
+  accounts.set(mint.toBase58(), { data: mintData, owner: TOKEN_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const global = Buffer.alloc(1045);
+  Buffer.from([167, 232, 232, 177, 200, 108, 114, 127]).copy(global);
+  mint.toBuffer().copy(global, 1013);
+  accounts.set(globalPda().toBase58(), { data: global, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const data = Buffer.alloc(115);
+  PUMP_CURVE_DISCRIMINATOR.copy(data);
+  mint.toBuffer().copy(data, 83);
+  for (const offset of [8, 16, 24]) data.writeBigUInt64LE(100_000_000n, offset);
+  accounts.set(bondingCurvePda(mint).toBase58(), { data, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 });
+  const reasons: Array<unknown> = [];
+  const load = quoteSolLoader(connection, (_event, status) => reasons.push(status?.reason));
+  expect(await load(mint.toBase58(), 6)).toBeNull();
+  expect(reasons).toContain("cycle-or-depth-limit");
+});
 
 const PUMP_TRADE_D8 = Buffer.from([189, 219, 127, 211, 78, 230, 97, 238]);
 const BUY_D8 = Buffer.from([103, 244, 82, 31, 44, 245, 119, 119]);

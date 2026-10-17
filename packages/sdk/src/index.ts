@@ -1,5 +1,6 @@
 export { default } from "./default.ts";
 export { createSolard } from "./client.ts";
+export { createTraderSolard } from "@solard/core";
 export {
   normalizeValueBandPolicy,
   planValueBandDecision,

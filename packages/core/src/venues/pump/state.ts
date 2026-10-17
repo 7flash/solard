@@ -25,6 +25,8 @@ export type PumpCurve = {
   isCashbackCoin: boolean;
   quoteAsset: QuoteAsset;
 };
+// Anchor account discriminator: sha256("account:BondingCurve")[0..8].
+export const PUMP_CURVE_DISCRIMINATOR = Buffer.from([23, 183, 248, 55, 96, 216, 172, 96]);
 export type PumpPool = {
   address: PublicKey;
   creator: PublicKey;
@@ -57,6 +59,8 @@ export function decodeCurve(
 ): PumpCurve {
   if (data.length < 49)
     throw new Error(`Bonding curve account ${address.toBase58()} is too short`);
+  if (!data.subarray(0, 8).equals(PUMP_CURVE_DISCRIMINATOR))
+    throw new Error(`Bonding curve ${address.toBase58()} has invalid account discriminator`);
   const metadata = token.metadataJson
     ? (JSON.parse(token.metadataJson) as { quoteDecimals?: number })
     : {};

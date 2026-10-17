@@ -836,3 +836,5 @@ export * from "./ledger/wallet-ledger.ts";
 export * from "./market/current-market.ts";
 export * from "./market/live-trade-history.ts";
 export * from "./tx/sell-economics.ts";
+export { getCompatibleParsedTransaction } from "./chain/parsed-transaction.ts";
+export type { CompatibleParsedTransaction } from "./chain/parsed-transaction.ts";

@@ -68,6 +68,7 @@ export class SolardTransaction {
   }
 }
 export class TransactionBuilder extends SolardTransaction {
+  protected publicPayer: PublicKey | null = null;
   constructor(
     protected readonly host: TransactionHost,
     protected readonly payerRef: WalletRef,
@@ -75,6 +76,7 @@ export class TransactionBuilder extends SolardTransaction {
     super();
   }
   async build(): Promise<PlannedTransaction> {
+    if (this.publicPayer) throw new Error("Unsigned composer cannot sign");
     return await this.host.compile(
       this.host.signer(this.payerRef),
       this.snapshot(),
@@ -98,7 +100,12 @@ export class TransactionBuilder extends SolardTransaction {
       options,
     );
   }
+  usePublicPayer(address: PublicKey): this {
+    this.publicPayer = address;
+    return this;
+  }
   payer(): PublicKey {
+    if (this.publicPayer) return this.publicPayer;
     return this.host.signer(this.payerRef).publicKey;
   }
 }

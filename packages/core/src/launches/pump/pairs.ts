@@ -96,7 +96,7 @@ function whitelistTail(data: Buffer): Buffer {
   return data.subarray(GLOBAL_WHITELIST_OFFSET, GLOBAL_WHITELIST_OFFSET + 32);
 }
 
-function decodeWhitelistedQuoteMints(data: Buffer): PublicKey[] {
+export function decodeWhitelistedQuoteMints(data: Buffer): PublicKey[] {
   const tail = whitelistTail(data);
   let payload = tail;
   if (tail.length % 32 !== 0) {

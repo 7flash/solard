@@ -151,6 +151,17 @@ function curveSellKeys(args: CurveInstructionArgs) {
   ];
 }
 
+function curveBuybackSetup(args: CurveInstructionArgs): TransactionInstruction[] {
+  if (args.quote.kind !== "spl-token") return [];
+  return [ensureAtaIx(
+    args.user,
+    args.quote.mint,
+    args.routing.buybackFeeRecipient,
+    args.quote.tokenProgram,
+    true,
+  )];
+}
+
 export function buildCreateV2(args: {
   mint: PublicKey;
   user: PublicKey;
@@ -229,6 +240,7 @@ export function buildCurveBuyV2(args: {
 }): TransactionInstruction[] {
   return [
     ensureAtaIx(args.user, args.mint, args.user, args.baseTokenProgram),
+    ...curveBuybackSetup(args),
     new TransactionInstruction({
       programId: PUMP_PROGRAM_ID,
       keys: curveBuyKeys(args),
@@ -251,6 +263,7 @@ export function buildCurveSellV2(args: {
   minQuoteOutRaw: bigint;
 }): TransactionInstruction[] {
   return [
+    ...curveBuybackSetup(args),
     new TransactionInstruction({
       programId: PUMP_PROGRAM_ID,
       keys: curveSellKeys(args),

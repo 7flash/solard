@@ -1695,10 +1695,15 @@ export class Solard implements ComposerHost {
           const funding = await this.tx(wallet)
             .buy(deployment.quoteAsset.mint, budget, { slippageBps: leg })
             .materializedDraft();
+          // Never accept a funding draft with no protected execution leg. In
+          // particular a stale quote or an RPC provider failure must not turn
+          // an explicitly requested creator buy into a create-only launch.
           const action = funding.actions.find((item) => item.kind === "buy");
           const minimum = BigInt(String(action?.meta?.minOutputRaw ?? "0"));
-          if (minimum <= 0n)
-            throw new Error("Quote funding route has no guaranteed output");
+          if (minimum <= 0n || funding.instructions.length === 0)
+            throw new Error("Quote funding route has no executable guaranteed output");
+          if (funding.actions.some((item) => item.kind === "sell"))
+            throw new Error("Creator quote funding unexpectedly contains a sell");
           const state = await this.initialPendingMarketState(
             launchpadId,
             deployment,
@@ -1711,6 +1716,12 @@ export class Solard implements ComposerHost {
             state,
             { slippageBps: leg },
           );
+          // All three parts must land atomically. A zero-output pending buy
+          // is not a successful token launch with a creator buy.
+          if (buy.minimumOutputRaw <= 0n || buy.instructions.length === 0)
+            throw new Error("Creator buy has no executable guaranteed output");
+          if (!buy.quoteAsset.mint.equals(deployment.quoteAsset.mint))
+            throw new Error("Creator buy changed deployment quote mint");
           deployment.instructions.push(
             ...funding.instructions,
             ...buy.instructions,
@@ -2152,6 +2163,72 @@ export class Solard implements ComposerHost {
           ? []
           : this.alts.list().map((row) => new PublicKey(row.address)),
     });
+  }
+
+  async prepareUnsignedBuyDraft(args: {
+    payer: PublicKey | string; mint: PublicKey | string; sol: string; slippageBps: number;
+  }): Promise<TransactionDraft> {
+    const payer = new PublicKey(args.payer);
+    const tx = new TransactionComposer(this, payer.toBase58()).usePublicPayer(payer);
+    tx.buy(new PublicKey(args.mint), { sol: args.sol }, { slippageBps: args.slippageBps });
+    try { return await tx.materializedDraft(); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/\b(?:403|429)\b|Request blocked|quota|Too Many Requests/i.test(message)) {
+        const failure = new TradePreSubmissionError(error);
+        Object.assign(failure, { code: "RPC_PROVIDER_UNAVAILABLE" });
+        throw failure;
+      }
+      throw error;
+    }
+  }
+
+  async prepareUnsignedBuy(args: {
+    payer: PublicKey | string; mint: PublicKey | string; sol: string; slippageBps: number;
+  }): Promise<PlannedTransaction> {
+    const payer = new PublicKey(args.payer);
+    return await assembleTransaction({
+      connection: this.connection(), blockhash: this.blockhash,
+      payer, unsigned: true,
+      draft: await this.prepareUnsignedBuyDraft(args),
+      altAddresses: this.alts.list().map(row => new PublicKey(row.address)),
+    });
+  }
+
+  async simulateUnsignedBuy(args: {
+    payer: PublicKey | string; mint: PublicKey | string; sol: string; slippageBps: number;
+  }) {
+    const plan = await this.prepareUnsignedBuy(args);
+    return { plan, simulation: await this.simulatePlan(plan) };
+  }
+
+  /** No ALT is created or registered. Return only reviewable unsigned setup. */
+  async proposeUnsignedBuyLookupTable(args: {
+    payer: PublicKey | string; mint: PublicKey | string; sol: string; slippageBps: number;
+  }) {
+    const payer = new PublicKey(args.payer);
+    const draft = await this.prepareUnsignedBuyDraft(args);
+    const { lookupCandidates } = await import("../tx/assemble.ts");
+    const candidates = lookupCandidates(payer, draft);
+    if (!candidates.length || candidates.length > 256) throw new Error("ALT candidate count invalid");
+    const recentSlot = await this.connection().getSlot("confirmed");
+    const [createIx, address] = AddressLookupTableProgram.createLookupTable({
+      authority: payer, payer, recentSlot,
+    });
+    const compile = async (instructions: import("@solana/web3.js").TransactionInstruction[]) =>
+      await assembleTransaction({ connection: this.connection(), blockhash: this.blockhash,
+        payer, unsigned: true, altAddresses: [],
+        draft: { instructions, actions: [], signers: [], trackedAccounts: [] },
+      });
+    const create = await compile([createIx]);
+    const extensions: PlannedTransaction[] = [];
+    for (let index = 0; index < candidates.length; index += 20) {
+      extensions.push(await compile([AddressLookupTableProgram.extendLookupTable({
+        payer, authority: payer, lookupTable: address,
+        addresses: candidates.slice(index, index + 20),
+      })]));
+    }
+    return { address: address.toBase58(), addresses: candidates.map(key => key.toBase58()), create, extensions };
   }
 
   /** Optional warmup; stop the timer when the worker shuts down. */

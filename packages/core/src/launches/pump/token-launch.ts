@@ -1008,6 +1008,14 @@ export async function preparePumpTokenLaunch(args: {
     );
     state = initialBuy.nextState;
   }
+  // Treat absent atomic-buy metadata as an incomplete deployment, not as a
+  // launch with an optional zero-token creator allocation.
+  if (customQuote && creator && (
+    !Array.isArray(deployment.metadata?.fundingActions) ||
+    deployment.metadata.fundingActions.length === 0 ||
+    deployment.metadata.creatorBuySolLamports == null ||
+    deployment.metadata.initialBuyRaw == null
+  )) throw new Error("Custom-quote launch is missing protected atomic creator funding");
   const atomicCreatorMinimum =
     customQuote && creator
       ? BigInt(String(deployment.metadata?.minimumOutputRaw ?? "0"))

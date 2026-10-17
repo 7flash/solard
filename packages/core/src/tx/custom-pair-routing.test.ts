@@ -3,6 +3,7 @@ import { Keypair, TransactionInstruction } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { Solard } from "../core/solard.ts";
 import { SOL_ASSET, sol } from "../core/amounts.ts";
+import { PUMP_PROGRAM_ID } from "../venues/pump/constants.ts";
 import type { TokenRow } from "../db/schema.ts";
 import type {
   QuoteResult,
@@ -88,6 +89,7 @@ function routingFixture(failExit = false) {
         quoteAsset: market.quoteAsset,
         instructions: [instruction(market.mint.equals(intermediate) ? 1 : 2)],
         minOutputRaw: 80n,
+        meta: { lookupTableAddresses: [market.mint.toBase58()] },
       };
     },
     async buildSell(_context, market) {
@@ -96,6 +98,7 @@ function routingFixture(failExit = false) {
         quoteAsset: market.quoteAsset,
         instructions: [instruction(market.mint.equals(target) ? 3 : 4)],
         minOutputRaw: 75n,
+        meta: { lookupTableAddresses: [market.mint.toBase58()] },
       };
     },
   };
@@ -107,9 +110,12 @@ function routingFixture(failExit = false) {
     market: token.mint === target.toBase58() ? targetMarket : fundingMarket,
   });
   slrd.tokenBalance = async () => 1_000n;
-  // The mock plugins do not use the connection; no network transport exists.
   slrd.connection = () =>
-    undefined as unknown as ReturnType<Solard["connection"]>;
+    ({ async getAccountInfo() {
+      const data = Buffer.alloc(1045);
+      intermediate.toBuffer().copy(data, 1013);
+      return { data, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false, rentEpoch: 0 };
+    } }) as unknown as ReturnType<Solard["connection"]>;
   return { slrd, target, intermediate, calls };
 }
 
@@ -148,6 +154,7 @@ test("SOL custom-pair buy builds both legs in one draft and spends only the buil
     1, 2,
   ]);
   expect(calls.map((call) => call.input)).toEqual([100_000_000n, 80n]);
+  expect(draft.actions[0]!.meta?.lookupTableAddresses).toEqual([target.toBase58(), calls[0]!.mint]);
   expect(draft.actions).toHaveLength(1);
   expect(draft.actions[0]!.mint?.equals(target)).toBe(true);
   expect(draft.actions[0]!.kind).toBe("buy");

@@ -5,13 +5,17 @@ import {
 } from "@solana/spl-token";
 import { PublicKey, type Connection } from "@solana/web3.js";
 import type { HumanAmount } from "../core/amounts.ts";
-import { rawAmount, sameAsset, toRawAmount } from "../core/amounts.ts";
+import { rawAmount, sameAsset, toRawAmount, SOL_ASSET } from "../core/amounts.ts";
 import { QuoteAssetMismatchError } from "../core/errors.ts";
 import { decimalsOr } from "../core/decimals.ts";
 import { readMint, listOwnedTokenAccounts } from "../chain/state.ts";
 import { assertTradeMinimum } from "./trade-minimum.ts";
 import { assertTradePrice, type SolPrice } from "./price-guard.ts";
 import { TradePreSubmissionError } from "./trade-errors.ts";
+import { decodeWhitelistedQuoteMints } from "../launches/pump/pairs.ts";
+import { globalPda } from "../venues/pump/pda.ts";
+import { PUMP_PROGRAM_ID } from "../venues/pump/constants.ts";
+import { fetchCurve, fetchPool } from "../venues/pump/state.ts";
 import type { TokenRef, WalletRef } from "../core/refs.ts";
 import type { TokenRow } from "../db/schema.ts";
 import type { ClaimPlan } from "../claims/claim-source.ts";
@@ -70,9 +74,78 @@ function legSlippageBps(totalBps: number): number {
   return Math.floor((1 - Math.sqrt(1 - total / 10_000)) * 10_000);
 }
 
+function conversionLookupTables(legs: Record<string, unknown>[], targetMeta?: Record<string, unknown>): unknown[] {
+  return [targetMeta, ...legs.map(leg => leg.builtMeta as Record<string, unknown> | undefined)]
+    .flatMap(meta => Array.isArray(meta?.lookupTableAddresses) ? meta.lookupTableAddresses : []);
+}
+
 /** Generic transaction sugar for one-off actions. Trading strategies belong in scripts that import slrd. */
 export class TransactionComposer extends TransactionBuilder {
   private readonly operations: Operation[] = [];
+  private async conversionLeg(
+    side: "buy" | "sell", mint: PublicKey, input: bigint,
+    slippageBps: number, path: string[], pumpQuote = false,
+  ): Promise<{ plugin: TradeVenuePlugin; market: VenueMarket; instructions: import("@solana/web3.js").TransactionInstruction[]; legs: Record<string, unknown>[]; minimumOutputRaw: bigint; expectedOutputRaw: bigint }> {
+    const identity = mint.toBase58();
+    if (path.includes(identity) || path.length >= 4)
+      throw Object.assign(new Error("Quote conversion cycle or depth limit exceeded"), { code: "CONVERSION_UNAVAILABLE" });
+    const token = await this.composerHost.resolveTokenForExecution(mint);
+    let route: { plugin: TradeVenuePlugin; market: VenueMarket };
+    try {
+      route = await this.composerHost.route(token, this.payer());
+    } catch (cause) {
+      throw Object.assign(new Error(`Quote conversion route unavailable for ${identity}`, { cause }), { code: "CONVERSION_UNAVAILABLE" });
+    }
+    if (sameAsset(route.market.quoteAsset, SOL_ASSET))
+      route.market = { ...route.market, quoteAsset: SOL_ASSET };
+    if (pumpQuote) {
+      const global = await this.composerHost.connection().getAccountInfo(globalPda(), "confirmed");
+      if (!global || !global.owner.equals(PUMP_PROGRAM_ID))
+        throw Object.assign(new Error("Pump quote eligibility metadata unavailable"), { code: "UNSUPPORTED_QUOTE_METADATA" });
+      const listed = decodeWhitelistedQuoteMints(Buffer.from(global.data));
+      if (!listed.some(quote => quote.equals(mint))) {
+        const curve = await fetchCurve(this.composerHost.connection(), token);
+        const pool = !curve && route.market.metadata.pool instanceof PublicKey
+          ? await fetchPool(this.composerHost.connection(), route.market.metadata.pool)
+          : undefined;
+        const quote = curve?.quoteAsset ?? route.market.quoteAsset;
+        if ((!curve && !pool) || (pool && (!pool.baseMint.equals(mint) || !pool.quoteMint.equals(quote.mint))) || (curve?.isMayhemMode ?? pool?.isMayhemMode) ||
+          (quote.kind !== "native-sol" && !listed.some(listedQuote => listedQuote.equals(quote.mint))))
+          throw Object.assign(new Error("Pump quote coin is mayhem or its quote mint is not Global-listed"), { code: "UNSUPPORTED_QUOTE_METADATA" });
+      }
+    }
+    const context = { connection: this.composerHost.connection(), token, user: this.payer() };
+    const nested = route.market.quoteAsset.kind !== "native-sol";
+    const perLeg = nested ? legSlippageBps(slippageBps) : slippageBps;
+    const instructions: import("@solana/web3.js").TransactionInstruction[] = [];
+    const legs: Record<string, unknown>[] = [];
+    let legInput = input;
+    if (side === "buy" && nested) {
+      const funding = await this.conversionLeg(side, route.market.quoteAsset.mint, input, perLeg, [...path, identity]);
+      instructions.push(...funding.instructions);
+      legs.push(...funding.legs);
+      legInput = funding.minimumOutputRaw;
+    }
+    const quote = side === "buy"
+      ? await route.plugin.quoteBuy(context, route.market, rawAmount(legInput, route.market.quoteAsset), perLeg)
+      : await route.plugin.quoteSell(context, route.market, legInput, perLeg);
+    const built = side === "buy"
+      ? await route.plugin.buildBuy(context, route.market, quote)
+      : await route.plugin.buildSell(context, route.market, quote);
+    instructions.push(...built.instructions);
+    let minimumOutputRaw = built.minOutputRaw ?? quote.minimumOutputRaw;
+    let expectedOutputRaw = built.expectedOutputRaw ?? quote.expectedOutputRaw;
+    legs.push({ venue: route.market.venue, pool: route.market.metadata.pool instanceof PublicKey ? route.market.metadata.pool.toBase58() : undefined, mint: identity, quoteMint: route.market.quoteAsset.mint.toBase58(), inputRaw: legInput.toString(), minOutputRaw: minimumOutputRaw.toString(), slippageBps: perLeg, quoteMeta: quote.meta, builtMeta: built.meta });
+    this.track({ address: getAssociatedTokenAddressSync(mint, this.payer(), false, route.market.baseTokenProgram), kind: "token", mint });
+    if (side === "sell" && nested) {
+      const exit = await this.conversionLeg(side, route.market.quoteAsset.mint, minimumOutputRaw, perLeg, [...path, identity]);
+      instructions.push(...exit.instructions);
+      legs.push(...exit.legs);
+      minimumOutputRaw = exit.minimumOutputRaw;
+      expectedOutputRaw = exit.expectedOutputRaw;
+    }
+    return { ...route, instructions, legs, minimumOutputRaw, expectedOutputRaw };
+  }
   private materialized = false;
   constructor(
     protected readonly composerHost: ComposerHost,
@@ -170,36 +243,10 @@ export class TransactionComposer extends TransactionBuilder {
             market.quoteAsset.mint.toBase58(),
           );
 
-        const fundingToken = await this.composerHost.resolveTokenForExecution(
-          market.quoteAsset.mint,
-        );
-        const funding = await this.composerHost.route(fundingToken, tx.payer());
-        if (!sameAsset(funding.market.quoteAsset, input.asset))
-          throw new QuoteAssetMismatchError(
-            input.asset.mint.toBase58(),
-            market.quoteAsset.mint.toBase58(),
-          );
-
         const perLegBps = legSlippageBps(totalSlippageBps);
-        const fundingQuote = await funding.plugin.quoteBuy(
-          {
-            connection: this.composerHost.connection(),
-            token: fundingToken,
-            user: tx.payer(),
-          },
-          funding.market,
-          input,
-          perLegBps,
-        );
-        const fundingBuilt = await funding.plugin.buildBuy(
-          {
-            connection: this.composerHost.connection(),
-            token: fundingToken,
-            user: tx.payer(),
-          },
-          funding.market,
-          fundingQuote,
-        );
+        const funding = await this.conversionLeg("buy", market.quoteAsset.mint, input.raw, perLegBps, [token.mint], ["pump-curve", "pumpswap"].includes(market.venue));
+        const fundingQuote = { minimumOutputRaw: funding.minimumOutputRaw };
+        const fundingBuilt = { instructions: funding.instructions, minOutputRaw: funding.minimumOutputRaw };
         // Intentionally omit a trade action for the funding leg. The execution
         // remains one target-token BUY for accounting, while the transaction is
         // atomic. The second leg consumes only the guaranteed first-leg output,
@@ -225,6 +272,7 @@ export class TransactionComposer extends TransactionBuilder {
           inputRaw: input.raw.toString(),
           guaranteedIntermediateRaw: quoteInput.raw.toString(),
           slippageBps: perLegBps,
+          legs: funding.legs,
         };
       }
 
@@ -268,6 +316,7 @@ export class TransactionComposer extends TransactionBuilder {
         mint: market.mint,
         meta: {
           venue: market.venue,
+          pool: market.metadata.pool instanceof PublicKey ? market.metadata.pool.toBase58() : undefined,
           inputRaw: input.raw.toString(),
           quoteInputRaw: quoteInput.raw.toString(),
           minOutputRaw: (
@@ -277,6 +326,9 @@ export class TransactionComposer extends TransactionBuilder {
           ...(fundingRoute ? { fundingRoute } : {}),
           ...(quote.meta ?? {}),
           ...(built.meta ?? {}),
+          lookupTableAddresses: conversionLookupTables(
+            (fundingRoute?.legs as Record<string, unknown>[] | undefined) ?? [], built.meta,
+          ),
           expectedOutputRaw: (
             built.expectedOutputRaw ?? quote.expectedOutputRaw
           ).toString(),
@@ -386,34 +438,9 @@ export class TransactionComposer extends TransactionBuilder {
 
       let exitRoute: Record<string, unknown> | null = null;
       if (needsExitRouting) {
-        const quoteToken = await this.composerHost.resolveTokenForExecution(
-          market.quoteAsset.mint,
-        );
-        const exit = await this.composerHost.route(quoteToken, tx.payer());
-        if (exit.market.quoteAsset.kind !== "native-sol")
-          throw new QuoteAssetMismatchError(
-            market.quoteAsset.mint.toBase58(),
-            exit.market.quoteAsset.mint.toBase58(),
-          );
-        const exitQuote = await exit.plugin.quoteSell(
-          {
-            connection: this.composerHost.connection(),
-            token: quoteToken,
-            user: tx.payer(),
-          },
-          exit.market,
-          built.minOutputRaw ?? quote.minimumOutputRaw,
-          legSlippageBps(totalSlippageBps),
-        );
-        const exitBuilt = await exit.plugin.buildSell(
-          {
-            connection: this.composerHost.connection(),
-            token: quoteToken,
-            user: tx.payer(),
-          },
-          exit.market,
-          exitQuote,
-        );
+        const exit = await this.conversionLeg("sell", market.quoteAsset.mint, built.minOutputRaw ?? quote.minimumOutputRaw, legSlippageBps(totalSlippageBps), [token.mint], ["pump-curve", "pumpswap"].includes(market.venue));
+        const exitQuote = { minimumOutputRaw: exit.minimumOutputRaw, expectedOutputRaw: exit.expectedOutputRaw };
+        const exitBuilt = { instructions: exit.instructions, minOutputRaw: exit.minimumOutputRaw, expectedOutputRaw: exit.expectedOutputRaw };
         assertTradeMinimum(
           exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw,
           options.minOutputLamports,
@@ -431,6 +458,7 @@ export class TransactionComposer extends TransactionBuilder {
           mint: market.mint,
           meta: {
             venue: market.venue,
+            pool: market.metadata.pool instanceof PublicKey ? market.metadata.pool.toBase58() : undefined,
             inputRaw: input.toString(),
             guaranteedIntermediateRaw: (
               built.minOutputRaw ?? quote.minimumOutputRaw
@@ -445,10 +473,12 @@ export class TransactionComposer extends TransactionBuilder {
               exitBuilt.expectedOutputRaw ?? exitQuote.expectedOutputRaw
             ).toString(),
             totalSlippageBps,
+            lookupTableAddresses: conversionLookupTables(exit.legs, built.meta),
             exitRoute: {
               venue: exit.market.venue,
               quoteMint: market.quoteAsset.mint.toBase58(),
               slippageBps: legSlippageBps(totalSlippageBps),
+              legs: exit.legs,
             },
           },
         });
