@@ -1,4 +1,5 @@
 import { Solard, type SolardOptions } from "../core/solard.ts";
+import {RaydiumAmmVenue} from '../venues/raydium/amm-venue.ts';
 import { installPump } from "../venues/pump/index.ts";
 import { MeteoraDbcVenue } from "../venues/meteora/dbc.ts";
 import { MeteoraDammV2Venue } from "../venues/meteora/damm-v2.ts";
@@ -16,6 +17,7 @@ export function createTraderSolard(options: SolardOptions = {}): Solard {
   const slrd = new Solard(options);
   trace("preset: installing Pump capabilities");
   installPump(slrd);
+  slrd.registerVenue(new RaydiumAmmVenue());
   slrd.registerLaunchpad(new LaunchLabTokenLaunchpad());
   slrd.registerClaimSource(new RaydiumCreatorFeesSource());
   slrd.registerClaimSource(new MeteoraDbcCreatorFeesSource());

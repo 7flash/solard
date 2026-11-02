@@ -1,3 +1,4 @@
+import { deserializeWireTransaction } from "../tx/wire-transaction.ts";
 import { Buffer } from "buffer";
 import { createHash } from "node:crypto";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
@@ -456,7 +457,7 @@ function signedTransactionBase64(transaction: VersionedTransaction): string {
 }
 
 function decodeSignedTransaction(base64: string): VersionedTransaction {
-  return VersionedTransaction.deserialize(Buffer.from(base64, "base64"));
+  return deserializeWireTransaction(Buffer.from(base64, "base64"));
 }
 
 type ClaimReconcileOutcome =

@@ -33,8 +33,7 @@ export function quoteSellConstantProduct(
   return { inputRaw, expectedOutputRaw: net, minimumOutputRaw: min };
 }
 
-/** Display/analytics-only spot price derived from current reserves. Trading
- * still obtains a protected quote and simulates before any submission. */
+/** Display/analytics spot ratio. Sized execution quotes must account for impact and fees. */
 export function spotPriceQuotePerToken(
   reserves: CurveReserves,
   baseDecimals: number,

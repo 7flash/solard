@@ -1,4 +1,5 @@
 import type { SolardSender } from "../sender.ts";
+import {observedSolardRpcFetch} from '../../chain/rpc-observer.ts';
 import type { SenderId } from "../types.ts";
 import { MissingConfigError } from "../../core/errors.ts";
 
@@ -15,7 +16,7 @@ export class HttpRpcSender implements SolardSender {
     options,
   }: Parameters<SolardSender["send"]>[0]): Promise<string> {
     if (!this.endpoint) throw new MissingConfigError(this.configName);
-    const response = await fetch(this.endpoint, {
+    const response = await observedSolardRpcFetch(this.endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({

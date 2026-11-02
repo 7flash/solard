@@ -193,7 +193,7 @@ export async function loadWalletAssetPortfolio(
     ),
   );
 
-  const allWallets = slrd.wallets.list();
+  const allWallets = slrd.wallets.list({ includeIgnored: Boolean(options.walletRefs?.length) });
   const selectedAddresses = options.walletRefs?.length
     ? new Set(
         options.walletRefs.map((ref) =>

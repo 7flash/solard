@@ -1,4 +1,5 @@
 import { PublicKey, type Connection } from "@solana/web3.js";
+import { boundaryReserves } from "./boundary-reserves.ts";
 import { sameAsset, type RawAmount } from "../../core/amounts.ts";
 import type { TokenRow } from "../../db/schema.ts";
 import type {
@@ -27,6 +28,10 @@ import {
 /** Pump bonding curve only. Graduated tokens intentionally fall through to PumpSwapVenue. */
 export class PumpCurveVenue implements TradeVenuePlugin {
   readonly id = "pump-curve";
+  private readonly recentCurves = new WeakMap<Connection, Map<string, {
+    fingerprint: string; atMs: number; curve: CurveMarketMeta["curve"];
+  }>>();
+  constructor(private readonly now = Date.now) {}
 
   async inspectToken(
     connection: Connection,
@@ -37,7 +42,7 @@ export class PumpCurveVenue implements TradeVenuePlugin {
       connection,
       defaultPumpQuoteShell(mint, now),
     );
-    if (!curve) return null;
+    if (!curve || curve.complete) return null;
     const sharing = await hasSharingConfig(connection, mint);
     return {
       bondingCurve: curve.address.toBase58(),
@@ -60,8 +65,25 @@ export class PumpCurveVenue implements TradeVenuePlugin {
         !["unknown", "pump-curve"].includes(ctx.token.venueHint))
     )
       return null;
-    const curve = await fetchCurve(ctx.connection, ctx.token);
-    if (!curve || curve.complete) return null;
+    let entries = this.recentCurves.get(ctx.connection);
+    if (!entries) { entries = new Map(); this.recentCurves.set(ctx.connection, entries); }
+    const fingerprint = JSON.stringify([ctx.token.mint, ctx.token.decimals, ctx.token.baseTokenProgram,
+      ctx.token.quoteMint, ctx.token.quoteTokenProgram, ctx.token.creator, ctx.token.metadataJson]);
+    const cached = entries.get(ctx.token.mint);
+    const age = cached ? this.now() - cached.atMs : Infinity;
+    const reusable = cached && cached.fingerprint === fingerprint && age >= 0 && age < 1000;
+    // A fresh chain-validated reserve read is reusable by the immediately
+    // following quote. Never substitute a spot-price ratio for full curve state.
+    const curve = reusable
+      ? { ...cached.curve, quoteAsset: { ...cached.curve.quoteAsset } }
+      : await fetchCurve(ctx.connection, ctx.token);
+    if (!curve || curve.complete) { entries.delete(ctx.token.mint); return null; }
+    if (!reusable) {
+      // Cache hits never extend the original read's lifetime.
+      entries.set(ctx.token.mint, { fingerprint, atMs: this.now(),
+        curve: { ...curve, quoteAsset: { ...curve.quoteAsset } } });
+      if (entries.size > 256) entries.delete(entries.keys().next().value!);
+    }
     return {
       venue: this.id,
       mint: new PublicKey(ctx.token.mint),
@@ -83,7 +105,8 @@ export class PumpCurveVenue implements TradeVenuePlugin {
     const curve = (market.metadata as CurveMarketMeta).curve;
     const value = quoteBuyConstantProduct(
       amount,
-      curve,
+      ctx.boundaryPriceQuotePerToken == null ? curve : boundaryReserves(curve,
+        Number(ctx.token.decimals), market.quoteAsset.decimals, ctx.boundaryPriceQuotePerToken, "buy"),
       slippageBps,
       configuredTotalFeeBps(ctx.token),
     );
@@ -99,7 +122,8 @@ export class PumpCurveVenue implements TradeVenuePlugin {
     const curve = (market.metadata as CurveMarketMeta).curve;
     const value = quoteSellConstantProduct(
       amountRaw,
-      curve,
+      ctx.boundaryPriceQuotePerToken == null ? curve : boundaryReserves(curve,
+        Number(ctx.token.decimals), market.quoteAsset.decimals, ctx.boundaryPriceQuotePerToken, "sell"),
       slippageBps,
       configuredTotalFeeBps(ctx.token),
     );

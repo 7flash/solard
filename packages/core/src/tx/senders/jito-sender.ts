@@ -3,8 +3,9 @@ import {
   ComputeBudgetProgram,
   SystemProgram,
   type Connection,
-  type VersionedTransaction,
 } from "@solana/web3.js";
+import type { WireTransaction as VersionedTransaction } from "../wire-transaction.ts";
+import { V1Transaction } from "../wire-transaction.ts";
 import type { SolardBundleSender } from "../sender.ts";
 
 const JITO_SENDER_BUILD = "2026-07-13-fresh-tip-ladder-v8";
@@ -188,7 +189,7 @@ async function fetchWithTimeout(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    return await fetch(url, {
+    return await observedSolardRpcFetch(url, {
       ...init,
       signal: controller.signal,
     });
@@ -322,6 +323,7 @@ function requestedComputeUnitLimit(
   transaction: VersionedTransaction,
 ): number | null {
   const message = transaction.message;
+  if (transaction instanceof V1Transaction) return transaction.message.transactionConfig?.computeUnitLimit ?? null;
   for (const instruction of message.compiledInstructions) {
     const program = message.staticAccountKeys[instruction.programIdIndex];
     if (!program?.equals(ComputeBudgetProgram.programId)) continue;
@@ -818,3 +820,4 @@ export class JitoSender implements SolardBundleSender {
     }
   }
 }
+import {observedSolardRpcFetch} from '../../chain/rpc-observer.ts';

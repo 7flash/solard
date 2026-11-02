@@ -80,7 +80,7 @@ export type {
 } from "./history/replay.ts";
 export { Solard, SolardGroup } from "./core/solard.ts";
 export type { TradeLandingPolicy } from "./tx/trade-policy.ts";
-export { PriceGuardRejected } from "./tx/price-guard.ts";
+export { PriceGuardRejected, minimumBuyOutputForPrice } from "./tx/price-guard.ts";
 export type { SolPrice } from "./tx/price-guard.ts";
 export type { LivePoolReserves } from "./venues/venue-plugin.ts";
 export { ensureAdditiveSqliteColumns } from "./db/additive-migration.ts";
@@ -144,6 +144,8 @@ export {
 } from "./tx/transaction-builder.ts";
 export { lookupCandidates } from "./tx/assemble.ts";
 export { TransactionComposer, BatchComposer } from "./tx/composer.ts";
+export {composeTransactionDrafts} from './tx/compose-drafts.ts';
+export type {TransactionGroupInput} from './tx/compose-drafts.ts';
 export {
   packTransferMany,
   SOLARD_V0_PACKET_LIMIT,
@@ -384,6 +386,8 @@ export type {
   TokenHolderSnapshotOptions,
 } from "./chain/holders.ts";
 export { subscribeTokenEvents } from "./events/token-events.ts";
+export { createEventLogSource } from "./events/log-source.ts";
+export type { EventSource, EventSourceOptions, EventLogSource, EventSourceStatus, SqdOptions } from "./events/log-source.ts";
 export type {
   SolardTokenCreateEvent,
   SolardTokenEvent,
@@ -652,7 +656,7 @@ export type {
   SpamBuyerReceipt,
   SpamSubmitOptions,
   TipConfig,
-  TokenMetadata,
+  TokenMetadata as PumpLaunchTokenMetadata,
   TraderReceiptOutcome,
   TraderSubmitMode,
 } from "./launches/pump/token-launch.ts";
@@ -837,4 +841,10 @@ export * from "./market/current-market.ts";
 export * from "./market/live-trade-history.ts";
 export * from "./tx/sell-economics.ts";
 export { getCompatibleParsedTransaction } from "./chain/parsed-transaction.ts";
+export {RpcPacer,createRpcPacer} from './chain/rpc-pacer.ts';
+export {resolveRpcPacer} from './chain/rpc-pacer.ts';
+export {solardRpcFetch} from './chain/connection.ts';
+export type {RpcPacingOptions} from './chain/rpc-pacer.ts';
+export {observeSolardRpc,withSolardRpcContext} from './chain/rpc-observer.ts';
+export type {SolardRpcObservation,SolardRpcContext} from './chain/rpc-observer.ts';
 export type { CompatibleParsedTransaction } from "./chain/parsed-transaction.ts";

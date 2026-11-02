@@ -1,5 +1,7 @@
 import bs58 from "bs58";
+import { createEventLogSource, eventSourceCommitment, physicalProgramLogIndex, type EventSourceOptions, type EventSource } from "../events/log-source.ts";
 import { quoteJupiterSwap } from "../chain/jupiter-swap.ts";
+import { probeQuoteSol } from "./conversion-probe.ts";
 import {
   PUMP_AMM_PROGRAM_ID,
   PUMP_PROGRAM_ID,
@@ -124,6 +126,9 @@ export type PumpDecodedEvent =
       quoteRaw: bigint;
       virtualBaseRaw: bigint;
       virtualQuoteRaw: bigint;
+      /** Trading wallet and token creator from the program event; null on truncated layouts. */
+      trader: string | null;
+      creator: string | null;
     };
 
 export type PumpSwapDecodedEvent =
@@ -150,6 +155,8 @@ export type PumpSwapDecodedEvent =
       poolQuoteRaw: bigint;
       virtualQuoteRaw: bigint | null;
       supplyRaw: bigint | null;
+      trader: string | null;
+      creator: string | null;
     };
 
 export type RaydiumLaunchLabDecodedEvent =
@@ -165,6 +172,8 @@ export type RaydiumLaunchLabDecodedEvent =
     };
 
 export type LaunchEvent = {
+  eventSource?: EventSource;
+  commitment?: Commitment;
   type: "launch";
   venue: "pump" | "raydium-launchlab";
   signature: string;
@@ -183,6 +192,8 @@ export type LaunchEvent = {
 };
 
 export type MigrationEvent = {
+  eventSource?: EventSource;
+  commitment?: Commitment;
   type: "migration";
   venue: MigrationVenue;
   destination: MigrationDestination;
@@ -196,7 +207,7 @@ export type MigrationEvent = {
   metadata: TokenMetadata | null;
 };
 
-export type SolUsdSource = "provided" | "coinbase" | "coingecko";
+export type SolUsdSource = "provided" | "jupiter" | "coinbase" | "coingecko";
 
 export type SolUsdPrice = {
   price: number;
@@ -231,8 +242,12 @@ export type TradeMarket = {
 };
 
 export type TradeEvent = {
+  /** Physical transaction log index, stable across RPC and filtered SQD data. */
+  logIndex?: number;
+  eventSource?: EventSource;
+  commitment?: Commitment;
   eventIndex?: number;
-  timestampSource?: "program-event" | "observed";
+  timestampSource?: "program-event" | "observed" | "block";
   type: "trade";
   venue: TradeVenue;
   signature: string;
@@ -243,6 +258,12 @@ export type TradeEvent = {
   side: TradeSide | null;
   baseRaw: bigint | null;
   quoteRaw: bigint | null;
+  /** Trading wallet as reported by the venue's own program event (Pump `user`, PumpSwap
+   * `user`); absent for venues whose events omit it. Normally the signer, but a router
+   * program may report its own account. */
+  trader?: string | null;
+  /** Token creator, when the venue's program event carries it (Pump, PumpSwap). */
+  creator?: string | null;
   market: TradeMarket;
   metadata: TokenMetadata | null;
 };
@@ -256,8 +277,9 @@ type MarketState = {
 };
 
 type InternalTradeEvent = {
+  logIndex?: number;
   eventIndex?: number;
-  timestampSource?: "program-event" | "observed";
+  timestampSource?: "program-event" | "observed" | "block";
   type: "trade";
   venue: TradeVenue;
   signature: string;
@@ -271,6 +293,8 @@ type InternalTradeEvent = {
   quoteDecimals: number | null;
   baseRaw: bigint | null;
   quoteRaw: bigint | null;
+  trader?: string | null;
+  creator?: string | null;
   metadata: TokenMetadata | null;
   marketState: MarketState | null;
 };
@@ -456,20 +480,21 @@ export function decodePumpProgramData(
     const legacyQuoteRaw = c.u64();
     const baseRaw = c.u64();
     const side: TradeSide = c.bool() ? "buy" : "sell";
-    c.pubkey();
+    const trader = c.pubkey();
     const atMs = timestamp(c.i64());
     const legacyVirtualQuoteRaw = c.u64();
     const virtualBaseRaw = c.u64();
     let quoteMint = WRAPPED_SOL_MINT;
     let quoteRaw = legacyQuoteRaw;
     let virtualQuoteRaw = legacyVirtualQuoteRaw;
+    let creator: string | null = null;
     try {
       c.u64();
       c.u64();
       c.pubkey();
       c.u64();
       c.u64();
-      c.pubkey();
+      creator = c.pubkey();
       c.u64();
       c.u64();
       c.bool();
@@ -504,6 +529,8 @@ export function decodePumpProgramData(
       quoteRaw,
       virtualBaseRaw,
       virtualQuoteRaw,
+      trader,
+      creator,
     };
   } catch {
     return null;
@@ -567,8 +594,12 @@ export function decodePumpSwapProgramData(
     const pool = c.pubkey();
     let virtualQuoteRaw: bigint | null = null;
     let supplyRaw: bigint | null = null;
+    let trader: string | null = null;
+    let creator: string | null = null;
     try {
-      for (let index = 0; index < 6; index += 1) c.pubkey();
+      trader = c.pubkey();
+      for (let index = 0; index < 4; index += 1) c.pubkey();
+      creator = c.pubkey();
       c.u64();
       c.u64();
       if (side === "buy") {
@@ -599,6 +630,8 @@ export function decodePumpSwapProgramData(
       poolQuoteRaw,
       virtualQuoteRaw,
       supplyRaw,
+      trader,
+      creator,
     };
   } catch {
     return null;
@@ -808,6 +841,14 @@ async function fetchJson(url: string): Promise<unknown> {
 async function loadSolUsd(): Promise<SolUsdPrice> {
   try {
     const raw = (await fetchJson(
+      "https://lite-api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112",
+    )) as Record<string, { usdPrice?: unknown } | undefined>;
+    const value = Number(raw["So11111111111111111111111111111111111111112"]?.usdPrice);
+    if (Number.isFinite(value) && value > 0)
+      return { price: value, source: "jupiter", atMs: Date.now() };
+  } catch {}
+  try {
+    const raw = (await fetchJson(
       "https://api.coinbase.com/v2/prices/SOL-USD/spot",
     )) as { data?: { amount?: unknown } };
     const value = Number(raw.data?.amount);
@@ -823,7 +864,10 @@ async function loadSolUsd(): Promise<SolUsdPrice> {
   return { price: value, source: "coingecko", atMs: Date.now() };
 }
 
-const DEFAULT_SOL_USD_MAX_AGE_MS = 15_000;
+const DEFAULT_SOL_USD_MAX_AGE_MS = 60_000;
+const SOL_USD_MIN_INTERVAL_MS = 15_000;
+let sharedSolUsdAttemptAt = 0;
+let sharedSolUsdError: Error | null = null;
 let sharedSolUsdPrice: SolUsdPrice | null = null;
 let sharedSolUsdPending: Promise<SolUsdPrice> | null = null;
 
@@ -841,11 +885,23 @@ export async function getSolUsdPrice(
   )
     return sharedSolUsdPrice;
   if (sharedSolUsdPending) return await sharedSolUsdPending;
+  // Throttle: callers can fire per trade (hundreds/s). At most one HTTP lookup per
+  // SOL_USD_MIN_INTERVAL_MS no matter how many callers or failures; between lookups serve the last value.
+  if (
+    !options.forceRefresh &&
+    Date.now() - sharedSolUsdAttemptAt < SOL_USD_MIN_INTERVAL_MS
+  ) {
+    if (sharedSolUsdPrice) return sharedSolUsdPrice;
+    throw sharedSolUsdError ?? new Error("SOL/USD unavailable");
+  }
+  sharedSolUsdAttemptAt = Date.now();
   sharedSolUsdPending = loadSolUsd();
   try {
     sharedSolUsdPrice = await sharedSolUsdPending;
+    sharedSolUsdError = null;
     return sharedSolUsdPrice;
   } catch (error) {
+    sharedSolUsdError = error instanceof Error ? error : new Error(String(error));
     if (sharedSolUsdPrice) return sharedSolUsdPrice;
     throw error;
   } finally {
@@ -859,10 +915,13 @@ function solUsdLoader(
   status: (event: string, data?: Record<string, unknown>) => void,
 ) {
   if (input == null) {
+    let loggedAt = 0;
     return async (): Promise<SolUsdPrice | null> => {
       try {
         return await getSolUsdPrice({ maxAgeMs: refreshMs });
       } catch (error) {
+        if (Date.now() - loggedAt < 60_000) return null; // one log line a minute, not one per trade
+        loggedAt = Date.now();
         status("sol-usd-error", {
           error: error instanceof Error ? error.message : String(error),
           cached: null,
@@ -982,6 +1041,7 @@ function supplyFromTransaction(
 }
 
 type ProgramDataEntry = {
+  logIndex: number;
   programId: string | null;
   data: Uint8Array;
 };
@@ -1007,7 +1067,7 @@ type PumpSwapPoolIdentity = {
 function programDataEntries(logs: readonly string[]): ProgramDataEntry[] {
   const rows: ProgramDataEntry[] = [];
   const stack: string[] = [];
-  for (const raw of logs) {
+  for (const [lineIndex, raw] of logs.entries()) {
     const line = raw.trim();
     const invoke = /^Program (\S+) invoke \[\d+\]$/.exec(line);
     if (invoke) {
@@ -1018,6 +1078,7 @@ function programDataEntries(logs: readonly string[]): ProgramDataEntry[] {
     if (returned) {
       try {
         rows.push({
+          logIndex: physicalProgramLogIndex(logs, lineIndex),
           programId: returned[1]!,
           data: Buffer.from(returned[2]!, "base64"),
         });
@@ -1028,6 +1089,7 @@ function programDataEntries(logs: readonly string[]): ProgramDataEntry[] {
     if (data) {
       try {
         rows.push({
+          logIndex: physicalProgramLogIndex(logs, lineIndex),
           programId: stack.at(-1) ?? null,
           data: Buffer.from(data[1]!, "base64"),
         });
@@ -1227,7 +1289,7 @@ function callbackError(
   });
 }
 
-export async function subscribeLaunches(options: {
+export async function subscribeLaunches(options: EventSourceOptions & {
   connection: Connection;
   venues?: readonly LaunchVenue[];
   commitment?: Commitment;
@@ -1239,7 +1301,11 @@ export async function subscribeLaunches(options: {
   const venues = new Set<LaunchVenue>(
     options.venues ?? ["pump", "raydium-launchlab"],
   );
-  const commitment = options.commitment ?? "processed";
+  const logSource = createEventLogSource(options.connection, { ...options, programFilters: {
+    [PUMP_PROGRAM_ID.toBase58()]: ["0x181ec828051c0777", "0xd6904cec5f8b31b4"],
+    [RAYDIUM_LAUNCHLAB_PROGRAM_ID.toBase58()]: [RAYDIUM_INITIALIZE_D8, RAYDIUM_INITIALIZE_V2_D8].map(value => `0x${value.toString("hex")}`),
+  } });
+  const commitment = logSource.commitment;
   const metadataMode = options.metadata ?? false;
   const subscriptionIds: number[] = [];
   const launchLabFetches = new Set<string>();
@@ -1258,6 +1324,8 @@ export async function subscribeLaunches(options: {
   const deliver = async (value: Omit<LaunchEvent, "metadata">) => {
     const event: LaunchEvent = {
       ...value,
+      eventSource: logSource.source,
+      commitment,
       metadata: await resolveEventMetadata({
         connection: options.connection,
         mode: metadataMode,
@@ -1334,7 +1402,7 @@ export async function subscribeLaunches(options: {
 
   if (venues.has("pump")) {
     subscriptionIds.push(
-      options.connection.onLogs(
+      logSource.onLogs(
         PUMP_PROGRAM_ID,
         (logs, context) => {
           if (logs.err || stopped) return;
@@ -1366,7 +1434,7 @@ export async function subscribeLaunches(options: {
 
   if (venues.has("raydium-launchlab")) {
     subscriptionIds.push(
-      options.connection.onLogs(
+      logSource.onLogs(
         RAYDIUM_LAUNCHLAB_PROGRAM_ID,
         (logs, context) => {
           if (logs.err || stopped) return;
@@ -1391,8 +1459,9 @@ export async function subscribeLaunches(options: {
     if (stopped) return;
     stopped = true;
     await Promise.allSettled(
-      subscriptionIds.map((id) => options.connection.removeOnLogsListener(id)),
+      subscriptionIds.map((id) => logSource.removeOnLogsListener(id)),
     );
+    await logSource.close();
     resolveClosed();
   };
 
@@ -1404,10 +1473,12 @@ export async function subscribeLaunches(options: {
       });
   }
 
+  void logSource.closed.then(() => close());
+  try { await logSource.ready(); } catch (error) { await close(); throw error; }
   return { close, closed };
 }
 
-export async function subscribeMigrations(options: {
+export async function subscribeMigrations(options: EventSourceOptions & {
   connection: Connection;
   tokens?: readonly string[];
   venues?: readonly MigrationVenue[];
@@ -1420,7 +1491,11 @@ export async function subscribeMigrations(options: {
   const venues = new Set<MigrationVenue>(
     options.venues ?? ["pump", "raydium-launchlab"],
   );
-  const commitment = options.commitment ?? "processed";
+  const logSource = createEventLogSource(options.connection, { ...options, programFilters: {
+    [PUMP_AMM_PROGRAM_ID.toBase58()]: ["0xe992d18ecf6840bc"],
+    [RAYDIUM_LAUNCHLAB_PROGRAM_ID.toBase58()]: [RAYDIUM_MIGRATE_TO_AMM_D8, RAYDIUM_MIGRATE_TO_CPSWAP_D8].map(value => `0x${value.toString("hex")}`),
+  } });
+  const commitment = logSource.commitment;
   const metadataMode = options.metadata ?? false;
   const mode = options.tokens === undefined ? "all" : "selected";
   const tokens = new Set(tokenList(options.tokens ?? []));
@@ -1449,6 +1524,8 @@ export async function subscribeMigrations(options: {
     if (seen.size > 10_000) seen.clear();
     const event: MigrationEvent = {
       ...value,
+      eventSource: logSource.source,
+      commitment,
       metadata: await resolveEventMetadata({
         connection: options.connection,
         mode: metadataMode,
@@ -1466,7 +1543,7 @@ export async function subscribeMigrations(options: {
 
   if (venues.has("pump")) {
     subscriptionIds.push(
-      options.connection.onLogs(
+      logSource.onLogs(
         PUMP_AMM_PROGRAM_ID,
         (logs, context) => {
           if (logs.err || stopped) return;
@@ -1555,7 +1632,7 @@ export async function subscribeMigrations(options: {
 
   if (venues.has("raydium-launchlab")) {
     subscriptionIds.push(
-      options.connection.onLogs(
+      logSource.onLogs(
         RAYDIUM_LAUNCHLAB_PROGRAM_ID,
         (logs, context) => {
           if (logs.err || stopped || !raydiumMigrationHint(logs.logs)) return;
@@ -1598,8 +1675,9 @@ export async function subscribeMigrations(options: {
     if (stopped) return;
     stopped = true;
     await Promise.allSettled(
-      subscriptionIds.map((id) => options.connection.removeOnLogsListener(id)),
+      subscriptionIds.map((id) => logSource.removeOnLogsListener(id)),
     );
+    await logSource.close();
     resolveClosed();
   };
 
@@ -1611,6 +1689,8 @@ export async function subscribeMigrations(options: {
       });
   }
 
+  void logSource.closed.then(() => close());
+  try { await logSource.ready(); } catch (error) { await close(); throw error; }
   return {
     mode,
     addTokens,
@@ -1631,7 +1711,7 @@ export async function subscribeMigrations(options: {
   };
 }
 
-async function subscribeTradeStream(options: {
+async function subscribeTradeStream(options: EventSourceOptions & {
   connection: Connection;
   tokens: readonly string[];
   venues?: readonly TradeVenue[];
@@ -1651,7 +1731,20 @@ async function subscribeTradeStream(options: {
       "meteora-damm-v2",
     ],
   );
-  const commitment = options.commitment ?? "processed";
+  // Trades are decoded only from the selected venues' own instructions.
+  const venuePrograms: Record<TradeVenue, PublicKey> = {
+    pump: PUMP_PROGRAM_ID,
+    pumpswap: PUMP_AMM_PROGRAM_ID,
+    "raydium-launchlab": RAYDIUM_LAUNCHLAB_PROGRAM_ID,
+    "raydium-cpmm": CREATE_CPMM_POOL_PROGRAM,
+    "meteora-dbc": DYNAMIC_BONDING_CURVE_PROGRAM_ID,
+    "meteora-damm-v2": CP_AMM_PROGRAM_ID,
+  };
+  const logSource = createEventLogSource(options.connection, {
+    ...options,
+    programScope: [...venues].map(venue => venuePrograms[venue].toBase58()),
+  });
+  const commitment = logSource.commitment;
   const metadataMode = options.metadata ?? false;
   const subscriptions = new Map<string, number>();
   const states = new Map<string, TradeTokenState>();
@@ -1660,6 +1753,7 @@ async function subscribeTradeStream(options: {
   const pumpQuoteMetadata = new Map<string, Promise<{ mint: string; decimals: number }>>();
   const cpmmPools = new Map<string, Promise<CurrentMarket | null>>();
   const SUPPLY_REFRESH_MS = 5 * 60_000;
+  const logPositions = new Map<string, number[]>();
   let stopped = false;
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => {
@@ -1673,8 +1767,16 @@ async function subscribeTradeStream(options: {
   };
 
   const deliver = async (value: Omit<InternalTradeEvent, "metadata">) => {
+    const fromBlock = logSource.source === "sqd" && value.timestampSource === "observed";
+    const blockTimeMs = fromBlock ? logSource.blockTimeMs(value.signature) : null;
+    if (fromBlock && blockTimeMs == null) {
+      status("trade-timestamp-unavailable", { signature: value.signature, mint: value.mint });
+      return;
+    }
     const event: InternalTradeEvent = {
       ...value,
+      ...(fromBlock ? { atMs: blockTimeMs!, timestampSource: "block" as const } : {}),
+      logIndex: value.eventIndex == null ? undefined : logPositions.get(value.signature)?.[value.eventIndex],
       metadata: await resolveEventMetadata({
         connection: options.connection,
         mode: metadataMode,
@@ -1856,6 +1958,8 @@ async function subscribeTradeStream(options: {
       quoteDecimals: qDecimals,
       baseRaw: decoded.baseRaw,
       quoteRaw: decoded.quoteRaw,
+      trader: decoded.trader,
+      creator: decoded.creator,
       marketState:
         qDecimals == null || state.supplyRaw == null
           ? null
@@ -1935,6 +2039,8 @@ async function subscribeTradeStream(options: {
       quoteDecimals: identity.quoteDecimals,
       baseRaw: decoded.baseRaw,
       quoteRaw: decoded.quoteRaw,
+      trader: decoded.trader,
+      creator: decoded.creator,
       marketState:
         state.supplyRaw == null || effectiveQuoteRaw == null
           ? null
@@ -2183,6 +2289,8 @@ async function subscribeTradeStream(options: {
     slot: number,
   ) => {
     if (logs.err || stopped || !subscriptions.has(mint)) return;
+    logPositions.set(logs.signature, programDataEntries(logs.logs).map(entry => entry.logIndex));
+    if (logPositions.size > 4096) logPositions.delete(logPositions.keys().next().value!);
     void processMeteoraLogs(
       mint,
       logs,
@@ -2373,7 +2481,7 @@ async function subscribeTradeStream(options: {
         quoteDecimals: null,
         pool: null,
       });
-      const id = options.connection.onLogs(
+      const id = logSource.onLogs(
         new PublicKey(mint),
         (logs, context) => onTokenLogs(mint, logs, context.slot),
         commitment,
@@ -2396,7 +2504,7 @@ async function subscribeTradeStream(options: {
       states.delete(mint);
       pumpSwapPools.clear();
       cpmmPools.clear();
-      removals.push(options.connection.removeOnLogsListener(id));
+      removals.push(logSource.removeOnLogsListener(id));
     }
     await Promise.allSettled(removals);
     status("tokens-changed", {
@@ -2411,9 +2519,11 @@ async function subscribeTradeStream(options: {
     const ids = [...subscriptions.values()];
     subscriptions.clear();
     states.clear();
+    logPositions.clear();
     await Promise.allSettled(
-      ids.map((id) => options.connection.removeOnLogsListener(id)),
+      ids.map((id) => logSource.removeOnLogsListener(id)),
     );
+    await logSource.close();
     resolveClosed();
   };
 
@@ -2427,6 +2537,8 @@ async function subscribeTradeStream(options: {
       });
   }
 
+  void logSource.closed.then(() => close());
+  try { await logSource.ready(); } catch (error) { await close(); throw error; }
   return {
     addTokens,
     removeTokens,
@@ -2449,6 +2561,8 @@ export function quoteSolLoader(
   connection: Connection,
   status: (event: string, data?: Record<string, unknown>) => void,
   maxAgeMs = 15_000,
+  poolHint?: (mint: string) => string | null | undefined,
+  preferJupiter?: (mint: string) => boolean,
 ) {
   const cache = new Map<string, { value: number | null; atMs: number }>();
   const pending = new Map<string, Promise<number | null>>();
@@ -2466,6 +2580,7 @@ export function quoteSolLoader(
     const active = visited.size === 0 ? pending.get(mint) : null;
     if (active) return await active;
     const request = (async () => {
+      if (!preferJupiter?.(mint)) {
       let migrating = false;
       let poolResolved = false;
       try {
@@ -2502,13 +2617,16 @@ export function quoteSolLoader(
       }
       try {
         const venue = new PumpSwapVenue();
-        const inspected = await venue.inspectToken(
+        const knownPool = poolHint?.(mint);
+        const inspected = knownPool ? { pool: knownPool } : await venue.inspectToken(
           connection,
           new PublicKey(mint),
         );
-        if (inspected?.quoteMint) {
+        if (inspected?.pool) {
           if (!inspected.pool) throw new Error("Inspected PumpSwap pool address missing");
           const pool = await fetchPool(connection, new PublicKey(inspected.pool));
+          if (!pool.baseMint.equals(new PublicKey(mint)))
+            throw new Error("Quote conversion pool does not match requested mint");
           poolResolved = true;
           if (pool.isMayhemMode) {
             status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: "mayhem-quote-prohibited" });
@@ -2554,19 +2672,20 @@ export function quoteSolLoader(
         status("quote-sol-conversion-unavailable", { quoteMint: mint, reason: poolResolved ? "missing-conversion" : "migration-gap" });
         return null;
       }
+      }
       try {
         // Quote a modest notional to avoid a zero-lamport route while limiting
         // price impact. This is an executable-route conversion, not an inferred
         // transaction-balance ratio.
-        const units = 100n;
         const verified = await poolMintMetadata(connection, new PublicKey(mint));
-        const amountRaw = units * 10n ** BigInt(verified.decimals);
-        const quote = await quoteJupiterSwap({
+        const value = await probeQuoteSol(verified.decimals, async amountRaw => {
+          const quote = await quoteJupiterSwap({
           inputMint: mint,
           outputMint: WRAPPED_SOL_MINT,
           amountRaw,
+          });
+          return quote.outAmountRaw;
         });
-        const value = Number(quote.outAmountRaw) / 1e9 / Number(units);
         const resolved = Number.isFinite(value) && value > 0 ? value : null;
         if (visited.size === 0) cache.set(mint, { value: resolved, atMs: Date.now() });
         return resolved;
@@ -2585,7 +2704,7 @@ export function quoteSolLoader(
   return (mint: string, decimals: number) => load(mint, decimals);
 }
 
-export async function subscribeTrades(options: {
+export async function subscribeTrades(options: EventSourceOptions & {
   connection: Connection;
   tokens: readonly string[];
   venues?: readonly TradeVenue[];
@@ -2612,6 +2731,8 @@ export async function subscribeTrades(options: {
   const getQuoteSol =
     options.quoteSol ?? quoteSolLoader(options.connection, status);
   return await subscribeTradeStream({
+    source: options.source,
+    sqd: options.sqd,
     connection: options.connection,
     tokens: options.tokens,
     venues: options.venues,
@@ -2645,6 +2766,9 @@ export async function subscribeTrades(options: {
         return;
       }
       const event: TradeEvent = {
+        logIndex: internal.logIndex,
+        eventSource: options.source ?? "sqd",
+        commitment: eventSourceCommitment(options),
         type: "trade",
         venue: internal.venue,
         signature: internal.signature,
@@ -2657,6 +2781,7 @@ export async function subscribeTrades(options: {
         side: internal.side,
         baseRaw: internal.baseRaw,
         quoteRaw: internal.quoteRaw,
+        ...(internal.trader !== undefined ? { trader: internal.trader, creator: internal.creator ?? null } : {}),
         market,
         metadata: internal.metadata,
       };

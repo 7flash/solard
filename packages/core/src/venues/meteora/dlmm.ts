@@ -7720,6 +7720,20 @@ export class MeteoraDlmmService {
     return { raw: total.toString(), accountCount: response.value.length };
   }
 
+  async getWalletNativeBalance(wallet: WalletRef, commitment: Commitment = "confirmed"):
+    Promise<import("./types.ts").MeteoraWalletNativeBalance> {
+    const address = this.resolveWalletAddress(wallet);
+    const lamports = await this.host.connection().getBalance(asPublicKey(address), commitment);
+    return { wallet: address, lamports: String(lamports), sol: lamports / 1_000_000_000 };
+  }
+
+  async getWalletTokenBalance(wallet: WalletRef, mint: string, commitment: Commitment = "confirmed"):
+    Promise<import("./types.ts").MeteoraWalletTokenBalance> {
+    const address = this.resolveWalletAddress(wallet);
+    return { wallet: address, mint: asPublicKey(mint).toBase58(),
+      rawAmount: await this.tokenBalanceRaw(asPublicKey(address), mint, commitment) };
+  }
+
   private async tokenBalanceRaw(
     owner: PublicKey,
     mint: string,

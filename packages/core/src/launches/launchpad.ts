@@ -18,6 +18,7 @@ export type PrepareDeploymentArgs = {
   quoteAsset?: QuoteAsset;
   mayhemMode?: boolean;
   cashback?: boolean;
+  holderReward?: boolean;
   /** LaunchLab on-chain quote config and platform account. */
   launchConfig?: string | PublicKey;
   platformConfig?: string | PublicKey;

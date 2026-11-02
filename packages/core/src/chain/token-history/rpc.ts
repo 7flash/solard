@@ -6,7 +6,7 @@ import {
 } from "@solana/web3.js";
 
 import { createSolardMeasure } from "../../core/log.ts";
-import { solardRpcFetch } from "../connection.ts";
+import { solardConnectionFetch } from "../connection.ts";
 import { measured } from "../../core/measured.ts";
 import { TokenHistoryError, tokenHistoryError } from "./errors.ts";
 import type {
@@ -288,7 +288,7 @@ export class SolanaTokenHistoryRpc implements TokenHistoryRpc {
           options.rpcTimeoutMs,
         );
         try {
-          const response = await solardRpcFetch(
+          const response = await solardConnectionFetch(this.connection,
             this.connection.rpcEndpoint,
             {
               method: "POST",
@@ -666,7 +666,7 @@ export class SolanaTokenHistoryRpc implements TokenHistoryRpc {
           options.rpcTimeoutMs,
         );
         try {
-          const response = await solardRpcFetch(
+          const response = await solardConnectionFetch(this.connection,
             this.connection.rpcEndpoint,
             {
               method: "POST",

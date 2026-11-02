@@ -459,3 +459,15 @@ describe("registry liquidation protected-mint execution invariant", () => {
     expect(chainCalls).toBe(0);
   });
 });
+
+
+test("sales pass never broadcasts empty-account cleanup", async () => {
+  const { slrd, plan, stats } = fixture("close-immediately");
+  const result = await executeRegistryTokenLiquidation(slrd, plan, { cleanup: false, delayMs: 0 });
+  expect(result).toHaveLength(0);
+  expect(stats().broadcasts).toBe(0);
+  expect(stats().exists).toBe(true);
+  const cleanup = await executeRegistryTokenLiquidation(slrd, plan, { delayMs: 0 });
+  expect(cleanup).toHaveLength(1);
+  expect(stats().exists).toBe(false);
+});

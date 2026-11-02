@@ -5,6 +5,9 @@ import { pumpAmmJson } from "@pump-fun/pump-swap-sdk";
 import { discoverPumpSwapPool, PumpSwapVenue } from "./pumpswap-venue.ts";
 import { PUMP_AMM_PROGRAM_ID, PUMP_PROGRAM_ID, WRAPPED_SOL_MINT } from "./constants.ts";
 import { globalPda } from "./pda.ts";
+import { quoteSolLoader } from "../../market/launch-trades.ts";
+import { Solard } from "../../core/solard.ts";
+import type { TokenRow } from "../../db/schema.ts";
 
 const mint = new PublicKey("pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn");
 const noncanonical = new PublicKey("539m4mVWt6iduB6W8rDGPMarzNCMesuqY5eUTiiYHAgR");
@@ -56,6 +59,7 @@ function chain() {
   const connection = {
     async getAccountInfo(address: PublicKey) { return accounts.get(address.toBase58()) ?? null; },
     async getMultipleAccountsInfo(keys: PublicKey[]) {
+      if (keys.length > 10) throw new Error("A maximum of 10 accounts is allowed");
       batches.push(keys.length);
       return keys.map(key => accounts.get(key.toBase58()) ?? null);
     },
@@ -77,10 +81,24 @@ test("PUMP without a bonding curve discovers noncanonical creator pool from boun
   expect(selected?.address.toBase58()).toBe(noncanonical.toBase58());
   expect(selected?.creator.toBase58()).toBe(creator.toBase58());
   expect(fixture.scans()).toBe(0);
-  expect(Math.max(...fixture.batches)).toBeLessThanOrEqual(40);
+  expect(Math.max(...fixture.batches)).toBeLessThanOrEqual(10);
   const inspected = await new PumpSwapVenue().inspectToken(fixture.connection, mint);
   expect(inspected?.pool).toBe(noncanonical.toBase58());
   expect(inspected?.quoteMint).toBe(WRAPPED_SOL_MINT.toBase58());
+});
+test("explicit PumpSwap registration verifies identities without unrelated indexed discovery", async () => {
+  const f = chain(), core = Object.create(Solard.prototype) as Solard;
+  core.connection = () => f.connection;
+  Object.defineProperty(core, "venues", { value: { inspect: () => { throw new Error("Indexed requests require a personal token"); } } });
+  Object.defineProperty(core, "tokens", { value: { upsert: (row: TokenRow) => row } });
+  const row = await core.addToken(mint.toBase58(), undefined, { pool: noncanonical.toBase58(), venueHint: "pumpswap" });
+  expect(row.quoteMint).toBe(WRAPPED_SOL_MINT.toBase58());
+  expect(row.baseTokenProgram).toBe(TOKEN_2022_PROGRAM_ID.toBase58());
+  f.connection.getSignaturesForAddress = async () => { throw new Error("Indexed requests require a personal token"); };
+  const price = await quoteSolLoader(f.connection, () => {}, 0,
+    quoteMint => quoteMint === mint.toBase58() ? row.pool : null)(mint.toBase58(), 6);
+  expect(price).toBeGreaterThan(0);
+  expect(f.scans()).toBe(0);
 });
 
 test("noncanonical pool rejects wrong owner, vault ownership or identity", async () => {

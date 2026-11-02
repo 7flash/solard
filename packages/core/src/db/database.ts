@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { Database } from "sqlite-zod-orm";
 import { measure } from "../core/log.ts";
 import { ensureSolardDatabaseRuntimeObjects } from "./maintenance.ts";
+import { migrateReplaySchemas } from "./replay-schema-migration.ts";
 import {
   AgentSchema,
   AltSchema,
@@ -57,6 +58,7 @@ export function openDatabase(input?: string): SolardDatabase {
   }
 
   mkdirSync(dirname(path), { recursive: true });
+  migrateReplaySchemas(path);
   const db = new Database(
     path,
     {

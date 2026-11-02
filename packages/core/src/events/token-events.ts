@@ -21,6 +21,7 @@ import {
   SPL_TOKEN_PROGRAM_ID,
 } from "../venues/pump/constants.ts";
 import { reduceTokenAccountTransaction } from "./token-account-reducer.ts";
+import { createEventLogSource, type EventSourceOptions, type EventSourceStatus, type EventSource } from "./log-source.ts";
 
 export type SolardTokenEventConfidence = "confirmed" | "finalized";
 
@@ -101,9 +102,10 @@ export type SolardTokenTransferEvent = {
 };
 
 export type SolardTokenEvent =
-  SolardTokenSwapEvent | SolardTokenTransferEvent | SolardTokenCreateEvent;
+  (SolardTokenSwapEvent | SolardTokenTransferEvent | SolardTokenCreateEvent) & { eventSource?: EventSource };
 
-export type SubscribeTokenEventsOptions = {
+export type SubscribeTokenEventsOptions = EventSourceOptions & {
+  onStatus?: EventSourceStatus;
   swaps?: boolean;
   transfers?: boolean;
   creates?: boolean;
@@ -372,7 +374,10 @@ export async function subscribeTokenEvents(args: {
   const creates = options.creates ?? false;
   if (!swaps && !transfers && !creates)
     throw new Error("Enable swaps, transfers, and/or creates");
-  const commitment = options.commitment ?? "confirmed";
+  // SQD hot blocks cannot attest confirmed status; typed token events require
+  // at least confirmed and therefore use finalized Portal delivery.
+  const logSource = createEventLogSource(args.connection, { ...options, commitment: options.commitment ?? "confirmed" });
+  const commitment = logSource.commitment as SolardTokenEventConfidence;
   const attempts = Math.max(1, Math.trunc(options.enrichmentAttempts ?? 6));
   const delayMs = Math.max(50, Math.trunc(options.enrichmentDelayMs ?? 250));
   const mint = new PublicKey(args.token.mint);
@@ -453,7 +458,7 @@ export async function subscribeTokenEvents(args: {
         for (const event of events) {
           if (eventIds.has(event.id)) continue;
           eventIds.add(event.id);
-          queue.push(event);
+          queue.push({ ...event, eventSource: logSource.source });
         }
       } catch {
         // Do not kill a long-running event stream because one RPC enrichment
@@ -465,7 +470,7 @@ export async function subscribeTokenEvents(args: {
   };
 
   for (const address of addresses) {
-    const id = args.connection.onLogs(
+    const id = logSource.onLogs(
       new PublicKey(address),
       (logs) => {
         if (!logs.err) enqueue(logs.signature);
@@ -480,13 +485,17 @@ export async function subscribeTokenEvents(args: {
     closed = true;
     options.signal?.removeEventListener("abort", abort);
     await Promise.all(
-      listenerIds.map((id) => args.connection.removeOnLogsListener(id)),
+      listenerIds.map((id) => logSource.removeOnLogsListener(id)),
     );
+    await logSource.close();
     queue.end();
   };
   const abort = () => void close();
   options.signal?.addEventListener("abort", abort, { once: true });
   if (options.signal?.aborted) await close();
+
+  void logSource.closed.then(() => close());
+  try { await logSource.ready(); } catch (error) { await close(); throw error; }
 
   return {
     mint: mint.toBase58(),

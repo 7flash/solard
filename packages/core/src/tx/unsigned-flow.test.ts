@@ -34,6 +34,14 @@ test("oversized unsigned route uses independently fetched active ALT and leaves 
   expect(plan.lookupTables.map(item => item.key.toBase58())).toEqual([tableKey.toBase58()]);
   expect(plan.serializedSize).toBeLessThanOrEqual(1232);
   expect(plan.transaction.signatures.every(row => row.every(value => value === 0))).toBe(true);
+  const historyReads = transactions;
+  const again = await assembleTransaction({ connection, blockhash, payer, draft, altAddresses: [], unsigned: true });
+  expect(transactions).toBe(historyReads);
+  expect(again.lookupTables).toHaveLength(1);
+  connection.getAddressLookupTable = async () => ({ context: { slot: 2 }, value: null });
+  await expect(assembleTransaction({ connection, blockhash, payer, draft, altAddresses: [], unsigned: true }))
+    .rejects.toMatchObject({ code: "TRANSACTION_TOO_LARGE" });
+
 });
 
 test("history provider error remains explicit packet-size rejection, without signing", async () => {
@@ -52,4 +60,20 @@ test("sell exitRoute pool participates in existing ALT discovery", async () => {
     exitRoute: { legs: [{ pool: pool.toBase58() }] },
   } }] }, payer);
   expect(seen).toContain(pool.toBase58());
+});
+
+test("immediate fee recompilation reuses verified tables/blockhash without RPC and does not extend freshness", async () => {
+  let reads = 0, hashes = 0;
+  const connection = { getAddressLookupTable: async () => { reads++; return { value: table }; } } as unknown as Connection;
+  const cache = { get: async () => { hashes++; return {blockhash: PublicKey.default.toBase58(),lastValidBlockHeight:10}; } } as any;
+  const first = await assembleTransaction({connection,blockhash:cache,payer,draft,altAddresses:[tableKey],unsigned:true});
+  const second = await assembleTransaction({connection,blockhash:cache,payer,draft:{...draft,cuPriceMicroLamports:5},altAddresses:[tableKey],unsigned:true,reusePlan:first});
+  expect(reads).toBe(1); expect(hashes).toBe(1);
+  expect(second.assembledAtMs).toBe(first.assembledAtMs);
+  expect(second.recentBlockhash).toBe(first.recentBlockhash);
+  expect(second.transaction.serialize()).not.toEqual(first.transaction.serialize());
+  expect(second.draft.actions).toEqual(first.draft.actions);
+  expect(second.serializedSize).toBeLessThanOrEqual(1232);
+  await assembleTransaction({connection,blockhash:cache,payer,draft,altAddresses:[tableKey],unsigned:true,reusePlan:{...first,assembledAtMs:Date.now()-16000}});
+  expect(reads).toBe(2); expect(hashes).toBe(2);
 });

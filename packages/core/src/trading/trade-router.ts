@@ -142,10 +142,22 @@ export async function resolveTradeRoute(
     "resolve",
     async () => {
       const asset = await resolveTradeAsset(slrd, ref);
-      const token =
+      let token =
         asset.kind === "token"
           ? (slrd.tokens.list().find((row) => row.mint === asset.mint) ?? null)
           : null;
+
+      // A missing/stale cache entry is not evidence that native routing is
+      // unavailable. Inspect before selecting the external fallback. Preserve
+      // provider failures rather than reporting them as an unsupported route.
+      if (asset.kind === "token" && preference !== "jupiter" &&
+          asset.mint !== CANONICAL_USDC_MINT && !nativePumpTradeAvailable(token)) {
+        token = token
+          ? await slrd.refreshToken(asset.mint)
+          : await slrd.resolveTokenForExecution(asset.mint);
+        if (token.decimals != null) asset.decimals = token.decimals;
+        if (token.baseTokenProgram) asset.tokenProgram = token.baseTokenProgram;
+      }
 
       return {
         asset,

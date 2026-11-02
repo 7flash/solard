@@ -57,7 +57,7 @@ export function liveTradeHistoryRow(
       ? event.eventIndex!
       : null;
   const identity =
-    eventIndex == null
+    event.logIndex != null && Number.isSafeInteger(event.logIndex) && event.logIndex >= 0 ? `log:${event.logIndex}` : eventIndex == null
       ? `partial:${event.baseRaw ?? "unknown"}:${event.quoteRaw ?? "unknown"}`
       : String(eventIndex);
   const eventKey = [
@@ -275,7 +275,7 @@ export function createLiveTradeHistoryRecorder(
   let closed = false;
   const active = new Set<Promise<void>>();
   const enqueue = async (event: TradeEvent) => {
-    const row = liveTradeHistoryRow(event, options.commitment);
+    const row = liveTradeHistoryRow(event, event.commitment ?? options.commitment);
     if (!row) {
       options.onStatus?.("history-event-skipped", {
         mint: event.mint,

@@ -106,7 +106,7 @@ export async function getTransactionsForAddress(
     },
   ];
 
-  const response = await fetch(options.rpcUrl, {
+  const response = await observedSolardRpcFetch(options.rpcUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -127,3 +127,4 @@ export async function getTransactionsForAddress(
   }
   return payload?.result ?? null;
 }
+import {observedSolardRpcFetch} from './rpc-observer.ts';

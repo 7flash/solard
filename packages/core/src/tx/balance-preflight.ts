@@ -35,6 +35,14 @@ export async function checkPlanBalance(
   connection: Connection,
   plan: PlannedTransaction,
 ): Promise<void> {
+  await checkPlanBalanceAndFee(connection, plan);
+}
+
+/** Returns the fee already verified for this exact message, for submission accounting. */
+export async function checkPlanBalanceAndFee(
+  connection: Connection,
+  plan: PlannedTransaction,
+): Promise<number> {
   const payer = plan.transaction.message.staticAccountKeys?.[0] ?? plan.payer;
   const cache = cacheFor(connection);
   const now = Date.now();
@@ -181,4 +189,5 @@ export async function checkPlanBalance(
         },
       ),
     );
+  return fee.value;
 }

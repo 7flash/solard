@@ -1,19 +1,31 @@
 {
   "name": "@solard/core",
-  "version": "0.2.37",
+  "version": "0.2.44",
   "description": "Core Solana wallet, transaction and trading engine for Solard.",
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "types": "./dist/types/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./*": "./src/*"
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./*": {
+      "types": "./dist/types/*.d.ts",
+      "default": "./src/*"
+    },
+    "./*.ts": {
+      "types": "./dist/types/*.d.ts",
+      "default": "./src/*.ts"
+    }
   },
   "files": [
     "src",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "dist/types"
   ],
   "license": "MIT",
   "engines": {
@@ -21,20 +33,24 @@
   },
   "scripts": {
     "test": "bun test src",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepack": "bun run ../../scripts/build-declarations.mjs"
   },
   "dependencies": {
     "@meteora-ag/cp-amm-sdk": "1.5.1",
     "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
+    "@pump-fun/pump-sdk": "4.1.0",
     "@pump-fun/pump-swap-sdk": "1.20.0",
     "@raydium-io/raydium-sdk-v2": "0.2.62-alpha",
     "@solana/spl-token": "^0.4.14",
+    "@solana/web3-v1": "npm:@solana/web3.js@3.0.2",
     "@solana/web3.js": "^1.98.4",
     "@types/bn.js": "^5.1.6",
     "bn.js": "^5.2.2",
     "bs58": "^6.0.0",
     "buffer": "^6.0.3",
     "measure-fn": "5.3.1",
-    "sqlite-zod-orm": "^3.33.0"
+    "sqlite-zod-orm": "3.34.0",
+    "zod": "^3.25.67"
   }
 }

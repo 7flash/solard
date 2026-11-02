@@ -18,15 +18,21 @@ test("client listener inherits its configured database and endpoint pool", async
   );
   const sdk = createSolard({
     dbPath,
+    source: "rpc",
+    sqd: { portalUrl: "https://portal.example/datasets/solana-mainnet" },
+    rpc: {maxRps:4,maxConcurrent:8},
     rpcUrls: ["https://first.example.com", "https://second.example.com"],
   });
   try {
     expect(await sdk.listenTrades({ tokens: ["mint"] })).toBe(fixture);
     expect(seen[0]).toMatchObject({
       dbPath,
+      source: "rpc",
+      sqd: { portalUrl: "https://portal.example/datasets/solana-mainnet" },
       rpcUrls: ["https://first.example.com", "https://second.example.com"],
       tokens: ["mint"],
     });
+    expect(typeof (seen[0]?.rpc as {fetch?:unknown})?.fetch).toBe('function');
     await sdk.listenTrades();
     expect(seen[1]?.tokens).toEqual([]);
   } finally {

@@ -33,6 +33,7 @@ export const TokenSchema = z.object({
       "meteora-damm-v2",
       "jupiter",
       "raydium-launchlab",
+      "raydium-amm",
     ])
     .default("unknown"),
   metadataJson: z.string().nullable().default(null),
@@ -233,6 +234,10 @@ export const HistoryTokenAccountSchema = z.object({
 
 export const HistoryReplayItemSchema = z.object({
   replayKey: z.string(),
+  eventId: z.string().default(""),
+  effectOrdinal: z.number().int().default(0),
+  payoutAssetMint: z.string().nullable().default(null),
+  payoutAttribution: z.string().nullable().default(null),
   mint: z.string(),
   signature: z.string(),
   slot: z.number(),
@@ -263,6 +268,13 @@ export const HistoryReplayCoverageSchema = z.object({
   creationSlot: z.number().nullable().default(null),
   finalizedThroughSlot: z.number(),
   attemptedThroughSlot: z.number().default(0),
+  fromCreation: z.number().default(0),
+  discoveryComplete: z.number().default(0),
+  fetchComplete: z.number().default(0),
+  parsingComplete: z.number().default(0),
+  orderingComplete: z.number().default(0),
+  attributionComplete: z.number().default(0),
+  contextJson: z.string().default('{"recipient":null,"originalCreator":null}'),
   authoritative: z.number().default(0),
   tokenBalancesAuthoritative: z.number().default(0),
   creatorRewardsAuthoritative: z.number().default(0),

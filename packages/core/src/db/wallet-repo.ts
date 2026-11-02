@@ -194,14 +194,21 @@ export class WalletRepo {
     );
   }
 
-  list(): WalletInfo[] {
+  list(options: { includeIgnored?: boolean; ignoredOnly?: boolean } = {}): WalletInfo[] {
     return (
       this.db.wallets
         .select()
-        .where({ isActive: 1 })
         .orderBy("id", "asc")
         .all() as WalletRow[]
-    ).map(publicWallet);
+    ).filter(row => options.ignoredOnly ? row.isActive === 0 : options.includeIgnored || row.isActive === 1).map(publicWallet);
+  }
+
+  /** Reversible selection policy; keys, history and group memberships are retained. */
+  setIgnored(ref: WalletRef, ignored = true): WalletInfo {
+    const { row } = this.resolve(ref);
+    if (!row) throw new UnknownWalletError(String(ref));
+    this.db.wallets.update({ isActive: ignored ? 0 : 1, updatedAtMs: Date.now() }).where({ id: row.id }).exec();
+    return publicWallet(this.db.wallets.select().where({ id: row.id }).first() as WalletRow);
   }
 
   resolve(ref: WalletRef): {

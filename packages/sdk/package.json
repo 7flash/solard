@@ -1,20 +1,24 @@
 {
   "name": "@solard/sdk",
-  "version": "0.2.37",
+  "version": "0.2.44",
   "description": "Public Solard SDK for wallets, trading, history, live market subscriptions and token metadata.",
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "types": "./dist/types/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
     "./browser": {
-      "types": "./src/browser/index.ts",
+      "types": "./dist/types/browser/index.d.ts",
       "import": "./src/browser/index.ts",
       "default": "./src/browser/index.ts"
     },
     "./protocol": {
-      "types": "./src/protocol.ts",
+      "types": "./dist/types/protocol.d.ts",
       "import": "./src/protocol.ts",
       "default": "./src/protocol.ts"
     }
@@ -22,15 +26,17 @@
   "files": [
     "src",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "dist/types"
   ],
   "license": "MIT",
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
-    "@solard/core": "0.2.37"
+    "@solard/core": "0.2.44"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.browser.json",
-    "typecheck:browser": "tsc --noEmit -p tsconfig.browser.json"
+    "typecheck:browser": "tsc --noEmit -p tsconfig.browser.json",
+    "prepack": "bun run ../../scripts/build-declarations.mjs"
   }
 }

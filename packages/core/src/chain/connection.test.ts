@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { resetEndpointMarks } from "./endpoint-health.ts";
 import {
   SolardConnection,
   SolardRpcEndpointPool,
@@ -72,7 +73,7 @@ test("RPC pool rotates on quota/auth/transport failures and sticks to the workin
   );
   try {
     const body = JSON.stringify({
-      method: "sendTransaction",
+      method: "getBalance",
       params: ["SAME_SIGNED_BYTES"],
     });
     for (const failure of [
@@ -82,6 +83,7 @@ test("RPC pool rotates on quota/auth/transport failures and sticks to the workin
       new Response(JSON.stringify({ error: { message: "max usage reached" } })),
     ]) {
       calls.length = 0;
+      resetEndpointMarks();
       unavailable = failure;
       const pool = new SolardRpcEndpointPool([
         "https://first.example/",
@@ -122,6 +124,7 @@ test("RPC pool rotates on quota/auth/transport failures and sticks to the workin
 });
 
 test("program errors and aborted requests do not rotate endpoints", async () => {
+  resetEndpointMarks();
   const calls: string[] = [];
   const mock = spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     calls.push(String(input));

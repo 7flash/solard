@@ -113,7 +113,7 @@ test("DAMM v2 event identity, side and marginal price work for either watched mi
   ]);
   expect(decodeDammV2Trade(connection, data)?.aToB).toBe(false);
   const trades: Array<TradeEvent> = [];
-  const subscription = await subscribeTrades({
+  const subscription = await subscribeTrades({ source: "rpc",
     connection,
     tokens: [MINT.toBase58(), PublicKey.default.toBase58()],
     venues: ["meteora-damm-v2"],

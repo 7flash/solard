@@ -1,3 +1,8 @@
+import { deserializeWireTransaction } from "../tx/wire-transaction.ts";
+import { abandonedBeforeSubmission } from "../tx/trade-intent.ts";
+import { retryPreflightSlippage } from "../tx/retry-preflight.ts";
+import { timeTradeStage } from "../tx/trade-options.ts";
+import { leasePreparedSubmission, takePreparedSubmission, type PreparedFastTrade } from "../tx/prepared-submission.ts";
 import { getAssociatedTokenAddressSync, NATIVE_MINT } from "@solana/spl-token";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -77,7 +82,7 @@ import {
 } from "../venues/pump/token-metadata.ts";
 import { TradePreSubmissionError } from "../tx/trade-errors.ts";
 import { TradeIntentStore } from "../tx/trade-intent.ts";
-import { checkPlanBalance } from "../tx/balance-preflight.ts";
+import { checkPlanBalanceAndFee } from "../tx/balance-preflight.ts";
 import { estimatePlanFee } from "../tx/fee-estimate.ts";
 import {
   assertEconomicSell,
@@ -107,6 +112,10 @@ import {
 } from "../ledger/wallet-ledger.ts";
 import { createRawTransactionCachingConnection } from "../events/raw-transaction-cache.ts";
 import { getSupportedPumpPairs as loadPumpPairs } from "../launches/pump/pairs.ts";
+import { OnlinePumpSdk } from "@pump-fun/pump-sdk";
+import {composeTransactionDrafts,type TransactionGroupInput} from '../tx/compose-drafts.ts';
+import { getCompatibleParsedTransaction } from "../chain/parsed-transaction.ts";
+import { recentTradeFees } from "../tx/recent-trade-fees.ts";
 import { getSupportedLaunchLabPairs as loadLaunchLabPairs } from "../launches/raydium/launchlab-pairs.ts";
 import {
   listVanityMintPool,
@@ -114,7 +123,10 @@ import {
   releaseVanityMintReservation,
   markVanityMintUsed,
 } from "../launches/pump/vanity-pool.ts";
-import { fetchCurve } from "../venues/pump/state.ts";
+import { fetchCurve, fetchPool } from "../venues/pump/state.ts";
+import { pumpSwapPoolPda } from "../venues/pump/pda.ts";
+import { defaultPumpQuoteShell } from "../venues/pump/common.ts";
+import { discoverConversionToken } from "../trading/quote-token-discovery.ts";
 import {
   failedTrade,
   tradeResult,
@@ -287,7 +299,10 @@ function chunkPlans<T>(values: T[], size: number): T[][] {
   return chunks;
 }
 
-export type SolardOptions = {
+export type SolardOptions = import('../events/log-source.ts').EventSourceOptions & {
+  rpc?: import('../chain/rpc-pacer.ts').RpcPacingOptions | import('../chain/rpc-pacer.ts').RpcPacer;
+  fetch?: import('@solana/web3.js').FetchFn;
+  transactionVersion?: 0 | 1;
   rpcUrl?: string;
   rpcUrls?: readonly string[];
   dbPath?: string;
@@ -872,8 +887,13 @@ export class Solard implements ComposerHost {
   >();
   private readonly dbPath: string;
   private closed = false;
+  private readonly transactionVersion?: 0 | 1;
+  private readonly eventSourceOptions: import('../events/log-source.ts').EventSourceOptions;
 
   constructor(options: SolardOptions = {}) {
+    this.eventSourceOptions = { source: options.source, sqd: options.sqd };
+    if (options.transactionVersion != null && options.transactionVersion !== 0 && options.transactionVersion !== 1) throw Error("Unsupported transaction version");
+    this.transactionVersion = options.transactionVersion;
     trace("construct: opening database");
     this.dbPath = resolveDbPath(options.dbPath);
     this.db = openDatabase(this.dbPath);
@@ -888,6 +908,8 @@ export class Solard implements ComposerHost {
     this.agentRepo = new AgentRepo(this.db);
     this.chain = new SolardConnection(options.rpcUrl, "confirmed", {
       rpcUrls: options.rpcUrls,
+      rpc: options.rpc,
+      fetch: options.fetch,
     });
     this.cache = new AccountCache(options.cacheTtlMs);
     this.watcher = new SolardWatcher(this.db, () => this.connection());
@@ -964,10 +986,12 @@ export class Solard implements ComposerHost {
       storedTradeFill(execution)
     )
       return;
-    const tx = await this.connection().getTransaction(execution.signature, {
-      commitment: "confirmed",
-      maxSupportedTransactionVersion: 0,
-    });
+    const connection = this.connection();
+    const tx = typeof connection.getParsedTransaction === "function"
+      ? await getCompatibleParsedTransaction(connection, execution.signature)
+      : await connection.getTransaction(execution.signature, {
+          commitment: "confirmed", maxSupportedTransactionVersion: 1,
+        });
     if (!tx?.meta || tx.meta.err) return;
     const pre = ownerTokenRaw(
       tx.meta.preTokenBalances,
@@ -1317,8 +1341,14 @@ export class Solard implements ComposerHost {
   ): WalletInfo {
     return this.wallets.import(privateKey, name, options);
   }
-  listWallets(): WalletInfo[] {
-    return this.wallets.list();
+  listWallets(options: { includeIgnored?: boolean; ignoredOnly?: boolean } = {}): WalletInfo[] {
+    return this.wallets.list(options);
+  }
+  ignoreWallet(ref: WalletRef): WalletInfo {
+    return this.wallets.setIgnored(ref, true);
+  }
+  unignoreWallet(ref: WalletRef): WalletInfo {
+    return this.wallets.setIgnored(ref, false);
   }
   walletAddress(ref: WalletRef): string {
     return this.resolveWallet(ref).address.toBase58();
@@ -1358,7 +1388,9 @@ export class Solard implements ComposerHost {
   resolveToken(ref: TokenRef): TokenRow {
     return this.tokens.resolve(ref);
   }
-  async resolveTokenForExecution(ref: TokenRef): Promise<TokenRow> {
+  async resolveTokenForExecution(ref: TokenRef, options?: { quoteConversion?: boolean }): Promise<TokenRow> {
+    if (options?.quoteConversion && ref instanceof PublicKey)
+      return await this.resolveQuoteTokenForExecution(ref);
     try {
       return this.resolveToken(ref);
     } catch (error) {
@@ -1382,6 +1414,15 @@ export class Solard implements ComposerHost {
       this.pendingExecutionTokens.set(mint, pending);
       try {
         return await pending;
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (/\b(?:403|429)\b|rate.limit|quota|Request blocked|max(?:imum)? usage/i.test(message)) {
+          throw new TradePreSubmissionError(Object.assign(
+            new Error("RPC provider unavailable during token discovery"),
+            { code: "RPC_PROVIDER_UNAVAILABLE", cause },
+          ));
+        }
+        throw cause;
       } finally {
         if (this.pendingExecutionTokens.get(mint) === pending) {
           this.pendingExecutionTokens.delete(mint);
@@ -1391,6 +1432,32 @@ export class Solard implements ComposerHost {
   }
   token(ref: TokenRef): TokenRow {
     return this.resolveToken(ref);
+  }
+  /** Quote conversion must not scan every unrelated venue before Jupiter. */
+  async resolveQuoteTokenForExecution(mint: PublicKey): Promise<TokenRow> {
+    return await discoverConversionToken({
+      existing: () => { try { return this.resolveToken(mint); } catch (error) {
+        if ((error as { code?: string }).code !== "UNKNOWN_TOKEN") throw error;
+        return null;
+      } },
+      curve: async () => {
+        const curve = await fetchCurve(this.connection(), defaultPumpQuoteShell(mint));
+        if (!curve || curve.complete) return null;
+        return { venueHint: "pump-curve", bondingCurve: curve.address.toBase58(),
+          creator: curve.creator?.toBase58() ?? null, quoteMint: curve.quoteAsset.mint.toBase58(),
+          quoteTokenProgram: curve.quoteAsset.tokenProgram.toBase58() };
+      },
+      solPool: async () => {
+        let pool;
+        try { pool = await fetchPool(this.connection(), pumpSwapPoolPda(mint, SOL_ASSET.mint)); }
+        catch (error) { if (error instanceof Error && error.message.startsWith("PumpSwap pool not found:")) return null; throw error; }
+        if (!pool.baseMint.equals(mint) || !pool.quoteMint.equals(SOL_ASSET.mint)) throw new Error("Conversion pool identity mismatch");
+        return { venueHint: "pumpswap", pool: pool.address.toBase58(), quoteMint: pool.quoteMint.toBase58() };
+      },
+      register: metadata => this.addToken(mint.toBase58(), undefined, metadata),
+      fallback: () => this.resolveTokenForExecution(mint),
+      jupiterAvailable: Boolean(process.env.JUPITER_API_KEY?.trim()),
+    });
   }
   async addToken(
     mintRef: string,
@@ -1404,7 +1471,8 @@ export class Solard implements ComposerHost {
         const mint = new PublicKey(mintRef);
         const chain = this.connection();
         const mintState = await readMint(chain, mint, this.cache);
-        const inspected = await this.venues.inspect(chain, mint);
+        const inspected = metadata.venueHint === "jupiter" || (metadata.pool && ["pumpswap","raydium-amm"].includes(metadata.venueHint??''))
+          ? {} : await this.venues.inspect(chain, mint);
         const candidate = {
           ...inspected,
           ...metadata,
@@ -1655,7 +1723,22 @@ export class Solard implements ComposerHost {
       creatorBuySol?: HumanAmount;
     },
   ): Promise<PreparedTokenDeployment> {
-    const user = this.signer(wallet).publicKey;
+    return await this.prepareDeploymentForPublicPayer(
+      launchpadId, this.signer(wallet).publicKey, args, wallet,
+    );
+  }
+
+  /** No managed-wallet signer access. The optional mint keypair is an ephemeral
+   * deployment signer identity, never used to sign an unsigned plan.
+   */
+  private async prepareDeploymentForPublicPayer(
+    launchpadId: string,
+    user: PublicKey,
+    args: Omit<PrepareDeploymentArgs, "user"> & {
+      vanitySuffix?: string; creatorBuySol?: HumanAmount;
+    },
+    wallet?: WalletRef,
+  ): Promise<PreparedTokenDeployment> {
     if (args.vanitySuffix && args.mint)
       throw new Error("Choose a mint or a vanity suffix, not both");
     const reserved = args.vanitySuffix
@@ -1673,12 +1756,18 @@ export class Solard implements ComposerHost {
         : null;
       if (budget && (!sameAsset(budget.asset, SOL_ASSET) || budget.raw <= 0n))
         throw new Error("creatorBuySol requires a positive SOL budget");
+      if (args.initialBuy && (args.initialBuy.raw <= 0n ||
+          !sameAsset(args.initialBuy.asset, args.quoteAsset ?? SOL_ASSET))) {
+        throw new Error("Initial buy must have positive amount in deployment quote");
+      }
       const plugin = this.launchpads.resolve(launchpadId);
       let deployment = await plugin.prepareDeployment(this.connection(), {
         ...args,
         mint: reserved?.mint ?? args.mint,
         user,
       });
+      if (args.initialBuy && deployment.quoteAsset.kind === "spl-token")
+        throw new Error("Custom-quote initial buy requires creatorBuySol atomic funding");
       if (budget) {
         if (deployment.quoteAsset.kind === "native-sol") {
           deployment = await plugin.prepareDeployment(this.connection(), {
@@ -1692,9 +1781,13 @@ export class Solard implements ComposerHost {
           if (!Number.isSafeInteger(total) || total < 0 || total >= 10_000)
             throw new Error("Invalid slippageBps");
           const leg = Math.floor((1 - Math.sqrt(1 - total / 10_000)) * 10_000);
-          const funding = await this.tx(wallet)
-            .buy(deployment.quoteAsset.mint, budget, { slippageBps: leg })
-            .materializedDraft();
+          const funding = wallet != null
+            ? await this.tx(wallet).buy(deployment.quoteAsset.mint, budget,
+                { slippageBps: leg }).materializedDraft()
+            : await new TransactionComposer(this, user.toBase58())
+                .usePublicPayer(user)
+                .buy(deployment.quoteAsset.mint, budget, { slippageBps: leg })
+                .materializedDraft();
           // Never accept a funding draft with no protected execution leg. In
           // particular a stale quote or an RPC provider failure must not turn
           // an explicitly requested creator buy into a create-only launch.
@@ -1708,14 +1801,17 @@ export class Solard implements ComposerHost {
             launchpadId,
             deployment,
           );
-          const buy = await this.preparePendingBuy(
-            launchpadId,
-            deployment,
-            wallet,
-            rawAmount(minimum, deployment.quoteAsset),
-            state,
-            { slippageBps: leg },
-          );
+          const buy = wallet != null
+            ? await this.preparePendingBuy(launchpadId, deployment, wallet,
+                rawAmount(minimum, deployment.quoteAsset), state,
+                { slippageBps: leg })
+            : await (async () => {
+                if (!plugin.buildPendingBuy)
+                  throw new Error("Launchpad lacks atomic pending creator buy");
+                return await plugin.buildPendingBuy(this.connection(), deployment,
+                  user, rawAmount(minimum, deployment.quoteAsset), state,
+                  { slippageBps: leg });
+              })();
           // All three parts must land atomically. A zero-output pending buy
           // is not a successful token launch with a creator buy.
           if (buy.minimumOutputRaw <= 0n || buy.instructions.length === 0)
@@ -1730,6 +1826,9 @@ export class Solard implements ComposerHost {
           deployment.metadata = {
             ...deployment.metadata,
             fundingActions: funding.actions,
+            lookupTableAddresses: funding.actions.flatMap(action =>
+              Array.isArray(action.meta?.lookupTableAddresses)
+                ? action.meta.lookupTableAddresses : []),
             initialBuyRaw: minimum.toString(),
             minimumOutputRaw: buy.minimumOutputRaw.toString(),
             expectedOutputRaw: buy.expectedOutputRaw.toString(),
@@ -1753,6 +1852,78 @@ export class Solard implements ComposerHost {
         : new TradePreSubmissionError(error);
     }
   }
+  /** Build an atomic deployment without looking up the payer's private key.
+   * All signatures (including the mint) remain zero. This is review/simulation
+   * material only; submitters must independently approve both signers.
+   */
+  async prepareUnsignedTokenDeployment(
+    launchpadId: string,
+    args: Omit<PrepareDeploymentArgs, "user"> & {
+      payer: PublicKey | string;
+      creatorBuySol?: HumanAmount;
+    },
+  ): Promise<{ deployment: PreparedTokenDeployment; plan: PlannedTransaction }> {
+    const { payer: payerRef, ...rest } = args;
+    const payer = new PublicKey(payerRef);
+    const deployment = await this.prepareDeploymentForPublicPayer(
+      launchpadId, payer, rest,
+    );
+    const wantsCreatorBuy = rest.creatorBuySol != null || rest.initialBuy != null;
+    if (wantsCreatorBuy &&
+        (deployment.metadata?.minimumOutputRaw == null ||
+         deployment.metadata?.initialBuyRaw == null)) {
+      throw new Error("Unsigned requested creator buy is not part of the atomic deployment");
+    }
+    const draft: TransactionDraft = {
+      instructions: deployment.instructions,
+      actions: [{ kind: "deploy-token", mint: deployment.mint.publicKey,
+        meta: { launchpad: launchpadId,
+          quoteMint: deployment.quoteAsset.mint.toBase58(),
+          quoteTokenProgram: deployment.quoteAsset.tokenProgram.toBase58(),
+          quoteDecimals: deployment.quoteAsset.decimals,
+          ...(deployment.metadata ?? {}),
+        } }],
+      signers: deployment.signers,
+      trackedAccounts: [{ address: payer, kind: "sol" }],
+    };
+    const plan = await assembleTransaction({
+      connection: this.connection(), blockhash: this.blockhash, transactionVersion: this.transactionVersion,
+      payer, draft, unsigned: true,
+      altAddresses: this.alts.list().map(row => new PublicKey(row.address)),
+    });
+    if (plan.serializedSize > (plan.transaction.version === 1 ? 4096 : 1232))
+      throw new Error("Unsigned launch exceeds Solana packet limit");
+    return { deployment, plan };
+  }
+
+  async simulateUnsignedTokenDeployment(
+    launchpadId: string,
+    args: Parameters<Solard["prepareUnsignedTokenDeployment"]>[1],
+  ) {
+    const { deployment, plan } = await this.prepareUnsignedTokenDeployment(launchpadId, args);
+    return { deployment, plan, simulation: await this.simulatePlan(plan) };
+  }
+
+  /** Admission for *new Pump launches*, not a list of currently tradable
+   * markets. Pump coins admitted through their curve are intentionally distinct
+   * from arbitrarily traded, unlisted PumpSwap assets.
+   */
+  async resolvePumpLaunchQuote(quoteRef: string | PublicKey) {
+    const resolved = await new OnlinePumpSdk(this.connection())
+      .resolveQuoteMint(new PublicKey(quoteRef));
+    const quoteAsset: QuoteAsset = resolved.source === "sol"
+      ? SOL_ASSET
+      : { kind: "spl-token", mint: resolved.mint,
+          tokenProgram: resolved.quoteTokenProgram,
+          decimals: resolved.decimals };
+    return {
+      quoteAsset, source: resolved.source,
+      initialVirtualQuoteReservesRaw: resolved.initialVirtualQuoteReserves.toString(),
+      depth: resolved.pumpQuote?.depth ?? 0,
+      // Return only public eligibility/quote metadata, not RPC URLs or keys.
+    };
+  }
+
   getSupportedPumpPairs() {
     return loadPumpPairs(this.connection());
   }
@@ -1958,7 +2129,8 @@ export class Solard implements ComposerHost {
     const memberships = this.groups.wallets(groupName);
     if (!memberships.length)
       throw new Error(`Group has no wallets: ${groupName}`);
-    return memberships.map((row) => row.walletAddress);
+    const active = new Set(this.wallets.list().map(wallet => wallet.address));
+    return memberships.filter(row => active.has(row.walletAddress)).map((row) => row.walletAddress);
   }
   async tokenAccounts(ref: WalletRef): Promise<OwnedTokenAccount[]> {
     const wallet = this.resolveWallet(ref);
@@ -2137,6 +2309,23 @@ export class Solard implements ComposerHost {
   tx(wallet: WalletRef): TransactionComposer {
     return new TransactionComposer(this, wallet);
   }
+
+  /** Build explicit transaction groups with one immutable blockhash generation.
+   * No simulation or send. All required managed co-signers must be declared.
+   */
+  async compileGroups(groups:readonly TransactionGroupInput[]):Promise<PlannedTransaction[]>{
+    if(!groups.length)throw new TradePreSubmissionError(new Error('No transaction groups'));
+    try{
+      const prepared=groups.map(group=>{
+        const payer=this.signer(group.payer),draft=composeTransactionDrafts(group.drafts,group);
+        const signers=new Map([payer,...draft.signers,...(group.additionalWallets??[]).map(wallet=>this.signer(wallet))].map(s=>[s.publicKey.toBase58(),s]));
+        for(const ix of draft.instructions)for(const key of ix.keys)if(key.isSigner&&!signers.has(key.pubkey.toBase58()))throw new Error(`Missing group signer ${key.pubkey.toBase58()}`);
+        return {payer,draft:{...draft,signers:[...signers.values()]}};
+      });
+      const connection=this.connection(),lifetime=await this.blockhash.get(connection);
+      return await Promise.all(prepared.map(({payer,draft})=>assembleTransaction({connection,blockhash:this.blockhash,payer,draft,lifetime,transactionVersion:this.transactionVersion,altAddresses:this.alts.list().map(row=>new PublicKey(row.address))})));
+    }catch(error){throw error instanceof TradePreSubmissionError?error:new TradePreSubmissionError(error);}
+  }
   composeMany(wallets: WalletRef[]): BatchComposer {
     return new BatchComposer(this, wallets);
   }
@@ -2151,13 +2340,16 @@ export class Solard implements ComposerHost {
   async compile(
     payer: Keypair,
     draft: TransactionDraft,
-    options: { useAlts?: boolean } = {},
+    options: { useAlts?: boolean; reusePlan?: PlannedTransaction; transactionVersion?: 0 | 1; lifetime?: {blockhash: string; lastValidBlockHeight: number} } = {},
   ): Promise<PlannedTransaction> {
     return await assembleTransaction({
       connection: this.connection(),
       blockhash: this.blockhash,
       payer,
       draft,
+      lifetime: options.lifetime,
+      reusePlan: options.useAlts === false ? undefined : options.reusePlan,
+      transactionVersion: options.transactionVersion ?? this.transactionVersion,
       altAddresses:
         options.useAlts === false
           ? []
@@ -2188,7 +2380,7 @@ export class Solard implements ComposerHost {
   }): Promise<PlannedTransaction> {
     const payer = new PublicKey(args.payer);
     return await assembleTransaction({
-      connection: this.connection(), blockhash: this.blockhash,
+      connection: this.connection(), blockhash: this.blockhash, transactionVersion: this.transactionVersion,
       payer, unsigned: true,
       draft: await this.prepareUnsignedBuyDraft(args),
       altAddresses: this.alts.list().map(row => new PublicKey(row.address)),
@@ -2199,6 +2391,46 @@ export class Solard implements ComposerHost {
     payer: PublicKey | string; mint: PublicKey | string; sol: string; slippageBps: number;
   }) {
     const plan = await this.prepareUnsignedBuy(args);
+    return { plan, simulation: await this.simulatePlan(plan) };
+  }
+
+  /** Read-only sell preparation uses current owned-token balance and preserves
+   * the same exitRoute and aggregate SOL minima as the signed composer.
+   */
+  async prepareUnsignedSell(args: {
+    payer: PublicKey | string; mint: PublicKey | string;
+    amountRaw?: bigint | string; bps?: number; slippageBps: number;
+    minOutputLamports?: bigint | string;
+  }): Promise<PlannedTransaction> {
+    const payer = new PublicKey(args.payer);
+    const composer = new TransactionComposer(this, payer.toBase58())
+      .usePublicPayer(payer);
+    composer.sell(new PublicKey(args.mint), {
+      amountRaw: args.amountRaw, bps: args.bps,
+      slippageBps: args.slippageBps,
+      minOutputLamports: args.minOutputLamports,
+    });
+    let draft: TransactionDraft;
+    try { draft = await composer.materializedDraft(); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/\b(?:403|429)\b|rate.limit|quota|Request blocked/i.test(message)) {
+        throw new TradePreSubmissionError(Object.assign(
+          new Error("RPC provider unavailable during unsigned sell preparation"),
+          { code: "RPC_PROVIDER_UNAVAILABLE", cause: error },
+        ));
+      }
+      throw error;
+    }
+    return await assembleTransaction({
+      connection: this.connection(), blockhash: this.blockhash, transactionVersion: this.transactionVersion,
+      payer, draft, unsigned: true,
+      altAddresses: this.alts.list().map(row => new PublicKey(row.address)),
+    });
+  }
+
+  async simulateUnsignedSell(args: Parameters<Solard["prepareUnsignedSell"]>[0]) {
+    const plan = await this.prepareUnsignedSell(args);
     return { plan, simulation: await this.simulatePlan(plan) };
   }
 
@@ -2216,7 +2448,7 @@ export class Solard implements ComposerHost {
       authority: payer, payer, recentSlot,
     });
     const compile = async (instructions: import("@solana/web3.js").TransactionInstruction[]) =>
-      await assembleTransaction({ connection: this.connection(), blockhash: this.blockhash,
+      await assembleTransaction({ connection: this.connection(), blockhash: this.blockhash, transactionVersion: this.transactionVersion,
         payer, unsigned: true, altAddresses: [],
         draft: { instructions, actions: [], signers: [], trackedAccounts: [] },
       });
@@ -2451,10 +2683,13 @@ export class Solard implements ComposerHost {
       fallbackSenders?: SenderId[];
       onSubmitted?: (signature: string) => void;
       onRebroadcast?: (signature: string) => void;
+      onStage?: TradeExecutionOptions["onStage"];
     } = {},
   ): Promise<SubmittedPlan> {
+    let verifiedMessageFee: number;
     try {
-      await checkPlanBalance(this.connection(), plan);
+      const preparedFee = takePreparedSubmission(plan);
+      verifiedMessageFee = preparedFee ?? await timeTradeStage(options, "balance-and-rent-check", () => checkPlanBalanceAndFee(this.connection(), plan));
     } catch (error) {
       throw error instanceof TradePreSubmissionError
         ? error
@@ -2466,7 +2701,7 @@ export class Solard implements ComposerHost {
         m,
         `preflight ${via}`,
         async () => {
-          const result = await this.simulatePlan(plan);
+          const result = await timeTradeStage(options, "transaction-simulation", () => this.simulatePlan(plan));
           if (!result.success)
             throw new TradePreSubmissionError(
               new Error(
@@ -2479,7 +2714,7 @@ export class Solard implements ComposerHost {
       );
     }
     const signature = signedPlanSignature(plan);
-    const feeEstimate = await estimatePlanFee(this.connection(), plan);
+    const feeEstimate = await estimatePlanFee(this.connection(), plan, verifiedMessageFee);
     try {
       if (plan.draft.actions.some((action) => action.kind === "sell"))
         assertEconomicSell(plan.draft, {
@@ -2566,14 +2801,14 @@ export class Solard implements ComposerHost {
       `submit ${via}`,
       async () => {
         const broadcast = async (skipPreflight: boolean) => {
-          const returned = await this.senders.resolve(via).send({
+          const returned = await timeTradeStage(options, "sender-broadcast", () => this.senders.resolve(via).send({
             connection: this.connection(),
             transaction: plan.transaction,
             options: {
               ...options,
               skipPreflight,
             },
-          });
+          }));
           if (returned !== signature)
             throw new Error(
               `${String(via)} returned signature ${returned}, expected signed transaction ${signature}`,
@@ -2997,22 +3232,14 @@ export class Solard implements ComposerHost {
         for (const key of ix.keys)
           if (key.isWritable) writable.set(key.pubkey.toBase58(), key.pubkey);
       const addresses = [...writable.values()];
-      try {
-        samples = (
-          await this.connection().getRecentPrioritizationFees(
-            addresses.length <= 128
-              ? { lockedWritableAccounts: addresses }
-              : undefined,
-          )
-        ).map((row) => row.prioritizationFee);
-      } catch {}
+      samples = await recentTradeFees(this.connection(), addresses);
     }
     const fee = chooseTradeFee(policy, computeLimit, samples, previousFee);
     const plan = await this.compile(this.signer(wallet), {
       ...draftPlan.draft,
       cuLimit: computeLimit,
       cuPriceMicroLamports: fee,
-    });
+    }, { reusePlan: draftPlan });
     // Solana's base fee is 5,000 lamports per signature; the final submission
     // also rechecks against getFeeForMessage before creating the journal entry.
     if (plan.draft.actions.some((action) => action.kind === "sell"))
@@ -3068,22 +3295,22 @@ export class Solard implements ComposerHost {
       let plan: PlannedTransaction;
       let fee: number;
       try {
-        const draftPlan = await buildPlan();
-        const prepared = await this.prepareTradePlan(
+        const draftPlan = await timeTradeStage(options, "build-route-and-plan", buildPlan);
+        const prepared = await timeTradeStage(options, "fees-and-final-compile", () => this.prepareTradePlan(
           wallet,
           draftPlan,
           options,
           previousFee,
-        );
+        ));
         fee = prepared.priorityMicroLamports;
         plan = prepared.plan;
       } catch (error) {
         throw new TradePreSubmissionError(error);
       }
-      const submission = await this.submitPlan(plan, via, kind, {
+      const submission = await timeTradeStage(options, "preflight-and-broadcast", () => this.submitPlan(plan, via, kind, {
         ...options,
         fallbackSenders: Array.isArray(options.via) ? options.via.slice(1) : [],
-      });
+      }));
       previousFee = fee;
       attempts.push({
         executionId: submission.executionId,
@@ -3096,7 +3323,9 @@ export class Solard implements ComposerHost {
       options.waitForConfirmation === false ? 1 : policy.maxAttempts,
       async (attempt) => {
         try {
-          return await submit(attempt);
+          return await retryPreflightSlippage(options.skipSimulation ? 1 : Math.min(2, policy.maxAttempts), () => submit(attempt), () => {
+            this.cache.invalidate(); this.blockhash?.invalidate();
+          });
         } catch (error) {
           if (
             kind !== "buy" ||
@@ -3116,12 +3345,12 @@ export class Solard implements ComposerHost {
               status: "submitted",
               slot: null,
             }
-          : await this.settleSubmission(
+          : await timeTradeStage(options, "settlement-and-accounting", () => this.settleSubmission(
               submission,
               options.confirm?.pollIntervalMs ?? 1_000,
               options.confirm?.timeoutMs ?? 180_000,
               options.confirm?.resendIntervalMs ?? 1_500,
-            ),
+            )),
     );
     if (result.receipt.status === "confirmed") {
       try {
@@ -3152,6 +3381,98 @@ export class Solard implements ComposerHost {
     return { ...result, attempts };
   }
 
+  /** Background preparation only. The single-use handle submits exact signed bytes,
+   * with a five-second preflight lease; execution never rebuilds or weakens limits.
+   */
+  async prepareFastTrade(input: {
+    side: "buy" | "sell"; token: TokenRef; wallet: WalletRef;
+    amountSol?: string; amountRaw?: string; priceSol: string;
+    priceKind?: "average" | "spot"; additionalSlippageBps?: number;
+  }, options: Pick<TradeExecutionOptions, "priorityFee" | "landing" | "onStage"> = {}): Promise<PreparedFastTrade> {
+    const request = { ...input };
+    if (request.side !== "buy" && request.side !== "sell") throw new Error("Invalid trade side");
+    if (request.priceKind != null && !["average", "spot"].includes(request.priceKind)) throw new Error("Invalid price kind");
+    const spot = request.priceKind === "spot" ? {priceSol:request.priceSol,additionalSlippageBps:request.additionalSlippageBps!} : undefined;
+    if (spot && (!Number.isInteger(spot.additionalSlippageBps) || spot.additionalSlippageBps < 0 || spot.additionalSlippageBps > 200))
+      throw new Error("Prepared spot orders require 0..200 additional slippage basis points");
+    const executionOptions: TradeExecutionOptions = {
+      ...options, skipSimulation: true, skipPreflight: true,
+      landing: { ...options.landing, maxAttempts: 1 },
+    };
+    const composer = this.tx(request.wallet).prepareLimitOrder(spot);
+    if (request.side === "buy") {
+      if (!request.amountSol) throw new Error("Prepared buy requires amountSol");
+      composer.buy(request.token, { sol: request.amountSol }, spot
+        ? {slippageBps:spot.additionalSlippageBps} : {maxPriceSol:request.priceSol});
+    } else {
+      if (!request.amountRaw) throw new Error("Prepared sell requires exact amountRaw");
+      composer.sell(request.token, { amountRaw: request.amountRaw, ...(spot
+        ? {slippageBps:spot.additionalSlippageBps} : {minPriceSol:request.priceSol}) });
+    }
+    const draft = await timeTradeStage(options, "prepare-route-and-plan", () => composer.build());
+    const { plan, priorityMicroLamports } = await timeTradeStage(options, "prepare-fees-and-compile", () =>
+      this.prepareTradePlan(request.wallet, draft, executionOptions));
+    const routePreparedAt = Date.now();
+    let consumed = false;
+    let generation = 0;
+    const finish = async (plan: PlannedTransaction): Promise<PreparedFastTrade> => {
+      if (Date.now() - routePreparedAt >= 15_000) throw new TradePreSubmissionError(Object.assign(
+        new Error("Prepared route requires refresh"), { code: "PREPARATION_EXPIRED" }));
+      const checkedAt = Date.now();
+      const fee = await timeTradeStage(options, "prepare-balance-and-rent", () => checkPlanBalanceAndFee(this.connection(), plan));
+      const expiresAt = leasePreparedSubmission(plan, fee, checkedAt);
+      if (Date.now() >= expiresAt) throw new TradePreSubmissionError(Object.assign(
+        new Error("Background preparation exceeded freshness lease"), { code: "PREPARATION_EXPIRED" }));
+      const currentGeneration = ++generation;
+      const action = plan.draft.actions.find(action => action.kind === request.side);
+      return Object.freeze({
+        expiresAt,
+        review: Object.freeze({side:request.side,inputRaw:String(action?.meta?.inputRaw??"0"),
+          minimumOutputRaw:String(action?.meta?.minOutputRaw??"0"),
+          modeledOutputRaw: action?.meta == null ? null : String(
+            (!action.meta.exitRoute ? action.meta.boundaryExpectedOutputRaw : undefined) ?? action.meta.expectedOutputRaw ?? "0"),
+          triggerPriceSol:request.priceSol,priceKind:request.priceKind??"average",additionalSlippageBps:spot?.additionalSlippageBps??0}),
+        refresh: async () => {
+          if (consumed || currentGeneration !== generation || Date.now() - routePreparedAt >= 15_000)
+            throw Object.assign(new Error("Prepared template consumed or requires route refresh"), { code: "PREPARATION_EXPIRED" });
+          const refreshed = await timeTradeStage(options, "prepare-refresh-compile", () =>
+            this.compile(this.signer(request.wallet), plan.draft));
+          return await finish(refreshed);
+        },
+        execute: async (execution: Pick<TradeExecutionOptions, "intentKey" | "onStage" | "onSubmitted" | "confirm"> & { signal?: AbortSignal } = {}) => {
+          if (consumed || currentGeneration !== generation) return failedTrade(new TradePreSubmissionError(Object.assign(
+            new Error("Prepared order already consumed or superseded"), { code: "PREPARATION_CONSUMED" })));
+          consumed = true;
+          const opts = { ...executionOptions, ...execution };
+          return await this.runReliableTrade(request.wallet, execution.intentKey,
+            JSON.stringify(["prepared-limit", request]), async () => {
+              // Check again after the wallet queue, before any network request.
+              if (execution.signal?.aborted) throw new TradePreSubmissionError(Object.assign(
+                new Error("Prepared order cancelled before broadcast"), { code: "ORDER_CANCELLED" }));
+              if (Date.now() >= expiresAt) throw new TradePreSubmissionError(Object.assign(
+                new Error("Prepared order expired in wallet queue"), { code: "PREPARATION_EXPIRED" }));
+              const submission = await timeTradeStage(opts, "prepared-broadcast", () =>
+                this.submitPlan(plan, options.landing?.route ?? "rpc", request.side, opts));
+              let receipt = await timeTradeStage(opts, "settlement-and-accounting", () =>
+                this.settleSubmission(submission, execution.confirm?.pollIntervalMs ?? 1000,
+                  execution.confirm?.timeoutMs ?? 180_000, execution.confirm?.resendIntervalMs ?? 1500));
+              if (receipt.status === "confirmed") {
+                try {
+                  const fill = storedTradeFill(this.executions.get(submission.executionId));
+                  if (fill) receipt = { ...receipt, solPrincipalDeltaLamports: BigInt(fill.economicLamports),
+                    targetTokenDeltaRaw: BigInt(fill.tokenDeltaRaw), networkFeeLamports: BigInt(fill.networkFeeLamports) };
+                } catch { /* Confirmation remains authoritative if accounting is temporarily unavailable. */ }
+              }
+              receipt = { ...receipt, feeEstimate: submission.feeEstimate };
+              return tradeResult(receipt, [{ executionId: submission.executionId,
+                signature: submission.signature, priorityMicroLamports }], submission.executionId);
+            }, opts);
+        },
+      });
+    };
+    return await finish(plan);
+  }
+
   async buy(
     token: TokenRef,
     wallet: WalletRef,
@@ -3172,6 +3493,7 @@ export class Solard implements ComposerHost {
           tradeTokenKey(token),
           toRawAmount(amount).raw.toString(),
           options.minOutputRaw?.toString(),
+          ...(options.outputMinimumRaw == null ? [] : [{ outputMinimumRaw: options.outputMinimumRaw.toString() }]),
           options.slippageBps,
           options.maxPriceSol,
         ],
@@ -3199,6 +3521,7 @@ export class Solard implements ComposerHost {
         );
         return settled;
       },
+      options,
     );
     notifyTrade(() => options.onSettled?.(outcome));
     return outcome;
@@ -3259,6 +3582,7 @@ export class Solard implements ComposerHost {
         tradeTokenKey(token),
         options.amountRaw == null ? (options.bps ?? 10_000) : null,
         options.minOutputLamports?.toString(),
+        ...(options.outputMinimumRaw == null ? [] : [{ outputMinimumRaw: options.outputMinimumRaw.toString() }]),
         options.slippageBps,
         options.minPriceSol,
         options.closeTokenAccount,
@@ -3286,6 +3610,7 @@ export class Solard implements ComposerHost {
         );
         return settled;
       },
+      options,
     );
     notifyTrade(() => options.onSettled?.(outcome));
     return outcome;
@@ -3300,6 +3625,7 @@ export class Solard implements ComposerHost {
     intentKey: string | undefined,
     fingerprint: string,
     operation: () => Promise<TradeResult>,
+    timing: Pick<TradeExecutionOptions, "onStage"> = {},
   ): Promise<TradeResult> {
     // Resolve public identity before any signing; harnesses may override signer.
     let address: string;
@@ -3309,11 +3635,13 @@ export class Solard implements ComposerHost {
       return failedTrade(new TradePreSubmissionError(error));
     }
     const queueKey = `${this.dbPath ?? "local"}:${address}`;
+    const queuedAt = performance.now();
     const previous =
       Solard.walletTradeQueues.get(queueKey) ?? Promise.resolve();
     const pending = previous
       .catch(() => {})
       .then(async () => {
+        notifyTrade(() => timing.onStage?.("wallet-queue", Math.round(performance.now() - queuedAt)));
         const store = intentKey ? new TradeIntentStore(this.db) : null;
         if (
           store &&
@@ -3359,8 +3687,12 @@ export class Solard implements ComposerHost {
             store.update(intentKey, (intent) => {
               intent.result = result;
             });
-          } catch {
-            /* Signed intent history remains durable; preserve known on-chain outcome. */
+          } catch (cause) {
+            // Never pretend an outcome was durably recorded. Include the known
+            // result so callers can preserve it without retrying the trade.
+            throw Object.assign(new Error("Trade outcome persistence failed; do not resubmit this intent", { cause }), {
+              code: "TRADE_OUTCOME_PERSISTENCE_FAILED", intentKey, tradeResult: result,
+            });
           }
         }
         return result;
@@ -3382,8 +3714,29 @@ export class Solard implements ComposerHost {
           code: "UNKNOWN_INTENT",
         }),
       );
-    if (intent.result && intent.result.status !== "unresolved")
-      return intent.result;
+    if (intent.result && intent.result.status !== "unresolved") {
+      const result = intent.result;
+      if (result.status === "confirmed" &&
+          (result.targetTokenDeltaRaw == null || result.solPrincipalDeltaLamports == null)) {
+        const submission = intent.submissions.at(-1);
+        if (submission && submission.signature === result.signature) {
+          try {
+            const execution = this.executions.get(submission.executionId);
+            await this.captureExecutionTradeFill(execution);
+            const fill = storedTradeFill(this.executions.get(submission.executionId));
+            if (fill) {
+              const recovered = { ...result,
+                solPrincipalDeltaLamports: BigInt(fill.economicLamports),
+                targetTokenDeltaRaw: BigInt(fill.tokenDeltaRaw),
+                networkFeeLamports: BigInt(fill.networkFeeLamports) };
+              store.update(intentKey, row => { row.result = recovered; });
+              return recovered;
+            }
+          } catch { /* Known confirmation is retained; retry metadata reads later. */ }
+        }
+      }
+      return result;
+    }
     const attempts = intent.submissions.map(
       ({ executionId, signature, priorityMicroLamports }) => ({
         executionId,
@@ -3392,6 +3745,17 @@ export class Solard implements ComposerHost {
       }),
     );
     const last = intent.submissions.at(-1);
+    if (!last && abandonedBeforeSubmission(intent)) {
+      // submitPlan persists the signature before invoking any sender. A dead
+      // owner and empty durable submission journal prove no broadcast occurred.
+      const result = { ...failedTrade(Object.assign(new Error("Previous process stopped before submission"),
+        { code: "NOT_SUBMITTED", phase: "before-submission" })), retryable: true };
+      store.update(intentKey, current => {
+        if (current.submissions.length) throw new Error("Submission changed during recovery");
+        current.result = result;
+      });
+      return result;
+    }
     if (!last)
       return {
         ...failedTrade(
@@ -3423,7 +3787,7 @@ export class Solard implements ComposerHost {
           meta.recentBlockhash &&
           meta.lastValidBlockHeight === last.lastValidBlockHeight
         ) {
-          const transaction = VersionedTransaction.deserialize(
+          const transaction = deserializeWireTransaction(
             Buffer.from(meta.signedTransactionBase64, "base64"),
           );
           const payer = transaction.message.staticAccountKeys[0]!;
@@ -3929,7 +4293,7 @@ export class Solard implements ComposerHost {
     return await openTokenEventStream({
       connection: this.connection(),
       token,
-      options,
+      options: { ...this.eventSourceOptions, ...options },
     });
   }
 
@@ -4007,19 +4371,7 @@ export class Solard implements ComposerHost {
   }
 
   private async resolveReplayToken(ref: TokenRef): Promise<TokenRow> {
-    try {
-      return this.resolveToken(ref);
-    } catch (error) {
-      if (ref instanceof PublicKey) return await this.addToken(ref.toBase58());
-      if (typeof ref === "string") {
-        try {
-          return await this.addToken(new PublicKey(ref.trim()).toBase58());
-        } catch {
-          throw error;
-        }
-      }
-      throw error;
-    }
+    return await this.resolveTokenForExecution(ref);
   }
 
   async replayHistory(
@@ -4229,7 +4581,11 @@ export class Solard implements ComposerHost {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    closeDatabase(this.dbPath);
+    try {
+      this.chain.close();
+    } finally {
+      closeDatabase(this.dbPath);
+    }
   }
 }
 export class SolardGroup {

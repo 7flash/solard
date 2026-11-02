@@ -5,6 +5,8 @@ import { fetchPool } from "./state.ts";
 import { tokenAccountAmount } from "./common.ts";
 import { readDbcMarket } from "../meteora/dbc.ts";
 import { readDammV2Market } from "../meteora/damm-v2.ts";
+import {readRaydiumSolPool} from '../raydium/amm-venue.ts';
+import {SOL_ASSET} from '../../core/amounts.ts';
 
 export function mergeTokenMetadataJson(
   ...values: Array<string | null | undefined>
@@ -26,6 +28,11 @@ export async function verifyPoolTokenMetadata(
   token: Partial<TokenRow>,
 ) {
   let quoteMint = token.quoteMint ? new PublicKey(token.quoteMint) : null;
+  if(token.venueHint==='raydium-amm'&&token.pool){
+    if(!token.mint)throw Error('Raydium registration requires a mint');
+    await readRaydiumSolPool(connection,new PublicKey(token.pool),new PublicKey(token.mint));
+    quoteMint=SOL_ASSET.mint;
+  }
   if (token.venueHint === "meteora-damm-v2" && token.pool) {
     const market = await readDammV2Market(
       connection,

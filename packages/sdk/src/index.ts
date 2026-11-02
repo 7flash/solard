@@ -1,5 +1,11 @@
 export { default } from "./default.ts";
 export { createSolard } from "./client.ts";
+export type { EventSource, EventSourceOptions, SqdOptions } from "@solard/core";
+export type { SubscribeTokenEventsOptions, TokenEventSubscription, SolardTokenEvent } from "@solard/core";
+export {RpcPacer,createRpcPacer} from '@solard/core';
+export type {RpcPacingOptions} from '@solard/core';
+export {observeSolardRpc,withSolardRpcContext} from '@solard/core';
+export type {SolardRpcObservation,SolardRpcContext} from '@solard/core';
 export { createTraderSolard } from "@solard/core";
 export {
   normalizeValueBandPolicy,
@@ -123,6 +129,8 @@ export {
 export type {
   ListenTradesOptions,
   LiveEndpointOptions,
+  FeedRecoveryVerification,
+  RecoverableTradeSubscription,
   SubscribeLaunchesOptions,
   SubscribeMigrationsOptions,
   TradeListener,
@@ -149,3 +157,5 @@ export type {
   TokenMetadataKind,
   TokenMetadataMode,
 } from "@solard/core";
+export {composeTransactionDrafts} from '@solard/core';
+export type {TransactionDraft,TransactionGroupInput,PlannedTransaction} from '@solard/core';

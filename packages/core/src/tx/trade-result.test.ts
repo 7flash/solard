@@ -75,3 +75,9 @@ test("uncertain submissions never permit retry even when error mentions slippage
     retryable: true,
   });
 });
+
+test('Jupiter 6001 is retryable only with verified program attribution',()=>{
+ const error=new Error('Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 failed: custom program error: 0x1771');
+ expect(failedTrade(error)).toMatchObject({code:'SLIPPAGE',retryable:true,programErrorName:'SlippageToleranceExceeded'});
+ expect(failedTrade(new Error('custom program error: 0x1771')).code).toBe('PROGRAM_ERROR');
+});

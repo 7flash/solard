@@ -71,17 +71,18 @@ export class TransactionTooLargeError extends SolardError {
     size: number | null,
     activeAltCount = 0,
     lookupCandidates: string[] = [],
+    sizeLimit = 1232,
   ) {
     const measured =
       size == null
         ? "before serialization (message buffer overflowed)"
         : `to ${size} bytes`;
-    const advice =
-      activeAltCount === 0
+      const advice = sizeLimit === 4096 ? " Reduce the instruction/account set; v1 does not use lookup tables." :
+        activeAltCount === 0
         ? " Create and extend an address lookup table for this settlement before retrying."
         : " Extend the registered address lookup table with the settlement accounts before retrying.";
     super(
-      `Transaction is too large ${measured}; Solana packet limit is 1232 bytes.${advice}`,
+        `Transaction is too large ${measured}; transaction size limit is ${sizeLimit} bytes.${advice}`,
       "TRANSACTION_TOO_LARGE",
     );
     this.lookupCandidates = lookupCandidates;

@@ -7,6 +7,7 @@ import {
 import { TOKEN_PROGRAM_ID, NATIVE_MINT } from "@solana/spl-token";
 import { decodeCpmmSwap } from "./raydium-cpmm-events.ts";
 import { subscribeTrades } from "./launch-trades.ts";
+import { portalBlock, portalFixture } from "../events/fixtures/portal.ts";
 function event(pool: PublicKey, mint: PublicKey) {
   const data = Buffer.alloc(170);
   Buffer.from([64, 198, 205, 232, 38, 8, 113, 226]).copy(data);
@@ -30,7 +31,7 @@ test("CPMM decoding requires the mint-bearing official event layout", () => {
   });
   expect(decodeCpmmSwap(event(pool, mint).subarray(0, 89))).toBeNull();
 });
-test("CPMM live prices verify each pool identity and cannot attribute another pool", async () => {
+for (const source of ["rpc", "sqd"] as const) test(`CPMM ${source} prices verify each pool identity and retain source timestamps`, async () => {
   const mint = Keypair.generate().publicKey,
     pool = Keypair.generate().publicKey,
     otherPool = Keypair.generate().publicKey,
@@ -80,7 +81,14 @@ test("CPMM live prices verify each pool identity and cannot attribute another po
     }),
   } as unknown as Connection;
   const trades: any[] = [];
-  const subscription = await subscribeTrades({
+  const block = portalBlock(12, [mint.toBase58(), CREATE_CPMM_POOL_PROGRAM.toBase58()], [
+    { program: CREATE_CPMM_POOL_PROGRAM.toBase58(), bytes: event(otherPool, mint) },
+    { program: CREATE_CPMM_POOL_PROGRAM.toBase58(), bytes: event(pool, mint) },
+  ], "multi-pool");
+  block.header.timestamp = 1_700_000_000;
+  const portal = portalFixture([block]);
+  const subscription = await subscribeTrades({ source,
+    sqd: { fromSlot: 12, fetch: portal.fetcher },
     connection,
     tokens: [mint.toBase58()],
     venues: ["raydium-cpmm"],
@@ -89,7 +97,7 @@ test("CPMM live prices verify each pool identity and cannot attribute another po
       trades.push(trade);
     },
   });
-  callback(
+  if (source === "rpc") callback(
     {
       signature: "multi-pool",
       err: null,
@@ -108,5 +116,9 @@ test("CPMM live prices verify each pool identity and cannot attribute another po
   expect(trades[0].market.priceSol).toBeCloseTo(0.00001);
   expect(trades[0].market.marketCapSol).toBeCloseTo(10000);
   expect(trades[0].market.supplyRaw).toBe(1000000000000000n);
+  if (source === "sqd") {
+    expect(trades[0].atMs).toBe(1_700_000_000_000);
+    expect(trades[0].timestampSource).toBe("block");
+  }
   await subscription.close();
 });

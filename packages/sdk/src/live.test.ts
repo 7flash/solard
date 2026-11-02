@@ -1,4 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
+const mockFetch = (implementation: (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>) =>
+  spyOn(globalThis, "fetch").mockImplementation(implementation as typeof fetch);
 import { Connection } from "@solana/web3.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -26,7 +28,7 @@ describe("sdk live endpoint", () => {
       redactRpcEndpoint(
         "https://mainnet.helius-rpc.com/?api-key=secret-value&foo=bar",
       ),
-    ).toBe("https://mainnet.helius-rpc.com/?api-key=<redacted>&foo=bar");
+    ).toBe("https://mainnet.helius-rpc.com/***");
   });
 });
 test("live endpoint selection requires readiness, sticks, and rotates after later failures", async () => {
@@ -57,7 +59,7 @@ test("pooled trade stream preserves dynamic watched tokens when it rotates and c
   const originalSocket = globalThis.WebSocket;
   let firstHealthy = true;
   let nextId = 0;
-  const registrations: Array<{ endpoint: string; token: string }> = [];
+  const registrations: Array<{ endpoint: string; ws: string; token: string }> = [];
   const first = "https://live-primary.example/";
   const second = "https://live-fallback.example/";
   const mint = "So11111111111111111111111111111111111111112";
@@ -66,18 +68,29 @@ test("pooled trade stream preserves dynamic watched tokens when it rotates and c
       super();
       queueMicrotask(() => this.dispatchEvent(new Event("open")));
     }
+    send(payload: string) {
+      const request = JSON.parse(payload) as { method?: string; id?: number };
+      if (request.method === "slotSubscribe") queueMicrotask(() =>
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+          jsonrpc: "2.0", id: request.id, result: 42,
+        }) })));
+    }
     close() {}
   } as any;
-  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(
-    async (input) => {
+  const fetchMock = mockFetch(
+    async (input, init) => {
       if (String(input) === first && !firstHealthy)
         return new Response("", { status: 401 });
-      return new Response(JSON.stringify({ result: "ok" }));
+      const method = JSON.parse(String(init?.body)).method;
+      return new Response(JSON.stringify({ result: method === "getGenesisHash"
+        ? "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+        : { context: { slot: 50 }, value: 0 } }));
     },
   );
   const logsMock = spyOn(Connection.prototype, "onLogs").mockImplementation(
     function (token) {
-      registrations.push({ endpoint: this.rpcEndpoint, token: String(token) });
+      registrations.push({ endpoint: this.rpcEndpoint,
+        ws: (this as any)._rpcWsEndpoint, token: String(token) });
       return ++nextId;
     },
   );
@@ -87,7 +100,7 @@ test("pooled trade stream preserves dynamic watched tokens when it rotates and c
   ).mockResolvedValue(undefined);
   let subscription: Awaited<ReturnType<typeof subscribeTrades>> | undefined;
   try {
-    subscription = await subscribeTrades({
+    subscription = await subscribeTrades({ source: "rpc",
       tokens: [],
       rpcUrls: [first, second],
       healthCheckIntervalMs: 1000,
@@ -102,11 +115,29 @@ test("pooled trade stream preserves dynamic watched tokens when it rotates and c
     )
       await Bun.sleep(25);
     expect(registrations).toEqual([
-      { endpoint: first, token: mint },
-      { endpoint: second, token: mint },
+      { endpoint: first, ws: "wss://live-primary.example/", token: mint },
+      { endpoint: second, ws: "wss://live-fallback.example/", token: mint },
     ]);
     expect(subscription.listTokens()).toEqual([mint]);
     expect(subscription.hasToken(mint)).toBe(true);
+    // A provider change must be explicitly reconciled by the application;
+    // a rejected snapshot cannot re-enable trading callbacks.
+    expect(subscription.feedVerified).toBe(false);
+    const rejected = await subscription.verifyAndResume(async ({tokens}) => {
+      expect(tokens).toEqual([mint]); return false;
+    });
+    expect(rejected).toBe(false);
+    expect(subscription.feedVerified).toBe(false);
+    const recovery = await subscription.verifyAndResume(async ({connection, tokens, signal}) => {
+      expect(connection.rpcEndpoint).toBe(second);
+      expect(tokens).toEqual([mint]);
+      expect(signal.aborted).toBe(false);
+      return true; // fixture represents successfully checked fresh pool/mint state
+    });
+    expect(recovery).toBe(true);
+    expect(subscription.feedVerified).toBe(true);
+    await expect(subscription.verifyAndResume(async () => new Promise<boolean>(() => {}), 5))
+      .rejects.toThrow("Feed verification cancelled or timed out");
     await subscription.close();
     await subscription.closed;
     expect(subscription.listTokens()).toEqual([]);
@@ -133,10 +164,22 @@ test("listenTrades refreshes migrated identities without changing the watched to
       super();
       queueMicrotask(() => this.dispatchEvent(new Event("open")));
     }
+    send(payload: string) {
+      const request = JSON.parse(payload) as { method?: string; id?: number };
+      if (request.method === "slotSubscribe") queueMicrotask(() =>
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+          jsonrpc: "2.0", id: request.id, result: 42,
+        }) })));
+    }
     close() {}
   } as any;
-  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(
-    async () => new Response(JSON.stringify({ result: "ok" })),
+  const fetchMock = mockFetch(
+    async (_input, init) => {
+      const method = JSON.parse(String(init?.body)).method;
+      return new Response(JSON.stringify({ result: method === "getGenesisHash"
+        ? "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+        : { context: { slot: 50 }, value: 0 } }));
+    },
   );
   let onMigration: any;
   let onTrade: any;
@@ -173,20 +216,22 @@ test("listenTrades refreshes migrated identities without changing the watched to
   const migrationMock = spyOn(core, "subscribeMigrations").mockImplementation(
     async (options: any) => {
       onMigration = options.onMigration;
+      let settle!: () => void;
+      const closed = new Promise<void>(resolve => { settle = resolve; });
       return {
         mode: "selected",
         addTokens: async () => {},
         removeTokens: async () => {},
         hasToken: () => true,
         listTokens: () => options.tokens,
-        close: async () => {},
-        closed: Promise.resolve(),
+        close: async () => { settle(); },
+        closed,
       } as any;
     },
   );
   let listener: Awaited<ReturnType<typeof listenTrades>> | undefined;
   try {
-    listener = await listenTrades({
+    listener = await listenTrades({ source: "rpc",
       tokens: [mint],
       rpcUrls: [endpoint],
       dbPath,

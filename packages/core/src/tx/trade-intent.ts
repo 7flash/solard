@@ -1,6 +1,7 @@
 import type { SolardDatabase } from "../db/schema.ts";
 import type { TradeResult } from "./trade-result.ts";
 export type TradeIntent = {
+  owner?: { pid: number; hostname: string };
   fingerprint: string;
   wallet: string;
   result?: TradeResult;
@@ -40,7 +41,7 @@ export class TradeIntentStore {
     try {
       this.db.settings.insert({
         key: this.key(key),
-        value: encode({ fingerprint, wallet, submissions: [] }),
+        value: encode({ fingerprint, wallet, submissions: [], owner: { pid: process.pid, hostname: process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? "" } }),
         updatedAtMs: Date.now(),
       });
       return true;
@@ -50,7 +51,11 @@ export class TradeIntentStore {
     }
   }
   update(key: string, mutate: (intent: TradeIntent) => void): void {
-    this.db.transaction(() => {
+    // A deferred SQLite transaction can lose a lock upgrade to another process.
+    // Retry the whole read/modify/write transaction, never just the write.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        this.db.transaction(() => {
       const row = this.db.settings
         .select()
         .where({ key: this.key(key) })
@@ -65,8 +70,22 @@ export class TradeIntentStore {
         intent.result?.status === "unresolved"
       )
         return;
-      row.value = encode(intent);
-      row.updatedAtMs = Date.now();
+      this.db.settings.update({ value: encode(intent), updatedAtMs: Date.now() })
+        .where({ key: this.key(key) }).exec();
     });
+        return;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (attempt >= 5 || !/^SQLITE_(BUSY|LOCKED)/.test(code ?? "")) throw error;
+        Bun.sleepSync(20 * (attempt + 1));
+      }
+    }
   }
+}
+
+/** Only local, definitely dead owners qualify; permission errors/PID reuse stay conservative. */
+export function abandonedBeforeSubmission(intent: TradeIntent): boolean {
+ if (intent.submissions.length || !intent.owner || !intent.owner.hostname || intent.owner.hostname.toLowerCase() !== (process.env.COMPUTERNAME ?? process.env.HOSTNAME)?.toLowerCase()) return false;
+ try { process.kill(intent.owner.pid, 0); return false; }
+ catch(error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
 }

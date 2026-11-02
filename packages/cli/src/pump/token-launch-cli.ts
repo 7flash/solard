@@ -41,7 +41,7 @@ import {
   type SendReceipt,
   type SimulationResult,
   type Solard,
-  type TokenMetadata,
+  type PumpLaunchTokenMetadata as TokenMetadata,
   type TraderSubmitMode,
   type VanityMintPoolReservation,
 } from "@solard/core";
@@ -851,6 +851,7 @@ function summarizeLaunchResult(result: PumpTokenLaunchResult): unknown {
     return {
       mode: result.mode,
       launchSimulation: simulationSummary(result.launchSimulation),
+      bundleSimulation: result.bundleSimulation,
       deploymentSender: result.deploymentSender,
       buyers: result.buyers,
     };
@@ -860,10 +861,11 @@ function summarizeLaunchResult(result: PumpTokenLaunchResult): unknown {
     mode: result.mode,
     launchReceipt: receiptSummary(result.launchReceipt),
     traderReceipts: result.traderReceipts,
+    buyerTransactions: result.buyerTransactions,
   };
 }
 
-function requireSkipSimulationForBlindLiveBuys(
+export function requireSkipSimulationForBlindLiveBuys(
   live: boolean,
   submitMode: TraderSubmitMode,
   skipSimulation: boolean,
@@ -872,12 +874,11 @@ function requireSkipSimulationForBlindLiveBuys(
   if (
     live &&
     hasBuyerGroup &&
-    (normalizeTraderSubmitMode(submitMode) === "blind-spam-after-submit" ||
-      normalizeTraderSubmitMode(submitMode) === "jito-bundle") &&
+    normalizeTraderSubmitMode(submitMode) === "blind-spam-after-submit" &&
     !skipSimulation
   ) {
     throw new Error(
-      "Blind parallel dependent-buy submission and Jito bundles require --skip-simulation after a reviewed dry run.",
+      "Blind parallel dependent-buy submission requires --skip-simulation after a reviewed dry run.",
     );
   }
 }
@@ -1371,6 +1372,8 @@ export async function runPumpTokenLaunchFromArgs(
   const mayhemMode = enabled(flags, "mayhem", "SOLARD_LAUNCH_MAYHEM");
   const vanityPoolSuffixRaw = nonEmpty(first(flags, "mint-pool"));
   const vanityPoolAddress = nonEmpty(first(flags, "mint-pool-address"));
+  const resumeMintReservation = nonEmpty(first(flags, "mint-reservation-reason"));
+  if (resumeMintReservation && !vanityPoolAddress) throw new Error("--mint-reservation-reason requires --mint-pool-address");
   if (vanityPoolAddress && !vanityPoolSuffixRaw) {
     throw new Error("--mint-pool-address requires --mint-pool <suffix>.");
   }
@@ -1508,6 +1511,7 @@ export async function runPumpTokenLaunchFromArgs(
   if (!vanityMint && vanityPoolSuffix) {
     poolReservation = reserveVanityMintFromPool(vanityPoolSuffix, {
       address: vanityPoolAddress,
+      resumeReason: resumeMintReservation,
       reason: live ? "pump-launch-live" : "pump-launch-dry-run",
     });
     vanityMint = poolReservation.mint;
@@ -1693,6 +1697,7 @@ export async function runPumpTokenLaunchFromArgs(
       prepared,
       live,
       traderSubmitMode: submitMode,
+      buyersPerTransaction: numberFlag(flags, "buyers-per-transaction", 1),
       skipSimulation,
       spam,
       kind: `cli:launch:pump:${input.alias}`,
@@ -1807,7 +1812,7 @@ export async function runPumpTokenLaunchFromArgs(
     // Dry runs never consume a pooled mint. Live failures intentionally leave
     // it RESERVED because a bundle can be ambiguous even when local tracking
     // fails. Release it manually only after on-chain preflight confirms unused.
-    if (poolReservation && !live) {
+    if (poolReservation && !live && !resumeMintReservation) {
       try {
         releaseVanityMintReservation(poolReservation.address);
       } catch {

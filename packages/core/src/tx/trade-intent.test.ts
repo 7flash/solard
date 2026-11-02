@@ -78,3 +78,75 @@ test("intent survives restart, reconciles original signature and blocks a second
     rmSync(folder, { recursive: true, force: true });
   }
 });
+
+test("terminal rejection survives a transient SQLite lock and restart", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "solard-intent-busy-"));
+  const path = join(folder, "db.sqlite");
+  try {
+    let db = openDatabase(path);
+    const payer = Keypair.generate();
+    const core: Solard = Object.create(Solard.prototype);
+    let failures = 0;
+    const wrapped = new Proxy(db, { get(target, prop) {
+      if (prop === "transaction") return (callback: () => unknown) => {
+        if (failures++ === 0) throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        return target.transaction(callback);
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    Object.defineProperty(core, "db", { value: wrapped });
+    core.signer = () => payer;
+    const rejected = { slot: null, solPrincipalDeltaLamports: null,
+      targetTokenDeltaRaw: null, networkFeeLamports: null, status: "failed" as const,
+      phase: "before-submission" as const, code: "BELOW_MINIMUM", message: "guard",
+      retryable: false, attempts: [], quotedMinimum: 87n, requiredMinimum: 101n };
+    expect(await core.runReliableTrade("wallet", "rejected", "same", async () => rejected)).toEqual(rejected);
+    expect(failures).toBe(2);
+    closeDatabase(path);
+    db = openDatabase(path);
+    expect(new TradeIntentStore(db).get("rejected")?.result).toEqual(rejected);
+  } finally {
+    closeDatabase(path);
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("exhausted outcome persistence reports the known result instead of silently stranding it", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "solard-intent-fail-"));
+  const path = join(folder, "db.sqlite");
+  try {
+    const db = openDatabase(path);
+    const core: Solard = Object.create(Solard.prototype);
+    const payer = Keypair.generate();
+    const wrapped = new Proxy(db, { get(target, prop) {
+      if (prop === "transaction") return () => { throw new Error("disk failure"); };
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    Object.defineProperty(core, "db", { value: wrapped });
+    core.signer = () => payer;
+    const result = { slot: null, solPrincipalDeltaLamports: null, targetTokenDeltaRaw: null,
+      networkFeeLamports: null, status: "failed" as const, phase: "before-submission" as const,
+      code: "BELOW_MINIMUM", message: "guard", retryable: false, attempts: [] };
+    let error: any;
+    try { await core.runReliableTrade("wallet", "save-failure", "same", async () => result); }
+    catch (caught) { error = caught; }
+    expect(error?.code).toBe("TRADE_OUTCOME_PERSISTENCE_FAILED");
+    expect(error?.tradeResult).toEqual(result);
+    expect(error?.intentKey).toBe("save-failure");
+  } finally {
+    closeDatabase(path);
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+import { abandonedBeforeSubmission } from './trade-intent.ts';
+import { hostname } from 'node:os';
+test('only a definitely dead local owner with no submissions is recoverable',()=>{
+ const intent={fingerprint:'x',wallet:'w',submissions:[],owner:{pid:process.pid,hostname:hostname()}};
+ expect(abandonedBeforeSubmission(intent)).toBe(false);
+ expect(abandonedBeforeSubmission({...intent,owner:{pid:2147483647,hostname:hostname()}})).toBe(true);
+ expect(abandonedBeforeSubmission({...intent,owner:undefined})).toBe(false);
+ expect(abandonedBeforeSubmission({...intent,owner:{pid:2147483647,hostname:'other-host'}})).toBe(false);
+ expect(abandonedBeforeSubmission({...intent,submissions:[{signature:'sent',executionId:1,sender:'rpc',lastValidBlockHeight:2,priorityMicroLamports:0}]})).toBe(false);
+});

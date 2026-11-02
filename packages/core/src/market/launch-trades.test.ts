@@ -36,7 +36,7 @@ test("custom Pump curve quote metadata survives unavailable parsed transactions"
   connection.getParsedTransaction = async () => { parsedCalls++; throw new Error("unavailable parsed RPC"); };
   const trades: Array<Parameters<Parameters<typeof subscribeTrades>[0]["onTrade"]>[0]> = [];
   const statuses: Array<string> = [];
-  const subscription = await subscribeTrades({ connection, tokens: [mint.toBase58()], venues: ["pump"], solUsd: 100, quoteSol: async () => 0.01, onStatus: event => statuses.push(event), onTrade: event => { trades.push(event); } });
+  const subscription = await subscribeTrades({ source: "rpc", connection, tokens: [mint.toBase58()], venues: ["pump"], solUsd: 100, quoteSol: async () => 0.01, onStatus: event => statuses.push(event), onTrade: event => { trades.push(event); } });
   callbacks[0]!({ err: null, signature: "custom-curve", logs: [`Program ${PUMP_PROGRAM_ID} invoke [1]`, `Program data: ${pumpTradeEvent().toString("base64")}`, `Program ${PUMP_PROGRAM_ID} success`] }, { slot: 42 });
   await Bun.sleep(40);
   expect(parsedCalls).toBe(0);
@@ -420,7 +420,7 @@ describe("launch trade market decoding", () => {
     }
 
     const trades: any[] = [];
-    const subscription = await subscribeTrades({
+    const subscription = await subscribeTrades({ source: "rpc",
       connection: new FakeConnection() as any,
       tokens: [mint],
       venues: ["raydium-launchlab"],
@@ -473,6 +473,8 @@ describe("launch trade market decoding", () => {
     expect(decoded.quoteRaw).toBe(707n);
     expect(decoded.virtualQuoteRaw).toBe(808n);
     expect(decoded.virtualBaseRaw).toBe(404n);
+    expect(decoded.trader).toBe(bs58.encode(pubkey(31)));
+    expect(decoded.creator).toBe(bs58.encode(pubkey(33)));
   });
 
   test("decodes PumpSwap buy amounts separately from post-trade reserves", () => {
@@ -486,6 +488,8 @@ describe("launch trade market decoding", () => {
     expect(decoded.poolQuoteRaw).toBe(145_018_861_948n);
     expect(decoded.virtualQuoteRaw).toBe(0n);
     expect(decoded.supplyRaw).toBe(975_349_926_053_310n);
+    expect(decoded.trader).toBe(bs58.encode(pubkey(2)));
+    expect(decoded.creator).toBe(bs58.encode(pubkey(7)));
   });
 
   test("decodes PumpSwap sell tail without buy-only fields", () => {
@@ -493,6 +497,8 @@ describe("launch trade market decoding", () => {
     expect(decoded?.kind).toBe("trade");
     if (!decoded || decoded.kind !== "trade") return;
     expect(decoded.side).toBe("sell");
+    expect(decoded.trader).toBe(bs58.encode(pubkey(2)));
+    expect(decoded.creator).toBe(bs58.encode(pubkey(7)));
     expect(decoded.virtualQuoteRaw).toBe(0n);
     expect(decoded.supplyRaw).toBe(975_349_926_053_310n);
   });
@@ -528,7 +534,7 @@ describe("launch trade market decoding", () => {
 
     const trades: any[] = [];
     const statuses: string[] = [];
-    const subscription = await subscribeTrades({
+    const subscription = await subscribeTrades({ source: "rpc",
       connection: new FakeConnection() as any,
       tokens: [watchedMint],
       venues: ["pumpswap"],
@@ -612,7 +618,7 @@ describe("launch trade market decoding", () => {
     const trades: any[] = [];
     const statuses: Array<{ event: string; data?: Record<string, unknown> }> =
       [];
-    const subscription = await subscribeTrades({
+    const subscription = await subscribeTrades({ source: "rpc",
       connection: new FakeConnection() as any,
       tokens: [watchedMint],
       venues: ["pumpswap"],
@@ -679,7 +685,7 @@ test("PUMP-quoted multi-pool transaction cannot corrupt supply/capitalization or
     new PublicKey(mint),
     "confirmed",
   );
-  const subscription = await subscribeTrades({
+  const subscription = await subscribeTrades({ source: "rpc",
     connection,
     tokens: [mint],
     venues: ["pumpswap"],
@@ -742,7 +748,7 @@ test("unavailable PUMP conversion leaves SOL/USD fields unavailable", async () =
   const trades: Array<
     Parameters<Parameters<typeof subscribeTrades>[0]["onTrade"]>[0]
   > = [];
-  const subscription = await subscribeTrades({
+  const subscription = await subscribeTrades({ source: "rpc",
     connection,
     tokens: ["3yLHGEma4ek25h8oRswBmYTJkTDdtGnrVn2ZuzV5pump"],
     venues: ["pumpswap"],

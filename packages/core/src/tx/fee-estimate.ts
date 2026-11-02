@@ -11,14 +11,17 @@ export type TransactionFeeEstimate = {
 export async function estimatePlanFee(
   connection: Pick<Connection, "getFeeForMessage">,
   plan: PlannedTransaction,
+  verifiedMessageFee?: number,
 ): Promise<TransactionFeeEstimate> {
   const cuLimit = plan.draft.cuLimit ?? 600_000;
   const priorityMicroLamports = plan.draft.cuPriceMicroLamports ?? 100_000;
   const priorityFeeLamports = Number(
     (BigInt(cuLimit) * BigInt(priorityMicroLamports) + 999_999n) / 1_000_000n,
   );
-  let total: number | null = null;
-  try {
+  if (verifiedMessageFee != null && (!Number.isSafeInteger(verifiedMessageFee) || verifiedMessageFee < 0))
+    throw new Error("Verified message fee must be non-negative lamports");
+  let total: number | null = verifiedMessageFee ?? null;
+  if (verifiedMessageFee == null) try {
     total = (
       await connection.getFeeForMessage(plan.transaction.message, "confirmed")
     ).value;

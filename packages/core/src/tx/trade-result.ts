@@ -31,6 +31,7 @@ export type TradeResult = {
 };
 const slippageNames =
   /\b(BuySlippageBelowMinTokensOut|SellSlippageBelowMinSolOut|BuySlippageBelowMinBaseAmountOut|SellSlippageBelowMinQuoteAmountOut|ExceededSlippage|TooLittleSolReceived|SlippageToleranceExceeded)\b/;
+const jupiterSlippage = /Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 failed: custom program error:\s*(?:0x1771|6001)\b/i;
 function errorText(error: unknown): string {
   const parts: string[] = [];
   let current = error;
@@ -52,7 +53,7 @@ function programDetails(message: string) {
       message,
     );
   const named =
-    /Error Code: ([A-Za-z0-9_]+)/.exec(message) ?? slippageNames.exec(message);
+    /Error Code: ([A-Za-z0-9_]+)/.exec(message) ?? slippageNames.exec(message) ?? (jupiterSlippage.test(message) ? ["", "SlippageToleranceExceeded"] : null);
   return {
     ...(custom
       ? { programErrorNumber: Number(custom[1] ?? custom[2] ?? custom[3]) }
@@ -92,7 +93,7 @@ export function tradeErrorCode(error: unknown): string {
   if (/AccountNotFound|account.*missing/i.test(message))
     return "ACCOUNT_MISSING";
   // Bare numeric custom codes are program-specific and cannot establish slippage.
-  if (slippageNames.test(message) || /slippage/i.test(message))
+  if (slippageNames.test(message) || jupiterSlippage.test(message) || /slippage/i.test(message))
     return "SLIPPAGE";
   if (/expired.*block height/i.test(message)) return "EXPIRED";
   if (/Custom|custom program error/i.test(message)) return "PROGRAM_ERROR";

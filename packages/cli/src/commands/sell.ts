@@ -1,3 +1,4 @@
+import { hasOutputMinimum, parseOutputMinimum } from "./trade-minimum.ts";
 import {
   executeJupiterSwap,
   NATIVE_SOL_MINT,
@@ -118,7 +119,7 @@ export async function runSmartSellCommand({
 }: RunSmartSellCommandArgs): Promise<SmartSellCommandResult> {
   const tokenRef = values[0];
   const usage =
-    "Usage: slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) [--bps 10000] [--venue auto|native|jupiter]";
+    "Usage: slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) [--bps 10000] [--venue auto|native|jupiter] [--min-out <amount> | --min-out-raw <units> | --slippage-bps N]";
   if (!tokenRef) throw new Error(usage);
 
   const bps = intFlag(flags, "bps", 10_000);
@@ -135,6 +136,11 @@ export async function runSmartSellCommand({
     throw new Error("slrd sell expects an SPL token");
   }
 
+  const outputMinimumRaw = parseOutputMinimum(flags, 9);
+  if (hasOutputMinimum(flags) && resolution.route !== "native") {
+    throw new Error("Absolute minimum output is currently supported on native Pump/PumpSwap routes; Jupiter orders do not expose a verified on-chain minimum");
+  }
+
   if (resolution.route === "native") {
     if (!nativePumpTradeAvailable(resolution.token)) {
       throw new Error(
@@ -144,6 +150,7 @@ export async function runSmartSellCommand({
 
     const options = {
       ...tradeFeeOptions(flags),
+      outputMinimumRaw,
       bps,
       slippageBps: intFlag(flags, "slippage-bps", 1_500),
       via: (flags.get("sender") ?? "rpc") as SenderId,
@@ -178,6 +185,8 @@ export async function runSmartSellCommand({
             ...(await slrd.simulatePlan(prepared.plan)),
             priorityMicroLamports: prepared.priorityMicroLamports,
             cuLimit: prepared.plan.draft.cuLimit ?? 600_000,
+            requestedMinimumOutputRaw: outputMinimumRaw?.toString(),
+            guaranteedOutputRaw: prepared.plan.draft.actions.find(action => action.kind === "sell")?.meta?.minOutputRaw,
           };
         }),
       );

@@ -1,4 +1,5 @@
 import bs58 from "bs58";
+import { composeTransactionDrafts } from "../../tx/compose-drafts.ts";
 import {
   PublicKey,
   SystemProgram,
@@ -188,6 +189,8 @@ export type PumpTokenLaunchPlan = {
   buyerPriorityMicroLamports: number;
   deploymentSender: SenderId;
   traderPlans: PlannedTransaction[];
+  /** Ordered participant refs for each compiled follower transaction. */
+  traderGroups?: WalletRef[][];
   traderLanes: BuyerLane[];
   expectedOutputByWallet: Array<{
     role: BuyerAllocation["role"];
@@ -205,11 +208,14 @@ export type PumpTokenLaunchResult =
       deploymentSender: string;
       buyers: PumpTokenLaunchPlan["expectedOutputByWallet"];
       note: string;
+      bundleSimulation?: AtomicBundleSimulationResult;
     }
   | {
       mode: TraderSubmitMode;
       launchReceipt: SendReceipt;
       traderReceipts: TraderReceiptOutcome[] | SendReceipt[];
+      /** Grouped receipts correspond to transactions; this maps every buyer. */
+      buyerTransactions?: Array<{wallet: WalletRef; transactionIndex: number; signature: string}>;
     };
 
 export type LaunchReporter = (label: string, value: unknown) => void;
@@ -2054,10 +2060,11 @@ function assertJitoPumpBundleLayout(args: {
           `This launch path requires fully static account keys.`,
       );
     }
-    if (plan.serializedSize > 1_232) {
+    const packetLimit = plan.transaction.version === 1 ? 4096 : 1232;
+    if (plan.serializedSize > packetLimit) {
       throw new Error(
         `Pump Jito transaction ${index + 1} is ${plan.serializedSize} bytes; ` +
-          `the Solana packet limit is 1232 bytes.`,
+          `the selected transaction packet limit is ${packetLimit} bytes.`,
       );
     }
   }
@@ -2078,17 +2085,18 @@ function assertJitoPumpBundleLayout(args: {
   }
 
   for (let index = 1; index < args.plans.length; index += 1) {
-    const buyInstruction = args.plans[index]!.draft.instructions.find(
+    const buyInstructions = args.plans[index]!.draft.instructions.filter(
       (instruction) =>
         instruction.programId.equals(PUMP_PROGRAM_ID) &&
         instructionHasDiscriminator(instruction.data, BUY_EXACT_QUOTE_IN_V2_D8),
     );
-    if (!buyInstruction) {
+    if (!buyInstructions.length) {
       throw new Error(
         `Pump buyer transaction ${index + 1} is missing buy_exact_quote_in_v2.`,
       );
     }
 
+    for (const buyInstruction of buyInstructions) {
     // Pump's current public IDL defines exactly 27 mandatory accounts for
     // buy_exact_quote_in_v2. There are no optional or trailing accounts.
     if (buyInstruction.keys.length !== 27) {
@@ -2120,6 +2128,7 @@ function assertJitoPumpBundleLayout(args: {
         `Pump buyer transaction ${index + 1} has the wrong account 27 ` +
           `(program).`,
       );
+    }
     }
   }
 }
@@ -2198,6 +2207,7 @@ async function simulateAtomicJitoBundle(args: {
   try {
     response = await fetch(endpoint, {
       method: "POST",
+      signal: AbortSignal.timeout(45_000),
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -2375,6 +2385,31 @@ function optimizedJitoCuLimit(
   return Math.min(currentLimit, Math.max(minimum, rounded));
 }
 
+/** Group follower drafts without changing sequential quotes or individual minima. */
+export function groupPumpJitoDrafts(prepared: PumpTokenLaunchPlan, count: number,
+  signer: (ref: WalletRef) => Keypair): { drafts: TransactionDraft[]; groups: WalletRef[][] } {
+  if (!Number.isInteger(count) || count < 1 || count > 3)
+    throw new Error("buyersPerTransaction must be an integer from 1 to 3");
+  if (prepared.traderGroups) throw new Error("Launch plan is already grouped; reprepare before another execution");
+  if (prepared.traderPlans.length !== prepared.traders.length)
+    throw new Error("Follower draft count does not match buyer allocations");
+  if (!prepared.traders.length || Math.ceil(prepared.traders.length / count) > 4)
+    throw new Error("Jito requires 1..4 follower transactions after grouping; no automatic bundle splitting");
+  const drafts: TransactionDraft[] = [], groups: WalletRef[][] = [];
+  for (let offset = 0; offset < prepared.traders.length; offset += count) {
+    const refs = prepared.traders.slice(offset, offset + count).map(t => t.walletRef);
+    const parts = prepared.traderPlans.slice(offset, offset + count).map(p => p.draft);
+    const draft = composeTransactionDrafts(parts, {
+      cuLimit: Math.min(1_400_000, parts.reduce((n, d) => n + (d.cuLimit ?? 600_000), 0)),
+      priorityMicroLamports: 0,
+    });
+    const signers = new Map([...draft.signers, ...refs.map(signer)].map(s => [s.publicKey.toBase58(), s]));
+    draft.signers = [...signers.values()];
+    drafts.push(draft); groups.push(refs);
+  }
+  return { drafts, groups };
+}
+
 async function compileJitoBundleDraftsWithSharedBlockhash(args: {
   slrd: Solard;
   prepared: PumpTokenLaunchPlan;
@@ -2382,7 +2417,7 @@ async function compileJitoBundleDraftsWithSharedBlockhash(args: {
   reporter?: LaunchReporter;
   reason: "initial" | "optimized" | "retry";
 }): Promise<PlannedTransaction[]> {
-  if (args.drafts.length !== args.prepared.traders.length + 1) {
+  if (args.drafts.length !== (args.prepared.traderGroups?.length ?? args.prepared.traders.length) + 1) {
     throw new Error(
       `Pump Jito shared-blockhash compile expected deployment plus ${args.prepared.traders.length} buyers; got ${args.drafts.length} drafts.`,
     );
@@ -2393,9 +2428,9 @@ async function compileJitoBundleDraftsWithSharedBlockhash(args: {
   // the deployment and buyer compiles.
   const signers: Keypair[] = [
     args.slrd.signer(args.prepared.creatorWallet),
-    ...args.prepared.traders.map((trader) =>
-      args.slrd.signer(trader.walletRef),
-    ),
+    ...(args.prepared.traderGroups
+      ? args.prepared.traderGroups.map(group => args.slrd.signer(group[0]!))
+      : args.prepared.traders.map(trader => args.slrd.signer(trader.walletRef))),
   ];
 
   const maximumAttempts = 3;
@@ -2409,7 +2444,7 @@ async function compileJitoBundleDraftsWithSharedBlockhash(args: {
 
     const plans = await Promise.all(
       args.drafts.map((draft, index) =>
-        args.slrd.compile(signers[index]!, draft, { useAlts: false }),
+        args.slrd.compile(signers[index]!, draft, { useAlts: false, lifetime: pinned }),
       ),
     );
 
@@ -2429,6 +2464,11 @@ async function compileJitoBundleDraftsWithSharedBlockhash(args: {
         recentBlockhash: pinned.blockhash,
         lastValidBlockHeight: pinned.lastValidBlockHeight,
         transactions: plans.length,
+        layout: plans.map((plan, index) => ({ transactionIndex: index,
+          bytes: plan.serializedSize, accounts: plan.transaction.message.staticAccountKeys.length,
+          signatures: plan.transaction.signatures.length,
+          buyers: index === 0 ? (args.prepared.creator ? [args.prepared.creatorWallet] : []) : args.prepared.traderGroups?.[index - 1],
+        })),
       });
 
       return plans;
@@ -2545,7 +2585,7 @@ function escalateJitoTipForRefresh(args: {
 }): boolean {
   const finalIndex = args.prepared.traderPlans.length - 1;
   const finalPlan = args.prepared.traderPlans[finalIndex];
-  const trader = args.prepared.traders[finalIndex];
+  const trader = args.prepared.traders.at(-1);
   if (!finalPlan || !trader) {
     throw new Error("Cannot escalate Jito tip without a final buyer.");
   }
@@ -2606,7 +2646,7 @@ function escalateJitoTipForRefresh(args: {
 
   const instructions = [...finalPlan.draft.instructions];
   instructions[instructionIndex] = SystemProgram.transfer({
-    fromPubkey: finalPlan.payer,
+    fromPubkey: finalPlan.draft.instructions[instructionIndex]!.keys[0]!.pubkey,
     toPubkey: recipient,
     lamports: next,
   });
@@ -2688,6 +2728,8 @@ export async function executePumpTokenLaunch(args: {
   prepared: PumpTokenLaunchPlan;
   live: boolean;
   traderSubmitMode: TraderSubmitMode;
+  /** Explicit atomic follower grouping, 1..3 buyers per transaction. */
+  buyersPerTransaction?: number;
   skipSimulation: boolean;
   spam: SpamSubmitOptions;
   kind: string;
@@ -2699,7 +2741,7 @@ export async function executePumpTokenLaunch(args: {
 }): Promise<PumpTokenLaunchResult> {
   const submitMode = normalizeTraderSubmitMode(args.traderSubmitMode);
 
-  if (!args.live) {
+  if (!args.live && submitMode !== "jito-bundle") {
     return {
       mode: "dry-run",
       launchSimulation: await simulatePumpTokenLaunch({
@@ -2713,11 +2755,11 @@ export async function executePumpTokenLaunch(args: {
   }
 
   if (submitMode === "jito-bundle") {
-    if (args.prepared.traders.length > 4) {
-      throw new Error(
-        `jito-bundle supports deployment plus at most 4 buyers; got ${args.prepared.traders.length} buyers.`,
-      );
-    }
+    const grouping = groupPumpJitoDrafts(args.prepared, args.buyersPerTransaction ?? 1,
+      ref => args.slrd.signer(ref));
+    args.prepared.traderGroups = grouping.groups;
+    if (!args.live && args.skipSimulation)
+      throw new Error("Jito dry-run requires complete atomic bundle simulation");
 
     // The ordinary preparation path may compile deployment and buyers at
     // different times. Recompile the complete first Jito generation here so
@@ -2727,7 +2769,7 @@ export async function executePumpTokenLaunch(args: {
       prepared: args.prepared,
       drafts: [
         args.prepared.launchDraft,
-        ...args.prepared.traderPlans.map((plan) => plan.draft),
+        ...grouping.drafts,
       ],
       reporter: args.reporter,
       reason: "initial",
@@ -2760,6 +2802,30 @@ export async function executePumpTokenLaunch(args: {
       buyers: args.prepared.traders.length,
       tipTransactionIndex: plans.length,
     });
+
+    if (!args.live) {
+      let bundleSimulation = await validateJitoBundleGeneration({
+        slrd: args.slrd, prepared: args.prepared, plans, reporter: args.reporter,
+        generation: 1, pass: "baseline",
+      });
+      const optimized = await optimizeJitoBundleForAuction({
+        slrd: args.slrd, prepared: args.prepared, plans, simulation: bundleSimulation,
+        reporter: args.reporter, generation: 1,
+      });
+      if (optimized.changed) {
+        plans = optimized.plans;
+        bundleSimulation = await validateJitoBundleGeneration({
+          slrd: args.slrd, prepared: args.prepared, plans, reporter: args.reporter,
+          generation: 1, pass: "optimized",
+        });
+      }
+      return { mode: "dry-run", bundleSimulation,
+        launchSimulation: { success: true, logs: [], cuUsed: bundleSimulation.unitsConsumed[0] ?? null,
+          error: null, accountChanges: [], tokenChanges: [], solChanges: [] },
+        deploymentSender: "jito", buyers: args.prepared.expectedOutputByWallet,
+        note: "Complete ordered bundle simulated; no submission performed.",
+      };
+    }
 
     const maxGenerations = positiveBundleGenerationLimit();
     let completedGenerations = 0;
@@ -2883,6 +2949,9 @@ export async function executePumpTokenLaunch(args: {
       mode: submitMode,
       launchReceipt,
       traderReceipts,
+      buyerTransactions: args.prepared.traderGroups?.flatMap((group, index) =>
+        group.map(wallet => ({ wallet, transactionIndex: index + 1,
+          signature: traderReceipts[index]!.signature }))),
     };
   }
 

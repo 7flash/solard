@@ -11,9 +11,13 @@ import { TransactionTooLargeError } from "../core/errors.ts";
 import { measure } from "../core/log.ts";
 import type { TransactionDraft, PlannedTransaction } from "./types.ts";
 import type { BlockhashCache } from "../chain/blockhash.ts";
+import { buildV1Transaction } from "./wire-transaction.ts";
 
 const m = measure("assemble");
 const PACKET_LIMIT = 1232;
+// Cache only table addresses, never their active state or contents. Every assembly
+// still fetches/validates the actual accounts before compiling and signing.
+const routeLookupHints = new WeakMap<Connection, Map<string, PublicKey[]>>();
 
 async function fetchLookupTables(
   connection: Connection,
@@ -50,6 +54,21 @@ export async function discoverRouteLookupTables(
   for (const action of draft.actions) {
     const meta = action.meta ?? {};
     add(meta.pool); add(meta.targetPool); add(meta.fundingPool);
+    // Atomic deployments carry separately quoted funding actions in metadata.
+    // Their pools need the same read-only ALT discovery as ordinary buys.
+    const fundingActions = Array.isArray(meta.fundingActions)
+      ? meta.fundingActions : [];
+    for (const nested of fundingActions) {
+      if (!nested || typeof nested !== "object") continue;
+      const fundingMeta = (nested as { meta?: Record<string, unknown> }).meta;
+      if (!fundingMeta) continue;
+      add(fundingMeta.pool); add(fundingMeta.targetPool);
+      const route = fundingMeta.fundingRoute as { legs?: unknown[] } | undefined;
+      for (const leg of Array.isArray(route?.legs) ? route.legs : []) {
+        if (!leg || typeof leg !== "object") continue;
+        add((leg as Record<string, unknown>).pool);
+      }
+    }
     for (const routeName of ["fundingRoute", "exitRoute"] as const) {
       const route = meta[routeName] as Record<string, unknown> | undefined;
       const legs = Array.isArray(route?.legs) ? route.legs : [];
@@ -158,13 +177,34 @@ export async function assembleTransaction(args: {
   unsigned?: boolean;
   draft: TransactionDraft;
   altAddresses: PublicKey[];
+  reusePlan?: PlannedTransaction;
+  transactionVersion?: 0 | 1;
+  lifetime?: {blockhash:string;lastValidBlockHeight:number};
 }): Promise<PlannedTransaction> {
   let plan: PlannedTransaction | undefined;
   let assemblyError: unknown;
+  const version = args.transactionVersion ?? (process.env.SOLARD_TRANSACTION_VERSION === "1" ? 1 : 0);
   await m.measure(
-    "v0",
+    `v${version}`,
     async () => {
-      const latest = await args.blockhash.get(args.connection);
+      const payerKey = args.payer instanceof PublicKey ? args.payer : args.payer.publicKey;
+      const source = args.reusePlan;
+      const age = source?.assembledAtMs == null ? Infinity : Date.now() - source.assembledAtMs;
+      const reuse = source && source.payer.equals(payerKey) && age >= 0 && age < 15_000
+        && source.lookupTables.every(table => table.isActive()) ? source : undefined;
+      const latest = args.lifetime ?? (reuse ? { blockhash: reuse.recentBlockhash,
+        lastValidBlockHeight: reuse.lastValidBlockHeight } : await args.blockhash.get(args.connection));
+      if (version === 1) {
+        if (!args.unsigned && args.payer instanceof PublicKey) throw Error("Public-only payer requires unsigned mode");
+        const transaction = await buildV1Transaction(payerKey, args.draft, latest.blockhash, latest.lastValidBlockHeight);
+        const size = transaction.serialize().length;
+        if (size > 4096) throw new TransactionTooLargeError(size, 0, [], 4096);
+        if (!args.unsigned) await transaction.sign(uniqueSigners(args.payer as Keypair, args.draft.signers), latest.lastValidBlockHeight);
+        plan = {transaction,draft:args.draft,lookupTables:[],serializedSize:size,payer:payerKey,
+          recentBlockhash:latest.blockhash,lastValidBlockHeight:latest.lastValidBlockHeight,
+          assembledAtMs:reuse?.assembledAtMs ?? Date.now()};
+        return {version,serializedSize:size,instructions:args.draft.instructions.length};
+      }
       const compute = [
         ComputeBudgetProgram.setComputeUnitLimit({
           units: args.draft.cuLimit ?? 600_000,
@@ -179,10 +219,15 @@ export async function assembleTransaction(args: {
       };
       // Load registered tables before signing. Previously Solard attempted to sign the
       // oversized uncompressed message first, which throws before ALT fallback runs.
+      let hints = routeLookupHints.get(args.connection);
+      if (!hints) { hints = new Map(); routeLookupHints.set(args.connection, hints); }
+      const routeKey = JSON.stringify(args.draft.actions.filter(action => action.mint)
+        .map(action => [action.kind, String(action.mint), action.meta?.pool]));
       const allAltAddresses = [
         ...new Map(
           [
             ...args.altAddresses,
+            ...(hints.get(routeKey) ?? []),
             ...args.draft.actions.flatMap((action) =>
               (Array.isArray(action.meta?.lookupTableAddresses)
                 ? action.meta.lookupTableAddresses
@@ -192,10 +237,9 @@ export async function assembleTransaction(args: {
           ].map((address) => [address.toBase58(), address]),
         ).values(),
       ];
-      const payerKey = args.payer instanceof PublicKey ? args.payer : args.payer.publicKey;
       if (!args.unsigned && args.payer instanceof PublicKey)
         throw new Error("Public-only payer requires unsigned mode");
-      let tables = allAltAddresses.length
+      let tables = reuse ? reuse.lookupTables : allAltAddresses.length
         ? await fetchLookupTables(args.connection, allAltAddresses) : [];
       const make = (selected: AddressLookupTableAccount[]) => {
         const message = new TransactionMessage({ payerKey,
@@ -225,8 +269,13 @@ export async function assembleTransaction(args: {
         throw new TransactionTooLargeError(size, tables.length,
           lookupCandidates(payerKey, args.draft).map(key => key.toBase58()));
       }
+      if (tables.length) {
+        if (hints.size >= 256 && !hints.has(routeKey)) hints.delete(hints.keys().next().value!);
+        hints.set(routeKey, tables.map(table => table.key));
+      }
       if (!args.unsigned) transaction.sign(uniqueSigners(args.payer as Keypair, args.draft.signers));
       plan = {
+        assembledAtMs: reuse?.assembledAtMs ?? Date.now(),
         transaction,
         draft: args.draft,
         lookupTables: tables,
@@ -243,11 +292,9 @@ export async function assembleTransaction(args: {
         serializedSize: size,
       };
     },
-    (error) => {
-      assemblyError = error;
-      return null;
-    },
-  );
+  ).catch((error: unknown) => {
+    assemblyError = error;
+  });
   if (!plan) {
     if (assemblyError instanceof Error) throw assemblyError;
     throw new Error("Failed to assemble transaction plan");

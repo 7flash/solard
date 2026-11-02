@@ -45,4 +45,20 @@ export class AgentRepo {
     agent.stateJson = JSON.stringify(state);
     agent.updatedAtMs = Date.now();
   }
+
+  mergeConfig(agent: AgentRow, patch: Record<string, unknown>): AgentRow {
+    return this.configure(agent.name, { ...this.config(agent), ...patch });
+  }
+
+  state(agent: AgentRow): Record<string, unknown> {
+    try {
+      const value: unknown = JSON.parse(agent.stateJson);
+      return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown> : {};
+    } catch { return {}; }
+  }
+
+  mergeState(agent: AgentRow, patch: Record<string, unknown>): void {
+    this.saveState(agent, { ...this.state(agent), ...patch });
+  }
 }

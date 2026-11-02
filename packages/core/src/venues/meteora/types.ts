@@ -7,6 +7,16 @@ import type {
 import type { WalletRef } from "../../core/refs.ts";
 
 export type MeteoraStrategy = "spot" | "bid_ask" | "curve";
+export type MeteoraWalletNativeBalance = {
+  wallet: string;
+  lamports: string;
+  sol: number;
+};
+export type MeteoraWalletTokenBalance = {
+  wallet: string;
+  mint: string;
+  rawAmount: string;
+};
 export type MeteoraTimeframe =
   "5m" | "30m" | "1h" | "2h" | "4h" | "12h" | "24h";
 export type MeteoraPoolCategory = "top" | "new" | "trending";

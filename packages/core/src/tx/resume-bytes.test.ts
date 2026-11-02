@@ -13,16 +13,18 @@ import { Solard } from "../core/solard.ts";
 import { openDatabase, closeDatabase } from "../db/database.ts";
 import { TradeIntentStore } from "./trade-intent.ts";
 import type { SubmittedPlan } from "./types.ts";
+import { buildV1Transaction } from "./wire-transaction.ts";
 
 async function exercise(
   change: (meta: Record<string, unknown>) => void = () => {},
   finalStatus: "confirmed" | "submitted" = "confirmed",
+  version: 0 | 1 = 0,
 ) {
   const folder = mkdtempSync(join(tmpdir(), "solard-resume-bytes-"));
   const path = join(folder, "test.sqlite");
   try {
     const payer = PublicKey.default;
-    const transaction = new VersionedTransaction(
+    const transaction = version === 1 ? await buildV1Transaction(payer, {instructions:[],actions:[],signers:[],trackedAccounts:[]}, PublicKey.default.toBase58(), 100) : new VersionedTransaction(
       new TransactionMessage({
         payerKey: payer,
         recentBlockhash: PublicKey.default.toBase58(),
@@ -120,6 +122,13 @@ test("restart resumes the exact journaled transaction without building or signin
   ).toBe(bytes);
   expect(restored[0]!.plan.lastValidBlockHeight).toBe(100);
   expect(restored[0]!.sender).toBe("helius-swqos");
+});
+
+test("restart restores v1 bytes and original signature without loading keys or rebuilding", async () => {
+  const {result,restored,bytes,signature}=await exercise(undefined,"confirmed",1);
+  expect(result).toMatchObject({status:"confirmed",signature});
+  expect(restored[0]!.plan.transaction.version).toBe(1);
+  expect(Buffer.from(restored[0]!.plan.transaction.serialize()).toString("base64")).toBe(bytes);
 });
 
 test("changed signature fixture retains uncertainty and never rebroadcasts", async () => {

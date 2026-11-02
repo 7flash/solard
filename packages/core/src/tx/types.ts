@@ -36,7 +36,9 @@ export type TransactionDraft = {
   cuPriceMicroLamports?: number;
 };
 export type PlannedTransaction = {
-  transaction: VersionedTransaction;
+  /** Local time of validated assembly; used only for immediate fee recompilation. */
+  assembledAtMs?: number;
+  transaction: import("./wire-transaction.ts").WireTransaction;
   draft: TransactionDraft;
   lookupTables: AddressLookupTableAccount[];
   serializedSize: number;

@@ -136,3 +136,13 @@ test("failed first-use inspection can be retried", async () => {
     slrd.close();
   }
 });
+
+
+test("current market preserves provider failure instead of reporting an unknown token", async () => {
+  const slrd = new Solard({ dbPath: tempDb("market-provider-failure") });
+  try {
+    slrd.addToken = async () => { throw new Error("429 max usage reached"); };
+    await expect(slrd.resolveCurrentMarket(Keypair.generate().publicKey.toBase58()))
+      .rejects.toMatchObject({ code: "RPC_PROVIDER_UNAVAILABLE", phase: "before-submission" });
+  } finally { slrd.close(); }
+});

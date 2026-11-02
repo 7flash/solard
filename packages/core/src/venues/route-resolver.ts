@@ -39,7 +39,9 @@ export class VenueRegistry {
     user: PublicKey,
     options: { reserves?: LivePoolReserves } = {},
   ): Promise<{ plugin: TradeVenuePlugin; market: VenueMarket }> {
-    for (const plugin of this.plugins) {
+    const candidates = token.venueHint === "jupiter"
+      ? this.plugins.filter(plugin => plugin.id === "jupiter") : this.plugins;
+    for (const plugin of candidates) {
       const market = await plugin.resolveMarket({
         connection,
         token,

@@ -77,6 +77,7 @@ test("custom-quote launch consumes only the guaranteed funding output in one ins
       pendingSlippage = options.slippageBps;
       return {
         instructions: [ix(3)],
+        quoteAsset: asset,
         minimumOutputRaw: 456n,
         expectedOutputRaw: 500n,
       };

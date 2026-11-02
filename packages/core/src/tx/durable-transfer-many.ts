@@ -1,3 +1,4 @@
+import { deserializeWireTransaction } from "./wire-transaction.ts";
 import { createHash } from "node:crypto";
 import { Buffer } from "buffer";
 import { PublicKey, VersionedTransaction } from "@solana/web3.js";
@@ -255,7 +256,7 @@ function signedTransactionBase64(transaction: VersionedTransaction): string {
 }
 
 function decodeSignedTransaction(base64: string): VersionedTransaction {
-  return VersionedTransaction.deserialize(Buffer.from(base64, "base64"));
+  return deserializeWireTransaction(Buffer.from(base64, "base64"));
 }
 
 function recordReceipt(

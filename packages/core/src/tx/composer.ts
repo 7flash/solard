@@ -3,15 +3,21 @@ import {
   getAccount,
   getTransferFeeAmount,
 } from "@solana/spl-token";
-import { PublicKey, type Connection } from "@solana/web3.js";
+import { PublicKey, type Connection, type TransactionInstruction } from "@solana/web3.js";
 import type { HumanAmount } from "../core/amounts.ts";
 import { rawAmount, sameAsset, toRawAmount, SOL_ASSET } from "../core/amounts.ts";
 import { QuoteAssetMismatchError } from "../core/errors.ts";
 import { decimalsOr } from "../core/decimals.ts";
 import { readMint, listOwnedTokenAccounts } from "../chain/state.ts";
-import { assertTradeMinimum } from "./trade-minimum.ts";
-import { assertTradePrice, type SolPrice } from "./price-guard.ts";
+import { assertTradeMinimum, setOutputMinimum } from "./trade-minimum.ts";
+import { assertTradePrice, minimumBuyOutputForPrice, minimumSellOutputForPrice, type SolPrice } from "./price-guard.ts";
 import { TradePreSubmissionError } from "./trade-errors.ts";
+import { createSolardMeasure } from "../core/log.ts";
+import { measured } from "../core/measured.ts";
+const composerMeasure = createSolardMeasure("composer");
+function tradeStep<T>(label: string, run: () => Promise<T>): Promise<T> {
+  return measured(composerMeasure, label, run, () => undefined);
+}
 import { decodeWhitelistedQuoteMints } from "../launches/pump/pairs.ts";
 import { globalPda } from "../venues/pump/pda.ts";
 import { PUMP_PROGRAM_ID } from "../venues/pump/constants.ts";
@@ -36,6 +42,7 @@ import {
 } from "./transaction-builder.ts";
 import type {
   BatchSendReceipt,
+  TransactionAction,
   SendReceipt,
   SenderId,
   SendOptions,
@@ -43,7 +50,7 @@ import type {
 
 export interface ComposerHost extends TransactionHost {
   connection(): Connection;
-  resolveTokenForExecution(ref: TokenRef): Promise<TokenRow>;
+  resolveTokenForExecution(ref: TokenRef, options?: { quoteConversion?: boolean }): Promise<TokenRow>;
   route(
     token: TokenRow,
     user: PublicKey,
@@ -82,23 +89,63 @@ function conversionLookupTables(legs: Record<string, unknown>[], targetMeta?: Re
 /** Generic transaction sugar for one-off actions. Trading strategies belong in scripts that import slrd. */
 export class TransactionComposer extends TransactionBuilder {
   private readonly operations: Operation[] = [];
+  private preparedLimitOrder = false;
+  private spotLimit?: { priceSol: string; additionalSlippageBps: number };
+  /** Encode an out-of-market hard floor for background preparation on verified Pump instruction builders. */
+  prepareLimitOrder(spotLimit?: { priceSol: string; additionalSlippageBps: number }): this {
+    if (spotLimit && (!Number.isInteger(spotLimit.additionalSlippageBps) || spotLimit.additionalSlippageBps < 0 || spotLimit.additionalSlippageBps > 200))
+      throw Error("Prepared spot orders allow at most 200bps additional slippage");
+    this.preparedLimitOrder = true; this.spotLimit = spotLimit ? { ...spotLimit } : undefined; return this;
+  }
+  private async quoteCoinSol(mint: PublicKey, path: string[]): Promise<number> {
+    const identity = mint.toBase58();
+    if (path.includes(identity) || path.length >= 4) throw Object.assign(
+      new Error("Spot boundary quote conversion cycle/depth exceeded"), { code: "CONVERSION_UNAVAILABLE" });
+    const token = await tradeStep(`boundary ${identity} discover`, () => this.composerHost.resolveTokenForExecution(mint, { quoteConversion: true }));
+    const {plugin,market} = await tradeStep(`boundary ${identity} market`, () => this.composerHost.route(token, this.payer()));
+    const price = await tradeStep(`boundary ${identity} spot`, () => plugin.price({connection:this.composerHost.connection(),token,user:this.payer()},market));
+    if (!price.mint.equals(mint) || !sameAsset(price.quoteAsset, market.quoteAsset) || !Number.isFinite(price.priceQuotePerToken) || price.priceQuotePerToken <= 0 ||
+      Date.now() < price.capturedAtMs || Date.now()-price.capturedAtMs > 5000)
+      throw Object.assign(new Error("Fresh verified quote price required for spot boundary"), {code:"CONVERSION_UNAVAILABLE"});
+    const value = price.priceQuotePerToken * (market.quoteAsset.kind === "native-sol" ? 1 :
+      await this.quoteCoinSol(market.quoteAsset.mint,[...path,identity]));
+    if (!Number.isFinite(value) || value <= 0) throw Error("Invalid quote/SOL conversion");
+    return value;
+  }
+  private async spotBoundary(market: VenueMarket): Promise<string | undefined> {
+    if (!this.spotLimit) return;
+    this.limitPreparationFor(market);
+    const quoteSol = market.quoteAsset.kind === "native-sol" ? 1 :
+      await this.quoteCoinSol(market.quoteAsset.mint,[market.mint.toBase58()]);
+    const price = Number(this.spotLimit.priceSol) / quoteSol;
+    if (!Number.isFinite(price) || price <= 0) throw Error("Invalid spot boundary price");
+    return String(price);
+  }
+  private limitPreparationFor(market: VenueMarket, conversion = false): boolean {
+    if (this.preparedLimitOrder && !["pump-curve", "pumpswap", "raydium-amm"].includes(market.venue) && !(conversion && market.venue === 'jupiter'))
+      throw Object.assign(new Error("Prepared limits require a verified Pump instruction builder"), { code: "NO_PREPARED_ROUTE" });
+    return this.preparedLimitOrder;
+  }
   private async conversionLeg(
     side: "buy" | "sell", mint: PublicKey, input: bigint,
-    slippageBps: number, path: string[], pumpQuote = false,
+    slippageBps: number, path: string[], pumpQuote = false, outputMinimumRaw?: bigint | string,
   ): Promise<{ plugin: TradeVenuePlugin; market: VenueMarket; instructions: import("@solana/web3.js").TransactionInstruction[]; legs: Record<string, unknown>[]; minimumOutputRaw: bigint; expectedOutputRaw: bigint }> {
     const identity = mint.toBase58();
     if (path.includes(identity) || path.length >= 4)
       throw Object.assign(new Error("Quote conversion cycle or depth limit exceeded"), { code: "CONVERSION_UNAVAILABLE" });
-    const token = await this.composerHost.resolveTokenForExecution(mint);
+    const token = await tradeStep(`conversion ${identity} discover`, () => this.composerHost.resolveTokenForExecution(mint, { quoteConversion: true }));
     let route: { plugin: TradeVenuePlugin; market: VenueMarket };
     try {
-      route = await this.composerHost.route(token, this.payer());
+      route = await tradeStep(`conversion ${identity} resolve market`, () => this.composerHost.route(token, this.payer()));
     } catch (cause) {
       throw Object.assign(new Error(`Quote conversion route unavailable for ${identity}`, { cause }), { code: "CONVERSION_UNAVAILABLE" });
     }
     if (sameAsset(route.market.quoteAsset, SOL_ASSET))
       route.market = { ...route.market, quoteAsset: SOL_ASSET };
-    if (pumpQuote) {
+    // Pump coin-quote eligibility governs quote coins routed on Pump itself.
+    // An existing AMM pool with an external quote mint (e.g. TTWO) may use a
+    // verified non-Pump conversion route; this grants no launch eligibility.
+    if (pumpQuote && ["pump-curve", "pumpswap"].includes(route.market.venue)) {
       const global = await this.composerHost.connection().getAccountInfo(globalPda(), "confirmed");
       if (!global || !global.owner.equals(PUMP_PROGRAM_ID))
         throw Object.assign(new Error("Pump quote eligibility metadata unavailable"), { code: "UNSUPPORTED_QUOTE_METADATA" });
@@ -116,7 +163,7 @@ export class TransactionComposer extends TransactionBuilder {
     }
     const context = { connection: this.composerHost.connection(), token, user: this.payer() };
     const nested = route.market.quoteAsset.kind !== "native-sol";
-    const perLeg = nested ? legSlippageBps(slippageBps) : slippageBps;
+    const perLeg = side === "sell" && outputMinimumRaw != null ? 0 : nested ? legSlippageBps(slippageBps) : slippageBps;
     const instructions: import("@solana/web3.js").TransactionInstruction[] = [];
     const legs: Record<string, unknown>[] = [];
     let legInput = input;
@@ -126,19 +173,21 @@ export class TransactionComposer extends TransactionBuilder {
       legs.push(...funding.legs);
       legInput = funding.minimumOutputRaw;
     }
-    const quote = side === "buy"
+    const quote = await tradeStep(`conversion ${identity} ${side} quote`, async () => side === "buy"
       ? await route.plugin.quoteBuy(context, route.market, rawAmount(legInput, route.market.quoteAsset), perLeg)
-      : await route.plugin.quoteSell(context, route.market, legInput, perLeg);
-    const built = side === "buy"
+      : await route.plugin.quoteSell(context, route.market, legInput, perLeg));
+    if (this.spotLimit) setOutputMinimum(quote, quote.minimumOutputRaw, this.limitPreparationFor(route.market, true));
+    if (side === "sell" && !nested && outputMinimumRaw != null) setOutputMinimum(quote, outputMinimumRaw, this.limitPreparationFor(route.market, true));
+    const built = await tradeStep(`conversion ${identity} ${side} instructions`, async () => side === "buy"
       ? await route.plugin.buildBuy(context, route.market, quote)
-      : await route.plugin.buildSell(context, route.market, quote);
+      : await route.plugin.buildSell(context, route.market, quote));
     instructions.push(...built.instructions);
     let minimumOutputRaw = built.minOutputRaw ?? quote.minimumOutputRaw;
     let expectedOutputRaw = built.expectedOutputRaw ?? quote.expectedOutputRaw;
     legs.push({ venue: route.market.venue, pool: route.market.metadata.pool instanceof PublicKey ? route.market.metadata.pool.toBase58() : undefined, mint: identity, quoteMint: route.market.quoteAsset.mint.toBase58(), inputRaw: legInput.toString(), minOutputRaw: minimumOutputRaw.toString(), slippageBps: perLeg, quoteMeta: quote.meta, builtMeta: built.meta });
     this.track({ address: getAssociatedTokenAddressSync(mint, this.payer(), false, route.market.baseTokenProgram), kind: "token", mint });
     if (side === "sell" && nested) {
-      const exit = await this.conversionLeg(side, route.market.quoteAsset.mint, minimumOutputRaw, perLeg, [...path, identity]);
+      const exit = await this.conversionLeg(side, route.market.quoteAsset.mint, minimumOutputRaw, perLeg, [...path, identity], false, outputMinimumRaw);
       instructions.push(...exit.instructions);
       legs.push(...exit.legs);
       minimumOutputRaw = exit.minimumOutputRaw;
@@ -147,6 +196,7 @@ export class TransactionComposer extends TransactionBuilder {
     return { ...route, instructions, legs, minimumOutputRaw, expectedOutputRaw };
   }
   private materialized = false;
+  private materialization?:Promise<void>;
   constructor(
     protected readonly composerHost: ComposerHost,
     payer: WalletRef,
@@ -154,15 +204,27 @@ export class TransactionComposer extends TransactionBuilder {
     super(composerHost, payer);
   }
   private addOperation(operation: Operation): this {
-    if (this.materialized) throw new Error("Cannot change a built transaction");
+    if (this.materialized||this.materialization) throw new Error("Cannot change a built transaction");
     this.operations.push(operation);
     return this;
   }
   private async materialize(): Promise<void> {
     if (this.materialized) return;
-    const context: Context = {};
-    for (const operation of this.operations) await operation(context, this);
-    this.materialized = true;
+    if(this.materialization)return await this.materialization;
+    this.materialization=(async()=>{
+      const context: Context = {};
+        for (const operation of this.operations) await operation(context, this);
+        this.materialized = true;
+    })();
+    return await this.materialization;
+  }
+  private addMaterialized(ix:TransactionInstruction,action?:TransactionAction):this{return super.add(ix,action);}
+  private addManyMaterialized(ixs:TransactionInstruction[],action?:TransactionAction):this{return super.addMany(ixs,action);}
+  override add(ix:TransactionInstruction,action?:TransactionAction):this{
+    return this.addOperation(async()=>{super.add(ix,action);});
+  }
+  override addMany(ixs:TransactionInstruction[],action?:TransactionAction):this{
+    const captured=[...ixs];return this.addOperation(async()=>{super.addMany(captured,action);});
   }
   async materializedDraft() {
     await this.materialize();
@@ -182,7 +244,7 @@ export class TransactionComposer extends TransactionBuilder {
     return this.addOperation(async (_ctx, tx) => {
       const token = await this.composerHost.resolveTokenForExecution(ref);
       const plan = await this.composerHost.resolveClaim(token, tx.payer());
-      tx.addMany(plan.instructions, {
+      tx.addManyMaterialized(plan.instructions, {
         kind: "claim",
         mint: new PublicKey(token.mint),
         meta: {
@@ -213,6 +275,7 @@ export class TransactionComposer extends TransactionBuilder {
     ref: TokenRef,
     amount: HumanAmount,
     options: {
+      outputMinimumRaw?: bigint | string;
       slippageBps?: number;
       minOutputRaw?: bigint | string;
       maxPriceSol?: SolPrice;
@@ -227,9 +290,16 @@ export class TransactionComposer extends TransactionBuilder {
         { reserves: options.reserves },
       );
       const input = toRawAmount(amount);
+      const boundary = await this.spotBoundary(market);
       if (options.maxPriceSol != null && input.asset.kind !== "native-sol")
         throw new Error("maxPriceSol requires SOL-funded input");
-      const totalSlippageBps = options.slippageBps ?? 1500;
+      let outputMinimumRaw = options.outputMinimumRaw;
+      if (options.maxPriceSol != null && options.slippageBps == null) {
+        if (token.decimals == null) throw new Error("Verified token decimals are required for a SOL price guard");
+        const priceMinimum = minimumBuyOutputForPrice(input.raw, token.decimals, options.maxPriceSol);
+        if (outputMinimumRaw == null || priceMinimum > BigInt(outputMinimumRaw)) outputMinimumRaw = priceMinimum;
+      }
+      const totalSlippageBps = this.spotLimit?.additionalSlippageBps ?? options.slippageBps ?? 1500;
       let quoteInput = input;
       let fundingRoute: Record<string, unknown> | null = null;
 
@@ -243,7 +313,12 @@ export class TransactionComposer extends TransactionBuilder {
             market.quoteAsset.mint.toBase58(),
           );
 
-        const perLegBps = legSlippageBps(totalSlippageBps);
+        // A price-only order must not silently discard ~8% of its buying power
+        // through the default 15% split tolerance. Protect funding at its quote
+        // when no percentage tolerance was requested; the final absolute floor
+        // is still encoded separately. Never spend pre-existing quote holdings.
+        const perLegBps = outputMinimumRaw != null && options.slippageBps == null
+          ? 0 : legSlippageBps(totalSlippageBps);
         const funding = await this.conversionLeg("buy", market.quoteAsset.mint, input.raw, perLegBps, [token.mint], ["pump-curve", "pumpswap"].includes(market.venue));
         const fundingQuote = { minimumOutputRaw: funding.minimumOutputRaw };
         const fundingBuilt = { instructions: funding.instructions, minOutputRaw: funding.minimumOutputRaw };
@@ -251,7 +326,7 @@ export class TransactionComposer extends TransactionBuilder {
         // remains one target-token BUY for accounting, while the transaction is
         // atomic. The second leg consumes only the guaranteed first-leg output,
         // so pre-existing quote-token holdings cannot be spent.
-        tx.addMany(fundingBuilt.instructions);
+        tx.addManyMaterialized(fundingBuilt.instructions);
         tx.track({
           address: getAssociatedTokenAddressSync(
             funding.market.mint,
@@ -276,21 +351,28 @@ export class TransactionComposer extends TransactionBuilder {
         };
       }
 
-      const targetSlippageBps = fundingRoute
+      const targetSlippageBps = outputMinimumRaw != null ? 0 : fundingRoute
         ? legSlippageBps(totalSlippageBps)
         : totalSlippageBps;
-      const quote = await plugin.quoteBuy(
+      const quote = await tradeStep(`${token.mint} ${market.venue} buy quote`, () => plugin.quoteBuy(
         {
           connection: this.composerHost.connection(),
           token,
           user: tx.payer(),
           reserves: options.reserves,
+          boundaryPriceQuotePerToken: boundary,
         },
         market,
         quoteInput,
         targetSlippageBps,
-      );
-      const built = await plugin.buildBuy(
+      ));
+      if (this.spotLimit) {
+        if (outputMinimumRaw == null || quote.minimumOutputRaw > BigInt(outputMinimumRaw)) outputMinimumRaw = quote.minimumOutputRaw;
+        quote.meta = {...quote.meta,spotTriggerPriceSol:this.spotLimit.priceSol,
+          additionalSlippageBps:this.spotLimit.additionalSlippageBps,boundaryExpectedOutputRaw:quote.expectedOutputRaw.toString()};
+      }
+      setOutputMinimum(quote, outputMinimumRaw, this.limitPreparationFor(market));
+      const built = await tradeStep(`${token.mint} ${market.venue} buy instructions`, () => plugin.buildBuy(
         {
           connection: this.composerHost.connection(),
           token,
@@ -299,7 +381,8 @@ export class TransactionComposer extends TransactionBuilder {
         },
         market,
         quote,
-      );
+      ));
+      assertTradeMinimum(built.minOutputRaw ?? quote.minimumOutputRaw, outputMinimumRaw);
       assertTradeMinimum(
         built.minOutputRaw ?? quote.minimumOutputRaw,
         options.minOutputRaw,
@@ -311,7 +394,7 @@ export class TransactionComposer extends TransactionBuilder {
         token.decimals,
         options.maxPriceSol,
       );
-      tx.addMany(built.instructions, {
+      tx.addManyMaterialized(built.instructions, {
         kind: "buy",
         mint: market.mint,
         meta: {
@@ -359,6 +442,7 @@ export class TransactionComposer extends TransactionBuilder {
     options: {
       bps?: number;
       amountRaw?: bigint | string;
+      outputMinimumRaw?: bigint | string;
       slippageBps?: number;
       minOutputLamports?: bigint | string;
       minPriceSol?: SolPrice;
@@ -409,23 +493,42 @@ export class TransactionComposer extends TransactionBuilder {
         throw new Error(
           "closeTokenAccount requires selling the entire token-account balance",
         );
-      const totalSlippageBps = options.slippageBps ?? 1500;
+      let outputMinimumRaw = options.outputMinimumRaw;
+      if (options.minPriceSol != null && options.slippageBps == null) {
+        if (token.decimals == null) throw new Error("Verified token decimals are required for a SOL price guard");
+        const priceMinimum = minimumSellOutputForPrice(input, token.decimals, options.minPriceSol);
+        for (const minimum of [priceMinimum, options.minOutputLamports]) {
+          if (minimum != null && (outputMinimumRaw == null || BigInt(minimum) > BigInt(outputMinimumRaw)))
+            outputMinimumRaw = BigInt(minimum);
+        }
+      }
+      const totalSlippageBps = this.spotLimit?.additionalSlippageBps ?? options.slippageBps ?? 1500;
       const needsExitRouting = market.quoteAsset.kind === "spl-token";
-      const targetSlippageBps = needsExitRouting
+      const boundary = await this.spotBoundary(market);
+      const targetSlippageBps = outputMinimumRaw != null ? 0 : needsExitRouting
         ? legSlippageBps(totalSlippageBps)
         : totalSlippageBps;
-      const quote = await plugin.quoteSell(
+      const quote = await tradeStep(`${token.mint} ${market.venue} sell quote`, () => plugin.quoteSell(
         {
           connection: this.composerHost.connection(),
           token,
           user: tx.payer(),
           reserves: options.reserves,
+          boundaryPriceQuotePerToken: boundary,
         },
         market,
         input,
         targetSlippageBps,
-      );
-      const built = await plugin.buildSell(
+      ));
+      this.limitPreparationFor(market);
+      if (this.spotLimit) {
+        quote.meta = {...quote.meta,spotTriggerPriceSol:this.spotLimit.priceSol,
+          additionalSlippageBps:this.spotLimit.additionalSlippageBps,boundaryExpectedOutputRaw:quote.expectedOutputRaw.toString()};
+        setOutputMinimum(quote, quote.minimumOutputRaw, true);
+        if (!needsExitRouting && (outputMinimumRaw == null || quote.minimumOutputRaw > BigInt(outputMinimumRaw))) outputMinimumRaw = quote.minimumOutputRaw;
+      }
+      if (!needsExitRouting) setOutputMinimum(quote, outputMinimumRaw, this.preparedLimitOrder);
+      const built = await tradeStep(`${token.mint} ${market.venue} sell instructions`, () => plugin.buildSell(
         {
           connection: this.composerHost.connection(),
           token,
@@ -434,13 +537,14 @@ export class TransactionComposer extends TransactionBuilder {
         },
         market,
         quote,
-      );
+      ));
 
       let exitRoute: Record<string, unknown> | null = null;
       if (needsExitRouting) {
-        const exit = await this.conversionLeg("sell", market.quoteAsset.mint, built.minOutputRaw ?? quote.minimumOutputRaw, legSlippageBps(totalSlippageBps), [token.mint], ["pump-curve", "pumpswap"].includes(market.venue));
+        const exit = await this.conversionLeg("sell", market.quoteAsset.mint, built.minOutputRaw ?? quote.minimumOutputRaw, legSlippageBps(totalSlippageBps), [token.mint], ["pump-curve", "pumpswap"].includes(market.venue), outputMinimumRaw);
         const exitQuote = { minimumOutputRaw: exit.minimumOutputRaw, expectedOutputRaw: exit.expectedOutputRaw };
         const exitBuilt = { instructions: exit.instructions, minOutputRaw: exit.minimumOutputRaw, expectedOutputRaw: exit.expectedOutputRaw };
+        assertTradeMinimum(exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw, outputMinimumRaw);
         assertTradeMinimum(
           exitBuilt.minOutputRaw ?? exitQuote.minimumOutputRaw,
           options.minOutputLamports,
@@ -452,8 +556,8 @@ export class TransactionComposer extends TransactionBuilder {
           token.decimals,
           options.minPriceSol,
         );
-        tx.addMany(built.instructions);
-        tx.addMany(exitBuilt.instructions, {
+        tx.addManyMaterialized(built.instructions);
+        tx.addManyMaterialized(exitBuilt.instructions, {
           kind: "sell",
           mint: market.mint,
           meta: {
@@ -472,12 +576,15 @@ export class TransactionComposer extends TransactionBuilder {
             expectedOutputRaw: (
               exitBuilt.expectedOutputRaw ?? exitQuote.expectedOutputRaw
             ).toString(),
-            totalSlippageBps,
+            ...(this.spotLimit ? {spotTriggerPriceSol:this.spotLimit.priceSol,
+              additionalSlippageBps:this.spotLimit.additionalSlippageBps,boundaryExpectedOutputRaw:quote.meta?.boundaryExpectedOutputRaw} : {}),
+            totalSlippageBps: outputMinimumRaw != null ? null : totalSlippageBps,
+            absoluteMinimumOutputRaw: outputMinimumRaw?.toString(),
             lookupTableAddresses: conversionLookupTables(exit.legs, built.meta),
             exitRoute: {
               venue: exit.market.venue,
               quoteMint: market.quoteAsset.mint.toBase58(),
-              slippageBps: legSlippageBps(totalSlippageBps),
+              slippageBps: outputMinimumRaw != null ? 0 : legSlippageBps(totalSlippageBps),
               legs: exit.legs,
             },
           },
@@ -495,6 +602,7 @@ export class TransactionComposer extends TransactionBuilder {
         });
         tx.track({ address: tx.payer(), kind: "sol" });
       } else {
+        assertTradeMinimum(built.minOutputRaw ?? quote.minimumOutputRaw, outputMinimumRaw);
         assertTradeMinimum(
           built.minOutputRaw ?? quote.minimumOutputRaw,
           options.minOutputLamports,
@@ -506,7 +614,7 @@ export class TransactionComposer extends TransactionBuilder {
           token.decimals,
           options.minPriceSol,
         );
-        tx.addMany(built.instructions, {
+        tx.addManyMaterialized(built.instructions, {
           kind: "sell",
           mint: market.mint,
           meta: {
@@ -544,7 +652,7 @@ export class TransactionComposer extends TransactionBuilder {
           throw new Error(
             "Token account cannot be closed by this wallet or contains withheld fees",
           );
-        tx.add(
+        tx.addMaterialized(
           closeTokenAccountIx({
             account: address,
             owner: tx.payer(),
@@ -582,7 +690,7 @@ export class TransactionComposer extends TransactionBuilder {
         typeof options.destination === "string"
           ? new PublicKey(options.destination)
           : (options.destination ?? tx.payer());
-      tx.add(
+      tx.addMaterialized(
         closeTokenAccountIx({
           account: accountKey,
           owner: tx.payer(),
@@ -620,7 +728,7 @@ export class TransactionComposer extends TransactionBuilder {
         if (!account) return;
       }
 
-      tx.addMany(unwrap.instructions, {
+      tx.addManyMaterialized(unwrap.instructions, {
         kind: "unwrap-wsol",
         mint: unwrap.mint,
         recipient: unwrap.destination,
@@ -642,7 +750,7 @@ export class TransactionComposer extends TransactionBuilder {
       const input = toRawAmount(amount);
       if (input.asset.kind !== "native-sol")
         throw new Error("transferSol requires a native SOL amount");
-      tx.add(transferSolIx(tx.payer(), destination, input.raw), {
+      tx.addMaterialized(transferSolIx(tx.payer(), destination, input.raw), {
         kind: "transfer-sol",
         recipient: destination,
         meta: { raw: input.raw.toString() },
@@ -692,7 +800,7 @@ export class TransactionComposer extends TransactionBuilder {
           tokenProgram: market.baseTokenProgram,
           source: source.source,
         });
-        tx.addMany(transfer.instructions, {
+        tx.addManyMaterialized(transfer.instructions, {
           kind: "transfer-token",
           mint: market.mint,
           recipient: destination,
@@ -724,7 +832,7 @@ export class TransactionComposer extends TransactionBuilder {
         decimals: decimalsOr(token.decimals, 6),
         tokenProgram: market.baseTokenProgram,
       });
-      tx.addMany(transfer.instructions, {
+      tx.addManyMaterialized(transfer.instructions, {
         kind: "transfer-token",
         mint: market.mint,
         recipient: destination,
@@ -797,7 +905,7 @@ export class TransactionComposer extends TransactionBuilder {
           tokenProgram: market.baseTokenProgram,
         });
 
-        tx.addMany(transfer.instructions, {
+        tx.addManyMaterialized(transfer.instructions, {
           kind: "transfer-token",
           mint: market.mint,
           recipient: destination,
@@ -906,7 +1014,7 @@ export class TransactionComposer extends TransactionBuilder {
           tokenProgram: market.baseTokenProgram,
         });
 
-        tx.addMany(transfer.instructions, {
+        tx.addManyMaterialized(transfer.instructions, {
           kind: "transfer-token",
           mint: market.mint,
           recipient: allocation.recipient,
@@ -958,6 +1066,7 @@ export class BatchComposer {
     token: TokenRef,
     amount: HumanAmount,
     options?: {
+      outputMinimumRaw?: bigint | string;
       slippageBps?: number;
       minOutputRaw?: bigint | string;
       maxPriceSol?: SolPrice;
@@ -972,6 +1081,7 @@ export class BatchComposer {
     options?: {
       bps?: number;
       amountRaw?: bigint | string;
+      outputMinimumRaw?: bigint | string;
       slippageBps?: number;
       minOutputLamports?: bigint | string;
       minPriceSol?: SolPrice;

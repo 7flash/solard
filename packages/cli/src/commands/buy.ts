@@ -1,5 +1,7 @@
+import { hasOutputMinimum, parseOutputMinimum } from "./trade-minimum.ts";
 import {
   executeJupiterSwap,
+  minimumBuyOutputForPrice,
   NATIVE_SOL_MINT,
   nativePumpTradeAvailable,
   quoteJupiterSwap,
@@ -74,7 +76,7 @@ export async function runSmartBuyCommand({
 }: RunSmartBuyCommandArgs): Promise<SmartBuyCommandResult> {
   const tokenRef = values[0];
   const usage =
-    "Usage: slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) --sol <amount> [--venue auto|native|jupiter]";
+    "Usage: slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <group>) --sol <amount> [--venue auto|native|jupiter] [--max-price-sol <SOL/token>] [--min-out <amount> | --min-out-raw <units> | --slippage-bps N]";
   if (!tokenRef) throw new Error(usage);
 
   const amountSol = flags.get("sol");
@@ -98,6 +100,20 @@ export async function runSmartBuyCommand({
     );
   }
 
+  const maxPriceSol = flags.get("max-price-sol");
+  if (flags.has("max-price-sol") && (!maxPriceSol || maxPriceSol === "true"))
+    throw new Error("--max-price-sol requires a positive SOL price per token");
+  if (maxPriceSol != null && flags.has("slippage-bps"))
+    throw new Error("Use --max-price-sol instead of --slippage-bps");
+  let outputMinimumRaw = parseOutputMinimum(flags, resolution.asset.decimals);
+  if (maxPriceSol != null) {
+    const priceMinimum = minimumBuyOutputForPrice(amount.raw, resolution.asset.decimals, maxPriceSol);
+    if (outputMinimumRaw == null || priceMinimum > outputMinimumRaw) outputMinimumRaw = priceMinimum;
+  }
+  if ((hasOutputMinimum(flags) || maxPriceSol != null) && resolution.route !== "native") {
+    throw new Error("Absolute minimum output is currently supported on native Pump/PumpSwap routes; Jupiter orders do not expose a verified on-chain minimum");
+  }
+
   if (resolution.route === "native") {
     if (!nativePumpTradeAvailable(resolution.token)) {
       throw new Error(
@@ -107,6 +123,8 @@ export async function runSmartBuyCommand({
 
     const options = {
       ...tradeFeeOptions(flags),
+      outputMinimumRaw,
+      maxPriceSol,
       slippageBps: intFlag(flags, "slippage-bps", 1_500),
       via: (flags.get("sender") ?? "rpc") as SenderId,
       skipSimulation: flags.has("skip-simulation"),
@@ -140,6 +158,8 @@ export async function runSmartBuyCommand({
             ...(await slrd.simulatePlan(prepared.plan)),
             priorityMicroLamports: prepared.priorityMicroLamports,
             cuLimit: prepared.plan.draft.cuLimit ?? 600_000,
+            requestedMinimumOutputRaw: outputMinimumRaw?.toString(),
+            guaranteedOutputRaw: prepared.plan.draft.actions.find(action => action.kind === "buy")?.meta?.minOutputRaw,
           };
         }),
       );

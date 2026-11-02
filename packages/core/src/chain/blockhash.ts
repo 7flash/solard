@@ -14,15 +14,22 @@ export class BlockhashCache {
     Connection,
     Promise<BlockhashWithExpiryBlockHeight>
   >();
-  constructor(private readonly ttlMs = 1000) {}
+  // A blockhash stays valid for ~150 slots (~60s). Serving one up to 20s old costs nothing in
+  // landing odds and keeps trades off the RPC queue; a failed refresh falls back to one up to 45s old.
+  constructor(
+    private readonly ttlMs = 20_000,
+    private readonly fallbackMs = 45_000,
+  ) {}
 
   async get(connection: Connection): Promise<BlockhashWithExpiryBlockHeight> {
-    if (
-      this.current?.connection === connection &&
-      Date.now() - this.current.at < this.ttlMs
-    )
-      return this.current.value;
-    return this.refresh(connection);
+    const current = this.current?.connection === connection ? this.current : undefined;
+    if (current && Date.now() - current.at < this.ttlMs) return current.value;
+    try {
+      return await this.refresh(connection);
+    } catch (error) {
+      if (current && Date.now() - current.at < this.fallbackMs) return current.value;
+      throw error;
+    }
   }
 
   private refresh(

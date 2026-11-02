@@ -1,4 +1,6 @@
 import {
+  RpcPacer,
+  createRpcPacer,
   createTraderSolard as createCoreSolard,
   type ClaimCreatorRewardsOptions,
   type CreatorRewardClaimResult,
@@ -43,9 +45,13 @@ import {
   type TradeListener,
 } from "./live.ts";
 
-export type SolardOptions = {
+export type SolardOptions = import('@solard/core').EventSourceOptions & {
+  rpc?: import('@solard/core').RpcPacingOptions | RpcPacer;
+  fetch?: import('@solana/web3.js').FetchFn;
+  transactionVersion?: 0 | 1;
   rpcUrl?: string;
   rpcUrls?: readonly string[];
+  websocketUrls?: readonly string[];
   dbPath?: string;
   cacheTtlMs?: number;
 };
@@ -62,6 +68,7 @@ export type SolardHistoryApi = {
 };
 
 export type SolardEventsApi = {
+  subscribeToken: ReturnType<typeof createCoreSolard>["events"]["subscribeToken"];
   (
     token: TokenRef,
     options?: ReplayEventsOptions,
@@ -96,13 +103,23 @@ export type SolardTradeExecutionOptions = TradeExecutionOptions;
 
 export type SolardTradeExecutionResult = TradeResult;
 export type Solard = {
+  tx:ReturnType<typeof createCoreSolard>['tx'];
+  compileGroups:ReturnType<typeof createCoreSolard>['compileGroups'];
+  simulatePlan:ReturnType<typeof createCoreSolard>['simulatePlan'];
+  sendBatchPlans:ReturnType<typeof createCoreSolard>['sendBatchPlans'];
+  prepareFastTrade: ReturnType<typeof createCoreSolard>["prepareFastTrade"];
   listenTrades(
     options?: Omit<ListenTradesOptions, "tokens"> & {
       tokens?: readonly string[];
     },
   ): Promise<TradeListener>;
   prepareUnsignedBuy: ReturnType<typeof createCoreSolard>["prepareUnsignedBuy"];
+  prepareUnsignedTokenDeployment: ReturnType<typeof createCoreSolard>["prepareUnsignedTokenDeployment"];
+  resolvePumpLaunchQuote: ReturnType<typeof createCoreSolard>["resolvePumpLaunchQuote"];
+  simulateUnsignedTokenDeployment: ReturnType<typeof createCoreSolard>["simulateUnsignedTokenDeployment"];
   simulateUnsignedBuy: ReturnType<typeof createCoreSolard>["simulateUnsignedBuy"];
+  prepareUnsignedSell: ReturnType<typeof createCoreSolard>["prepareUnsignedSell"];
+  simulateUnsignedSell: ReturnType<typeof createCoreSolard>["simulateUnsignedSell"];
   proposeUnsignedBuyLookupTable: ReturnType<typeof createCoreSolard>["proposeUnsignedBuyLookupTable"];
   resolveCurrentMarket: ReturnType<
     typeof createCoreSolard
@@ -168,6 +185,8 @@ export type Solard = {
   createVanityWallet: ReturnType<typeof createCoreSolard>["createVanityWallet"];
   importWallet: ReturnType<typeof createCoreSolard>["importWallet"];
   listWallets: ReturnType<typeof createCoreSolard>["listWallets"];
+  ignoreWallet: ReturnType<typeof createCoreSolard>["ignoreWallet"];
+  unignoreWallet: ReturnType<typeof createCoreSolard>["unignoreWallet"];
   walletAddress(wallet: WalletRef): string;
   exportPrivateKey(
     wallet: WalletRef,
@@ -272,6 +291,7 @@ async function executeTrade(
 }
 
 export function createSolard(options: SolardOptions = {}): Solard {
+  if(options.rpc||options.fetch)options={...options,rpc:options.rpc instanceof RpcPacer?options.rpc:createRpcPacer(options.rpc,options.fetch)};
   const core = createCoreSolard(options);
   const history: SolardHistoryApi = Object.freeze({
     replay: (token, replayOptions) => core.history.replay(token, replayOptions),
@@ -281,23 +301,38 @@ export function createSolard(options: SolardOptions = {}): Solard {
   const events = Object.assign(
     (token: TokenRef, eventOptions: ReplayEventsOptions = {}) =>
       core.events(token, eventOptions),
-    { merge: core.events.merge },
+    { merge: core.events.merge, subscribeToken: core.events.subscribeToken },
   ) as SolardEventsApi;
   return Object.freeze({
+    tx:core.tx.bind(core),
+    compileGroups:core.compileGroups.bind(core),
+    simulatePlan:core.simulatePlan.bind(core),
+    sendBatchPlans:core.sendBatchPlans.bind(core),
     listenTrades: (
       listenerOptions: Omit<ListenTradesOptions, "tokens"> & {
         tokens?: readonly string[];
       } = {},
     ) =>
       openTradeListener({
+        source: options.source,
+        sqd: options.sqd,
+        rpc: options.rpc,
+        fetch: options.fetch,
+        websocketUrls: listenerOptions.websocketUrls ?? options.websocketUrls,
         rpcUrls:
           options.rpcUrls ?? (options.rpcUrl ? [options.rpcUrl] : undefined),
         dbPath: options.dbPath,
         ...listenerOptions,
         tokens: listenerOptions.tokens ?? [],
       }),
+    prepareFastTrade: core.prepareFastTrade.bind(core),
     prepareUnsignedBuy: core.prepareUnsignedBuy.bind(core),
+    prepareUnsignedTokenDeployment: core.prepareUnsignedTokenDeployment.bind(core),
+    resolvePumpLaunchQuote: core.resolvePumpLaunchQuote.bind(core),
+    simulateUnsignedTokenDeployment: core.simulateUnsignedTokenDeployment.bind(core),
     simulateUnsignedBuy: core.simulateUnsignedBuy.bind(core),
+    prepareUnsignedSell: core.prepareUnsignedSell.bind(core),
+    simulateUnsignedSell: core.simulateUnsignedSell.bind(core),
     proposeUnsignedBuyLookupTable: core.proposeUnsignedBuyLookupTable.bind(core),
     resolveCurrentMarket: core.resolveCurrentMarket.bind(core),
     getClaimableCreatorFees: core.getClaimableCreatorFees.bind(core),
@@ -337,6 +372,8 @@ export function createSolard(options: SolardOptions = {}): Solard {
     createVanityWallet: core.createVanityWallet.bind(core),
     importWallet: core.importWallet.bind(core),
     listWallets: core.listWallets.bind(core),
+    ignoreWallet: core.ignoreWallet.bind(core),
+    unignoreWallet: core.unignoreWallet.bind(core),
     walletAddress: core.walletAddress.bind(core),
     exportPrivateKey: core.exportWalletPrivateKey.bind(core),
     addToken: core.addToken.bind(core),

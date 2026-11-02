@@ -16,7 +16,7 @@ export class PriceGuardRejected extends Error {
   }
 }
 
-function fraction(price: SolPrice): { numerator: bigint; denominator: bigint } {
+export function fraction(price: SolPrice): { numerator: bigint; denominator: bigint } {
   const match = /^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(
     String(price).trim(),
   );
@@ -34,6 +34,28 @@ function fraction(price: SolPrice): { numerator: bigint; denominator: bigint } {
   return exponent >= 0
     ? { numerator: numerator * 10n ** BigInt(exponent), denominator: 1n }
     : { numerator, denominator: 10n ** BigInt(-exponent) };
+}
+
+export function minimumBuyOutputForPrice(inputLamports: bigint, tokenDecimals: number, maxPriceSol: SolPrice): bigint {
+  if (inputLamports <= 0n || !Number.isInteger(tokenDecimals) || tokenDecimals < 0 || tokenDecimals > 255)
+    throw new Error("Positive SOL input and verified token decimals are required");
+  const price = fraction(maxPriceSol);
+  const numerator = inputLamports * 10n ** BigInt(tokenDecimals) * price.denominator;
+  const denominator = price.numerator * 1_000_000_000n;
+  const minimum = (numerator + denominator - 1n) / denominator;
+  if (minimum > 0xffffffffffffffffn) throw new Error("Price limit requires more than u64 token output");
+  return minimum;
+}
+
+export function minimumSellOutputForPrice(inputRaw: bigint, tokenDecimals: number, minPriceSol: SolPrice): bigint {
+  if (inputRaw <= 0n || !Number.isInteger(tokenDecimals) || tokenDecimals < 0 || tokenDecimals > 255)
+    throw new Error("Positive token input and verified token decimals are required");
+  const price = fraction(minPriceSol);
+  const numerator = inputRaw * price.numerator * 1_000_000_000n;
+  const denominator = price.denominator * 10n ** BigInt(tokenDecimals);
+  const minimum = (numerator + denominator - 1n) / denominator;
+  if (minimum > 0xffffffffffffffffn) throw new Error("Price limit requires more than u64 SOL output");
+  return minimum;
 }
 
 /** Compare worst-case principal price with integer arithmetic, excluding fees/rent. */

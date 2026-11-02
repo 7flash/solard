@@ -1,3 +1,4 @@
+import { isDefinitivePreSubmissionError } from "../core/errors.ts";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   NATIVE_MINT,
@@ -11,6 +12,7 @@ import {
 import { PublicKey } from "@solana/web3.js";
 
 import type { Solard } from "../core/solard.ts";
+import { resolveLiquidationMarket } from "./liquidation-routing.ts";
 import type { TokenRow } from "../db/schema.ts";
 import type {
   SendReceipt,
@@ -143,6 +145,8 @@ export type RegistryTokenLiquidationOptions = {
   routeDelayMs?: number;
   portfolioConcurrency?: number;
   portfolioDelayMs?: number;
+  /** Defer rent cleanup until every selected wallet has had a sell pass. */
+  cleanup?: boolean;
   /** Try Jupiter when native routing/build/execution fails. */
   jupiterFallback?: boolean;
   /** Explicitly destroy unprotected unsellable balances so their accounts can close. */
@@ -1117,14 +1121,7 @@ export async function planRegistryTokenLiquidation(
     });
     let nativeError: string | null = null;
     try {
-      const mint = new PublicKey(holding.mint);
-      const inspected = await slrd.venues.inspect(slrd.connection(), mint);
-      const token = ephemeralToken(holding, inspected);
-      const routed = await slrd.route(token, PublicKey.default);
-      mintRoutes.set(holding.mint, {
-        token,
-        venue: String(routed.market.venue),
-      });
+      mintRoutes.set(holding.mint, await resolveLiquidationMarket(slrd, holding));
     } catch (error) {
       nativeError = error instanceof Error ? error.message : String(error);
     }
@@ -1468,7 +1465,7 @@ export async function executeRegistryTokenLiquidation(
             result = { action, receipt };
           } catch (error) {
             routeError = error;
-            if (options.jupiterFallback !== false) {
+            if (options.jupiterFallback !== false && isDefinitivePreSubmissionError(error)) {
               const amountRaw = await associatedSellableAmount(
                 slrd,
                 action.walletAddress,
@@ -1631,6 +1628,8 @@ export async function executeRegistryTokenLiquidation(
 
     await pause(delayMs);
   }
+
+  if (options.cleanup === false) return out;
 
   const walletRows = Array.from(
     new Map(

@@ -6,12 +6,48 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 
-import { normalizeZeroSlippageSdkBuyToExactQuoteIn } from "./pumpswap-venue.ts";
+import { normalizeZeroSlippageSdkBuyToExactQuoteIn, applyPumpSwapOutputMinimum } from "./pumpswap-venue.ts";
+import { SOL_ASSET } from "../../core/amounts.ts";
+import { setOutputMinimum } from "../../tx/trade-minimum.ts";
 import {
   AMM_BUY_D8,
   AMM_BUY_EXACT_QUOTE_IN_D8,
+  AMM_SELL_D8,
   PUMP_AMM_PROGRAM_ID,
 } from "./constants.ts";
+
+test("prepared buy/sell floors remain encoded even while the quote is outside the limit", () => {
+  for (const discriminator of [AMM_BUY_EXACT_QUOTE_IN_D8, AMM_SELL_D8]) {
+    const instruction = new TransactionInstruction({programId:PUMP_AMM_PROGRAM_ID,keys:[],data:buyData(discriminator,100n,200n)});
+    const quote={venue:"pumpswap",quoteAsset:SOL_ASSET,inputRaw:100n,expectedOutputRaw:200n,minimumOutputRaw:200n,meta:{}};
+    setOutputMinimum(quote,300n,true);
+    const fresh={instructions:[instruction],expectedOutputRaw:150n,minimumOutputRaw:150n};
+    applyPumpSwapOutputMinimum(fresh,quote,discriminator);
+    expect(instruction.data.readBigUInt64LE(8)).toBe(100n);
+    expect(instruction.data.readBigUInt64LE(16)).toBe(300n);
+    expect(fresh.minimumOutputRaw).toBe(300n);
+    expect(quote.expectedOutputRaw).toBe(150n);
+  }
+});
+
+test("absolute buy/sell floors survive refresh in actual instruction bytes", () => {
+  for (const discriminator of [AMM_BUY_EXACT_QUOTE_IN_D8, AMM_SELL_D8]) {
+    const instruction = new TransactionInstruction({ programId: PUMP_AMM_PROGRAM_ID,
+      keys: [], data: buyData(discriminator, 100n, 200n) });
+    const fresh = { instructions: [instruction], expectedOutputRaw: 200n, minimumOutputRaw: 200n };
+    const quote = { venue: "pumpswap", quoteAsset: SOL_ASSET, inputRaw: 100n,
+      expectedOutputRaw: 220n, minimumOutputRaw: 180n, meta: {} };
+    setOutputMinimum(quote, 191n);
+    applyPumpSwapOutputMinimum(fresh, quote, discriminator);
+    expect(instruction.data.readBigUInt64LE(8)).toBe(100n);
+    expect(instruction.data.readBigUInt64LE(16)).toBe(191n);
+    expect(fresh.minimumOutputRaw).toBe(191n);
+    quote.expectedOutputRaw = 220n;
+    setOutputMinimum(quote, 210n);
+    expect(() => applyPumpSwapOutputMinimum(fresh, quote, discriminator)).toThrow();
+    expect(instruction.data.readBigUInt64LE(16)).toBe(191n);
+  }
+});
 
 function buyData(
   discriminator: Buffer,

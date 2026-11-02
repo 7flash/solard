@@ -1,5 +1,9 @@
 import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { readMint } from "../chain/state.ts";
+import { createSolardMeasure } from "../core/log.ts";
+import { measured } from "../core/measured.ts";
+import { applyJupiterMinimum } from "./jupiter-minimum.ts";
+const jupiterMeasure = createSolardMeasure("jupiter-instructions");
 import { SOL_ASSET, type RawAmount } from "../core/amounts.ts";
 import type {
   TradeVenuePlugin,
@@ -52,9 +56,9 @@ export class JupiterVenue implements TradeVenuePlugin {
           JupiterVenue.lastRequest = Date.now();
         });
         JupiterVenue.gate = slot.catch(() => {});
-        await slot;
+        await measured(jupiterMeasure, `${path.split("?")[0]} rate-limit queue`, async () => { await slot; return true; }, () => undefined);
       }
-      response = await this.request(`${root.replace(/\/$/, "")}/${path}`, {
+      response = await measured(jupiterMeasure, `${path.split("?")[0]} HTTP attempt ${attempt + 1}`, () => this.request(`${root.replace(/\/$/, "")}/${path}`, {
         ...init,
         signal: AbortSignal.timeout(20_000),
         headers: {
@@ -64,7 +68,7 @@ export class JupiterVenue implements TradeVenuePlugin {
             : {}),
           ...init?.headers,
         },
-      });
+      }), value => ({ status: value.status }));
       if (![429, 502, 503, 504].includes(response.status) || attempt === 2)
         break;
       await new Promise((resolve) =>
@@ -124,7 +128,7 @@ export class JupiterVenue implements TradeVenuePlugin {
     const inputMint = (buy ? SOL_ASSET.mint : market.mint).toBase58();
     const outputMint = (buy ? market.mint : SOL_ASSET.mint).toBase58();
     const raw: WireQuote = await this.api(
-      `quote?${new URLSearchParams({ inputMint, outputMint, amount: inputRaw.toString(), swapMode: "ExactIn", slippageBps: String(slippageBps), ...(process.env.JUPITER_DEXES ? { dexes: process.env.JUPITER_DEXES } : {}) })}`,
+      `quote?${new URLSearchParams({ inputMint, outputMint, amount: inputRaw.toString(), swapMode: "ExactIn", slippageBps: String(slippageBps), maxAccounts: "32", ...(process.env.JUPITER_DEXES ? { dexes: process.env.JUPITER_DEXES } : {}) })}`,
     );
     const output = uint(raw.outAmount);
     const minimum = uint(raw.otherAmountThreshold);
@@ -204,7 +208,7 @@ export class JupiterVenue implements TradeVenuePlugin {
         )
       )
         throw noRoute("Jupiter route requires an unknown signer");
-      return new TransactionInstruction({
+      const instruction = new TransactionInstruction({
         programId: new PublicKey(wire.programId),
         keys: wire.accounts.map((account) => ({
           pubkey: new PublicKey(account.pubkey),
@@ -213,6 +217,9 @@ export class JupiterVenue implements TradeVenuePlugin {
         })),
         data: Buffer.from(wire.data, "base64"),
       });
+      return wire === raw.swapInstruction && quote.meta?.absoluteMinimumOutputRaw != null
+        ? applyJupiterMinimum(instruction, quote.inputRaw, quote.expectedOutputRaw, quote.minimumOutputRaw)
+        : instruction;
     });
     return {
       venue: this.id,

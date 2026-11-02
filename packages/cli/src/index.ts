@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { configure } from "measure-fn";
+import { excludeWalletGroups } from "./wallet-group-filter.ts";
+import { ignoreZeroSolWallets } from "../../core/src/chain/ignore-zero-sol-wallets.ts";
 import {
   addExternalContact,
   createSolardMeasureCollector,
@@ -23,6 +25,7 @@ import {
   type TokenRow,
 } from "@solard/core";
 
+import { activateRpc, effectiveRpc, loadRpcConfig, saveRpcConfig, rpcUrl, safeUrl, probeHttp, probeWs } from "./rpc-management.ts";
 import { handleMeteoraCommand } from "./meteora-commands.ts";
 import { handleAccountingCommand } from "./accounting-commands.ts";
 import { resolveDestinationRef } from "./refs.ts";
@@ -358,7 +361,11 @@ External contacts (public addresses only; never signing wallets or group members
   slrd contact list
   slrd contact show <name|address>
   slrd contact remove <name|address>
-  slrd wallets [--wallet <wallet>] [--group <name>] [--token <token> | --tokens] [--token-totals] [--only-with-tokens] [--rpc-concurrency <n>] [--rpc-delay-ms <n>] [--addresses-only]
+  slrd rpc add http|ws <url> [--group <quota-group>] [--rps N] [--concurrency N]
+  slrd rpc list|test|status|auto on|off|remove http|ws <url>
+  slrd wallets [--wallet <wallet>] [--group <name>] [--except <group1,group2>] [--include-ignored | --ignored-only] [--ignore-zero] [--token <token> | --tokens] [--token-totals] [--only-with-tokens] [--rpc-concurrency <n>] [--rpc-delay-ms <n>] [--addresses-only]
+  slrd wallet ignore <wallet>                         Hide from default lists and automatic wallet scans; retain keys/history
+  slrd wallet unignore <wallet>                       Restore to default lists and scans
                                                         Show SOL by default; token scans are opt-in
   slrd balances --wallet <wallet> [--token <token>] [--show-zero]        Show SOL + all SPL token balances for one wallet
   slrd fees --wallet <wallet> [--since 30m] [--limit 100]               Sum actual on-chain transaction fees paid by this wallet
@@ -442,10 +449,10 @@ Diagnostics
 Trading
   slrd swap --from <SOL|token|mint> --to <SOL|token|mint> --amount <ui> --wallet <wallet> [--live]  Jupiter exact-input any -> any; quote-only unless --live
   slrd swap <token|mint> --wallet <wallet> --sol <amount> [--live]                              Compatibility: SOL -> token
-  slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
+  slrd buy <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) --sol <amount> [--max-price-sol <SOL/token>] [--venue auto|native|jupiter] [--slippage-bps 1500 | --min-out <amount> | --min-out-raw <units>] [--sender rpc|helius|jito] [--simulate-only]
   slrd buy <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) --spam [--live]
   slrd spam-buy [pump] <future-mint> (--wallet <wallet> | --group <name>) (--sol <amount> | --lamports <amount> | --min-bps <n> --max-bps <n>) [--sender <id>] [--live]
-  slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--venue auto|native|jupiter] [--slippage-bps 1500] [--sender rpc|helius|jito] [--simulate-only]
+  slrd sell <token|ca> (--wallet <wallet> | --wallets <w1,w2> | --group <name>) [--bps 10000] [--venue auto|native|jupiter] [--slippage-bps 1500 | --min-out <amount> | --min-out-raw <units>] [--sender rpc|helius|jito] [--simulate-only]
     Native buy/sell and transfer fees: --cu-limit N --priority-micro-lamports N (fixed), or --fee-percentile N --trade-attempts N --fee-multiplier N --max-priority-fee-lamports N (automatic)
   slrd unwrap-wsol (--all-wallets | --wallet <wallet> | --wallets <w1,w2> | --group <name>) [--sender rpc|helius|jito] [--ignore-missing] [--simulate-only]
                                                         Close every owned WSOL token account, including non-ATA WSOL accounts
@@ -542,6 +549,58 @@ async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const { values, flags } = args(rest);
 
+  if (command === "rpc") {
+    const action = values[0] ?? "list";
+    if (action === "add" || action === "remove") {
+      const transport = values[1]; const raw = values[2];
+      if (!raw || (transport !== "http" && transport !== "ws")) throw new Error("Usage: slrd rpc add|remove http|ws <url>");
+      const url = rpcUrl(raw, transport);
+      const config = loadRpcConfig();
+      if (transport === "http") {
+        const index = config.http.findIndex(row => row.url === url);
+        if (action === "remove") { if (index < 0) throw new Error("RPC not configured"); config.http.splice(index, 1); }
+        else if (index < 0) {
+          const hostname = new URL(url).hostname;
+          const group = flags.get("group") ?? hostname;
+          const rps = int(flags, "rps", 5)!, concurrency = int(flags, "concurrency", 3)!;
+          if (!/^[a-zA-Z0-9._:-]{1,100}$/.test(group) || !Number.isSafeInteger(rps) || rps < 1 || !Number.isSafeInteger(concurrency) || concurrency < 1)
+            throw new Error("Invalid RPC provider limits");
+          config.http.push({ url, group, rps, concurrency });
+        }
+      } else {
+        const index = config.websocket.indexOf(url);
+        if (action === "remove") { if (index < 0) throw new Error("WebSocket not configured"); config.websocket.splice(index, 1); }
+        else if (index < 0) config.websocket.push(url);
+      }
+      saveRpcConfig(config); emit("RPC configuration saved; credentials redacted\n"); return;
+    }
+    if (action === "auto") {
+      if (values[1] !== "on" && values[1] !== "off") throw new Error("Usage: slrd rpc auto on|off");
+      const config = loadRpcConfig(); config.auto = values[1] === "on"; saveRpcConfig(config);
+      emit(`RPC automatic selection ${values[1]}\n`); return;
+    }
+    if (action === "list" || action === "status" || action === "test") {
+      const effective = effectiveRpc(flags);
+      const saved = effective.saved;
+      const output: Record<string, unknown> = {
+        source: effective.source, auto: saved.auto,
+        saved: { http: saved.http.map(row => ({ ...row, url: safeUrl(row.url) })), websocket: saved.websocket.map(safeUrl) },
+        effective: { http: effective.http.map(safeUrl), websocket: effective.websocket.map(safeUrl) },
+        aggregateRps: saved.aggregateRps,
+      };
+      if (action !== "list") {
+        const health = [];
+        for (const url of effective.http) health.push(await probeHttp(url));
+        for (const url of effective.websocket) health.push(await probeWs(url));
+        output.health = health;
+        output.active = health.find(row => row.state === "healthy")?.endpoint ?? null;
+        if (!effective.http.length || health.every(row => row.state !== "healthy")) process.exitCode = 1;
+      }
+      emit(json(output) + "\n"); return;
+    }
+    throw new Error("Usage: slrd rpc add|remove|list|test|status|auto");
+  }
+  activateRpc(flags);
   const commandStartedAt = performance.now();
   const measureCollector = createSolardMeasureCollector();
   resetSolardRpcStats();
@@ -1017,8 +1076,15 @@ async function main() {
       throw new Error("Usage: slrd contact <add|list|show|remove> [arguments]");
     }
 
+    if (command === "wallet" && (values[0] === "ignore" || values[0] === "unignore")) {
+      const ref = values[1];
+      if (!ref) throw new Error("Usage: slrd wallet ignore|unignore <wallet>");
+      const wallet = slrd.wallets.setIgnored(ref, values[0] === "ignore");
+      emit(`${values[0] === "ignore" ? "IGNORED" : "RESTORED"}\t@${wallet.name}\t${wallet.address}\n`);
+      return;
+    }
     if (command === "wallet" && values[0] === "create") {
-      const firstWallet = slrd.wallets.list().length === 0;
+      const firstWallet = slrd.wallets.list({ includeIgnored: true }).length === 0;
       const name = values[1] ?? (firstWallet ? "main" : undefined);
       const vanity = flags.has("vanity") ? need(flags, "vanity") : null;
       const vanityResult = vanity
@@ -1123,7 +1189,13 @@ async function main() {
         throw new Error("Use either --token <token> or --tokens, not both.");
       }
 
-      let wallets = slrd.wallets.list();
+      if (flags.has("ignore-zero")) {
+        if (flags.has("wallet") || flags.has("group") || flags.has("except") || flags.has("include-ignored") || flags.has("ignored-only")) throw new Error("--ignore-zero checks all active wallets; do not combine with selection flags");
+        const result = await ignoreZeroSolWallets(slrd.wallets, slrd.connection());
+        emit(json(result) + "\n");
+        return;
+      }
+      let wallets = slrd.wallets.list({ includeIgnored: flags.has("include-ignored") || flags.has("wallet") || command === "balances", ignoredOnly: flags.has("ignored-only") });
       const singleWalletRef =
         flags.get("wallet") ?? (command === "balances" ? values[0] : undefined);
       if (singleWalletRef) {
@@ -1146,6 +1218,11 @@ async function main() {
         wallets = wallets.filter((wallet) => addresses.has(wallet.address));
       }
 
+      if (flags.has("except")) {
+        const value=flags.get("except");
+        if(!value || value==="true")throw Error("Missing --except <group1,group2>");
+        wallets=excludeWalletGroups(wallets,csv(value),slrd.db.groupWallets.select().all(),new Set(slrd.groups.list().map(group=>group.name)));
+      }
       if (flags.has("addresses-only")) {
         for (const wallet of wallets)
           emit(`@${wallet.name}\t${wallet.address}\n`);
@@ -1161,7 +1238,7 @@ async function main() {
         // Cheap native-SOL-only default: <=100 wallets per RPC call.
         const rows: Array<{
           wallet: (typeof wallets)[number];
-          solLamports: bigint;
+          solLamports: bigint | null;
         }> = [];
         const connection = slrd.connection();
         const batchSize = 100;
@@ -1171,34 +1248,27 @@ async function main() {
           const addresses = batch.map(
             (wallet) => slrd.resolveWallet(wallet).address,
           );
-          const accounts = await connection.getMultipleAccountsInfo(
-            addresses,
-            "confirmed",
-          );
-
-          for (let index = 0; index < batch.length; index += 1) {
-            rows.push({
-              wallet: batch[index]!,
-              solLamports: BigInt(accounts[index]?.lamports ?? 0),
+          try {
+            const accounts = await connection.getMultipleAccountsInfo(addresses, "confirmed");
+            if (accounts.length !== batch.length) throw new Error("Truncated account response");
+            for (let index = 0; index < batch.length; index++) rows.push({
+              wallet: batch[index]!, solLamports: BigInt(accounts[index]?.lamports ?? 0),
             });
+          } catch {
+            for (const wallet of batch) rows.push({ wallet, solLamports: null });
           }
         }
 
-        rows.sort((left, right) =>
-          left.solLamports === right.solLamports
-            ? left.wallet.name.localeCompare(right.wallet.name)
-            : left.solLamports > right.solLamports
-              ? -1
-              : 1,
-        );
+        rows.sort((a,b) => a.solLamports === b.solLamports
+          ? a.wallet.name.localeCompare(b.wallet.name)
+          : a.solLamports === null ? 1 : b.solLamports === null ? -1
+            : a.solLamports > b.solLamports ? -1 : 1);
+        const unavailable = rows.filter(row => row.solLamports === null).length;
+        const total = rows.reduce((sum,row) => sum + (row.solLamports ?? 0n), 0n);
+        emit(`TOTAL\tSOL=${unavailable ? "N/A (partial)" : formatRaw(total,9)}\tWALLETS=${rows.length}\tUNAVAILABLE=${unavailable}\n`);
+        for (const { wallet, solLamports } of rows) emit(
+          `@${wallet.name}\t${wallet.address}\tSOL=${solLamports === null ? "N/A (RPC unavailable)" : formatRaw(solLamports,9)}\n`);
 
-        const totalSol = rows.reduce((sum, row) => sum + row.solLamports, 0n);
-        emit(`TOTAL\tSOL=${formatRaw(totalSol, 9)}\tWALLETS=${rows.length}\n`);
-        for (const { wallet, solLamports } of rows) {
-          emit(
-            `@${wallet.name}\t${wallet.address}\tSOL=${formatRaw(solLamports, 9)}\n`,
-          );
-        }
         return;
       }
 
@@ -2328,7 +2398,7 @@ async function main() {
         delayMs: int(flags, "delay-ms", 0) ?? 0,
         routeDelayMs: int(flags, "route-delay-ms", 0) ?? 0,
         portfolioConcurrency: 1,
-        portfolioDelayMs: 0,
+        portfolioDelayMs: Math.max(0, int(flags, "rpc-delay-ms", 2500) ?? 2500),
         jupiterFallback: !flags.has("no-jupiter"),
         burnUnsellable: flags.has("burn-unsellable"),
         onProgress: (event: any) => {
@@ -2386,8 +2456,27 @@ async function main() {
         );
       };
 
-      let plan = await planRegistryTokenLiquidation(slrd, options);
+      const { retryLiquidationRead, runLiquidationWallets } = await import("./liquidation-wallets.ts");
+      const cleanupWallets = new Set<string>();
+      const runWallet = async (walletRef: string, phase: "sales" | "cleanup" = "sales") => {
+      const walletOptions = { ...options, walletRefs: [walletRef], cleanup: phase === "cleanup" };
+
+      const readPlan = () => retryLiquidationRead(
+        () => planRegistryTokenLiquidation(slrd, walletOptions),
+        (attempt, delayMs) => emit(`BACKOFF  @${walletRef} read retry=${attempt} delay=${delayMs}ms\n`),
+      );
+      let plan = await readPlan();
+      if (plan.actions.some(action => action.kind === "close-empty")) cleanupWallets.add(walletRef);
+      if (phase === "cleanup") plan = { ...plan, actions: plan.actions.filter(action => action.kind === "close-empty") };
       emitPlan(plan);
+      if (flags.has("live") && phase === "sales" && !plan.actions.some(action => action.amountRaw > 0n)) {
+        emit(`SELL-PASS @${walletRef} no positive holdings; rent cleanup queued separately\n`);
+        return;
+      }
+      if (plan.actions.length === 0) {
+        emit(`EMPTY    @${walletRef} verified token-account scan; no liquidation work\n`);
+        return;
+      }
 
       if (!flags.has("simulate") && !flags.has("live")) {
         const actionable = plan.actions.filter(
@@ -2447,7 +2536,7 @@ async function main() {
       let finalPlan = plan;
 
       if (flags.has("simulate")) {
-        results = await simulateRegistryTokenLiquidation(slrd, plan, options);
+        results = await simulateRegistryTokenLiquidation(slrd, plan, walletOptions);
       } else {
         const maxRounds = Math.max(
           1,
@@ -2459,9 +2548,12 @@ async function main() {
             emitPlan(plan, "PLAN-R  ");
           }
           results.push(
-            ...(await executeRegistryTokenLiquidation(slrd, plan, options)),
+            ...(await executeRegistryTokenLiquidation(slrd, plan, walletOptions)),
           );
-          finalPlan = await planRegistryTokenLiquidation(slrd, options);
+          finalPlan = await readPlan();
+          if (finalPlan.actions.some(action => action.kind === "close-empty")) cleanupWallets.add(walletRef);
+          if (phase === "cleanup") break;
+          if (results.some(result => result.error)) break;
           const retryable = finalPlan.actions.filter(
             (action) =>
               action.amountRaw > 0n &&
@@ -2530,6 +2622,24 @@ async function main() {
         );
         process.exitCode = 1;
       }
+      if (failed) { process.exitCode = 1; throw new Error(`${failed} liquidation action(s) failed; no automatic repeat`); }
+      };
+      const excluded = new Set(exceptWalletRefs.map(ref => slrd.resolveWallet(ref).address.toBase58()));
+      const selected = (options.walletRefs.length ? options.walletRefs : slrd.listWallets().map(w => w.address))
+        .filter(ref => !excluded.has(slrd.resolveWallet(ref).address.toBase58()));
+      const failures = await runLiquidationWallets(selected, runWallet,
+        (ref, index, total) => emit(`WALLET   ${index}/${total} @${slrd.resolveWallet(ref).row?.name ?? ref}\n`),
+        (ref, error) => emit(`WALLET-FAILED @${ref} ${error instanceof Error ? error.message : String(error)}\n`));
+      if (failures.length) process.exitCode = 1;
+      if (flags.has("live")) {
+        emit(`CLEANUP-PASS selling pass finished; reclaiming rent afterward\n`);
+        const cleanupFailures = await runLiquidationWallets([...cleanupWallets].filter(ref => !failures.includes(ref)),
+          ref => runWallet(ref, "cleanup"),
+          (ref, index, total) => emit(`CLEANUP-WALLET ${index}/${total} @${slrd.resolveWallet(ref).row?.name ?? ref}\n`),
+          (ref, error) => emit(`CLEANUP-FAILED @${ref} ${error instanceof Error ? error.message : String(error)}\n`));
+        if (cleanupFailures.length) process.exitCode = 1;
+      }
+      emit(`REGISTRY wallets=${selected.length} scan-or-execution-errors=${failures.length}\n`);
       return;
     }
 
@@ -3316,7 +3426,11 @@ async function main() {
       `Unknown command: ${command}. Run "slrd help" for available commands.`,
     );
   } finally {
-    slrd.close();
+    try {
+      slrd.close();
+    } finally {
+      printPerfSummary();
+    }
   }
 }
 main().catch((error) => {

@@ -168,6 +168,8 @@ export function reserveVanityMintFromPool(
   options: {
     address?: string | null;
     reason?: string | null;
+    /** Explicitly resume an exact existing reservation owned by this reason. */
+    resumeReason?: string;
   } = {},
   database: SolardDatabase = openDatabase(),
 ): VanityMintPoolReservation {
@@ -179,7 +181,8 @@ export function reserveVanityMintFromPool(
 
     const row = state.entries.find(
       (item) =>
-        item.status === "available" &&
+        (item.status === "available" || (item.status === "reserved" &&
+          !!requestedAddress && !!options.resumeReason && item.reservationReason === options.resumeReason)) &&
         item.suffix === suffix &&
         (!requestedAddress || item.address === requestedAddress),
     );
@@ -204,10 +207,12 @@ export function reserveVanityMintFromPool(
       );
     }
 
-    row.status = "reserved";
-    row.reservedAtMs = Date.now();
-    row.reservationReason = options.reason?.trim() || "launch";
-    writeState(state, db);
+    if (row.status !== "reserved") {
+      row.status = "reserved";
+      row.reservedAtMs = Date.now();
+      row.reservationReason = options.reason?.trim() || "launch";
+      writeState(state, db);
+    }
 
     return {
       ...publicEntry(row),

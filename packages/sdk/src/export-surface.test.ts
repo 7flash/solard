@@ -30,6 +30,11 @@ describe("sdk membrane", () => {
   test("has an exact curated root export surface", () => {
     expect(exportedNames(source)).toEqual({
       values: [
+        "RpcPacer",
+        "createRpcPacer",
+        "composeTransactionDrafts",
+        "observeSolardRpc",
+        "withSolardRpcContext",
         "normalizeValueBandPolicy",
         "planValueBandDecision",
         "valueBandThresholds",
@@ -55,6 +60,20 @@ describe("sdk membrane", () => {
         "tokenAmount",
       ].sort(),
       types: [
+        "EventSource",
+        "EventSourceOptions",
+        "SqdOptions",
+        "SubscribeTokenEventsOptions",
+        "TokenEventSubscription",
+        "SolardTokenEvent",
+        "RpcPacingOptions",
+        "TransactionDraft",
+        "TransactionGroupInput",
+        "PlannedTransaction",
+        "SolardRpcObservation",
+        "SolardRpcContext",
+        "FeedRecoveryVerification",
+        "RecoverableTradeSubscription",
         "SellEconomics",
         "SupportedLaunchLabPair",
         "TradeListenerMigration",

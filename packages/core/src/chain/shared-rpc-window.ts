@@ -1,4 +1,24 @@
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+
+/**
+ * SQLite file that shares RPC rate-limit reservations between every solard
+ * process on this machine, so N bots on one key share its RPS instead of each
+ * spending the full budget. Default: ~/.solard/rpc-gate.sqlite.
+ * SLRD_RPC_GATE_DB=<path> overrides; "", "off" or "memory" keeps it per-process.
+ * bun test (NODE_ENV=test) stays per-process unless the variable is set.
+ */
+export function rpcGateDbPath(): string | undefined {
+  const value = process.env.SLRD_RPC_GATE_DB;
+  if (value !== undefined)
+    return value.trim() && !/^(off|0|false|none|memory)$/i.test(value.trim()) ? value : undefined;
+  if (process.env.NODE_ENV === "test") return undefined;
+  const dir = join(homedir(), ".solard");
+  mkdirSync(dir, { recursive: true });
+  return join(dir, "rpc-gate.sqlite");
+}
 
 export type RpcWindowOptions = {
   maxRequests: number;
@@ -52,6 +72,14 @@ export class SharedRpcWindow {
     sends = 0,
     now = Date.now(),
   ): number {
+    return this.evaluate(options, requests, sends, now, true);
+  }
+  /** Capacity hint only; reserve rechecks atomically before network starts. */
+  delay(options: RpcWindowOptions, requests = 1, sends = 0, now = Date.now()): number {
+    return this.evaluate(options, requests, sends, now, false);
+  }
+  private evaluate(options: RpcWindowOptions, requests: number, sends: number,
+    now: number, commit: boolean): number {
     const maxSends = options.maxSends ?? 1;
     const sendWindowMs = options.sendWindowMs ?? 1000;
     for (const number of [
@@ -74,7 +102,7 @@ export class SharedRpcWindow {
     const attempt = () => {
       let rows: Reservation[];
       if (this.db) {
-        this.db
+        if (commit) this.db
           .query("DELETE FROM solard_rpc_window WHERE at <= ?")
           .run(cutoff);
         rows = this.db
@@ -97,7 +125,7 @@ export class SharedRpcWindow {
         ),
         waitForBudget(rows, now, sendWindowMs, maxSends, sends, "sends"),
       );
-      if (wait === 0) {
+      if (wait === 0 && commit) {
         if (this.db)
           this.db
             .query(

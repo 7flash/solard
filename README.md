@@ -1,8 +1,24 @@
 # Solard (`slrd`)
 
+Wallets can be hidden from default lists and registry RPC scans with
+`slrd wallet ignore <wallet>` and restored with `slrd wallet unignore <wallet>`.
+Use `slrd wallets --ignore-zero` to ignore currently zero-SOL wallets in batched
+reads, or `slrd wallets --ignored-only --addresses-only` to inspect the ignored
+list without RPC calls. Keys and history are retained. See [ignored wallets](docs/wallet-ignore.md).
+
+Replay persistence now declares attribution and coverage fields in its ORM schemas. A transactional pre-open migration preserves existing replay rows and retains original backup tables; unchanged starts do not rebuild them. Historical `_vN` tables are not deleted automatically.
+
+The live allocation console at http://127.0.0.1:3817 supports range edits, new positions, source-timestamped market caps and finalized inventory reconciliation. Its `/rpc` page shows persisted Solard RPC timing and active work. See [Range Console](range-console/README.md) and [RPC observations](docs/rpc-observability.md).
+
+Range allocation bid/ask mode targets 100% tokens at the lower cap, 50% at the midpoint and 100% SOL at the upper cap. A 10% step divides the range into ten intervals. The selected runner accepts `--allocation-config bid-ask-efge.json` to share its SDK wallet queue with the existing range strategies, while preserving separate inventory and journals. Explicit SOL-quoted legacy Raydium AMM v4 pools now support protected exact-input orders through the official SDK instruction builder; registration verifies pool, vaults, mint programs, decimals and reserves. See [bid-ask.md](bid-ask.md).
+
 Solard is a capability-oriented Solana toolkit for multi-wallet operations, token trading, launches, historical market reconstruction, holder accounting, rewards, and liquidity management.
 
 The CLI command is `slrd` (with `solard` as an alias). Applications should normally use `@solard/sdk`; the CLI and SDK share the same canonical `@solard/core` implementation and database.
+
+Range trading now prepares Pump/PumpSwap orders in the background with fixed on-chain output floors, short-lived exact-byte preflight checks and no simulation at submission. `range-bots.ts` supports `--hold-ms 2000` to require two seconds of fresh qualifying observations (default zero), `--priority-micro-lamports 20000` and `--cu-limit 600000`. Sampling defaults to one second. Expired or changed preparation waits rather than rebuilding in the trigger. See [range-trade.md](range-trade.md). Funded worker receipts and operational status are tracked separately; preparation does not guarantee subsecond landing.
+
+Range targets are pre-trade spot prices: minimum outputs account for modeled trade impact and protocol fees at the trigger boundary. Additional slippage defaults to 10% of the positive relative buy/sell spread, capped at 2% (`--range-slippage-share-bps 1000`); a 540k/580k range permits 0.74% extra. SDK callers can opt into this with `prepareFastTrade({ priceKind: "spot", additionalSlippageBps: 74, ... })`; existing average-price guards remain available. Custom quotes retain protected intermediate and final outputs.
 
 ## Packages
 
@@ -35,6 +51,25 @@ recent pool activity. If no usable table exists, the caller may request
 extension messages. Nothing creates, registers, signs or broadcasts an ALT.
 Rebuild the swap against activated tables and repeat simulation before any
 funded transaction. No funded execution is established by unsigned simulation.
+
+`prepareUnsignedTokenDeployment("pump", { payer, quoteAsset, name, symbol, uri,
+creatorBuySol: sol("0.001") })` prepares creation, SOL-to-quote funding and the
+protected creator buy atomically. `resolvePumpLaunchQuote(mint)` uses the pinned
+Pump SDK 4.1.0 eligibility rules; the pending curve uses the protocol's Global,
+QuoteControl or Pump-coin reserve calculation, rather than a spot-price estimate.
+`simulateUnsignedTokenDeployment` and `simulateUnsignedSell` expose the same
+public-payer review boundary. See [R6 acceptance](docs/custom-quote-r6-acceptance.md)
+for prerequisites and read-only commands. Live launch and funded execution remain
+unverified.
+
+RPC endpoints can be managed with `slrd rpc add http <url>`, `slrd rpc add ws <url>`,
+`slrd rpc test`, and `slrd rpc status`. These settings are stored separately from
+wallets; diagnostics redact credentials and test mainnet/account-read readiness.
+Failed native balance reads display `N/A`, not zero. See
+[RPC management](docs/rpc-management.md) for configuration precedence, quota groups,
+queue limits, and independent WebSocket settings. After a stream switch the SDK
+fails closed with `feed-gap-unverified`; callers must reconcile and reopen the
+subscription before receiving trading callbacks again.
 
 ## Requirements
 
@@ -744,3 +779,252 @@ The public SDK now exposes creator-fee discovery and batch claims, LaunchLab pre
 Custom Pump quote trades use atomic venue legs. Quote funding and exit chains are limited to four venues including the target; repeated mints reject with `CONVERSION_UNAVAILABLE`. Each next leg spends only the preceding guaranteed minimum, preserving unrelated quote holdings. Plan `fundingRoute.legs` / `exitRoute.legs` record per-leg raw inputs, minima and slippage; the target action retains total SOL input or guaranteed final SOL output. This uses individual venue instructions, with each venue charging its own fees; it does not implement PumpSwap `multi_hop_swap`. Custom-quote curve trades create the buyback quote ATA idempotently with the verified quote token program.
 
 Read-only SEEDCAT mainnet verification is reproducible with `bun run scripts/verify-seedcat-plans.ts`. The captured custom-quote buy/sell instruction fixture validates quote eligibility, Token-2022 programs, and meaningful per-leg minima. Without lookup tables the observed plans measured 1,657/1,547 wire bytes; assembly rejects with `TransactionTooLargeError` and lookup candidates before accessing a signing key. This construction check does not establish funded simulation or live execution acceptance.
+
+### Consumer TypeScript declarations
+
+`bun run build:types` generates the core and curated SDK declaration graphs.
+Package exports select `dist/types` for TypeScript and retain Bun runtime entry points.
+`npm pack` regenerates these files via prepack; publish matching core/SDK archives.
+`bun run test:types` installs actual archives into an isolated strict TypeScript 5.9
+consumer, checks public contracts and expected type errors, then imports the SDK at runtime.
+The consumer uses `skipLibCheck: true` to exclude upstream protocol declaration defects.
+Solard implementation source and sqlite-zod-orm's older measure-fn source are not traversed.
+No global measure-fn override or consumer patch is required. Full implementation typechecks
+remain a separate release gate; declaration emission alone does not certify execution.
+
+### Absolute output floors in CLI trades
+
+For native Pump curves and PumpSwap (including atomic custom-quote routes),
+choose an absolute final output instead of a percentage:
+
+```sh
+slrd buy <mint> --wallet main --sol 0.01 --min-out 12000 --simulate-only
+slrd sell <mint> --wallet main --bps 10000 --min-out 0.009 --simulate-only
+slrd buy <mint> --wallet main --sol 0.01 --min-out-raw 12000000000 --simulate-only
+```
+
+Buy `--min-out` is the number of target tokens in human units; sell `--min-out`
+is SOL. `--min-out-raw` uses target-token raw units for buys and lamports for sells.
+The floor applies separately to each wallet, is encoded in the final on-chain swap,
+and appears as the plan's guaranteed output. An above-quote floor fails before signing.
+Do not combine these flags with `--slippage-bps`. Custom-quote intermediate legs retain
+bounded slippage protection and consume only guaranteed intermediate output.
+Jupiter currently rejects these flags because its order path does not expose a verified
+on-chain floor. The existing slippage defaults are unchanged when no minimum is passed.
+
+CLI auto-routing inspects uncached mints and refreshes non-native/unknown cached metadata
+before choosing Jupiter. A missing cache entry does not establish that Pump routing is unavailable.
+Provider discovery failures surface directly; explicit `--venue jupiter` bypasses native discovery.
+
+For a buy price ceiling, specify SOL per whole token instead of calculating token output:
+
+```sh
+slrd buy <mint> --wallet main --sol 0.1 --max-price-sol 0.000001 --simulate-only
+```
+
+This derives a rounded-up raw token minimum from the SOL budget and verified token decimals,
+then enforces it in the final on-chain swap. It caps worst-case SOL principal per received
+whole token, including venue fees/price impact through output; network fees, tips and account
+rent are separate. It is supported on the same native routes as `--min-out` and cannot be
+combined with `--slippage-bps`. If also given a token minimum, the stricter floor applies.
+An above-limit quote fails before signing; it does not wait for the price to recover.
+
+SDK price-only buys (`maxPriceSol` with no explicit `slippageBps`) now derive the same
+on-chain output floor as CLI price ceilings. Passing an explicit slippage percentage retains
+both checks. An intent key identifies one saved trade request: reconciliation reads its result,
+not a fresh attempt. The SMA example logs status, code, phase, message and submitted-attempt
+count so a failed quote can be distinguished from missing wallet/password configuration.
+
+The local SMA example `trade.ts` accepts `--rpc-url <http-url>` to override its process RPC
+without changing the wallet database/config. It registers an unknown mint once before sampling
+and exits on registration failure instead of repeating UNKNOWN_TOKEN every tick.
+
+SMA sampling converts custom quote prices through verified quote/SOL reserves, preserving
+the original quote identity. Missing conversion blocks the tick; no custom quote is labeled SOL.
+
+PumpSwap discovery splits candidate account reads into batches of at most10 for public
+providers with small per-request account caps. Such a batch-cap rejection is distinct from
+request-rate429 or account-quota exhaustion.
+
+Explicit PumpSwap pool registration validates the supplied pool and vault/mint identities
+without unrelated venue discovery. SMA quote conversion uses registered pool hints, rereading
+the actual pool and reserves, so public providers need not support indexed history lookups.
+
+SMA ticks include RPC work in the configured interval rather than adding an extra full
+interval after each request; the existing sample coverage and maximum-gap guards remain.
+
+SDK price-only sells (`minPriceSol` without explicit `slippageBps`) encode the stricter of
+the price-derived SOL floor and minOutputLamports. Intermediate sell legs protect their
+full quoted output; the final leg encodes the user floor. Explicit percentage slippage
+retains its previous guard behavior. No SMA or profit target is lowered.
+
+### Live SMA target CSV
+
+`bun run report-trade-targets.ts --once` writes `bot-targets.csv`, replacing the latest
+snapshot rather than appending history. Run it under bgrun without restarting trading bots:
+
+```sh
+bunx bgrun --name sma-targets-csv --command "bun run report-trade-targets.ts" --directory C:/Code/solwal --no-config
+```
+
+There is one row per token/wallet state file (default wallet ddm6), refreshed about every
+5 seconds. Columns include current price/cap, SMA buy/sell prices and USD caps, and the
+**effective sell target** after the position profit floor. This is a read-only reporter:
+it does not submit trades, access wallet secrets or alter strategy thresholds.
+Supply/decimals are verified on-chain every5 minutes, SOL/USD refreshes every minute,
+and unavailable/stale conversion metadata leaves USD cap fields blank. Warmup/stale
+prices leave actionable targets blank. USD caps use total verified mint supply; they
+are derived targets, not an executable quote or circulating-supply estimate.
+
+Reporter `--sma`, `--range`, `--profit`, `--interval` settings must match the bots it reads
+(default5m/2%/1%/5000ms). `--wallet`, `--output`, and `--rpc-url` select the reporting scope
+and destination. The reporter atomically replaces the CSV; use one reporter per output.
+
+### Registry token liquidation
+
+`slrd liquidate tokens --live` processes wallets sequentially. Completed wallets do not depend on a later wallet scan succeeding. Temporary read failures back off before retrying; execution itself is never replayed by the wallet runner. Use `--rpc-delay-ms` (default 2500) to pace token-account scans on public RPC. SOL stays in each wallet; unsupported holdings are reported and not burned without `--burn-unsellable`. A wallet failure is reported, later wallets still run, and the command exits unsuccessfully if work remains.
+
+Live registry liquidation completes its selling pass across selected wallets before closing empty token accounts in a separate cleanup pass. A wallet with an execution error is excluded from automatic cleanup replay.
+
+Custom-quote conversion checks verified native Pump routes first, then uses configured Jupiter routing without scanning unrelated protocols. Atomic buys retain the final absolute token minimum while allowing bounded intermediate funding slippage; only guaranteed funding output is spent.
+Quote-to-SOL fallback conversion sizes probes to a small SOL notional rather than selling a fixed 100 quote tokens, preventing BTC-sized price-impact distortion.
+Immediate fee recompilation reuses the same validated lookup tables and blockhash for up to 15 seconds, avoiding redundant RPC reads; recompiled transactions still enforce packet limits, price guards and simulation.
+Range manager enables detailed measure-fn transport spans: RPC provider queue versus network attempts, and Jupiter rate-limit queue versus HTTP attempts. Logs contain method/status labels rather than endpoint credentials or request payloads.
+Reported manual exits with verified finalized zero balances are recorded as external exits with unknown proceeds/profit, allowing a fresh bot cycle without inventing trade accounting.
+The range manager opts into SLRD_RPC_TRADE_PRIORITY=1: build/fee/preflight requests get admission preference during execution while background reads retain one admission opportunity per 1.1 seconds. Existing shared/provider quotas stay unchanged; confirmation waits do not hold trade priority. This preference is local to the process.
+Absolute output floors on supported Jupiter exact-input routes are checked and encoded in the returned instruction itself. Unknown layouts fail before signing. Jupiter quotes request at most 32 route accounts to reduce composed v0 transaction size; final size checks still apply. Select transactionVersion: 1 on the SDK client for native 4096-byte v1 plans; legacy clients default to v0.
+
+V1 transactions: createTraderSolard({ rpcUrl, transactionVersion: 1 }) builds, signs, simulates and submits native v1 bytes with a 4096-byte limit and no lookup tables. The range manager enables this option. Existing clients retain v0 by default; SOLARD_TRANSACTION_VERSION=1 also opts assembly in. Compute limits and the total priority fee are stored in the v1 config, with an explicit 64 MiB loaded-account cap. ComputeBudget instructions inside a v1 draft are rejected. Signed journal recovery detects the original version and rebroadcasts identical bytes without rebuilding. Public unsigned plans keep every signature zero; external v1 signing is asynchronous and must be awaited. Read-only mainnet verification: SOLARD_V1_READ_ONLY=1 and SOLARD_PUBLIC_WALLET=<public-address>, bun run scripts/verify-v1-read-only.ts. This simulates a >1232-byte memo and does not broadcast.
+Hide archived empty wallets with: slrd wallets --except oct23-empty. Comma-separated exclusions and the virtual ungrouped group are supported; unknown group names fail explicitly. Exclusion runs before balance RPC reads. Groups preserve the existing wallet keys and history in one database.
+Liquidation planning reuses registered pool/Jupiter metadata and still resolves the live venue before execution, avoiding unrelated native protocol scans for known quote assets. Fresh portfolio mint decimals and token programs override stale registry values.
+
+FAIRS launch preparation: see launches/fairs-2026-10-23/README.md for the finalized wallet inventory and non-executable draft config. Regeneration overwrites drafts; buy budgets and deployment metadata remain unset.
+
+
+Range history export marks tokens needing accounting review in the aggregate CSV and preserves their existing detailed history. One incomplete older token does not block other tokens from exporting.
+
+
+Confirmed trade recovery retries missing fill metadata using the compatible v1 parsed transport. It preserves the original signature and confirmation; metadata retries never create another trade. Range bots wait for verified fill fields before creating a position.
+
+
+Automatic trade fee discovery waits at most 250ms for optional recent-priority samples. Account-scoped samples cache for 10s (stale fallback up to 60s), repeated failures cool down for 5s, and in-flight lookups coalesce. Missing suggestions use the existing configured floor/caps. Explicit fixed bids skip discovery. Optional fee HTTP429/network failures are not retried by the transport. This bounds fee discovery, not the entire trade or RPC settlement.
+
+
+Price-only custom-quote buys use zero percentage slippage on intermediate funding when the caller omitted slippageBps, retaining the final absolute token minimum. The downstream leg spends only guaranteed funding output; no unrelated holdings are consumed. This removes the implicit default funding haircut but can reject adverse movement on the funding market. Explicit slippage retains existing behavior. Range quote-conversion and supply reads use Solard's shared RPC limiter.
+
+
+Range supply and SOL/USD metadata refresh outside the decision loop after45s. Decisions use only timestamp-valid verified values under the existing120s limit; missing/expired data pauses new decisions. Refreshes coalesce and failed reads cool down without changing data timestamps. A hung refresh no longer blocks a sell while its prior metadata remains valid. Price RPC and transaction build delays are still separately observable.
+
+
+A market-cap CSV sell floor at or below its buy ceiling now means exits enabled, new entries paused. This lets an existing position honor a lowered exit target without creating repeated buy/sell trades across overlapping thresholds. Restore sell greater than buy to resume entries. Nonpositive/malformed values still reject, and hard on-chain minimum outputs remain enforced.
+
+
+Verified manual exits can persist an entryPause reason on the bot state. This blocks buying back after restart even if the CSV buy ceiling is crossed; existing exits remain possible. Resume requires an explicit user action, not merely a fresh price or config edit. A manual exit is recorded separately from a bot fill.
+
+
+Token-balance reads return zero only for a genuinely missing associated token account. RPC, quota and account-owner failures propagate instead of masquerading as empty holdings. Uncached mint program/decimals/supply are decoded from a single account response, removing the previous second read.
+
+
+Range observations retain a conservative source/request timestamp instead of appearing freshly captured after a slow RPC. Direct buy/sell stage hooks now include wallet-queue time separately from building and settlement. See .docs/analysis/range-reliability-2026-10-24.md for the stopped-trading remediation and acceptance plan.
+
+Bid/ask ladder strategy: see [bid-ask.md](bid-ask.md) for half-budget initialization, percentage bins, isolated inventory, paper mode and explicit boundary behavior. This is a separate script from the SMA and range strategies.
+The operational selected range runner supports repeatable `--also-mint <mint>` to run up to eight explicitly chosen range bots with one SDK wallet queue and shared CSV/SOL-USD sources. Other CSV rows remain inactive. Every selected allocation and market preparation is validated before startup.
+
+Selected native-SOL Pump/PumpSwap bots share one validated reserve-account price batch per second. Mint decimals/programs, curve/pool identities and vault identities are verified against the response; existing freshness guards remain. Custom quotes and other venues retain the normal verified sampling/conversion path.
+Explicitly adopted existing positions keep a separate confirmed-acquisition artifact under `.range-bots/bot-adoptions/`. Their original buy signatures and observed acquisition costs are included in range history without fabricating a bot execution or sending another buy.
+
+SDK transaction composition is available through `tx()`, `composeTransactionDrafts()` and `compileGroups()`. Preserve ordered operations, action minima, tracked accounts and all co-signers; grouped compilation pins one blockhash generation without submitting. See [transaction composition](docs/transaction-composition.md).
+
+Release preflight now runs before `pub` bumps versions, and again before publishing the new version. App-only allocation code stays outside published core; root tests include its lifecycle test. Use `bun run pub:verify` to validate archives without publishing.
+
+Grouped Pump Jito launches support `--buyers-per-transaction 1..3`. Dry runs simulate the complete dependent bundle and optimized compute limits. See [transaction composition](docs/transaction-composition.md). The local FAIRS preparation can be checked with `bun run scripts/launch-fairs.ts --simulate --slippage-bps 500`; funded execution requires an explicit matching budget confirmation.
+
+For automatic RPC failover, pass `rpcUrls` containing every allowed endpoint. A lone `rpcUrl` provides no backups. FAIRS operation scripts now share both configured Helius endpoints plus public mainnet through `scripts/fairs-rpc.ts`. Quota errors on reads rotate to a working endpoint and remain there. Ambiguous signed submissions retain their original signature and are reconciled rather than blindly sent as replacement transactions.
+
+Built-in HTTP pacing can be shared by trading, holder/fee reads, raw history batches, listener enrichment and live readiness probes:
+
+```ts
+import {createSolard, createRpcPacer} from '@solard/sdk';
+const rpc = createRpcPacer({
+  maxRps: 4,
+  maxConcurrent: 8,
+  retryOn429: {attempts: 4, honorRetryAfter: true},
+});
+const sdk = createSolard({rpcUrls: ['https://your-rpc.example'], rpc});
+// Other clients can receive the same rpc instance to share this budget.
+```
+
+Alternatively pass the options directly as `rpc: {maxRps: 4, maxConcurrent: 8}`. Supply `fetch` to the factory or `createRpcPacer(options, fetch)` to inject a transport without patching globals. Each endpoint has a sliding one-second window, a bounded waiting queue, concurrency cap and shared 429 pause. Retry-After pauses all queued requests to that endpoint. Signed sends, mixed batches containing sends, opaque bodies and one-shot Request bodies are never automatically replayed by the pacer. Existing core provider limits can impose a lower throughput/concurrency cap; this option does not increase provider quota.
+
+Pacer instances share HTTP budgets within one process. Existing `SLRD_RPC_GATE_DB` reservations remain the opt-in cross-process limit; concurrency remains process-local. HTTP pacing does not count WebSocket messages or implement reconnect backoff. The separate browser SDK client is unchanged. Without explicit pacing options, core retains its existing environment-configured rate gate; Node SDK live HTTP now uses that controlled transport too.
+
+Rate slots remain reserved until the transport is invoked. Sliding-window and pause deadlines use a monotonic clock, so synchronous observer delays cannot cause early dispatch or expire an unstarted request's slot. Regression tests enforce the rate against physical transport invocation times.
+
+The local 100-mint generation job is `pump-mint-batch-100` under bgrun. It runs `scripts/pregenerate-pump-mints.ts`, stores each `pump` mint encrypted in the configured Solard database, removes its temporary key file after persistence, and checkpoints public addresses in `.docs/vanity-pump-20261026/receipt.json`. Restarting resumes that batch; it does not deploy or fund anything. This local pool is separate from FairFun's server mint creation.
+
+Luffy/STRAWHAT preparation and the tested three-transaction launch plus one-transaction eight-wallet exit layout are documented in [the STRAWHAT review](launches/strawhat-2026-10-26/README.md). `bun run scripts/launch-strawhat.ts` defaults to unsigned preparation/simulation; it does not deploy. Explicit live budget/floor flags are required for any funded operation.
+
+`bun run scripts/analyze-fairs-exits.ts` audits finalized FAIRS bundle buys and exits without signing. The report and public transaction evidence are saved under `launches/fairs-2026-10-25/exit-pnl-*.json`; net P&L includes wallet fee and rent changes, with the creator's launch debit shown separately.
+
+BIBI launch preparation and reviewed metadata/budgets are documented in [launches/bibi-2026-10-26/README.md](launches/bibi-2026-10-26/README.md). Prepared launch bundles use Jito; their single atomic exits use RPC and exclude the deployer.
+
+Launch buyer exclusions are stored in launches/excluded-buyer-wallets.json. Preparation and new live launch validation reject excluded buyers until a replacement allocation is reviewed. Existing journal resume/exit remains available to close previously purchased holdings.
+
+
+Launch preparation accepts SOLARD_LAUNCH_BUYERS_FILE for an explicit reviewed buyer list and SOLARD_LAUNCH_CREATOR_FEE_RECIPIENT for the onchain creator. Exclusions remain enforced. scripts/launch-bow.ts prepares the six-wallet 3 SOL Bow campaign without broadcasting by default.
+
+
+New campaign launch transactions permit one buyer each; creation occupies its own transaction and Jito launch bundles are capped at five. Grouped exits remain supported. Bow's earlier grouped-buyer review is superseded pending a reduced buyer selection.
+
+
+Pump launchpad supports holderReward:true using the official SDK and protocol reward PDA for trade routing; it requires the global holder-reward gate. Holder rewards replace wallet creator-fee sharing and distribution requires Pump's configured claim authority. scripts/prepare-bow-holder-rewards.ts prepares only, with no automatic sale or broadcast.
+
+
+Prepared launch runners support a persisted hold-after-buys policy: wait for launch confirmation, mark the journal held and never sign or submit a sell. Resume cannot change that policy. The holder-reward Bow campaign uses this policy.
+
+
+Launch exits can require a ceiling-rounded minimum of 110 percent of each buyer's SOL trade budget. Sequential mode submits one wallet's sell through RPC and confirms it before the next, preserving that minimum and all confirmed signatures across expiry replacements. Existing IPFS metadata may be reused with original downloaded image bytes and hashes retained for review.
+
+
+Campaigns can specify SOLARD_LAUNCH_BUY_AMOUNTS_FILE mapping each selected wallet to its exact SOL trade budget. The selection must match exactly, each amount must be positive, the sum must equal the approved total, and balances must retain the existing reserves.
+
+
+Explicit eight-buyer campaigns use two confirmed Jito batches (5 and 4 transactions), each with its own tip. They are not atomic together. After both confirm, the runner derives actual purchased units from the known signed buy transactions before signing sequential exits; current balances must match. A later batch failure records partial execution and never replays creation.
+
+# Launch atomicity
+
+Live listeners support SQD (default) or `source: "rpc"` through the same API.
+See [event sources](docs/event-sources.md) for configuration, finality, live token
+events, remaining RPC reads and bounded read-only verification.
+
+Campaigns can select a dedicated managed deployer with
+`SOLARD_LAUNCH_DEPLOYER`; the preparation report and signer follow that address.
+`scripts/prepare-fresh-deployer.ts` creates one persisted wallet per campaign
+and optionally funds its rent/fee reserve through a durable transfer intent.
+
+Confirmed campaign exits sell only their recorded token allocation. Additional
+tokens in the same wallet are preserved, including their token account; a
+balance below the recorded allocation still stops the exit for reconciliation.
+
+Campaigns may opt into confirmed-fill reconciliation for one combined exit,
+including three individual buys followed by one RPC sale of all three positions.
+An immediate zero-floor sale requires explicit campaign authorization and does
+not guarantee profit or a particular execution latency.
+
+New prepared campaign launches must fit one Jito bundle (at most five
+transactions). Eight buyers can be packed two per transaction after creation.
+Buyer-to-transaction mappings and confirmed wallet fills are persisted before
+exit signing; plans that do not fit fail rather than splitting automatically.
+# Scout terminal and two-sided trading
+
+[Wallet-presence ranking](docs/wallet-presence-ranking.md) tests frozen wallet
+labels on later launches and produces a current, coverage-labelled coin report.
+
+Read-only launch-family research is available through
+[launch-cohort-analysis.md](docs/launch-cohort-analysis.md), including IRONYMAN
+and ALON grouping, observation coverage, early-flow comparisons and source hashes.
+
+See [scout-terminal.md](docs/scout-terminal.md) for terminal range controls and
+[bid-ask.md](bid-ask.md) for the existing two-sided inventory strategy. The scout
+manager can host both with one shared wallet queue and distinct mint ownership.
+

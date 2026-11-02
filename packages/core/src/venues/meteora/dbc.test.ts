@@ -175,7 +175,7 @@ test("DBC decodes event-CPI and listener uses matched pool sqrt price plus verif
   expect(dbcTradesFromTransaction(connection, transaction)).toHaveLength(1);
   connection.getParsedTransaction = async () => transaction;
   const trades: Array<TradeEvent> = [];
-  const subscription = await subscribeTrades({
+  const subscription = await subscribeTrades({ source: "rpc",
     connection,
     tokens: [MINT.toBase58()],
     venues: ["meteora-dbc"],

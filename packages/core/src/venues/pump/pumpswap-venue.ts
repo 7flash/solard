@@ -1,6 +1,8 @@
+import { setOutputMinimum } from "../../tx/trade-minimum.ts";
 import { Buffer } from "buffer";
 import BN from "bn.js";
-import { OnlinePumpAmmSdk, PUMP_AMM_SDK } from "@pump-fun/pump-swap-sdk";
+import { OnlinePumpAmmSdk, PUMP_AMM_SDK, type SwapSolanaState } from "@pump-fun/pump-swap-sdk";
+import { boundaryReserves } from "./boundary-reserves.ts";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
   PublicKey,
@@ -32,7 +34,7 @@ import { fetchCurve, fetchPool } from "./state.ts";
 import { getCompatibleParsedTransaction } from "../../chain/parsed-transaction.ts";
 import { getSupportedPumpPairs } from "../../launches/pump/pairs.ts";
 import {
-  snapshotSwapState,
+  snapshotSwapState, batchedSwapState,
   validateLivePoolReserves,
 } from "./live-reserves.ts";
 import {
@@ -281,6 +283,18 @@ export function normalizeZeroSlippageSdkBuyToExactQuoteIn(args: {
   };
 }
 
+export function boundarySwapState(state: SwapSolanaState, price: string, quoteDecimals: number, side: "buy" | "sell"): SwapSolanaState {
+  const offset = BigInt(state.pool.virtualQuoteReserves.toString());
+  const projected = boundaryReserves({ virtualBase: BigInt(state.poolBaseAmount.toString()),
+    virtualQuote: BigInt(state.poolQuoteAmount.toString()) + offset }, state.baseMintAccount.decimals,
+    quoteDecimals, price, side);
+  const realQuote = projected.virtualQuote - offset;
+  if (realQuote <= 0n || realQuote > 0xffffffffffffffffn)
+    throw Error("Spot boundary is outside the PumpSwap virtual reserve domain");
+  return { ...state, pool: { ...state.pool }, poolBaseAmount: new BN(projected.virtualBase.toString()),
+    poolQuoteAmount: new BN(realQuote.toString()) };
+}
+
 async function freshSdkBuy(
   ctx: VenueContext,
   market: VenueMarket,
@@ -294,10 +308,14 @@ async function freshSdkBuy(
 }> {
   const m = market.metadata as PumpSwapMarketMeta;
   const online = new OnlinePumpAmmSdk(ctx.connection);
-  const swapState = ctx.reserves
+  let swapState = ctx.reserves
     ? await snapshotSwapState(ctx, market)
-    : await online.swapSolanaState(m.pool, ctx.user);
+    : typeof ctx.connection.getMultipleAccountsInfoAndContext === "function"
+      ? await batchedSwapState(ctx, market)
+      : await online.swapSolanaState(m.pool, ctx.user);
 
+  if (ctx.boundaryPriceQuotePerToken != null)
+    swapState = boundarySwapState(swapState, ctx.boundaryPriceQuotePerToken, market.quoteAsset.decimals, "buy");
   // Quote the exact budget with ZERO SDK slippage. The legacy SDK expresses
   // slippage by increasing maxQuoteIn, which cannot be translated directly to
   // buy_exact_quote_in. Solard applies its BPS protection to base output below.
@@ -339,9 +357,13 @@ async function freshSdkSell(
 }> {
   const m = market.metadata as PumpSwapMarketMeta;
   const online = new OnlinePumpAmmSdk(ctx.connection);
-  const swapState = ctx.reserves
+  let swapState = ctx.reserves
     ? await snapshotSwapState(ctx, market)
-    : await online.swapSolanaState(m.pool, ctx.user);
+    : typeof ctx.connection.getMultipleAccountsInfoAndContext === "function"
+      ? await batchedSwapState(ctx, market)
+      : await online.swapSolanaState(m.pool, ctx.user);
+  if (ctx.boundaryPriceQuotePerToken != null)
+    swapState = boundarySwapState(swapState, ctx.boundaryPriceQuotePerToken, market.quoteAsset.decimals, "sell");
   const instructions = await PUMP_AMM_SDK.sellBaseInput(
     swapState,
     new BN(inputRaw.toString()),
@@ -362,6 +384,19 @@ async function freshSdkSell(
     minimumOutputRaw,
     expectedOutputRaw: expectedFromMinimum(minimumOutputRaw, slippageBps),
   };
+}
+
+export function applyPumpSwapOutputMinimum(
+  fresh: { instructions: TransactionInstruction[]; expectedOutputRaw: bigint; minimumOutputRaw: bigint },
+  quote: QuoteResult, discriminator: Buffer,
+): void {
+  const absolute = quote.meta?.absoluteMinimumOutputRaw;
+  if (absolute == null) return;
+  quote.expectedOutputRaw = fresh.expectedOutputRaw;
+  setOutputMinimum(quote, String(absolute), quote.meta?.preparedLimitOrder === true);
+  const trade = pumpTradeInstruction(fresh.instructions, discriminator, "Absolute minimum");
+  trade.data.writeBigUInt64LE(quote.minimumOutputRaw, 16);
+  fresh.minimumOutputRaw = quote.minimumOutputRaw;
 }
 
 function quoteSlippageBps(quote: QuoteResult): number {
@@ -413,8 +448,8 @@ export async function discoverPumpSwapPool(
     const verified: Array<{ pool: Awaited<ReturnType<typeof fetchPool>>; quoteReserve: bigint; baseReserve: bigint }> = [];
     const inspected = new Set<string>();
     const inspect = async (addresses: PublicKey[]) => {
-      for (let offset = 0; offset < addresses.length; offset += 40) {
-        const chunk = addresses.slice(offset, offset + 40);
+      for (let offset = 0; offset < addresses.length; offset += 10) {
+        const chunk = addresses.slice(offset, offset + 10);
         const infos = await connection.getMultipleAccountsInfo(chunk, "confirmed");
         for (let index = 0; index < chunk.length; index++) {
           const address = chunk[index]!;
@@ -660,8 +695,10 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     // Re-fetch immediately before transaction construction. If the pool moved
     // after quoteBuy(), this replaces the stale minimum instead of carrying it
     // into simulation and tripping PumpSwap 6040.
-    const slippageBps = quoteSlippageBps(quote);
+    const absolute = quote.meta?.absoluteMinimumOutputRaw;
+    const slippageBps = absolute == null ? quoteSlippageBps(quote) : 0;
     const fresh = await freshSdkBuy(ctx, market, quote.inputRaw, slippageBps);
+    applyPumpSwapOutputMinimum(fresh, quote, AMM_BUY_EXACT_QUOTE_IN_D8);
     quote.expectedOutputRaw = fresh.expectedOutputRaw;
     quote.minimumOutputRaw = fresh.minimumOutputRaw;
     quote.meta = {
@@ -684,8 +721,10 @@ export class PumpSwapVenue implements TradeVenuePlugin {
     market: VenueMarket,
     quote: QuoteResult,
   ): Promise<BuiltInstructions> {
-    const slippageBps = quoteSlippageBps(quote);
+    const absolute = quote.meta?.absoluteMinimumOutputRaw;
+    const slippageBps = absolute == null ? quoteSlippageBps(quote) : 0;
     const fresh = await freshSdkSell(ctx, market, quote.inputRaw, slippageBps);
+    applyPumpSwapOutputMinimum(fresh, quote, AMM_SELL_D8);
     quote.expectedOutputRaw = fresh.expectedOutputRaw;
     quote.minimumOutputRaw = fresh.minimumOutputRaw;
     quote.meta = {

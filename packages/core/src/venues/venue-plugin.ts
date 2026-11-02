@@ -23,6 +23,8 @@ export type VenueContext = {
   token: TokenRow;
   user: PublicKey;
   reserves?: LivePoolReserves;
+  /** Quote-only projection for a prepared pre-trade spot trigger; never a live price. */
+  boundaryPriceQuotePerToken?: string;
 };
 export type VenueMarket = {
   venue: VenueId;

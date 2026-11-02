@@ -1,4 +1,6 @@
 import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
+import { OnlinePumpSdk, PUMP_SDK, newBondingCurve, holderRewardsPda } from "@pump-fun/pump-sdk";
+import { readMint } from "../../chain/state.ts";
 import { SOL_ASSET, sameAsset, type RawAmount } from "../../core/amounts.ts";
 import type {
   PendingMarketState,
@@ -59,8 +61,48 @@ export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
     args: PrepareDeploymentArgs,
   ): Promise<PreparedTokenDeployment> {
     const mint = args.mint ?? Keypair.generate();
-    const creator = args.creator ?? args.user;
-    const quoteAsset = args.quoteAsset ?? SOL_ASSET;
+    const requestedCreator = args.creator ?? args.user;
+    const creator = args.holderReward ? holderRewardsPda(mint.publicKey) : requestedCreator;
+    if(args.holderReward){
+      if(args.cashback)throw new Error('Holder rewards cannot be combined with deprecated cashback');
+      const global=await new OnlinePumpSdk(_connection).fetchGlobal();
+      if(!global.isHolderRewardEnabled)throw new Error('Pump holder rewards are disabled');
+    }
+    let quoteAsset = args.quoteAsset ?? SOL_ASSET;
+    let customCreateInstruction = null as import("@solana/web3.js").TransactionInstruction | null;
+    let quoteSource: string = "sol";
+    if (quoteAsset.kind === "spl-token") {
+      const sdk = new OnlinePumpSdk(_connection);
+      // A traded pool does not establish a create_v2 quote entitlement.
+      // The official resolver enforces Global, QuoteControl, depth, cycle,
+      // mayhem and migration-gap admission before any deploy instruction exists.
+      const resolved = await sdk.resolveQuoteMint(quoteAsset.mint);
+      const chainMint = await readMint(_connection, resolved.mint);
+      if (!chainMint.tokenProgram.equals(resolved.quoteTokenProgram) ||
+          chainMint.decimals !== resolved.decimals) {
+        throw new Error("Launch quote mint program/decimals changed during admission");
+      }
+      quoteAsset = { kind: "spl-token", mint: resolved.mint,
+        tokenProgram: resolved.quoteTokenProgram, decimals: resolved.decimals };
+      quoteSource = resolved.source;
+      if (args.mayhemMode && resolved.source !== "global")
+        throw new Error("Mayhem custom quote must be listed on Pump Global");
+      customCreateInstruction = await PUMP_SDK.createV2Instruction({
+        mint: mint.publicKey, user: args.user, creator,
+        name: args.name, symbol: args.symbol, uri: args.uri,
+        quoteMint: resolved.mint, quoteTokenProgram: resolved.quoteTokenProgram,
+        mayhemMode: args.mayhemMode ?? false, cashback: args.cashback ?? false,
+        holderReward: args.holderReward ?? false,
+        pumpQuote: resolved.pumpQuote?.accounts,
+      });
+    }
+    if(args.holderReward&&quoteAsset.kind==='native-sol'){
+      customCreateInstruction=await PUMP_SDK.createV2Instruction({
+        mint:mint.publicKey,user:args.user,creator:requestedCreator,
+        name:args.name,symbol:args.symbol,uri:args.uri,mayhemMode:args.mayhemMode??false,
+        cashback:false,holderReward:true,
+      });
+    }
     const token: Partial<TokenRow> & { mint: string } = {
       mint: mint.publicKey.toBase58(),
       name: args.name,
@@ -79,14 +121,14 @@ export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
         cashback: args.cashback ?? false,
       }),
     };
-    return {
+    const deployment: PreparedTokenDeployment = {
       launchpad: this.id,
       mint,
       user: args.user,
       creator,
       quoteAsset,
       token,
-      instructions: [
+      instructions: customCreateInstruction ? [customCreateInstruction] : [
         buildCreateV2({
           mint: mint.publicKey,
           user: args.user,
@@ -104,22 +146,69 @@ export class PumpTokenLaunchpad implements TokenLaunchpadPlugin {
         uri: args.uri,
         mayhemMode: args.mayhemMode ?? false,
         cashback: args.cashback ?? false,
+        quoteSource,
+        holderReward: args.holderReward ?? false,
       },
     };
+    // A launchpad caller may request its first buy in the deployment quote.
+    // Include the buy as instructions in the SAME atomic transaction; never
+    // discard the request or return a create-only deployment.
+    if (args.initialBuy) {
+      if (!sameAsset(args.initialBuy.asset, deployment.quoteAsset) ||
+          args.initialBuy.raw <= 0n)
+        throw new Error("Initial buy does not use a positive deployment quote amount");
+      const state = await this.initialPendingMarketState(_connection, deployment);
+      const buy = await this.buildPendingBuy(
+        _connection, deployment, args.user, args.initialBuy, state,
+        { slippageBps: args.slippageBps ?? 500 },
+      );
+      if (buy.minimumOutputRaw <= 0n || buy.instructions.length === 0 ||
+          !buy.quoteAsset.mint.equals(deployment.quoteAsset.mint))
+        throw new Error("Requested initial buy has no protected execution");
+      deployment.instructions.push(...buy.instructions);
+      deployment.metadata = {
+        ...deployment.metadata,
+        initialBuyRaw: args.initialBuy.raw.toString(),
+        minimumOutputRaw: buy.minimumOutputRaw.toString(),
+        expectedOutputRaw: buy.expectedOutputRaw.toString(),
+      };
+    }
+    return deployment;
   }
 
   async initialPendingMarketState(
     connection: Connection,
     deployment: PreparedTokenDeployment,
   ): Promise<PumpPendingCurveState> {
-    if (!sameAsset(deployment.quoteAsset, SOL_ASSET)) {
-      throw new Error(
-        "Pre-landing Pump buy planning is currently implemented only for SOL-paired create_v2 launches",
-      );
+    // The official SDK reads the correct Global/QuoteControl or eligible pump
+    // quote-chain seed (including synthetic migrated reserve calculations).
+    // Decimal scaling or SOL spot-price conversion is NOT equivalent.
+    if (sameAsset(deployment.quoteAsset, SOL_ASSET)) {
+      const initial = await fetchInitialSolCurveState(connection);
+      return { ...initial,
+        totalFeeBps: configuredTotalFeeBps(tokenForDeployment(deployment)) };
     }
-    const initial = await fetchInitialSolCurveState(connection);
+    const resolved = await new OnlinePumpSdk(connection)
+      .resolveQuoteMint(deployment.quoteAsset.mint);
+    if (!resolved.quoteTokenProgram.equals(deployment.quoteAsset.tokenProgram) ||
+        resolved.decimals !== deployment.quoteAsset.decimals) {
+      throw new Error("Pending quote program/decimals do not match current chain");
+    }
+    const online = new OnlinePumpSdk(connection);
+    const [global, quoteControl] = await Promise.all([
+      online.fetchGlobal(), online.fetchQuoteControl(),
+    ]);
+    const initial = newBondingCurve(
+      global, resolved.mint, quoteControl, undefined, false,
+      resolved.pumpQuote?.curve,
+    );
+    if (initial.virtualTokenReserves.lten(0) ||
+        initial.virtualQuoteReserves.lten(0)) {
+      throw new Error("Pending custom quote has nonpositive protocol reserves");
+    }
     return {
-      ...initial,
+      virtualBase: BigInt(initial.virtualTokenReserves.toString()),
+      virtualQuote: BigInt(initial.virtualQuoteReserves.toString()),
       totalFeeBps: configuredTotalFeeBps(tokenForDeployment(deployment)),
     };
   }

@@ -130,4 +130,6 @@ export type {
   MeteoraPositionAccountingSnapshot,
   MeteoraUiAmount,
   MeteoraWalletPositions,
+  MeteoraWalletNativeBalance,
+  MeteoraWalletTokenBalance,
 } from "./types.ts";

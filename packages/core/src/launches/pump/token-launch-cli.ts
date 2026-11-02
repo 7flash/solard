@@ -837,6 +837,7 @@ function summarizeLaunchResult(result: PumpTokenLaunchResult): unknown {
     return {
       mode: result.mode,
       launchSimulation: simulationSummary(result.launchSimulation),
+      bundleSimulation: result.bundleSimulation,
       deploymentSender: result.deploymentSender,
       buyers: result.buyers,
     };
@@ -846,10 +847,11 @@ function summarizeLaunchResult(result: PumpTokenLaunchResult): unknown {
     mode: result.mode,
     launchReceipt: receiptSummary(result.launchReceipt),
     traderReceipts: result.traderReceipts,
+    buyerTransactions: result.buyerTransactions,
   };
 }
 
-function requireSkipSimulationForBlindLiveBuys(
+export function requireSkipSimulationForBlindLiveBuys(
   live: boolean,
   submitMode: TraderSubmitMode,
   skipSimulation: boolean,
@@ -858,12 +860,11 @@ function requireSkipSimulationForBlindLiveBuys(
   if (
     live &&
     hasBuyerGroup &&
-    (normalizeTraderSubmitMode(submitMode) === "blind-spam-after-submit" ||
-      normalizeTraderSubmitMode(submitMode) === "jito-bundle") &&
+    normalizeTraderSubmitMode(submitMode) === "blind-spam-after-submit" &&
     !skipSimulation
   ) {
     throw new Error(
-      "Blind parallel dependent-buy submission and Jito bundles require --skip-simulation after a reviewed dry run.",
+      "Blind parallel dependent-buy submission requires --skip-simulation after a reviewed dry run.",
     );
   }
 }
@@ -1544,6 +1545,7 @@ export async function runPumpTokenLaunchFromArgs(
       prepared,
       live,
       traderSubmitMode: submitMode,
+      buyersPerTransaction: numberFlag(flags, "buyers-per-transaction", 1),
       skipSimulation,
       spam,
       kind: `cli:launch:pump:${input.alias}`,

@@ -4,6 +4,8 @@ import {
   getMint,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
+  TokenAccountNotFoundError,
+  unpackMint,
 } from "@solana/spl-token";
 import { Connection, PublicKey, type AccountInfo } from "@solana/web3.js";
 import type { AccountCache } from "./account-cache.ts";
@@ -33,6 +35,16 @@ export async function readMint(
   mint: PublicKey,
   cache?: AccountCache,
 ) {
+  // One account read supplies owner, decimals and supply from the same snapshot.
+  // Keep the existing explicit cache contract for callers that opt into it.
+  if (!cache) {
+    const account = await connection.getAccountInfo(mint, "confirmed");
+    if (!account) throw new Error(`Mint account not found: ${mint.toBase58()}`);
+    if (!account.owner.equals(TOKEN_PROGRAM_ID) && !account.owner.equals(TOKEN_2022_PROGRAM_ID))
+      throw new Error(`Unsupported token program ${account.owner.toBase58()} for mint ${mint.toBase58()}`);
+    const info = unpackMint(mint, account, account.owner);
+    return { tokenProgram: account.owner, decimals: info.decimals, supply: info.supply };
+  }
   const tokenProgram = await resolveTokenProgram(connection, mint, cache);
   const info = await (cache?.get(`mint:${mint.toBase58()}`, () =>
     getMint(connection, mint, "confirmed", tokenProgram),
@@ -50,8 +62,9 @@ export async function readTokenAmount(
   try {
     return (await getAccount(connection, ata, "confirmed", tokenProgram))
       .amount;
-  } catch {
-    return 0n;
+  } catch (error) {
+    if (error instanceof TokenAccountNotFoundError) return 0n;
+    throw error; // Provider and account-validation failures are not zero balances.
   }
 }
 

@@ -1,4 +1,5 @@
-import type { Connection, VersionedTransaction } from "@solana/web3.js";
+import type { Connection } from "@solana/web3.js";
+import type { WireTransaction as VersionedTransaction } from "./wire-transaction.ts";
 import type { SenderId, SendOptions } from "./types.ts";
 
 export type BundleSubmission = { submissionId: string; signatures: string[] };

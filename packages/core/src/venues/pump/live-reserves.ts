@@ -15,7 +15,7 @@ import {
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
 } from "@solana/spl-token";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, type AccountInfo, type RpcResponseAndContext } from "@solana/web3.js";
 import type {
   LivePoolReserves,
   VenueContext,
@@ -57,6 +57,7 @@ export function validateLivePoolReserves(
 export async function snapshotSwapState(
   ctx: VenueContext,
   market: VenueMarket,
+  loaded?: RpcResponseAndContext<(AccountInfo<Buffer> | null)[]>,
 ): Promise<SwapSolanaState> {
   const snapshot = ctx.reserves!;
   const poolKey = new PublicKey(String(market.metadata.pool));
@@ -88,7 +89,7 @@ export async function snapshotSwapState(
     quoteAta,
   ];
   const { context, value } =
-    await ctx.connection.getMultipleAccountsInfoAndContext(addresses, {
+    loaded ?? await ctx.connection.getMultipleAccountsInfoAndContext(addresses, {
       commitment: "confirmed",
       minContextSlot: snapshot.slot,
     });
@@ -184,4 +185,24 @@ export async function snapshotSwapState(
     userBaseAccountInfo: userBaseInfo ?? null,
     userQuoteAccountInfo: userQuoteInfo ?? null,
   };
+}
+
+/** Fetch current config, pool, mints, vaults and user ATAs in one coherent slot. */
+export async function batchedSwapState(ctx: VenueContext, market: VenueMarket): Promise<SwapSolanaState> {
+ const pool=new PublicKey(String(market.metadata.pool));
+ const baseVault=new PublicKey(String(market.metadata.poolBaseAta));
+ const quoteVault=new PublicKey(String(market.metadata.poolQuoteAta));
+ const baseAta=getAssociatedTokenAddressSync(market.mint,ctx.user,true,market.baseTokenProgram);
+ const quoteAta=getAssociatedTokenAddressSync(market.quoteAsset.mint,ctx.user,true,market.quoteAsset.tokenProgram);
+ const loaded=await ctx.connection.getMultipleAccountsInfoAndContext([
+  GLOBAL_CONFIG_PDA,PUMP_AMM_FEE_CONFIG_PDA,pool,market.mint,market.quoteAsset.mint,
+  baseAta,quoteAta,baseVault,quoteVault,
+ ], {commitment:"confirmed"});
+ const base=unpackAccount(baseVault,loaded.value[7]??null,market.baseTokenProgram);
+ const quote=unpackAccount(quoteVault,loaded.value[8]??null,market.quoteAsset.tokenProgram);
+ if(!base.mint.equals(market.mint)||!quote.mint.equals(market.quoteAsset.mint)||!base.owner.equals(pool)||!quote.owner.equals(pool))
+  throw new Error("PumpSwap vault identity mismatch");
+ return await snapshotSwapState({...ctx,reserves:{pool:pool.toBase58(),baseMint:market.mint.toBase58(),quoteMint:market.quoteAsset.mint.toBase58(),
+  baseReserveRaw:base.amount,quoteReserveRaw:quote.amount,slot:loaded.context.slot,capturedAtMs:Date.now()}},market,
+  {context:loaded.context,value:loaded.value.slice(0,7)});
 }

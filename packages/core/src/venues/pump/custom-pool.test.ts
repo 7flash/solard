@@ -16,7 +16,7 @@ import { verifyPoolTokenMetadata } from "./token-metadata.ts";
 import { Solard } from "../../core/solard.ts";
 import { PumpCurveVenue } from "./pump-curve-venue.ts";
 import { fetchCurve } from "./state.ts";
-import { snapshotSwapState } from "./live-reserves.ts";
+import { snapshotSwapState, batchedSwapState } from "./live-reserves.ts";
 
 function fixture() {
   const base = Keypair.generate().publicKey;
@@ -282,6 +282,14 @@ test("validated caller reserves skip vault reads while SDK uses fresh mint suppl
   expect(state.poolBaseAmount.toString()).toBe("300000000");
   expect(state.baseMintAccount.supply).toBe(1_000_000_000n);
   expect(state.quoteTokenProgram.equals(TOKEN_2022_PROGRAM_ID)).toBe(true);
+  context.pool.toBuffer().copy(context.accounts.get(context.baseVault.toBase58())!.data, 32);
+  context.pool.toBuffer().copy(context.accounts.get(String(market.metadata.poolQuoteAta))!.data, 32);
+  const current = await batchedSwapState(context, market);
+  expect(batches.at(-1)).toHaveLength(9);
+  expect(current.poolBaseAmount.toString()).toBe("200000000");
+  expect(current.quoteTokenProgram.equals(TOKEN_2022_PROGRAM_ID)).toBe(true);
+  batches.pop(); // Keep the caller-reserve path assertions below isolated.
+
   const quote = await venue.quoteBuy(
     ctx,
     market,
