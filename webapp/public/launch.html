@@ -63,12 +63,12 @@ $("form").addEventListener("submit", async (e) => {
   const d = r ? await r.json().catch(() => ({})) : {};
   if (!r?.ok) { $("error").textContent = d.error ?? "Could not create the agent."; $("go").disabled = false; return; }
   $("form").hidden = true; $("done").hidden = false;
-  $("coin").href = `/launch/coin?agent=${encodeURIComponent(d.slug)}&name=${encodeURIComponent(name)}&feesTo=${encodeURIComponent(d.wallet)}`;
+  $("coin").href = `https://fairfun.xyz/launch?name=${encodeURIComponent(name)}&feesTo=${encodeURIComponent(d.wallet)}`;
 });
 fetch("/api/agents").then((r) => r.json()).then((d) => {
   $("agents").replaceChildren(...d.agents.map((a) => {
     const row = document.createElement("a"), rules = document.createElement("span");
-    row.href = `/agents/${encodeURIComponent(a.slug)}`; row.textContent = a.name; rules.textContent = a.rules; row.append(rules); return row;
+    row.href = `https://fairfun.xyz/agents/${encodeURIComponent(a.slug)}`; row.textContent = a.name; rules.textContent = a.rules; row.append(rules); return row;
   }));
 }).catch(() => {});
 </script>
