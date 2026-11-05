@@ -15,7 +15,7 @@ process.env.JSX_AI_RUNTIME ??= "codex";
 process.env.JSX_AI_MODEL ??= "gpt-5.6-sol"; // the local codex default is rejected by the API
 const dot = resolve(import.meta.dir, ".range-bots"), token = readFileSync(resolve(dot, "bridge-token"), "utf8").trim(), out = resolve(dot, "kris-events.json");
 const { streamLLM } = await import(process.env.JSX_AI_PATH ?? resolve(import.meta.dir, "..", "jsx-ai", "src", "index.ts")) as { streamLLM: (m: { role: string; content: string }[], o: { timeoutMs: number }) => AsyncIterable<string> };
-const KEEP = 300, KEEP_COINS = 100, THOUGHT_GAP_MS = 4_000;
+const KEEP = 100, KEEP_COINS = 100, KEEP_THOUGHTS = 500, THOUGHT_GAP_MS = 4_000;
 const SYSTEM = "You are Kris, a young trader whose memecoin positions on Solana are run by rules on the Solard terminal. You do not choose trades: the rules do. Your job is to look back honestly at how they went, thinking out loud, and you feel every result: a win makes you buzz, a loss stings, a rug makes you angry. "
   + "Open with how this result feels in your own plain words, then say why it worked or failed, using the facts given: how long it was held, what the range caught, what the flow and holders did, and what that says about this kind of coin. End with the one lesson you take from it. "
   + "Never recommend a trade or say what you will do next: you are reviewing, not deciding. Earlier thoughts are given so you can spot patterns across results; never repeat one or copy their mood. At most three sentences, first person, plain words. "
@@ -26,8 +26,10 @@ type Decision = { atMs: number; mint: string; name: string; symbol?: string | nu
 
 let events: KrisEvent[] = []; try { events = JSON.parse(readFileSync(out, "utf8")); } catch {}
 const isCoin = (e: KrisEvent) => e.kind === "coin" || e.kind === "migrated";
-const save = () => { const kept = [...events.filter(isCoin).slice(0, KEEP_COINS), ...events.filter(e => !isCoin(e)).slice(0, KEEP)].sort((a, b) => b.atMs - a.atMs); writeFileSync(`${out}.tmp`, JSON.stringify(kept)); try { renameSync(`${out}.tmp`, out); } catch { /* Windows: a reader has it open; the next save writes it */ } };
-const add = (e: Omit<KrisEvent, "id">) => { const ev = { ...e, id: `${e.atMs}-${e.kind}-${e.mint}` }; if (events.some(x => x.id === ev.id)) return null; events.unshift(ev); events = events.slice(0, KEEP); save(); return ev; };
+/** Thoughts are the history: they are kept apart from the flood of events that carry none. */
+const trimmed = () => [...events.filter(e => e.thought).slice(0, KEEP_THOUGHTS), ...events.filter(e => !e.thought && isCoin(e)).slice(0, KEEP_COINS), ...events.filter(e => !e.thought && !isCoin(e)).slice(0, KEEP)].sort((a, b) => b.atMs - a.atMs);
+const save = () => { const kept = trimmed(); writeFileSync(`${out}.tmp`, JSON.stringify(kept)); try { renameSync(`${out}.tmp`, out); } catch { /* Windows: a reader has it open; the next save writes it */ } };
+const add = (e: Omit<KrisEvent, "id">) => { const ev = { ...e, id: `${e.atMs}-${e.kind}-${e.mint}` }; if (events.some(x => x.id === ev.id)) return null; events.unshift(ev); events = trimmed(); save(); return ev; };
 
 /** Trades and range moves wait their turn; a new coin gets a thought only when nothing else is waiting. */
 type Closed = { symbol: string | null; mint: string; pnlSol: number; pct: number | null; closedAt: number; openedAt: number | null };
@@ -59,7 +61,7 @@ async function drainThoughts() {
         }
         break;
       } catch (e) { if (attempt === 2) throw e; await Bun.sleep(1_500); }
-    } catch (e) { console.log(`${new Date().toISOString()} thought failed: ${String(e).slice(0, 160)}`); if (job.ev.kind === "result" || job.ev.kind === "review") { job.ev.thought ??= job.ev.title; save(); } } // no Codex: results still reach the history
+    } catch (e) { console.log(`${new Date().toISOString()} thought failed: ${String(e).slice(0, 160)}`); if (job.ev.kind === "result" || job.ev.kind === "review" || job.ev.kind === "trade") { job.ev.thought ??= job.ev.title; save(); } } // no Codex: results still reach the history
     await Bun.sleep(THOUGHT_GAP_MS);
   }
   thinking = false;
