@@ -17,7 +17,6 @@ h1 { font-size:36px; line-height:1.1; letter-spacing:-.02em; margin:0 0 10px } .
 label { display:block; margin:0 0 16px; font-weight:600; font-size:14px } small { display:block; color:var(--muted); font-weight:400; margin-top:4px }
 input,textarea { width:100%; margin-top:6px; padding:12px; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:10px; font:inherit; font-weight:400 }
 .row { display:grid; grid-template-columns:1fr 130px; gap:12px } .pick { display:flex; gap:14px; align-items:center; margin-bottom:16px } .pic { width:72px; height:72px; flex:none; border-radius:14px; background:var(--panel) center/cover no-repeat; border:1px dashed #3A4452; cursor:pointer; display:grid; place-items:center; color:var(--muted); font-size:13px }
-.rules { margin:0 0 16px; padding:12px 14px; background:var(--panel); border:1px solid var(--line); border-radius:10px; color:var(--muted); font-size:14px }
 button,.btn { display:inline-block; padding:12px 20px; border-radius:10px; border:0; background:var(--acc); color:#0B0E11; font:600 16px Inter,system-ui,sans-serif; cursor:pointer } button:disabled { opacity:.5; cursor:default } .btn.alt { background:none; color:var(--text); border:1px solid #2A313B }
 .error { color:var(--dn); margin-top:12px } .note { color:var(--muted); font-size:14px; margin-top:22px }
 details { margin-bottom:16px; color:var(--muted); font-size:14px } summary { cursor:pointer; margin-bottom:10px }
@@ -40,7 +39,6 @@ details { margin-bottom:16px; color:var(--muted); font-size:14px } summary { cur
     </div>
     <input id="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
     <label>What should it do?<textarea id="strategy" rows="3" maxlength="600" required placeholder="Always buys cat coins from 5k to 60k"></textarea></label>
-    <div class="rules" id="rules">Its rules appear here.</div>
     <label>Your wallet<input id="wallet" required placeholder="Solana address"><small>Your launch buy sells at +2% and comes back here.</small></label>
     <details><summary>More options</summary>
       <label>Website<input id="website" type="url" placeholder="https://"><small>Leave empty to use the agent's Solard page.</small></label>
@@ -67,15 +65,7 @@ details { margin-bottom:16px; color:var(--muted); font-size:14px } summary { cur
 <script>
 const $ = (id) => document.getElementById(id);
 const post = (path, body) => fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-let timer, image = null, file = null;
-$("strategy").addEventListener("input", () => {
-  clearTimeout(timer);
-  timer = setTimeout(async () => {
-    const text = $("strategy").value.trim(); if (text.length < 3) return;
-    const r = await post("/api/agents/preview", { strategy: text }).catch(() => null);
-    if (r?.ok) $("rules").textContent = (await r.json()).text;
-  }, 300);
-});
+let image = null, file = null;
 $("pic").addEventListener("click", () => $("file").click());
 $("file").addEventListener("change", () => {
   file = $("file").files[0] ?? null; image = null;

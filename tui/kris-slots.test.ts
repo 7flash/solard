@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { bundleShare, earlyBoughtPct } from "./bundles.ts";
+import { tradedFromLog } from "./fill-log.ts";
 import { freshMigration, planSlots, slotKeepsRange, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
@@ -106,3 +107,8 @@ test("an old pair that gets busy is not a fresh migration", () => {
   expect(freshMigration(true, true)).toBe(false);
   expect(freshMigration(false, false)).toBe(false);
 });
+test("traded volume counts buys, sells and the final sell-all", () => {
+  const log = "2026-11-05T15:30:35Z bgr X: BUY confirmed CONFIRMED -0.5 SOL a\n2026-11-05T15:31:00Z bgr X: SELL confirmed CONFIRMED +0.25 SOL b\nbgr:X: sell all attempt 1: confirmed CONFIRMED +0.25 SOL c\nbgr:X: sell all attempt 2: failed NO_ROUTE\n";
+  expect(tradedFromLog(log)).toEqual({ sol: 1, trades: 3 });
+});
+

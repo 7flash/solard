@@ -32,7 +32,7 @@ export default function KrisRoom() {
           </div>
           <div className="stand" /><div className="stand-foot" />
         </section>
-        <aside className="seat"><Figure /><button id="ca-row" className="ca" title="Copy">CA: <span id="ca" /></button></aside>
+        <aside className="seat"><Figure /><button id="ca-row" className="ca" title="Copy wallet">Wallet: <span id="ca" /></button><span id="traded" className="ca" hidden /></aside>
         <div className="desk" />
       </main>
     </div>

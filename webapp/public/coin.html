@@ -58,7 +58,7 @@ table { width:100%; border-collapse:collapse; font-size:14px } th { text-align:l
     <div class="stat"><small>24h change</small><b id="chg">—</b></div>
     <div class="stat"><small>24h buys / sells</small><b id="txns">—</b></div>
     <div class="stat"><small>Kris positions</small><b id="open">—</b></div>
-    <div class="stat"><small>Held in coins</small><b id="held">—</b></div>
+    <div class="stat"><small>Kris traded</small><b id="traded">—</b></div>
   </section>
   <section class="live">
     <div class="side">
@@ -112,7 +112,6 @@ async function kris() {
   if (o?.bots) {
     const on = o.bots.filter((b) => !b.inactive);
     $("open").textContent = on.length;
-    $("held").textContent = `${on.reduce((a, b) => a + (b.valueSol ?? 0), 0).toFixed(2)} SOL`;
   }
   const rows = o?.closedRows ?? [];
   if (o?.bots) tables(o, o.bots.filter((b) => !b.inactive), rows);
@@ -124,6 +123,7 @@ async function kris() {
     $("best").textContent = name(sorted[0]); $("worst").textContent = name(sorted[sorted.length - 1]);
   }
   const k = await fetch("/terminal/api/kris").then((r) => r.json()).catch(() => null);
+  if (k?.stats?.volumeSol) $("traded").textContent = `${Math.round(k.stats.volumeSol).toLocaleString("en-US")} SOL`;
   const list = (k?.events ?? []).filter((e) => e.thought).slice(0, 6);
   if (list.length) $("thoughts").replaceChildren(...list.map((e) => {
     const row = document.createElement("div"), when = document.createElement("small");

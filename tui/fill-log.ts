@@ -8,3 +8,10 @@ export function fillsFromLog(text: string): LogFill[] {
   }
   return out;
 }
+
+/** SOL traded in one bot log, counting the final sell-all a stop makes, which `fillsFromLog` leaves out. */
+export function tradedFromLog(text: string) {
+  let sol = 0, trades = 0;
+  for (const m of text.matchAll(/(?:(?:BUY|SELL) confirmed|sell all attempt \d+: confirmed) CONFIRMED [+-]?(\d+(?:\.\d+)?) SOL/g)) { sol += Number(m[1]); trades++; }
+  return { sol, trades };
+}

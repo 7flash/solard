@@ -23,7 +23,6 @@ h2 { font-size:18px; margin:26px 0 10px } .muted { color:var(--muted) }
 <main>
   <h1 id="name">Agent</h1>
   <p class="lead" id="strategy"></p>
-  <div class="box"><small>Rules</small><span id="rules"></span></div>
   <div class="box"><small>Agent wallet</small><span class="mono" id="wallet"></span></div>
   <div class="box"><small>Reads</small><span id="sites"></span></div>
   <h2>Thoughts</h2>
@@ -36,7 +35,7 @@ async function load() {
   if (!r?.ok) { if (r?.status === 404) { $("name").textContent = "Agent not found"; document.querySelectorAll(".box").forEach((b) => b.remove()); } return; }
   const d = await r.json();
   document.title = `${d.name} · Solard`;
-  $("name").textContent = d.name; $("strategy").textContent = d.strategy; $("rules").textContent = d.rules; $("wallet").textContent = d.wallet ?? "—"; $("sites").textContent = d.sites.join(" · ");
+  $("name").textContent = d.name; $("strategy").textContent = d.strategy; $("wallet").textContent = d.wallet ?? "—"; $("sites").textContent = d.sites.join(" · ");
   if (d.thoughts.length) $("thoughts").replaceChildren(...d.thoughts.map((t) => {
     const box = document.createElement("div"), when = document.createElement("small");
     box.className = "box"; when.textContent = `${new Date(t.at).toISOString().slice(0, 16).replace("T", " ")} · ${t.title || t.url}`;

@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 const dir = import.meta.dir, token = readFileSync(`${dir}/.token`, "utf8").trim();
 const port = Number(process.env.PORT ?? 3030), MAX_BODY = 3_000_000, MAX_COINS = 80;
 const files: Record<string, [string, string]> = { "/home": ["home.html", "text/html; charset=utf-8"], "/launch": ["launch.html", "text/html; charset=utf-8"], "/coin/kris": ["coin.html", "text/html; charset=utf-8"], "/terminal.webp": ["terminal.webp", "image/webp"], "/": ["index.html", "text/html; charset=utf-8"], "/live.js": ["live.js", "text/javascript; charset=utf-8"], "/style.css": ["style.css", "text/css; charset=utf-8"] };
-let overview = "null", kris = "[]", ca = ""; const coins = new Map<string, string>(), ART = new Set(["ape", "profit", "loss", "dip", "hold"]);
+let overview = "null", kris = "[]", ca = "", wallet = "", stats = "null"; const coins = new Map<string, string>(), ART = new Set(["ape", "profit", "loss", "dip", "hold"]);
 const json = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 const digest = (a: string) => new Bun.CryptoHasher("sha256").update(a).digest("hex");
 const allowed = (a: string) => digest(a) === digest(token);
@@ -14,9 +14,9 @@ Bun.serve({ port, hostname: "127.0.0.1", maxRequestBodySize: MAX_BODY, async fet
   const url = new URL(req.url), f = files[url.pathname];
   if (req.method === "POST" && url.pathname === "/api/ingest") {
     if (!allowed((req.headers.get("authorization") ?? "").replace(/^Bearer /, ""))) return json(`{"error":"no"}`, 401);
-    const body = await req.json().catch(() => null) as { overview?: unknown; coin?: { mint?: string }; kris?: unknown; ca?: string } | null;
+    const body = await req.json().catch(() => null) as { overview?: unknown; coin?: { mint?: string }; kris?: unknown; ca?: string; wallet?: string; stats?: unknown } | null;
     if (body?.overview) overview = JSON.stringify(body.overview);
-    if (body?.kris) { kris = JSON.stringify(body.kris); ca = String(body.ca ?? ""); }
+    if (body?.kris) { kris = JSON.stringify(body.kris); ca = String(body.ca ?? ""); wallet = String(body.wallet ?? ""); stats = JSON.stringify(body.stats ?? null); }
     if (body?.coin?.mint) {
       coins.delete(body.coin.mint); coins.set(body.coin.mint, JSON.stringify(body.coin));
       if (coins.size > MAX_COINS) coins.delete(coins.keys().next().value!);
@@ -32,7 +32,7 @@ Bun.serve({ port, hostname: "127.0.0.1", maxRequestBodySize: MAX_BODY, async fet
   if (/^\/coin\/[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(url.pathname)) return page("token.html");
   if (f) return new Response(readFileSync(`${dir}/${f[0]}`), { headers: { "content-type": f[1], "cache-control": "no-cache" } });
   if (url.pathname === "/api/overview") return json(overview);
-  if (url.pathname === "/api/kris") return json(`{"events":${kris},"ca":${JSON.stringify(ca)}}`);
+  if (url.pathname === "/api/kris") return json(`{"events":${kris},"ca":${JSON.stringify(ca)},"wallet":${JSON.stringify(wallet)},"stats":${stats}}`);
   if (url.pathname === "/api/kris/art") { const n = url.searchParams.get("name") ?? ""; return ART.has(n) ? new Response(readFileSync(`${dir}/art/${n}.webp`), { headers: { "content-type": "image/webp", "cache-control": "public, max-age=86400" } }) : new Response("not found", { status: 404 }); }
   if (url.pathname === "/api/coin") { const c = coins.get(url.searchParams.get("mint") ?? ""); return c ? json(c) : json(`{"error":"not tracked"}`, 404); }
   return new Response("not found", { status: 404 });

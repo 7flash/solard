@@ -1,11 +1,25 @@
 /** Pushes the cleaned view to the public page: overview every 5s, a few held coins each round. One way only: nothing
  * comes back, and the server never gets the bridge token. Token: .range-bots/public-token. */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { tradedFromLog } from "./tui/fill-log.ts";
 import { assertClean, publicCoin, publicKris, publicOverview, type Secrets } from "./webapp/public/sanitize.ts";
 
 const dot = resolve(import.meta.dir, ".range-bots");
 const bridgeToken = readFileSync(resolve(dot, "bridge-token"), "utf8").trim(), publicToken = readFileSync(resolve(dot, "public-token"), "utf8").trim();
+/** All SOL Kris has traded, from the bot logs. Read at most every 5 minutes. */
+let traded = { volumeSol: 0, trades: 0, coins: 0 }, tradedAt = 0;
+function totals() {
+  if (Date.now() - tradedAt < 300_000) return traded;
+  tradedAt = Date.now();
+  const dir = resolve(import.meta.dir, ".range-bots"), sum = { volumeSol: 0, trades: 0, coins: 0 };
+  for (const f of readdirSync(dir)) {
+    if (!/^term-bgr-.*\.log$/.test(f)) continue;
+    const t = tradedFromLog(readFileSync(resolve(dir, f), "utf8"));
+    if (t.trades) { sum.volumeSol += t.sol; sum.trades += t.trades; sum.coins++; }
+  }
+  return traded = { ...sum, volumeSol: Math.round(sum.volumeSol * 100) / 100 };
+}
 const target = process.env.SLRD_PUBLIC_URL ?? "https://solard.xyz/live/api/ingest", bridge = "http://127.0.0.1:5174", view = "http://127.0.0.1:5176";
 
 async function get(url: string, headers: Record<string, string>) {
@@ -31,7 +45,7 @@ for (;;) {
     // watch=0: reading a coin here must never start its holder history download.
     for (let i = 0; i < 2 && mints.length; i++)
       await push({ coin: publicCoin(await get(`${bridge}/api/coin-wallets?mint=${mints[next++ % mints.length]}&watch=0`, { "x-slrd-token": bridgeToken }), s) }, s);
-    await push({ kris: publicKris(await get(`${view}/api/kris`, { cookie: `slrd_web=${bridgeToken}` }).then(r => r.events ?? [])), ca: process.env.KRIS_CA ?? "" }, s);
+    await push({ kris: publicKris(await get(`${view}/api/kris`, { cookie: `slrd_web=${bridgeToken}` }).then(r => r.events ?? [])), ca: process.env.KRIS_CA ?? "", wallet: process.env.KRIS_WALLET ?? "", stats: totals() }, s);
     if (lastError) console.log("publishing again");
     lastError = "";
   } catch (e) {
