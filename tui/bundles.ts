@@ -21,3 +21,11 @@ export function bundleShare(trades: BuyRow[]) {
   const wallets = new Set(trades.flatMap(t => t.trader ? [t.trader] : []));
   return wallets.size ? bundledWallets(trades).size / wallets.size : 0;
 }
+
+/** Percent of supply still held by wallets that bought in a coin's first 3 seconds: the launch bundle, whatever sizes it used.
+ * bundleShare alone misses it: those buys leave the recent trades within a minute. */
+export function earlyHeldPct(wallets: { firstAtMs?: number | null; pct?: number | null }[], launchedAtMs?: number | null) {
+  const firsts = wallets.flatMap(w => w.firstAtMs ? [w.firstAtMs] : []); if (!firsts.length) return 0;
+  const t0 = launchedAtMs ?? Math.min(...firsts);
+  return wallets.reduce((a, w) => a + (w.firstAtMs && w.firstAtMs - t0 <= 3_000 ? w.pct ?? 0 : 0), 0);
+}
