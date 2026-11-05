@@ -41,7 +41,7 @@ const EMBED = qs.get("embed") === "1";
 const EMBED_PARENTS = new Set([location.origin, "https://krisagent.xyz"]);
 const embedParent = () => { try { const o = new URL(document.referrer).origin; return EMBED_PARENTS.has(o) ? o : location.origin; } catch { return location.origin; } };
 let embedReady = false;
-const S = { sortKey: qs.get("sort") ?? (qs.get("agent") ? "last" : "pnl"), sortDir: qs.get("dir") === "asc" ? 1 : -1, showBots: false, coin: new URLSearchParams(location.search).get("coin"), filter: "all", hover: null as string | null, pin: null as string | null,
+const S = { kris: null as { wallet?: string; stats?: { volumeSol: number } | null } | null, sortKey: qs.get("sort") ?? (qs.get("agent") ? "last" : "pnl"), sortDir: qs.get("dir") === "asc" ? 1 : -1, showBots: false, coin: new URLSearchParams(location.search).get("coin"), filter: "all", hover: null as string | null, pin: null as string | null,
   ov: null as Overview | null, cd: null as CoinData | null };
 let dots: Dot[] = [];
 
@@ -185,6 +185,8 @@ function draw() {
   if (ov) {
     const holding = ov.bots.filter(b => (b.valueSol ?? 0) > 0), pnl = ov.bots.reduce((a, b) => a + b.pnl, 0), ok = ov.bots.filter(b => !b.error && !b.stale && !b.inactive).length;
     render(<>
+      {S.kris?.wallet ? <span>wallet <a className="v" href={`https://solscan.io/account/${S.kris.wallet}`} target="_blank" rel="noopener">{S.kris.wallet.slice(0, 6)}…{S.kris.wallet.slice(-4)}</a></span> : null}
+      {S.kris?.stats?.volumeSol ? <span>traded <span className="v">{Math.round(S.kris.stats.volumeSol).toLocaleString("en-US")} SOL</span></span> : null}
       <span>bots <span className="v">{ok}/{ov.bots.length}</span> ok</span>
       <span>holding <span className="v">{holding.reduce((a, b) => a + (b.valueSol ?? 0), 0).toFixed(3)} SOL</span> in {holding.length}</span>
       {(() => { const closedSol = ov.closed?.sol ?? 0, total = pnl + closedSol; return <span>P&amp;L <span className="v">{sgn(total, 3)} SOL</span>{ov.solUsd ? <span className="dim"> ({total >= 0 ? "+" : "−"}${Math.abs(total * ov.solUsd).toFixed(0)})</span> : null}<span className="dim" title={`${ov.closed?.bots ?? 0} closed bots`}> · open {sgn(pnl, 3)} · closed {sgn(closedSol, 3)}</span></span>; })()}
@@ -243,6 +245,7 @@ async function pullCoin() {
   catch {} finally { coinBusy = false; }
 }
 
+const loadKris = () => fetch("api/kris").then(r => r.ok ? r.json() : null).then(d => { if (d) { S.kris = { wallet: d.wallet, stats: d.stats }; draw(); } }).catch(() => {});
 export default function mount() {
   // One delegated handler: any row with data-mint selects that coin; rows with data-w highlight that wallet.
   const onClick = (e: Event) => {
@@ -277,7 +280,8 @@ export default function mount() {
   search.addEventListener("input", () => { void openFrom(search.value); });
   search.addEventListener("keydown", e => { if ((e as KeyboardEvent).key === "Enter") void openFrom(search.value); });
   void pullOverview(); void pullCoin();
+  void loadKris(); const krisTimer = setInterval(() => void loadKris(), 60_000);
   const a = setInterval(() => void pullOverview(), 3_000), b = setInterval(() => void pullCoin(), 2_000);
   if (EMBED) window.addEventListener("message", onEmbed);
-  return () => { clearInterval(a); clearInterval(b); window.removeEventListener("message", onEmbed); document.removeEventListener("click", onClick); };
+  return () => { clearInterval(a); clearInterval(krisTimer); clearInterval(b); window.removeEventListener("message", onEmbed); document.removeEventListener("click", onClick); };
 }
