@@ -59,9 +59,9 @@ test("a slot that sold out moves on at once, whatever its age", () => {
   const coins = [coin("a"), coin("b"), coin("c", { traders: 60 })], slots = [slot("a", { openedAtMs: now - 10_000 }), slot("b")], heldMints = new Set(["a", "b"]);
   expect(plan({ slots, heldMints, coins, config: { maxNew: 2, swapRatio: 99 }, emptyMints: new Set(["a"]) })).toMatchObject({ type: "close", slot: { mint: "a" }, forSwap: true });
 });
-test("a new pair gives way sooner than a migration", () => {
-  const coins = [coin("old"), coin("fresh", { traders: 60 })];
-  expect(plan({ slots: [slot("old", { openedAtMs: now - 500_000 })], heldMints: new Set(["old"]), coins, config: { maxNew: 1 } })).toMatchObject({ type: "close", slot: { mint: "old" } });
+test("a new pair past its limit gives way", () => {
+  const coins = [coin("old"), coin("fresh", { traders: 60 })]; // held past the 15 minute limit
+  expect(plan({ slots: [slot("old", { openedAtMs: now - 1_000_000 })], heldMints: new Set(["old"]), coins, config: { maxNew: 1 } })).toMatchObject({ type: "close", slot: { mint: "old" } });
 });
 test("a slot held over 15 minutes gives way to a fresh coin, however strong it still is", () => {
   const big = coin("old", { migrated: true, capUsd: 80_000, traders: 5000, trades: 9000, ageMs: null }), fresh = coin("f", { migrated: true, capUsd: 80_000, traders: 200, trades: 400, ageMs: null });
