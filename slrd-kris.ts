@@ -159,7 +159,7 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
   } catch (e) { console.log(`${new Date().toISOString()} compare: ${String(e).slice(0, 160)}`); }
   finally { thinking = false; void drainThoughts(); }
 }
-const missingSince = new Map<string, number>(), lastSeen = new Map<string, number>(), pendingSide = new Map<string, { side: string; at: number }>(), reportedAt = new Map<string, number>();
+const closing = new Map<string, number>(), missingSince = new Map<string, number>(), lastSeen = new Map<string, number>(), pendingSide = new Map<string, { side: string; at: number }>(), reportedAt = new Map<string, number>();
 async function runSlots(bots: Bot[], coins: Coin[]) {
   if (existsSync(offPath)) return;
   const held = new Set(bots.map(b => b.mint));
@@ -170,10 +170,12 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   if (gone.length) { book.slots = book.slots.filter(s => !gone.includes(s)); saveBook(); }
   const w = await myWallet(), now = Date.now(), listed = new Set(coins.map(c => c.mint));
   for (const s of book.slots) if (listed.has(s.mint) || !lastSeen.has(s.mint)) lastSeen.set(s.mint, now);
+  for (const [mint, at] of closing) { if (!held.has(mint)) closing.delete(mint); else if (now - at > 60_000) { closing.set(mint, now); await act({ action: "stop", mint }); } } // the sale failed: again
   const a = planSlots({ coins, slots: book.slots, heldMints: held, closedAt: new Map(book.closedAt), migratedAt, freeSol: w.sol, nowMs: now, lastActionMs: book.lastActionMs, lastSwapMs: book.lastSwapMs, pendingKind: book.pendingKind, lastSeen, emptyMints: new Set(bots.filter(b => (b.holdingSteps ?? 0) === 0).map(b => b.mint)), allowNew: new Set(picked && now - picked.at < PICK_LIFE_MS ? [picked.mint] : []) });
   if (!a) return;
   if (a.type === "close") {
-    await act({ action: "stop", mint: a.slot.mint });
+    // Buys off first: a sale that fails must not leave the bot buying with no slot watching it.
+    await act({ action: "pause", mint: a.slot.mint }); await act({ action: "stop", mint: a.slot.mint }); closing.set(a.slot.mint, now);
     book.slots = book.slots.filter(s => s.mint !== a.slot.mint); book.closedAt = [...book.closedAt.filter(([, at]) => now - at < SLOT_CONFIG.reopenAfterMs), [a.slot.mint, now]];
     book.lastActionMs = now; if (a.forSwap) { book.lastSwapMs = now; book.pendingKind = a.slot.kind; } saveBook();
     const ev = add({ atMs: now, kind: "decision", mint: a.slot.mint, symbol: a.slot.symbol, title: `Closing: ${a.reason}` });
