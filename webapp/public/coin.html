@@ -41,7 +41,6 @@ table { width:100%; border-collapse:collapse; font-size:14px } th { text-align:l
     <div class="pic" id="pic"></div>
     <div style="min-width:0">
       <h1>Kris Agent <span>$KRIS</span></h1>
-      <button class="ca" id="ca" title="Copy contract address"></button>
       <a class="ca" id="wallet" title="Kris's wallet on Solscan"></a>
     </div>
     <div class="links">
@@ -82,8 +81,7 @@ const usd = (n) => n == null ? "—" : `$${n >= 1e6 ? (n / 1e6).toFixed(2) + "M"
 const sol = (n) => `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(3)} SOL`;
 const ago = (ms) => { const m = Math.max(0, Math.round((Date.now() - ms) / 60000)); return m < 1 ? "now" : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : `${Math.floor(m / 1440)}d ago`; };
 const tone = (node, n) => { node.classList.toggle("up", n > 0); node.classList.toggle("dn", n < 0); };
-$("ca").textContent = CA; $("wallet").textContent = `Wallet ${WALLET}`; $("wallet").href = `https://solscan.io/account/${WALLET}`; $("buy").href = `https://pump.fun/coin/${CA}`;
-$("ca").addEventListener("click", async () => { await navigator.clipboard?.writeText(CA).catch(() => {}); $("ca").textContent = "Copied"; setTimeout(() => { $("ca").textContent = CA; }, 1200); });
+$("wallet").textContent = `Wallet ${WALLET}`; $("wallet").href = `https://solscan.io/account/${WALLET}`; $("buy").href = `https://pump.fun/coin/${CA}`;
 $("pic").style.backgroundImage = 'url("/api/media/622d3725f71bacfa915f7c5fe19462315abadeb2bdb0de571c8228900fe92001.png")';
 const cell = (text, cls) => { const td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; return td; };
 const row = (mint, cells) => { const tr = document.createElement("tr"); tr.append(...cells); tr.addEventListener("click", () => { location.href = `/terminal/?agent=kris&coin=${encodeURIComponent(mint)}`; }); return tr; };
