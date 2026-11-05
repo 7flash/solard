@@ -51,10 +51,13 @@ async function drainThoughts() {
     const gloomy = /burned|bruis|sting|bites|bitter|licking/i, earlier = events.filter(e => e.thought && e.id !== job.ev.id && e.kind !== "coin" && e.kind !== "migrated" && !gloomy.test(e.thought)).slice(0, 4).map(e => ({ coin: e.symbol ?? e.mint.slice(0, 6), event: e.title, thought: e.thought }));
     try {
       const context = job.ev.kind === "coin" || job.ev.kind === "migrated" ? null : await coinContext(job.ev.mint);
-      let text = "";
-      for await (const chunk of streamLLM([{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({ ...job.facts, context, ...(job.ev.reaction === "loss" ? { myRecentResults: results } : {}), earlierThoughts: earlier }) }], { timeoutMs: 60_000 })) {
-        text += chunk; job.ev.thought = text; save();
-      }
+      for (let attempt = 1; attempt <= 2; attempt++) try { // the Codex runtime sometimes exits mid-turn: one more try
+        let text = "";
+        for await (const chunk of streamLLM([{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({ ...job.facts, context, ...(job.ev.reaction === "loss" ? { myRecentResults: results } : {}), earlierThoughts: earlier }) }], { timeoutMs: 60_000 })) {
+          text += chunk; job.ev.thought = text; save();
+        }
+        break;
+      } catch (e) { if (attempt === 2) throw e; await Bun.sleep(1_500); }
     } catch (e) { console.log(`${new Date().toISOString()} thought failed: ${String(e).slice(0, 160)}`); }
     await Bun.sleep(THOUGHT_GAP_MS);
   }
