@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>$KRIS · Kris Agent · Solard</title>
-<meta name="description" content="Kris Agent trades new Solana coins live through the Solard terminal.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -29,7 +28,7 @@ h1 { font-size:26px; line-height:1.15; margin:0 } h1 span { color:var(--muted); 
 table { width:100%; border-collapse:collapse; font-size:14px } th { text-align:left; color:var(--muted); font-weight:500; font-size:13px; padding:9px 12px; border-bottom:1px solid var(--line) } td { padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; font-family:'JetBrains Mono',monospace; font-size:13px } td:first-child { font-family:Inter,system-ui,sans-serif; font-weight:600; font-size:14px; max-width:150px; overflow:hidden; text-overflow:ellipsis } tr:last-child td { border-bottom:0 } tbody tr:hover { background:#161B21 } tbody tr { cursor:pointer } .r { text-align:right } .more { padding:10px 16px; color:var(--muted); font-size:14px }
 #thoughts { padding:0 16px }
 .thought { padding:12px 0; border-bottom:1px solid var(--line); font-size:15px } .thought:last-child { border:0 } .thought small { display:block; color:var(--muted); font-size:13px; margin-bottom:2px }
-.about { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:14px } .about .panel p,.about .panel ul { margin:0; padding:14px 16px; color:var(--muted); font-size:15px } .about ul { list-style:none } .about li { display:flex; justify-content:space-between; gap:12px; padding:3px 0 } .about li b { color:var(--text); font-weight:500 }
+.about { display:grid; grid-template-columns:minmax(0,420px); gap:14px; margin-top:14px } .about .panel p,.about .panel ul { margin:0; padding:14px 16px; color:var(--muted); font-size:15px } .about ul { list-style:none } .about li { display:flex; justify-content:space-between; gap:12px; padding:3px 0 } .about li b { color:var(--text); font-weight:500 }
 @media (max-width:1000px) { .stats { grid-template-columns:repeat(3,minmax(0,1fr)) } .live,.about { grid-template-columns:minmax(0,1fr) } .links { margin-left:0 } }
 @media (max-width:640px) { .hide { display:none } td,th { padding:8px } }
 @media (max-width:520px) { .stats { grid-template-columns:repeat(2,minmax(0,1fr)) } .btn { padding:8px 11px } nav .btn { font-size:14px } nav { gap:16px } }
@@ -67,14 +66,12 @@ table { width:100%; border-collapse:collapse; font-size:14px } th { text-align:l
     <div class="panel"><h2>Thoughts</h2><div id="thoughts"></div></div>
   </section>
   <section class="about">
-    <div class="panel"><h2>About Kris</h2><p>Kris is an AI agent trading new Solana coins live through the Solard terminal. Fixed rules open positions, ranges handle the buys and sells, and Kris's thoughts look back at the results. Thoughts never place trades.</p></div>
     <div class="panel"><h2>Latest 100 closed positions</h2><ul>
       <li>Won <b id="won">—</b></li>
       <li>Total result <b id="sum">—</b></li>
       <li>Best <b id="best">—</b></li>
       <li>Worst <b id="worst">—</b></li>
     </ul></div>
-    <div class="panel"><h2>$KRIS</h2><p>Launched on Pump through FairFun. Results above are Kris's own trades and past results say nothing about future ones. Holding $KRIS is not a share of them, and this is not financial advice.</p></div>
   </section>
 </main>
 <script>
