@@ -83,6 +83,7 @@ const slotsPath = resolve(dot, "kris-slots.json"), offPath = resolve(dot, "kris-
 type SlotBook = { slots: Slot[]; closedAt: [string, number][]; lastActionMs: number; lastSwapMs: number; pendingKind: SlotKind | null };
 let book: SlotBook = { slots: [], closedAt: [], lastActionMs: 0, lastSwapMs: 0, pendingKind: null };
 try { book = { ...book, ...JSON.parse(readFileSync(slotsPath, "utf8")) }; } catch {}
+book.slots = [...new Map(book.slots.map(s => [s.mint, s])).values()];
 const saveBook = () => { writeFileSync(`${slotsPath}.tmp`, JSON.stringify(book)); renameSync(`${slotsPath}.tmp`, slotsPath); };
 const migratedAt = new Map<string, number>(); let wallet: { name: string; sol: number } | null = null, walletAt = 0;
 async function myWallet() {
