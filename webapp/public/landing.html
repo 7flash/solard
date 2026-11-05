@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solard Terminal for agents</title>
+<meta name="description" content="A Solana range-trading terminal your agent drives through a local API. Your keys stay on your machine.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root { --bg:#0B0E11; --panel:#12161B; --line:#1F252D; --text:#E6E8EB; --muted:#A9B2BF; --acc:#8FA8FF; --up:#3DD68C; --amb:#F5B841 }
+* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 Inter, system-ui, sans-serif }
+main { max-width:780px; margin:0 auto; padding:64px 24px 88px }
+.brand { letter-spacing:.14em; font-weight:700; font-size:14px; color:var(--muted) }
+h1 { font-size:40px; line-height:1.15; margin:18px 0 14px; letter-spacing:-.02em }
+.lead { font-size:19px; color:var(--muted); margin:0 0 26px }
+.actions { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:60px }
+.btn { padding:11px 18px; border-radius:9px; font-weight:600; text-decoration:none; border:1px solid #2A313B; color:var(--text) } .btn.primary { background:var(--acc); border-color:var(--acc); color:#0B0E11 }
+h2 { font-size:22px; margin:52px 0 14px } a { color:var(--acc) }
+.grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px } .card b { display:block; margin-bottom:5px } .card span { color:var(--muted); font-size:15px }
+ol { padding:0; margin:0; list-style:none; counter-reset:s } ol > li { counter-increment:s; position:relative; padding:0 0 26px 42px }
+ol > li::before { content:counter(s); position:absolute; left:0; top:0; width:27px; height:27px; border-radius:50%; background:#1B2230; color:var(--acc); font-size:14px; font-weight:700; display:flex; align-items:center; justify-content:center }
+li b { display:block; margin-bottom:6px }
+pre { margin:8px 0 0; padding:13px 15px; overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:9px; font:14px/1.55 'JetBrains Mono', monospace; color:#D5DAE1 }
+code { font:14px 'JetBrains Mono', monospace; color:#D5DAE1 }
+.note { margin-top:8px; padding:9px 13px; border-left:3px solid var(--amb); background:#2A2212; border-radius:0 8px 8px 0; font-size:15px; color:#F0DDB0 }
+table { width:100%; border-collapse:collapse; font-size:15px } td { padding:9px 10px 9px 0; border-bottom:1px solid var(--line); vertical-align:top } td:first-child { white-space:nowrap; padding-right:18px }
+footer { margin-top:56px; color:var(--muted); font-size:15px }
+@media (max-width:640px) { h1 { font-size:31px } .grid { grid-template-columns:1fr } }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">SOLARD TERMINAL</div>
+  <h1>A trading terminal your agent can drive</h1>
+  <p class="lead">Your agent decides what to hold. The terminal runs each position as a range on Solana, on your own machine, with your own keys.</p>
+  <div class="actions"><a class="btn primary" href="/terminal/?agent=kris">Watch Kris trade live</a><a class="btn" href="https://krisagent.xyz">Meet Kris</a><a class="btn" href="/getting-started">Solard docs</a></div>
+
+  <h2>How it works</h2>
+  <div class="grid">
+    <div class="card"><b>The agent decides</b><span>It opens positions and sets their ranges through a local API.</span></div>
+    <div class="card"><b>The terminal executes</b><span>It buys each step going down and sells each step going up.</span></div>
+    <div class="card"><b>Everyone can watch</b><span>Positions, charts, holders and trades on one screen, live.</span></div>
+  </div>
+
+  <h2>Set up your own</h2>
+  <ol>
+    <li><b>Install</b><pre>bun add -g solard-cli
+git clone -b terminal-target-bots https://github.com/7flash/solwal
+cd solwal && bun install</pre></li>
+    <li><b>Add an RPC endpoint</b><pre>slrd rpc add http https://your-rpc.example
+slrd rpc test</pre></li>
+    <li><b>Create the agent's wallet</b><pre>slrd wallet create my-agent</pre></li>
+    <li><b>Run the terminal</b><pre>bun run slrd-bots.ts
+bun slrd-bridge.ts</pre></li>
+    <li><b>Connect your agent</b><pre>TOKEN=$(cat .range-bots/bridge-token)
+curl -X POST http://127.0.0.1:5174/api/bot \
+  -H "x-slrd-token: $TOKEN" -H "content-type: application/json" \
+  -d '{"action":"add","wallet":"my-agent","mint":"TOKEN_MINT",
+       "buy":80000,"sell":120000,"steps":5,"budget":0.05}'</pre></li>
+  </ol>
+
+  <h2>What the agent can do</h2>
+  <table>
+    <tr><td><code>GET /api/state</code></td><td>Wallets and every running position</td></tr>
+    <tr><td><code>add</code></td><td>Open a position: market cap range in USD, steps, size in SOL</td></tr>
+    <tr><td><code>range</code></td><td>Move a position's range</td></tr>
+    <tr><td><code>budget</code></td><td>Change a position's size</td></tr>
+    <tr><td><code>pause</code> / <code>resume</code></td><td>Stop or restart its buys</td></tr>
+    <tr><td><code>stop</code></td><td>Sell everything and close the position</td></tr>
+  </table>
+</main>
+</body>
+</html>

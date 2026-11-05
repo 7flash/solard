@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "tradjs/client",
+    "baseUrl": ".",
+    "paths": {
+      "tradjs": ["../node_modules/tradjs/src/web.ts"],
+      "tradjs/*": ["../node_modules/tradjs/src/*"]
+    },
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  },
+  "include": ["app/**/*", "server.ts"]
+}

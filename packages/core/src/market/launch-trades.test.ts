@@ -730,14 +730,14 @@ test("PUMP-quoted multi-pool transaction cannot corrupt supply/capitalization or
   expect(strategySignals).toBe(0);
   const market = trades[0]!.market;
   expect(trades[0]!.pool).toBe(pool);
-  expect(market.supplyRaw).toBe(BigInt(verifiedSupply.value.amount));
+  expect(market.supplyRaw).toBe(1_000_000_000_000_000n); // pump mints: fixed 1B supply, no RPC read
   expect(market.baseDecimals).toBe(6);
   expect(market.quoteDecimals).toBe(6);
   expect(market.priceQuotePerToken).toBeCloseTo(0.02592, 12);
   expect(market.priceSol).toBeCloseTo(0.0000002592, 12);
   expect(market.priceUsd).toBeCloseTo(0.00002592, 12);
   expect(market.marketCapUsd).toBeCloseTo(
-    (market.priceUsd! * Number(verifiedSupply.value.amount)) / 1e6,
+    (market.priceUsd! * 1e15) / 1e6,
     6,
   );
   await subscription.close();

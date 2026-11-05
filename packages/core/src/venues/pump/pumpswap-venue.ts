@@ -514,7 +514,8 @@ export async function discoverPumpSwapPool(
   entries.set(key, { expires: Date.now() + 15_000, promise });
   try {
     const selected = await promise;
-    if (selected) entries.set(key, { expires: Date.now() + 300_000, promise: Promise.resolve(selected) });
+    // A pool, once found, stays the coin's pool; "no pool" is rechecked every 10 min (each check costs ~10-20 RPC calls).
+    entries.set(key, { expires: Date.now() + (selected ? 3_600_000 : 600_000), promise: Promise.resolve(selected) });
     return selected;
   } catch (error) { entries.delete(key); throw error; }
 }

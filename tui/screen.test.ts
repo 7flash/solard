@@ -17,9 +17,9 @@ test("scanBots keeps running, holding and pending bots and reads their range fil
   writeFileSync(join(root, ".range-bots", `bot-cat-${MINT_B}.json`), JSON.stringify({ phase: "sell", position: { amountRaw: "1000000000", costLamports: "100000000" }, prices: [{ time: 1, price: 0.00012 }] }));
   writeFileSync(join(root, ".range-bots", `bot-cat-${MINT_C}.json`), JSON.stringify({ phase: "buy", position: null, pending: null })); // idle + stopped: hidden
   const bots = scanBots(root);
-  expect(bots.map(b => b.mint)).toEqual([MINT_A, MINT_B]);
-  expect(bots[0]).toMatchObject({ alive: true, range: { unit: "usd", buy: 50000, sell: 72000 }, capUsd: 60000 });
-  expect(bots[1]).toMatchObject({ alive: false, phase: "sell", costSol: 0.1, priceSol: 0.00012 });
+  expect(bots.map(b => b.mint)).toEqual([MINT_B, MINT_A]); // newest registry entry first
+  expect(bots[1]).toMatchObject({ alive: true, range: { unit: "usd", buy: 50000, sell: 72000 }, capUsd: 60000 });
+  expect(bots[0]).toMatchObject({ alive: false, phase: "sell", costSol: 0.1, priceSol: 0.00012 });
 });
 
 test("recordTrade accumulates per-trader session stats", () => {

@@ -38,6 +38,25 @@ export async function readMint(
   // One account read supplies owner, decimals and supply from the same snapshot.
   // Keep the existing explicit cache contract for callers that opt into it.
   if (!cache) {
+    // Decimals/program never change and supply rarely does: one read per mint per 10 min, shared by all callers.
+    let memo = mintMemo.get(connection); if (!memo) { memo = new Map(); mintMemo.set(connection, memo); }
+    const k = mint.toBase58(), hit = memo.get(k);
+    if (hit && hit.expires > Date.now()) return await hit.value;
+    const value = readMintNow(connection, mint);
+    memo.set(k, { expires: Date.now() + 600_000, value });
+    value.catch(() => { if (memo.get(k)?.value === value) memo.delete(k); });
+    return await value;
+  }
+  const tokenProgram = await resolveTokenProgram(connection, mint, cache);
+  const info = await (cache?.get(`mint:${mint.toBase58()}`, () =>
+    getMint(connection, mint, "confirmed", tokenProgram),
+  ) ?? getMint(connection, mint, "confirmed", tokenProgram));
+  return { tokenProgram, decimals: info.decimals, supply: info.supply };
+}
+
+const mintMemo = new WeakMap<Connection, Map<string, { expires: number; value: Promise<{ tokenProgram: PublicKey; decimals: number; supply: bigint }> }>>();
+async function readMintNow(connection: Connection, mint: PublicKey) {
+  {
     const account = await connection.getAccountInfo(mint, "confirmed");
     if (!account) throw new Error(`Mint account not found: ${mint.toBase58()}`);
     if (!account.owner.equals(TOKEN_PROGRAM_ID) && !account.owner.equals(TOKEN_2022_PROGRAM_ID))
@@ -45,11 +64,6 @@ export async function readMint(
     const info = unpackMint(mint, account, account.owner);
     return { tokenProgram: account.owner, decimals: info.decimals, supply: info.supply };
   }
-  const tokenProgram = await resolveTokenProgram(connection, mint, cache);
-  const info = await (cache?.get(`mint:${mint.toBase58()}`, () =>
-    getMint(connection, mint, "confirmed", tokenProgram),
-  ) ?? getMint(connection, mint, "confirmed", tokenProgram));
-  return { tokenProgram, decimals: info.decimals, supply: info.supply };
 }
 
 export async function readTokenAmount(

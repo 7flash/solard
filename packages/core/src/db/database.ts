@@ -25,6 +25,7 @@ import {
   RawTransactionSchema,
   PositionSchema,
   SettingSchema,
+  TraderStatSchema,
   TokenSchema,
   WalletSchema,
   WatchSchema,
@@ -84,6 +85,7 @@ export function openDatabase(input?: string): SolardDatabase {
       historyReplayItems: HistoryReplayItemSchema,
       historyReplayCoverage: HistoryReplayCoverageSchema,
       settings: SettingSchema,
+      traderStats: TraderStatSchema,
     },
     {
       timestamps: false,
@@ -109,6 +111,7 @@ export function openDatabase(input?: string): SolardDatabase {
         historyReplayItems: [["replayKey"]],
         historyReplayCoverage: [["mint"]],
         settings: [["key"]],
+        traderStats: [["statKey"]],
       },
       indexes: {
         wallets: ["name", "address", "isActive"],
@@ -127,6 +130,7 @@ export function openDatabase(input?: string): SolardDatabase {
         historyTokenAccounts: ["mint", "address", "initializedAtSlot"],
         historyReplayItems: ["mint", "slot", "signature", "kind"],
         historyReplayCoverage: ["mint", "finalizedThroughSlot"],
+        traderStats: ["trader", "mint", "lastAtMs"],
       },
     },
   ) as SolardDatabase;

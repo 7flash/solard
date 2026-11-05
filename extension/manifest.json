@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Solard ranges",
+  "version": "0.1.0",
+  "description": "Draws your Solard bot's buy and sell range on TradingView charts. Reads your local bridge only.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1:5174/*", "https://api.dexscreener.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "Solard ranges" },
+  "content_scripts": [
+    { "matches": ["https://gmgn.ai/*", "https://dexscreener.com/*", "https://axiom.trade/*", "https://photon-sol.tinyastro.io/*", "https://pump.fun/*", "https://birdeye.so/*"], "js": ["chart-math.js", "content.js"], "run_at": "document_idle" },
+    { "matches": ["https://gmgn.ai/*", "https://dexscreener.com/*", "https://axiom.trade/*", "https://photon-sol.tinyastro.io/*", "https://pump.fun/*", "https://birdeye.so/*"], "js": ["chart-math.js", "page.js"], "run_at": "document_idle", "world": "MAIN" }
+  ]
+}

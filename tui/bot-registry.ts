@@ -4,7 +4,17 @@ import { join } from "node:path";
 
 /** mode "target" (default): trade the wallet's whole balance toward the budget's target inventory.
  * mode "engine": the older per-step range engines that only track their own fills. */
-export type BotEntry = { wallet: string; mint: string; amount: string; addedAt: number; mode?: "target" | "engine"; buysPaused?: boolean };
+export type BotEntry = { wallet: string; mint: string; amount: string; addedAt: number; mode?: "target" | "engine"; buysPaused?: boolean;
+  /** Opened automatically by the migration watcher. */
+  auto?: boolean;
+  /** Opened by the smart-wallet signal (counts against SLRD_SMART_MAX, not the migration limit). */
+  smart?: boolean;
+  /** The followable wallets whose buys opened this bot: when half of them have sold out, so does the bot. */
+  signal?: string[];
+  /** You keep this range: the daemon never moves it, even when the price has left it. */
+  rangeLocked?: boolean;
+  /** Your size before the range was moved to a smaller bag; an empty bot goes back to it. */
+  baseAmount?: string };
 export const registryPath = (root: string) => join(root, ".range-bots", "bots.json");
 export const daemonPidPath = (root: string) => join(root, ".range-bots", "daemon.pid");
 

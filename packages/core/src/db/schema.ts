@@ -283,6 +283,26 @@ export const HistoryReplayCoverageSchema = z.object({
   updatedAtMs: z.number(),
 });
 
+/** Per trader wallet, per coin: cumulative flows seen on the live trade stream. Scores (P&L, win rate)
+ * are computed from these rows; lastPriceSol marks open holdings. statKey = `${trader}:${mint}`. */
+export const TraderStatSchema = z.object({
+  statKey: z.string(),
+  trader: z.string(),
+  mint: z.string(),
+  buys: z.number().default(0),
+  sells: z.number().default(0),
+  solIn: z.number().default(0),       // SOL spent buying
+  solOut: z.number().default(0),      // SOL received selling
+  tokensBought: z.number().default(0),
+  tokensSold: z.number().default(0),
+  lastPriceSol: z.number().nullable().default(null),
+  /** Market cap (USD) at the wallet's first buy and last sell in this coin: its entry/exit behaviour. */
+  entryCapUsd: z.number().nullable().default(null),
+  exitCapUsd: z.number().nullable().default(null),
+  firstAtMs: z.number(),
+  lastAtMs: z.number(),
+});
+
 export const SettingSchema = z.object({
   key: z.string(),
   value: z.string(),
@@ -353,4 +373,5 @@ export type SolardDatabase = Database<{
   historyReplayItems: typeof HistoryReplayItemSchema;
   historyReplayCoverage: typeof HistoryReplayCoverageSchema;
   settings: typeof SettingSchema;
+  traderStats: typeof TraderStatSchema;
 }>;

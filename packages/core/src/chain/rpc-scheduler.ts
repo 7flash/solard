@@ -2,11 +2,15 @@
  * SLRD_RPC_GATE_DB (SQLite reservations); concurrency is process-local. */
 import { createHash } from "crypto";
 import { SharedRpcWindow, rpcGateDbPath } from "./shared-rpc-window.ts";
+// Set by rpc-priority.ts (Node-only, AsyncLocalStorage); read through a global so the browser bundle,
+// which reaches this module, never imports async_hooks.
+const isTradeRpc = (): boolean => (globalThis as { __slrdIsTradeRpc?: () => boolean }).__slrdIsTradeRpc?.() === true;
 
 export type ProviderBudget = { group: string; rps: number; concurrency: number };
 export type RequestPermit = { release(): void };
 type Group = { active: number; queue: symbol[]; window: SharedRpcWindow };
 const groups = new Map<string, Group>();
+const urgentTickets = new Set<symbol>();
 const globalWindows = new Map<string, SharedRpcWindow>();
 export const MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 export const READINESS_ADDRESS = "11111111111111111111111111111111";
@@ -134,7 +138,15 @@ export class RpcScheduler {
       throw Object.assign(new Error("RPC_QUEUE_FULL"), { code: "RPC_QUEUE_FULL" });
     const ticket = Symbol("rpc admission");
     const joined = quotaGroups.filter(group => group.queue.length < 512);
-    joined.forEach(group => group.queue.push(ticket));
+    // Trade requests go ahead of every background read (FIFO among themselves): with demand above the
+    // provider budget, a FIFO queue made token registration and trades wait minutes behind price polling.
+    const urgent = isTradeRpc();
+    if (urgent) urgentTickets.add(ticket);
+    joined.forEach(group => {
+      if (!urgent) { group.queue.push(ticket); return; }
+      const at = group.queue.findIndex(t => !urgentTickets.has(t));
+      if (at < 0) group.queue.push(ticket); else group.queue.splice(at, 0, ticket);
+    });
     try {
       while (true) {
         if (signal?.aborted) throw abortError();
@@ -149,6 +161,7 @@ export class RpcScheduler {
         await waitBounded(15, signal, deadline);
       }
     } finally {
+      urgentTickets.delete(ticket);
       for (const group of joined) {
         const index = group.queue.indexOf(ticket);
         if (index >= 0) group.queue.splice(index, 1);
@@ -157,3 +170,8 @@ export class RpcScheduler {
   }
 }
 export const sharedRpcScheduler = new RpcScheduler();
+/** Diagnostics: in-process admission state per quota group. */
+export function rpcSchedulerStats() {
+  return [...groups].map(([key, g]) => ({ group: key.slice(key.lastIndexOf(":") + 1), active: g.active, queued: g.queue.length,
+    urgent: g.queue.filter(t => urgentTickets.has(t)).length }));
+}

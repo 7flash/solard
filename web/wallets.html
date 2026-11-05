@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOLARD Wallets</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0B0E11; --chrome:#0E1216; --panel:#12161B; --line:#1F252D; --line2:#181D23; --chip:#161B21; --border:#2A313B;
+    --text:#E6E8EB; --muted:#A9B2BF; --dim:#8A94A3; --acc:#8FA8FF; --acc-bg:#172038; --sel:#1A2030;
+    --up:#3DD68C; --up-bg:#12241B; --dn:#FF7A66; --dn-bg:#2A1512; --amb:#F5B841; --amb-bg:#2A2212; }
+  * { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--text); font-family:Inter, system-ui, sans-serif; font-size:13px }
+  a { color:var(--acc); text-decoration:none } button { font-family:inherit; cursor:pointer } button:hover { filter:brightness(1.18) }
+  .num { font-family:'JetBrains Mono', ui-monospace, monospace; font-variant-numeric:tabular-nums }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:20px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--chrome) }
+  .brand { display:flex; align-items:center; gap:10px } .brand b { font-weight:700; letter-spacing:.12em; font-size:14px }
+  .tabs { display:flex; gap:4px; background:var(--panel); border-radius:8px; padding:3px }
+  .tabs a, .tabs button { height:30px; display:flex; align-items:center; padding:0 12px; border-radius:6px; border:0; font-size:12px; background:transparent; color:var(--dim) }
+  .tabs .on { background:#1F2633; color:var(--text); font-weight:600 }
+  .chip { padding:5px 10px; border-radius:6px; background:var(--chip); color:var(--muted) }
+  .grow { flex:1 }
+  .search { height:36px; width:360px; padding:0 14px; border-radius:8px; border:1px solid var(--border); background:var(--chip); color:var(--text); font:inherit; outline:none }
+  .search::placeholder { color:var(--muted) }
+  .layout { display:flex; flex-wrap:wrap; gap:16px; padding:16px 20px }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden }
+  .card-head { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--line) }
+  h2 { margin:0; font-size:14px; font-weight:600 }
+  table { width:100%; border-collapse:collapse } th { color:var(--dim); font-size:11px; text-align:left; letter-spacing:.06em; font-weight:600; padding:9px 8px; position:sticky; top:0; background:var(--panel) }
+  td { padding:7px 8px; border-top:1px solid var(--line2) } th:first-child, td:first-child { padding-left:16px } th:last-child, td:last-child { padding-right:16px }
+  .r { text-align:right } tr.row { cursor:pointer } tr.row:hover { background:#171C22 } tr.on { background:var(--sel); box-shadow:inset 2px 0 0 var(--acc) }
+  .scroll { overflow:auto }
+  .up { color:var(--up) } .dn { color:var(--dn) } .flatc { color:var(--muted) } .dim { color:var(--dim) }
+  .tiles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; padding:14px 16px }
+  .tile { background:var(--chrome); border-radius:8px; padding:10px 12px } .tile .k { color:var(--dim); font-size:11px } .tile .v { font-size:16px; margin-top:4px }
+  .tag { margin-left:6px; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:600; letter-spacing:.06em; background:var(--acc-bg); color:var(--acc) }
+  .tag.hold { background:var(--amb-bg); color:var(--amb) }
+  select { height:30px; border-radius:6px; border:1px solid var(--border); background:var(--chip); color:var(--text); font:inherit; padding:0 8px }
+  #map { width:100%; height:340px; display:block; cursor:crosshair }
+  .legend { display:flex; gap:14px; color:var(--dim); font-size:12px } .legend i { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle }
+  .tip { position:fixed; pointer-events:none; background:var(--chip); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-size:12px; display:none; z-index:5 }
+  .empty { padding:18px 16px; color:var(--dim) }
+  .copy { display:inline-flex; align-items:center; gap:5px; margin-left:6px; border:0; background:transparent; color:var(--dim); font-size:11px; padding:2px 3px; border-radius:4px; vertical-align:middle }
+  .copy:hover { color:var(--text); background:var(--chip) } .copy.done { color:var(--up) }
+  .ext { margin-left:4px; color:var(--dim); font-size:12px } .ext:hover { color:var(--acc) }
+  #w-title .num { font-size:13px; word-break:break-all }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8FA8FF" stroke-width="2" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"></path><path d="M15 7h6v6"></path></svg><b>SOLARD</b></div>
+  <div class="tabs"><a href="./index.html">Terminal</a><a href="./discovery.html">Discovery</a><a class="on" href="./wallets.html">Wallets</a></div>
+  <span class="chip num" id="summary"></span>
+  <div class="grow"></div>
+  <input id="search" class="search" placeholder="Wallet address or coin mint" autocomplete="off">
+</header>
+<div class="layout">
+  <section class="card" style="flex:1 1 520px; min-width:0">
+    <div class="card-head"><h2>Wallet leaderboard</h2><div class="grow"></div>
+      <div class="tabs" id="sort"><button data-s="pnl" class="on">P&amp;L</button><button data-s="winrate">Win rate</button><button data-s="early">Early</button><button data-s="coins">Coins</button></div>
+      <select id="min"><option value="2">2+ coins</option><option value="3" selected>3+ coins</option><option value="5">5+ coins</option><option value="10">10+ coins</option></select></div>
+    <div class="scroll" style="max-height:calc(100vh - 150px)"><table id="board"><thead><tr><th>WALLET</th><th class="r">PNL</th><th class="r">COINS</th><th class="r">WIN</th><th class="r" title="average entry position among each coin's buyers (lower = earlier)">RANK</th><th class="r" title="median market cap at first buy">ENTRY</th><th class="r" title="median market cap at last sell">EXIT</th><th class="r" title="median exit/entry multiple">X</th><th class="r" title="median minutes held">HOLD</th><th class="r">LAST</th></tr></thead><tbody></tbody></table></div>
+  </section>
+  <div style="flex:999 1 640px; min-width:0; display:flex; flex-direction:column; gap:16px">
+    <section class="card">
+      <div class="card-head"><h2 id="w-title">Select a wallet</h2><a id="w-link" class="num dim" target="_blank" rel="noreferrer"></a></div>
+      <div class="tiles" id="tiles"></div>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2 id="m-title">Coin trade map</h2><span class="dim" id="m-sub"></span><div class="grow"></div>
+        <div class="legend"><span><i style="background:var(--up)"></i>buy</span><span><i style="background:var(--dn)"></i>sell</span><span><i style="background:#fff; outline:2px solid var(--acc)"></i>selected wallet</span></div></div>
+      <canvas id="map"></canvas>
+    </section>
+    <div style="display:flex; flex-wrap:wrap; gap:16px">
+      <section class="card" style="flex:999 1 460px; min-width:0">
+        <div class="card-head"><h2>Coins traded</h2><span class="dim">click a coin to map it</span></div>
+        <div class="scroll" style="max-height:420px"><table id="coins"><thead><tr><th>COIN</th><th class="r">B/S</th><th class="r">IN</th><th class="r">OUT</th><th class="r">OPEN</th><th class="r">PNL</th><th class="r">RANK</th><th class="r">ENTRY</th><th class="r">EXIT</th><th class="r">LAST</th></tr></thead><tbody></tbody></table></div>
+      </section>
+      <section class="card" style="flex:1 1 300px; min-width:0">
+        <div class="card-head"><h2>Co-traders</h2><span class="dim">same coins</span></div>
+        <div class="scroll" style="max-height:420px"><table id="co"><thead><tr><th>WALLET</th><th class="r">SHARED</th><th class="r">PNL</th></tr></thead><tbody></tbody></table></div>
+      </section>
+    </div>
+  </div>
+</div>
+<div class="tip num" id="tip"></div>
+<script type="module" src="./wallets.js"></script>
+</body>
+</html>

@@ -144,7 +144,8 @@ class SqdLogSource implements EventLogSource {
     const url = new URL(options.portalUrl ?? "https://portal.sqd.dev/datasets/solana-mainnet");
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Invalid SQD Portal URL");
     this.url = url.toString().replace(/\/$/, "");
-    this.fetcher = options.fetch ?? globalThis.fetch;
+    // Bound: browsers throw "Illegal invocation" when fetch is called as a method of another object.
+    this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.pollMs = positive(options.pollIntervalMs, 1_000, "pollIntervalMs");
     this.timeoutMs = positive(options.requestTimeoutMs, 30_000, "requestTimeoutMs");
     if (options.fromSlot !== undefined && (!Number.isSafeInteger(options.fromSlot) || options.fromSlot < 0))
@@ -339,7 +340,7 @@ class SqdLogSource implements EventLogSource {
             this.rejectReady(new Error(message)); break;
           }
           const delayMs = Math.max(retryAfter || 0, Math.min(60_000, 1_000 * 2 ** Math.min(failures++, 6)));
-          this.status("source-retrying", { delayMs, nextSlot: this.cursor });
+          this.status("source-retrying", { delayMs, nextSlot: this.cursor, error: message.slice(0, 200) });
           await this.pause(delayMs);
         }
       }

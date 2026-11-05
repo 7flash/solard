@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOLARD Coin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0B0E11; --chrome:#0E1216; --panel:#12161B; --line:#1F252D; --line2:#181D23; --chip:#161B21; --border:#2A313B;
+    --text:#E6E8EB; --muted:#A9B2BF; --dim:#8A94A3; --acc:#8FA8FF; --acc-bg:#172038; --sel:#1A2030;
+    --up:#3DD68C; --up-bg:#12241B; --dn:#FF7A66; --dn-bg:#2A1512; --amb:#F5B841; --amb-bg:#2A2212; }
+  * { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--text); font-family:Inter, system-ui, sans-serif; font-size:13px }
+  a { color:var(--acc); text-decoration:none } button { font-family:inherit; cursor:pointer } button:hover { filter:brightness(1.18) }
+  .num { font-family:'JetBrains Mono', ui-monospace, monospace; font-variant-numeric:tabular-nums }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:20px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--chrome) }
+  .brand { display:flex; align-items:center; gap:10px } .brand b { font-weight:700; letter-spacing:.12em; font-size:14px }
+  .tabs { display:flex; gap:4px; background:var(--panel); border-radius:8px; padding:3px }
+  .tabs a, .tabs button { height:30px; display:flex; align-items:center; padding:0 12px; border-radius:6px; border:0; font-size:12px; background:transparent; color:var(--dim) }
+  .tabs .on { background:#1F2633; color:var(--text); font-weight:600 }
+  .chip { padding:5px 10px; border-radius:6px; background:var(--chip); color:var(--muted) }
+  .grow { flex:1 }
+  .search { height:36px; width:320px; padding:0 14px; border-radius:8px; border:1px solid var(--border); background:var(--chip); color:var(--text); font:inherit; outline:none }
+  .search::placeholder { color:var(--muted) }
+  .layout { display:flex; flex-wrap:wrap; gap:16px; padding:16px 20px }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; min-width:0 }
+  .card-head { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--line) }
+  h2 { margin:0; font-size:14px; font-weight:600 }
+  .scroll { overflow:auto; max-height:calc(100vh - 150px) }
+  table { width:100%; border-collapse:collapse } th { color:var(--dim); font-size:11px; text-align:left; letter-spacing:.06em; font-weight:600; padding:9px 8px; position:sticky; top:0; background:var(--panel) }
+  td { padding:7px 8px; border-top:1px solid var(--line2) } th:first-child, td:first-child { padding-left:16px } th:last-child, td:last-child { padding-right:16px }
+  .r { text-align:right } tr.row:hover { background:#171C22 }
+  .state { display:inline-block; padding:3px 8px; border-radius:6px; font-size:12px; font-weight:500; background:var(--acc-bg); color:var(--acc) }
+  .state.sell { background:var(--up-bg); color:var(--up) } .state.paused { background:var(--amb-bg); color:var(--amb) }
+  .state.err { background:var(--dn-bg); color:var(--dn) } .state.flat { background:var(--chip); color:var(--dim) }
+  .copy { display:inline-flex; align-items:center; gap:5px; margin-left:6px; border:0; background:transparent; color:var(--dim); font-size:11px; padding:2px 3px; border-radius:4px; vertical-align:middle }
+  .copy:hover { color:var(--text); background:var(--chip) } .copy.done { color:var(--up) }
+  .half { max-height:calc(60vh - 60px) } tr.smart td { background:rgba(245,184,65,.07) } .star { color:var(--amb); font-weight:600 }
+  .empty { padding:18px 16px; color:var(--dim) }
+<style>
+  .stats { display:flex; flex-wrap:wrap; gap:24px; padding:14px 20px; border-bottom:1px solid var(--line) }
+  .stat .k { color:var(--dim); font-size:11px; letter-spacing:.06em } .stat .v { font-size:18px; font-weight:600; margin-top:3px }
+  .tag { display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600; margin-left:6px }
+  .tag.smart { background:var(--amb-bg); color:var(--amb) } .tag.dev { background:var(--dn-bg); color:var(--dn) } .tag.ours { background:var(--acc-bg); color:var(--acc) }
+  .bar { height:6px; border-radius:3px; background:var(--acc); opacity:.7 } .barbox { width:90px; background:var(--chip); border-radius:3px }
+  .up { color:var(--up) } .dn { color:var(--dn) } tr.flash td { animation: flash 1.6s ease-out } @keyframes flash { from { background:#1f2a1f } to { background:transparent } }
+  tr.flashdn td { animation: flashdn 1.6s ease-out } @keyframes flashdn { from { background:#2a1a17 } to { background:transparent } }
+  tr.hl td { background:#1d2638 !important } tr.hl td:first-child { box-shadow: inset 3px 0 0 var(--acc) }
+  .toggle { display:flex; gap:6px; align-items:center; color:var(--muted) }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8FA8FF" stroke-width="2" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"></path><path d="M15 7h6v6"></path></svg><b>SOLARD</b></div>
+  <div class="tabs"><a href="./index.html">Terminal</a><a href="./discovery.html">Discovery</a><a href="./wallets.html">Wallets</a><a class="on" href="#">Coin</a></div>
+  <h2 id="title" style="font-size:16px"></h2><span id="links"></span>
+  <div class="grow"></div>
+  <input id="mint" class="search" placeholder="Paste a mint and press Enter" autocomplete="off">
+</header>
+<div class="stats" id="stats"></div>
+<div class="layout">
+  <section class="card" style="flex:1 1 100%">
+    <div class="card-head"><h2>Trade map</h2><span style="color:var(--dim)">every trade: time × market cap, size = SOL · hover a wallet or trade to highlight it · click a dot to pin its wallet</span><div class="grow"></div><span class="num" id="pin" style="color:var(--acc)"></span></div>
+    <canvas id="map" style="width:100%; height:300px; display:block; cursor:crosshair"></canvas>
+  </section>
+  <section class="card" style="flex:1 1 760px">
+    <div class="card-head"><h2>Wallets</h2><span class="num" id="w-sub" style="color:var(--dim)"></span><div class="grow"></div>
+      <label class="toggle"><input type="checkbox" id="holders" checked> holders only</label>
+      <div class="tabs" id="sort"><button data-f="held" class="on">Holding</button><button data-f="delta">5 min change</button><button data-f="pnl">P&amp;L</button><button data-f="recent">Recent</button></div></div>
+    <div class="scroll"><table id="wallets"><thead><tr><th>WALLET</th><th class="r">HOLDS</th><th class="r">% SUPPLY</th><th></th><th class="r">5 MIN</th><th class="r">BOUGHT</th><th class="r">SOLD</th><th class="r">P&amp;L</th><th class="r">B/S</th><th class="r">ENTRY MCAP</th><th class="r">LAST</th></tr></thead><tbody></tbody></table></div>
+  </section>
+  <section class="card" style="flex:1 1 460px">
+    <div class="card-head"><h2>Live trades</h2><span style="color:var(--dim)">newest first</span></div>
+    <div class="scroll"><table id="trades"><thead><tr><th>TIME</th><th>SIDE</th><th class="r">SOL</th><th class="r">MCAP</th><th>WALLET</th><th class="r">NOW HOLDS</th></tr></thead><tbody></tbody></table></div>
+  </section>
+</div>
+<script type="module" src="./coin.js"></script>
+<div id="tip" class="num" style="position:fixed; display:none; pointer-events:none; background:#0E1216; border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:12px; z-index:10"></div>
+</body>
+</html>

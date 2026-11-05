@@ -13,8 +13,19 @@ export class RpcTradePriority {
   }
 }
 const priority = new RpcTradePriority();
+/** True inside withTradeRpcPriority: the RPC scheduler puts these requests ahead of background reads. */
+export function isTradeRpc(): boolean { return foreground.getStore() === true; }
+(globalThis as { __slrdIsTradeRpc?: () => boolean }).__slrdIsTradeRpc = isTradeRpc;
+queueMicrotask(() => { (globalThis as { __slrdWithTradeRpcPriority?: unknown }).__slrdWithTradeRpcPriority = withTradeRpcPriority; });
+/** Trades (and token registration for a trade) jump the RPC queue. SLRD_RPC_TRADE_PRIORITY=1 additionally
+ * throttles background reads while a trade is running. SLRD_RPC_TRADE_PRIORITY=0 turns both off. */
 export async function withTradeRpcPriority<T>(task: () => Promise<T>): Promise<T> {
-  if (process.env.SLRD_RPC_TRADE_PRIORITY !== "1" || foreground.getStore()) return task();
+  if (process.env.SLRD_RPC_TRADE_PRIORITY === "0" || foreground.getStore()) return task();
+  if (process.env.SLRD_RPC_TRADE_PRIORITY !== "1") {
+    let operation: Promise<T> | undefined;
+    foreground.run(true, () => { operation = task(); });
+    return await operation!;
+  }
   priority.active++;
   try {
     let operation: Promise<T> | undefined;

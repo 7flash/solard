@@ -2239,6 +2239,14 @@ export class Solard implements ComposerHost {
     return { token, venue: market.venue, quoteAsset: market.quoteAsset, quote };
   }
 
+  /** What selling amountRaw tokens would return right now (no wallet needed): the honeypot check before entries. */
+  async quoteSell(ref: TokenRef, amountRaw: bigint, slippageBps = 1500) {
+    const token = this.resolveToken(ref);
+    const { plugin, market } = await this.route(token, PublicKey.default);
+    const quote = await plugin.quoteSell({ connection: this.connection(), token, user: PublicKey.default }, market, amountRaw, slippageBps);
+    return { token, venue: market.venue, quoteAsset: market.quoteAsset, quote };
+  }
+
   async samplePrice(ref: TokenRef): Promise<MarketPrice> {
     const token = this.resolveToken(ref);
     const { plugin, market } = await this.route(token, PublicKey.default);

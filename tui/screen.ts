@@ -16,11 +16,15 @@ export type BotRow = {
   nextSell?: number | null; nextBuy?: number | null;
   /** Target mode: holdings are the wallet's whole balance; `target` is the step count it is trading toward. */
   mode?: "target"; target?: number | null; budgetSol?: number; last?: string | null; valueSol?: number | null;
+  /** Opened by the migration watcher. */
+  auto?: boolean;
 };
 export type TradeRow = {
   signature: string; atMs: number; side: "buy" | "sell" | null; sol: number | null;
   tokens: number | null; capUsd: number | null; trader: string | null; creator: string | null;
 };
+export type CoinWallets = { mint: string; walletCount: number; holders: number; wallets: Array<{ trader: string; held: number; pct: number; buys: number; sells: number;
+  solIn: number; solOut: number; pnlSol: number; lastAtMs: number; delta5: { tokens: number } | null; smart: unknown; ours: string | null; dev: boolean }> };
 export type TraderStats = { buys: number; sells: number; netSol: number; firstSeen: number; balanceSol?: number | null };
 
 const json = (path: string) => { try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; } };
@@ -95,7 +99,7 @@ export function scanBots(root: string, now = Date.now()): BotRow[] {
     rows.push({
       wallet, mint, alive: now - t.updatedAt < 15_000, pid: null, phase: (t.held ?? 0) > 0 ? "sell" : "buy",
       health: t.error, paused: t.buysPaused ? "BUYS PAUSED" : null,
-      amountRaw: t.balanceRaw && t.balanceRaw !== "0" ? t.balanceRaw : null, costSol: null, pending: t.inFlight,
+      amountRaw: t.balanceRaw && t.balanceRaw !== "0" ? t.balanceRaw : null, costSol: typeof t.flowSol === "number" ? -t.flowSol : null, pending: t.inFlight,
       capUsd: t.capUsd, capAgeMs: now - t.updatedAt, priceSol: t.priceSol,
       range: { unit: t.range.unit, buy: t.range.buy, sell: t.range.sell }, updatedAt: t.updatedAt,
       steps: t.range.steps, holdingSteps: t.held ?? 0, nextSell: t.nextSell, nextBuy: t.nextBuy,
@@ -103,8 +107,13 @@ export function scanBots(root: string, now = Date.now()): BotRow[] {
       valueSol: t.balanceRaw && t.priceSol ? Number(t.balanceRaw) / scale * t.priceSol : null,
     });
   }
-  // Stable order: state files are rewritten every second, so sorting by mtime made rows jump.
-  return rows.sort((a, b) => Number(b.alive) - Number(a.alive) || a.wallet.localeCompare(b.wallet) || a.mint.localeCompare(b.mint));
+  const registry = ((json(join(dir, "bots.json"))?.bots ?? []) as Array<{ wallet?: string; mint: string; auto?: boolean }>);
+  const auto = new Set<string>(registry.filter(b => b.auto).map(b => b.mint));
+  for (const r of rows) if (auto.has(r.mint)) r.auto = true;
+  // Fixed order = the order bots were added (registry order), newest on top. Never sort by
+  // live state (alive, mtime, P&L): those flip every second and made rows jump around.
+  const order = new Map(registry.map((b, i) => [b.mint, i]));
+  return rows.sort((a, b) => (order.get(b.mint) ?? -1) - (order.get(a.mint) ?? -1) || a.wallet.localeCompare(b.wallet) || a.mint.localeCompare(b.mint));
 }
 
 /** Session stats per trader, built from the stream itself. */
@@ -145,6 +154,9 @@ export type Screen = {
   streamStatus: string; solUsd: number | null;
   prompt: { label: string; text: string } | null; message: string;
   tradeOffset?: number;                        // 0 = live (newest at top)
+  /** Bottom panel: live trades (default) or every wallet in the coin (key w). */
+  bottom?: "trades" | "wallets";
+  coinWallets?: CoinWallets | null;
 };
 /** Rows of the trade list that fit on screen. */
 export function tradeRows(s: Pick<Screen, "height">) { return Math.max(1, Math.max(20, s.height) - 2 - 3 - 3 - Math.max(6, Math.min(14, Math.floor((Math.max(20, s.height) - 4) * 0.4))) - 1); }
@@ -160,7 +172,13 @@ function botState(b: BotRow): string {
     if (b.pending) return c.yellow(`TRADING: ${b.pending}`);
     const steps = b.steps ?? 1, fmt = (v: number) => b.range?.unit === "usd" ? usd(v) : v.toPrecision(3);
     const dist = (v: number) => b.capUsd && b.range?.unit === "usd" ? ` (${v >= b.capUsd ? "+" : "−"}${Math.abs((v / b.capUsd - 1) * 100).toFixed(0)}%)` : "";
-    const parts = [b.nextSell != null ? `sell ${fmt(b.nextSell)}${dist(b.nextSell)}` : null,
+    const held = b.holdingSteps ?? 0, want = b.target ?? held;
+    // Behind target: it wants to trade right now (say why it has not, e.g. not enough SOL), not where it would sell later.
+    if (want !== held && !(want > held && b.paused)) {
+      const why = b.last && /failed/i.test(b.last) ? c.red(` · failing: ${b.last.replace(/^S+ S+ (buy|sell) failed /i, "").slice(0, 50)}`) : "";
+      return `${(held ? c.green : c.cyan)(`${held}/${steps}`)}${c.yellow(` → ${want}`)} · ${want > held ? "BUY now" : "SELL now"}${why}`;
+    }
+    const parts = [held > 0 && b.nextSell != null ? `sell ${fmt(b.nextSell)}${dist(b.nextSell)}` : null,
       b.nextBuy != null && !b.paused ? `buy ${fmt(b.nextBuy)}${dist(b.nextBuy)}` : null].filter(Boolean).join(" · ");
     const gap = b.target != null && b.target !== b.holdingSteps ? c.yellow(` → ${b.target}`) : "";
     const head = (b.holdingSteps ? c.green : c.cyan)(`${b.holdingSteps ?? 0}/${steps}`) + gap;
@@ -203,7 +221,7 @@ export function render(s: Screen): string {
   const bots = filteredBots(s);
   const sel = bots[s.botIndex] ?? null;
   out.push(c.inverse(fit(` SOLARD  ${s.wallets.length} wallets · ${s.bots.filter(b => b.alive).length} bots running · SOL ${s.solUsd ? "$" + s.solUsd.toFixed(2) : "--"}`, W)));
-  out.push(c.dim(fit(" h/l pane  j/k select  e range  n new  r resume  PgUp/PgDn trades  x x sell+stop  o relaunch  d d remove  q quit", W)));
+  out.push(c.dim(fit(" h/l pane  j/k select  v discovery  w wallets/trades  c copy CA  e range  s size  n new  r resume  PgUp/PgDn trades  x x sell+stop  o relaunch  d d remove  q quit", W)));
 
   // Top block: wallets (left) | positions (right)
   const topH = Math.max(6, Math.min(14, Math.floor((H - 4) * 0.4)));
@@ -220,7 +238,7 @@ export function render(s: Screen): string {
     const value = positionValueSol(b), pnl = value != null && b.costSol != null ? value - b.costSol : null;
     const stale = b.capAgeMs == null || b.capAgeMs > 15_000;
     const pnlText = pnl == null ? "--" : (pnl >= 0 ? c.green : c.red)((pnl >= 0 ? "+" : "") + pnl.toFixed(3));
-    const line = ` ${fit(b.wallet, 7)} ${fit(s.symbols.get(b.mint) ?? short(b.mint), 10)} ${fit(usd(b.capUsd) + (stale ? "?" : ""), 9)} ${fit(rangeText(b), 18)} ${fit(sol(b.costSol), 7)} ${fit(sol(value), 7)} ${fit(pnlText, 8)} ${botState(b)}`;
+    const line = ` ${fit(b.wallet, 7)} ${fit((b.auto ? "◆" : "") + (s.symbols.get(b.mint) ?? short(b.mint)), 10)} ${fit(usd(b.capUsd) + (stale ? "?" : ""), 9)} ${fit(rangeText(b), 18)} ${fit(sol(b.costSol), 7)} ${fit(sol(value), 7)} ${fit(pnlText, 8)} ${botState(b)}`;
     right.push(start + i === s.botIndex ? (s.focus === "bots" ? c.inverse(fit(visible(line), rightW)) : c.bold(fit(line, rightW))) : line);
   });
   if (!bots.length) right.push(c.dim("  No bots. Press n to start one: <MINT> <BUY> <SELL>"));
@@ -235,6 +253,25 @@ export function render(s: Screen): string {
     out.push(fit(` ${c.bold(name)} ${c.dim(sel.mint)}  ${sel.wallet}  mcap ${c.bold(usd(sel.capUsd))}  range ${c.bold(rangeText(sel))}  ${botState(sel)}`, W));
     out.push(fit(` ${sel.amountRaw ? `holding ${(Number(sel.amountRaw) / 1e6).toLocaleString()} tokens · cost ${sol(sel.costSol)} · value ${sol(value)} SOL` : "flat"}   ${c.dim("trades: " + s.streamStatus)}${(s.tradeOffset ?? 0) > 0 ? c.yellow(`  SCROLLED ${s.tradeOffset} back · End = live`) : ""}`, W));
     out.push(c.dim(fit(` ${fit("TIME", 8)} ${fit("SIDE", 4)} ${fit("SOL", 8)} ${fit("MCAP", 8)} ${fit("TRADER", 11)} ${fit("TAG", 6)} ${fit("SESSION b/s", 11)} ${fit("NET SOL", 8)} WALLET SOL`, W)));
+    if (s.bottom === "wallets") {
+      const cw = s.coinWallets?.mint === sel.mint ? s.coinWallets : null;
+      out.pop(); // trades header
+      out.push(c.dim(fit(` ${fit("WALLET", 12)} ${fit("TAG", 7)} ${fit("HOLDS", 7)} ${fit("%SUP", 6)} ${fit("5 MIN", 9)} ${fit("IN SOL", 7)} ${fit("OUT SOL", 7)} ${fit("P&L", 7)} ${fit("B/S", 7)} LAST   ${cw ? `${cw.walletCount} wallets · ${cw.holders} holding` : "loading… (needs slrd-bridge)"}`, W)));
+      const tok = (v: number) => v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}k` : v.toFixed(0);
+      const list = (cw?.wallets ?? []).filter(w => w.held > 0).slice(s.tradeOffset ?? 0, (s.tradeOffset ?? 0) + Math.max(0, bottomH - 3));
+      for (const w of list) {
+        const tag = w.ours ? c.magenta(w.ours.slice(0, 7)) : w.dev ? c.yellow("DEV") : w.smart ? c.yellow("★ smart") : "";
+        const d = w.delta5 ? (w.delta5.tokens >= 0 ? c.green(`▲ ${tok(w.delta5.tokens)}`) : c.red(`▼ ${tok(-w.delta5.tokens)}`)) : "";
+        const pnl = (w.pnlSol >= 0 ? c.green : c.red)((w.pnlSol >= 0 ? "+" : "") + w.pnlSol.toFixed(2));
+        const ago = (ms: number) => ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${(ms / 3_600_000).toFixed(0)}h`;
+        out.push(fit(` ${fit(short(w.trader, 5), 12)} ${fit(tag, 7)} ${fit(tok(w.held), 7)} ${fit(w.pct.toFixed(2), 6)} ${fit(d, 9)} ${fit(w.solIn.toFixed(2), 7)} ${fit(w.solOut.toFixed(2), 7)} ${fit(pnl, 7)} ${fit(`${w.buys}/${w.sells}`, 7)} ${ago(Date.now() - w.lastAtMs)}`, W));
+      }
+      if (!list.length) out.push(c.dim(cw ? "  no holders recorded yet" : "  loading wallets…"));
+      while (out.length < H - 1) out.push("");
+      out.length = H - 1;
+      out.push(s.prompt ? c.bold(fit(` ${s.prompt.label}: ${s.prompt.text}█`, W)) : fit(s.message ? ` ${s.message}` : "", W));
+      return out.join("\n");
+    }
     const offset = Math.max(0, Math.min(s.tradeOffset ?? 0, Math.max(0, s.trades.length - 1)));
     const rows = s.trades.slice(offset, offset + Math.max(0, bottomH - 3));
     for (const t of rows) {
@@ -247,6 +284,42 @@ export function render(s: Screen): string {
     }
     if (!rows.length) out.push(c.dim("  waiting for trades…"));
   } else out.push(c.dim(" Select a position to see its range and live trades."));
+  while (out.length < H - 1) out.push("");
+  out.length = H - 1;
+  out.push(s.prompt ? c.bold(fit(` ${s.prompt.label}: ${s.prompt.text}█`, W)) : fit(s.message ? ` ${s.message}` : "", W));
+  return out.join("\n");
+}
+
+// ---------- Discovery view (key v): live coins, bonding curve | migrated, side by side ----------
+export type DiscoveryCoin = { mint: string; symbol: string | null; ageMs: number | null; capUsd: number | null; ammCapUsd?: number | null;
+  trades: number; lastTradeMs: number; migrated: boolean; status: string; smart?: number };
+export type DiscoveryDecision = { atMs: number; mint: string; name: string; symbol?: string | null; decision: string; reason: string };
+export type DiscoveryData = { at: number; firehose: { liveCoins: number; perSec: number; lagMs: number } | null; coins: DiscoveryCoin[]; decisions: DiscoveryDecision[] };
+const ago = (ms: number | null) => ms == null ? "--" : ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${(ms / 3_600_000).toFixed(1)}h`;
+export function renderDiscovery(s: Pick<Screen, "width" | "height" | "prompt" | "message">, d: DiscoveryData | null, now = Date.now()): string {
+  const W = Math.max(80, s.width), H = Math.max(20, s.height), out: string[] = [];
+  const f = d?.firehose;
+  out.push(c.inverse(fit(` SOLARD DISCOVERY  ${f ? `${f.liveCoins} live coins · ${f.perSec.toFixed(0)} trades/s · lag ${(f.lagMs / 1000).toFixed(1)}s` : "firehose off"}${d ? ` · updated ${ago(now - d.at)} ago` : ""}`, W)));
+  out.push(c.dim(fit(" v back to positions  q quit   ★ = followable wallets bought   coins drop off 10 min after their last trade", W)));
+  const colW = Math.floor((W - 1) / 2), decH = Math.max(5, Math.min(12, Math.floor((H - 4) * 0.3))), listH = H - 4 - decH - 1;
+  const col = (title: string, coins: DiscoveryCoin[]) => {
+    const rows = [c.bold(` ${title} (${coins.length})`), c.dim(` ${fit("COIN", 11)} ${fit("AGE", 5)} ${fit("MCAP", 8)} ${fit("TRADES", 6)} ${fit("★", 2)} ${fit("LAST", 4)}`)];
+    for (const x of coins.slice(0, listH - 2)) {
+      const name = (x.status === "ours" ? "◆" : "") + (x.symbol ?? short(x.mint));
+      const line = ` ${fit(name, 11)} ${fit(ago(x.ageMs), 5)} ${fit(usd(x.migrated ? x.ammCapUsd ?? x.capUsd : x.capUsd), 8)} ${fit(String(x.trades), 6)} ${fit(x.smart ? String(x.smart) : "", 2)} ${fit(ago(now - x.lastTradeMs), 4)}`;
+      rows.push(x.smart ? c.yellow(line) : x.status === "ours" ? c.green(line) : line);
+    }
+    while (rows.length < listH) rows.push("");
+    return rows.map(r => fit(r, colW));
+  };
+  const coins = d?.coins ?? [];
+  const a = col("NEW · BONDING CURVE", coins.filter(x => !x.migrated)), b = col("MIGRATED", coins.filter(x => x.migrated));
+  for (let i = 0; i < listH; i++) out.push(`${a[i]}${c.dim("│")}${b[i]}`);
+  out.push(c.bold(" DECISIONS (migration + smart wallets)"));
+  for (const x of (d?.decisions ?? []).slice(0, decH)) {
+    const tag = x.decision === "opened" || x.decision === "buys-on" ? c.green(fit(x.decision, 8)) : x.decision === "skipped" ? c.yellow(fit(x.decision, 8)) : c.red(fit(x.decision, 8));
+    out.push(fit(` ${fit(clock(x.atMs), 8)} ${fit(x.symbol ?? x.name, 10)} ${tag} ${x.reason}`, W));
+  }
   while (out.length < H - 1) out.push("");
   out.length = H - 1;
   out.push(s.prompt ? c.bold(fit(` ${s.prompt.label}: ${s.prompt.text}█`, W)) : fit(s.message ? ` ${s.message}` : "", W));

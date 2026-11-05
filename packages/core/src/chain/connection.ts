@@ -3,7 +3,7 @@ import { Connection, type Commitment, type FetchFn } from "@solana/web3.js";
 import { MissingConfigError } from "../core/errors.ts";
 import { createSolardMeasure } from "../core/log.ts";
 import { measured, measuredSync } from "../core/measured.ts";
-import { waitForRpcPriority } from "./rpc-priority.ts";
+import { waitForRpcPriority, withTradeRpcPriority } from "./rpc-priority.ts";
 import {traceSolardRpcRequest,traceSolardRpcHttp,markSolardRpcQueued,traceSolardRpcOperation} from './rpc-observer.ts';
 const rpcMeasure = createSolardMeasure("rpc-transport");
 const connectionTransports=new WeakMap<Connection,FetchFn>();
@@ -327,6 +327,16 @@ async function endpointUnavailable(response: Response): Promise<boolean> {
   }
 }
 
+const livePools = new Set<SolardRpcEndpointPool>();
+/** Diagnostics: requests slower than 3s, with where the time went (cumulative ms at each phase). */
+const slowRows: string[] = [];
+function slowRpc(method: string, total: number, p: { ready: number; admitted: number; fetched: number; tries: number; priorityMs: number; acquireMs: number; queueMs: number; loops: number; via: string }) {
+  slowRows.push(`${method} ${total}ms (ready +${p.ready}, admitted +${p.admitted}, resp +${p.fetched}; priority ${p.priorityMs}, acquire ${p.acquireMs}, measured-queue ${p.queueMs}, loops ${p.loops}, tries ${p.tries}, via ${p.via})`);
+  if (slowRows.length > 200) slowRows.shift();
+}
+export function takeSlowRpc() { return slowRows.splice(0); }
+/** Diagnostics: every endpoint pool in this process with its cooldowns and last failure. */
+export function rpcPoolStatuses() { return [...livePools].map(p => p.status()); }
 /** Sticky provider-aware failover. Never retry ambiguous signed submissions. */
 export class SolardRpcEndpointPool {
   readonly urls: readonly string[];
@@ -341,6 +351,7 @@ export class SolardRpcEndpointPool {
       if (!["http:", "https:"].includes(new URL(url).protocol)) throw new Error("RPC requires HTTP(S)");
     }
     this.statusRows = this.urls.map(url => ({ endpoint: rpcSafeEndpoint(url), cooldownUntil: 0, errors: 0, lastReason: null }));
+    livePools.add(this);
   }
   get activeRpcUrl() { return this.urls[this.active]!; }
   status() { return this.statusRows.map((row,index) => ({ ...row, active: index === this.active,
@@ -377,7 +388,9 @@ export class SolardRpcEndpointPool {
       } finally { clearTimeout(timer); signal?.removeEventListener("abort", cancel); }
       return;
     }
-    const verification = this.performReadiness(index, deadline, signal);
+    // Every request to this endpoint waits for the probe: it must not queue behind them (with trade priority on,
+    // it timed out behind trade requests and benched the only live key for minutes).
+    const verification = withTradeRpcPriority(() => this.performReadiness(index, deadline, signal));
     this.verifying.set(index, verification);
     try { await verification; }
     finally { if (this.verifying.get(index) === verification) this.verifying.delete(index); }
@@ -412,7 +425,7 @@ export class SolardRpcEndpointPool {
         throw error;
       } finally { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); }
     }
-    this.ready.set(index, Date.now() + 60_000);
+    this.ready.set(index, Date.now() + 600_000); // cluster/key check: once per 10 min is plenty
   }
   private batchParts(body: string): Array<string> | null {
     let parsed: unknown;
@@ -469,12 +482,17 @@ export class SolardRpcEndpointPool {
     }
     const signed = rpcRequestCost(init?.body).sends > 0;
     const visited = new Set<number>(); let lastError: unknown;
+    const phase = { start: Date.now(), ready: 0, admitted: 0, fetched: 0, tries: 0, priorityMs: 0, acquireMs: 0, queueMs: 0, loops: 0, via: "" };
+    const slow = () => { const total = Date.now() - phase.start; if (total > 3_000) slowRpc(rpcMethod(init?.body), total, phase); };
     while (visited.size < this.urls.length) {
       markSolardRpcQueued();
       const now = Date.now();
       const choices = [this.active, ...this.urls.map((_url,i) => i)]
         .filter((i, position, all) => all.indexOf(i) === position)
         .filter(i => !visited.has(i) && this.statusRows[i]!.cooldownUntil <= now && !endpointDead(this.urls[i]!, now));
+      // Reads try the biggest budget first: sticking to whichever endpoint answered last parked requests on the
+      // public RPC (5 rps, mostly 429) while the paid key idled. Signed sends keep the sticky endpoint.
+      if (!signed) choices.sort((a, b) => providerBudget(this.urls[b]!).rps - providerBudget(this.urls[a]!).rps);
       // A signed submission retains sticky single-endpoint semantics.
       // Reads prefer an available independent quota group rather than
       // enqueueing behind a saturated active provider.
@@ -492,19 +510,28 @@ export class SolardRpcEndpointPool {
       }
       let attempted = false;
       try {
+        phase.tries++;
         await this.readiness(index, deadline, init?.signal);
+        phase.ready = Date.now() - phase.start;
         const cost = rpcRequestCost(init?.body);
         let admission: Awaited<ReturnType<typeof sharedRpcScheduler.acquireAny>>;
         while (true) {
-          admission = await measured(rpcMeasure, `${rpcMethod(init?.body)} provider queue`, async () => { await waitForRpcPriority(); return await sharedRpcScheduler.acquireAny(
-            (signed ? [index] : choices).map(i => this.urls[i]!),
-            cost.requests, cost.sends, init?.signal, deadline); }, () => undefined);
+          const q0 = Date.now();
+          admission = await measured(rpcMeasure, `${rpcMethod(init?.body)} provider queue`, async () => {
+            const w0 = Date.now(); await waitForRpcPriority(); phase.priorityMs += Date.now() - w0;
+            const a0 = Date.now();
+            try { return await sharedRpcScheduler.acquireAny((signed ? [index] : choices).map(i => this.urls[i]!), cost.requests, cost.sends, init?.signal, deadline); }
+            finally { phase.acquireMs += Date.now() - a0; }
+          }, () => undefined);
+          phase.queueMs += Date.now() - q0; phase.loops++;
           index = this.urls.indexOf(admission.url);
+          phase.via = providerBudget(admission.url).group;
           if (process.env.SLRD_RPC_VERIFY_MAINNET !== "1" || (this.ready.get(index) ?? 0) > Date.now()) break;
           // Cold backup: release its transport slot before metering its own probes.
           admission.permit.release();
           await this.readiness(index, deadline, init?.signal);
         }
+        phase.admitted = Date.now() - phase.start;
         let response: Response;
         const controller = new AbortController();
         const abort = () => controller.abort();
@@ -523,9 +550,11 @@ export class SolardRpcEndpointPool {
           clearTimeout(timer); init?.signal?.removeEventListener("abort", abort);
           admission.permit.release();
         }
+        phase.fetched = Date.now() - phase.start;
         if (!(await endpointUnavailable(response))) {
           this.active = index; this.statusRows[index]!.errors = 0;
           this.statusRows[index]!.lastReason = null;
+          slow();
           return response;
         }
         visited.add(index);
@@ -540,6 +569,7 @@ export class SolardRpcEndpointPool {
         this.failure(index, `Provider/network/queue failure: ${String((error as Error)?.message ?? error).slice(0, 120)}`); lastError = error;
       }
     }
+    slow();
     throw Object.assign(new Error("RPC_PROVIDER_UNAVAILABLE: no healthy RPC account-read endpoint"),
       { code: "RPC_PROVIDER_UNAVAILABLE", cause: lastError });
   }
@@ -583,10 +613,20 @@ export class SolardConnection {
       ...init,
       signal: init?.signal ? AbortSignal.any([init.signal, this.lifetime.signal]) : this.lifetime.signal,
     })) as FetchFn;
+    // web3.js derives its websocket from the first URL and never fails over: with that key out of credits it
+    // reconnected every second forever and subscriptions (confirmations) never arrived. Use SLRD_WS_URLS[0],
+    // else the first HTTP endpoint not marked dead, as wss.
+    let wsEndpoint: string | undefined;
+    try { const ws = JSON.parse(process.env.SLRD_WS_URLS ?? "[]") as string[]; if (ws.length) wsEndpoint = ws[0]; } catch {}
+    if (!wsEndpoint) {
+      const live = (urls ?? [url]).find(u => !endpointDead(u));
+      if (live && live !== url) wsEndpoint = live.replace(/^http/, "ws");
+    }
     this.value = new Connection(url, {
       commitment: this.commitment,
       disableRetryOnRateLimit: true,
       fetch: transport,
+      ...(wsEndpoint ? { wsEndpoint } : {}),
     });
     if(paced||this.pool)connectionTransports.set(this.value,transport);
     const rpc=this.value as unknown as {_rpcRequest:(method:string,args:unknown[])=>Promise<unknown>;_rpcBatchRequest:(requests:Array<{methodName:string;args:unknown[]}>)=>Promise<unknown>};

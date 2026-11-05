@@ -108,6 +108,7 @@ export type Solard = {
   simulatePlan:ReturnType<typeof createCoreSolard>['simulatePlan'];
   sendBatchPlans:ReturnType<typeof createCoreSolard>['sendBatchPlans'];
   prepareFastTrade: ReturnType<typeof createCoreSolard>["prepareFastTrade"];
+  quoteSell: ReturnType<typeof createCoreSolard>["quoteSell"];
   listenTrades(
     options?: Omit<ListenTradesOptions, "tokens"> & {
       tokens?: readonly string[];
@@ -326,6 +327,7 @@ export function createSolard(options: SolardOptions = {}): Solard {
         tokens: listenerOptions.tokens ?? [],
       }),
     prepareFastTrade: core.prepareFastTrade.bind(core),
+    quoteSell: core.quoteSell.bind(core),
     prepareUnsignedBuy: core.prepareUnsignedBuy.bind(core),
     prepareUnsignedTokenDeployment: core.prepareUnsignedTokenDeployment.bind(core),
     resolvePumpLaunchQuote: core.resolvePumpLaunchQuote.bind(core),

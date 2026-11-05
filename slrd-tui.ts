@@ -22,7 +22,9 @@ import { parseRangeFile, parseRangeSteps } from "./packages/core/src/runtime/ran
 import { parseRangeCommand, rangeBounds, rangeFileBody } from "./packages/core/src/runtime/range-commands.ts";
 import { stepRungs } from "./packages/core/src/runtime/range-steps.ts";
 import { createSolard } from "./packages/sdk/src/index";
-import { filteredBots, recordTrade, render, scanBots, tradeRows, type Screen, type TradeRow, type TraderStats } from "./tui/screen.ts";
+import { filteredBots, recordTrade, render, renderDiscovery, scanBots, type DiscoveryData, tradeRows, type Screen, type TradeRow, type TraderStats } from "./tui/screen.ts";
+import { readTrades } from "./tui/trade-log.ts";
+import { updateBot } from "./tui/bot-registry.ts";
 
 const root = import.meta.dir;
 const configToml = resolve(root, ".config.toml");
@@ -120,25 +122,30 @@ async function openStream(tokens: string[]) {
     try { await openStream(streamMint ? [streamMint] : []); } catch (e) { screen.streamStatus = `reconnect failed: ${e}`; }
   });
 }
+/** Trades come from the slrd-bots daemon (.range-bots/trades/<mint>.json): it already streams every coin,
+ * so the TUI no longer opens a second SQD stream and RPC pool of its own. */
 async function follow(mint: string | null) {
   if (mint === streamMint) return;
-  const previous = streamMint;
   streamMint = mint;
   screen.trades = []; screen.traders = new Map(); seen.clear(); screen.tradeOffset = 0;
-  screen.streamStatus = mint ? "connecting…" : "idle";
-  try {
-    if (!subscription) { await openStream(mint ? [mint] : []); return; }
-    if (previous) await subscription.removeTokens(previous);
-    if (mint) await subscription.addTokens(mint);
-    if (mint) screen.streamStatus = "live (sqd) · waiting for trades";
-  } catch (e) { screen.streamStatus = `stream error: ${e instanceof Error ? e.message : e}`; }
+  screen.streamStatus = mint ? "waiting for trades (from daemon)" : "idle";
+  pullTrades();
+}
+function pullTrades() {
+  if (!streamMint) return;
+  const rows = readTrades(root, streamMint);
+  const fresh = rows.filter(r => !seen.has(r.signature));
+  for (const r of fresh.reverse()) { seen.add(r.signature); recordTrade(screen.traders, r); }
+  if (fresh.length && (screen.tradeOffset ?? 0) > 0) screen.tradeOffset! += fresh.length; // keep a scrolled view still
+  screen.trades = rows;
+  if (rows.length) screen.streamStatus = `live · ${rows.length} trades · last ${Math.max(0, Math.round((Date.now() - rows[0]!.atMs) / 1000))}s ago`;
 }
 
 // ---- token symbols: on-chain metadata, cached on disk (one read per mint, ever) ----
 const symbolsPath = resolve(root, ".range-bots", "symbols.json");
 try { for (const [mint, symbol] of Object.entries(JSON.parse(readFileSync(symbolsPath, "utf8")) as Record<string, string>)) screen.symbols.set(mint, symbol); } catch {}
 const symbolTried = new Map<string, number>(); // mint -> last attempt; retried every minute
-const saveSymbols = () => { try { writeFileSync(symbolsPath, JSON.stringify(Object.fromEntries(screen.symbols), null, 1)); } catch {} };
+const saveSymbols = () => { try { let disk: Record<string, string> = {}; try { disk = JSON.parse(readFileSync(symbolsPath, "utf8")); } catch {} for (const [m, v] of Object.entries(disk)) if (!screen.symbols.has(m)) screen.symbols.set(m, v); writeFileSync(symbolsPath, JSON.stringify(Object.fromEntries(screen.symbols), null, 1)); } catch {} };
 async function symbolWorker() {
   while (true) {
     const mint = screen.bots.map(b => b.mint).find(m => !screen.symbols.has(m) && Date.now() - (symbolTried.get(m) ?? 0) > 60_000);
@@ -176,6 +183,19 @@ void balanceWorker();
 
 // ---- actions ----
 const rangePath = (wallet: string, mint: string) => resolve(root, "ranges", `${wallet}-${mint}.json`);
+/** Copy the selected coin's contract address (Windows clip / macOS pbcopy / Linux xclip). */
+function copyMint() {
+  const bot = selectedBot(); if (!bot) throw Error("No position selected");
+  const cmd = process.platform === "win32" ? ["clip"] : process.platform === "darwin" ? ["pbcopy"] : ["xclip", "-selection", "clipboard"];
+  try { const p = Bun.spawn(cmd, { stdin: "pipe", stdout: "ignore", stderr: "ignore", windowsHide: true }); p.stdin.write(bot.mint); p.stdin.end(); say(`Copied ${bot.mint}`); }
+  catch (error) { say(`Copy failed (${error instanceof Error ? error.message : error}): ${bot.mint}`); }
+}
+/** Position size = SOL the bot holds when every step is filled; changes apply live (buys up / sells down). */
+function editSize(input: string) {
+  const bot = selectedBot(); if (!bot) throw Error("No position selected");
+  const sol = Number(input.trim()); if (!(sol > 0 && sol <= 5)) throw Error("Size must be a SOL amount between 0 and 5");
+  updateBot(root, bot.wallet, bot.mint, { amount: String(sol) }); say(`Size ${bot.mint.slice(0, 6)} -> ${sol} SOL (applies within a few seconds)`);
+}
 function selectedBot() { return filteredBots(screen)[screen.botIndex] ?? null; }
 function editRange(input: string) {
   const bot = selectedBot();
@@ -245,21 +265,56 @@ function relaunch() {
 
 // ---- loop ----
 let stopArmed = 0, deleteArmed = 0;
+let view: "bots" | "discovery" = "bots";
+/** Wallets panel data: the same /api/coin-wallets the web coin page uses (local bridge, token from .range-bots). */
+let walletsBusy = false;
+async function pullWallets() {
+  const mint = selectedBot()?.mint;
+  if (screen.bottom !== "wallets" || !mint || walletsBusy) return;
+  walletsBusy = true;
+  try {
+    const token = readFileSync(resolve(root, ".range-bots", "bridge-token"), "utf8").trim();
+    const r = await fetch(`http://127.0.0.1:${process.env.SLRD_BRIDGE_PORT ?? 5174}/api/coin-wallets?mint=${mint}`, { headers: { "x-slrd-token": token }, signal: AbortSignal.timeout(8_000) });
+    if (r.ok) { screen.coinWallets = await r.json(); draw(); }
+  } catch {} finally { walletsBusy = false; }
+}
+setInterval(() => void pullWallets(), 2_000).unref?.();
+const readDiscovery = (): DiscoveryData | null => { try { return JSON.parse(readFileSync(resolve(root, ".range-bots", "discovery.json"), "utf8")); } catch { return null; } };
 function draw() {
   try {
+    if (view === "discovery") {
+      screen.width = process.stdout.columns ?? screen.width; screen.height = process.stdout.rows ?? screen.height;
+      const lines = renderDiscovery(screen, readDiscovery()).split("
+");
+      const full = lines.length !== lastFrame.length;
+      let out = full ? "[H[J" : "";
+      lines.forEach((line, i) => { if (full || line !== lastFrame[i]) out += `[${i + 1};1H${line}[K`; });
+      if (out) process.stdout.write(out);
+      lastFrame = lines; return;
+    }
+    const keep = selectedBot()?.mint; // keep the cursor on the same coin when bots are added/removed
     screen.bots = scanBots(root);
+    pullTrades();
     const bots = filteredBots(screen);
-    screen.botIndex = Math.max(0, Math.min(screen.botIndex, bots.length - 1));
+    const at = keep ? bots.findIndex(b => b.mint === keep) : -1;
+    screen.botIndex = at >= 0 ? at : Math.max(0, Math.min(screen.botIndex, bots.length - 1));
     void follow(bots[screen.botIndex]?.mint ?? null);
     screen.width = process.stdout.columns ?? screen.width; screen.height = process.stdout.rows ?? screen.height;
-    process.stdout.write(`\u001b[H${render(screen)}\u001b[J`);
+    // Only rewrite lines that changed: full-screen repaints twice a second kept Windows Terminal at 100% of a core.
+    const lines = render(screen).split("\n");
+    const full = lines.length !== lastFrame.length;
+    let out = full ? "\u001b[H\u001b[J" : "";
+    lines.forEach((line, i) => { if (full || line !== lastFrame[i]) out += `\u001b[${i + 1};1H${line}\u001b[K`; });
+    if (out) process.stdout.write(out);
+    lastFrame = lines;
   } catch (e) { toLog(`draw ${e instanceof Error ? e.stack : e}`); }
 }
-if (process.argv.includes("--snapshot")) { screen.bots = scanBots(root); void follow(filteredBots(screen)[0]?.mint ?? null); await Bun.sleep(Number(process.env.SNAPSHOT_MS ?? 3000)); draw(); process.stdout.write("\n"); process.exit(0); }
+let lastFrame: string[] = [];
+if (process.argv.includes("--snapshot")) { screen.bots = scanBots(root); { const i = Math.max(0, filteredBots(screen).findIndex(b => b.mint === process.env.SNAPSHOT_MINT)); screen.botIndex = i; void follow(filteredBots(screen)[i]?.mint ?? null); } await Bun.sleep(Number(process.env.SNAPSHOT_MS ?? 3000)); draw(); process.stdout.write("\n"); process.exit(0); }
 if (!process.stdin.isTTY) throw Error("Run slrd-tui in an interactive terminal");
 process.stdout.write("\u001b[?1049h\u001b[?25l");
 emitKeypressEvents(process.stdin); process.stdin.setRawMode(true); process.stdin.resume();
-const timer = setInterval(draw, 500);
+const timer = setInterval(draw, 1000);
 const quit = () => {
   clearInterval(timer); process.stdin.setRawMode(false);
   process.stdout.write("\u001b[?25h\u001b[?1049l");
@@ -267,7 +322,7 @@ const quit = () => {
   process.exit(0);
 };
 process.on("SIGINT", quit);
-process.stdout.on("resize", draw);
+process.stdout.on("resize", () => { lastFrame = []; draw(); });
 
 process.stdin.on("keypress", (text: string | undefined, key: { name?: string; ctrl?: boolean } | undefined) => {
   if (key?.ctrl && key.name === "c") return quit();
@@ -278,7 +333,7 @@ process.stdin.on("keypress", (text: string | undefined, key: { name?: string; ct
       else if (key?.name === "backspace") p.text = p.text.slice(0, -1);
       else if (key?.name === "return") {
         screen.prompt = null;
-        if (p.label.startsWith("Range")) editRange(p.text); else newBot(p.text);
+        if (p.label.startsWith("Range")) editRange(p.text); else if (p.label.startsWith("Size")) editSize(p.text); else newBot(p.text);
       } else if (text && text >= " " && p.text.length < 120) p.text += text;
       return draw();
     }
@@ -286,6 +341,9 @@ process.stdin.on("keypress", (text: string | undefined, key: { name?: string; ct
     if (name !== "x") stopArmed = 0;
     if (name !== "d") deleteArmed = 0;
     if (name === "q") return quit();
+    if (name === "v") { view = view === "bots" ? "discovery" : "bots"; lastFrame = []; return draw(); }
+    if (view === "discovery") return;
+    if (name === "w") { screen.bottom = screen.bottom === "wallets" ? "trades" : "wallets"; screen.tradeOffset = 0; void pullWallets(); return draw(); }
     if (name === "tab") screen.focus = screen.focus === "bots" ? "wallets" : "bots";
     else if (name === "h" || name === "left") screen.focus = "wallets";
     else if (name === "l" || name === "right") screen.focus = "bots";
@@ -302,6 +360,11 @@ process.stdin.on("keypress", (text: string | undefined, key: { name?: string; ct
       const page = Math.max(1, tradeRows(screen) - 2), back = name === "pageup" || name === "[";
       screen.tradeOffset = Math.max(0, Math.min(Math.max(0, screen.trades.length - page), (screen.tradeOffset ?? 0) + (back ? page : -page)));
     } else if (name === "end" || name === "home") screen.tradeOffset = 0;
+    else if (name === "c") copyMint();
+    else if (name === "s") {
+      const bot = selectedBot(); if (!bot) throw Error("No position selected");
+      screen.prompt = { label: `Size ${bot.mint.slice(0, 6)}: SOL at full inventory (now ${bot.budgetSol ?? "?"})`, text: "" };
+    }
     else if (name === "r") sendCommand("resume");
     else if (name === "o") relaunch();
     else if (name === "d") {

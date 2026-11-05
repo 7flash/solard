@@ -1,4 +1,7 @@
 import bs58 from "bs58";
+// Node-only priority lane (rpc-priority.ts registers it); a global keeps async_hooks out of the browser bundle.
+const withTradeRpcPriority = <T,>(task: () => Promise<T>): Promise<T> =>
+  ((globalThis as { __slrdWithTradeRpcPriority?: <U>(t: () => Promise<U>) => Promise<U> }).__slrdWithTradeRpcPriority ?? (t => t()))(task);
 import { createEventLogSource, eventSourceCommitment, physicalProgramLogIndex, type EventSourceOptions, type EventSource } from "../events/log-source.ts";
 import { quoteJupiterSwap } from "../chain/jupiter-swap.ts";
 import { probeQuoteSol } from "./conversion-probe.ts";
@@ -514,10 +517,17 @@ export function decodePumpProgramData(
         c.u16();
       }
       const rawQuoteMint = c.pubkey();
-      quoteMint =
+      const extendedQuoteMint =
         rawQuoteMint === DEFAULT_PUBKEY ? WRAPPED_SOL_MINT : rawQuoteMint;
-      quoteRaw = c.u64();
-      virtualQuoteRaw = c.u64();
+      const extendedQuoteRaw = c.u64();
+      const extendedVirtualQuoteRaw = c.u64();
+      // SOL curves: the fixed-position amounts are the SOL amounts. Only take the extended layout for
+      // other quote assets; on some newer layouts it misaligns without throwing and yields garbage.
+      if (extendedQuoteMint !== WRAPPED_SOL_MINT) {
+        quoteMint = extendedQuoteMint;
+        quoteRaw = extendedQuoteRaw;
+        virtualQuoteRaw = extendedVirtualQuoteRaw;
+      }
     } catch {}
     return {
       kind: "trade",
@@ -884,6 +894,18 @@ export async function getSolUsdPrice(
     Date.now() - sharedSolUsdPrice.atMs < maxAgeMs
   )
     return sharedSolUsdPrice;
+  // Stale-while-revalidate: a refresh walks Jupiter -> Coinbase -> CoinGecko with 5s timeouts each (10-15s when
+  // a source is down), and every caller used to wait for it: all bots timed out together. A SOL/USD rate up to
+  // 10 min old is fine for market caps and ranges; refresh in the background and answer now.
+  if (!options.forceRefresh && sharedSolUsdPrice && Date.now() - sharedSolUsdPrice.atMs < 10 * 60_000) {
+    if (!sharedSolUsdPending && Date.now() - sharedSolUsdAttemptAt >= SOL_USD_MIN_INTERVAL_MS) {
+      sharedSolUsdAttemptAt = Date.now();
+      sharedSolUsdPending = loadSolUsd();
+      void sharedSolUsdPending.then(p => { sharedSolUsdPrice = p; sharedSolUsdError = null; }, e => { sharedSolUsdError = e instanceof Error ? e : new Error(String(e)); })
+        .finally(() => { sharedSolUsdPending = null; });
+    }
+    return sharedSolUsdPrice;
+  }
   if (sharedSolUsdPending) return await sharedSolUsdPending;
   // Throttle: callers can fire per trade (hundreds/s). At most one HTTP lookup per
   // SOL_USD_MIN_INTERVAL_MS no matter how many callers or failures; between lookups serve the last value.
@@ -1054,6 +1076,8 @@ type TradeTokenState = {
   quoteMint: string | null;
   quoteDecimals: number | null;
   pool: string | null;
+  /** Quote reserve of the deepest PumpSwap pool seen for this mint (dust pools are ignored against it). */
+  poolQuoteRaw?: bigint | null;
 };
 
 type PumpSwapPoolIdentity = {
@@ -1234,7 +1258,7 @@ async function loadParsedTransaction(
   return null;
 }
 
-function canonicalPumpPoolCreator(mint: string): string {
+export function canonicalPumpPoolCreator(mint: string): string {
   return PublicKey.findProgramAddressSync(
     [Buffer.from("pool-authority"), new PublicKey(mint).toBuffer()],
     PUMP_PROGRAM_ID,
@@ -1526,12 +1550,17 @@ export async function subscribeMigrations(options: EventSourceOptions & {
       ...value,
       eventSource: logSource.source,
       commitment,
+      // Metadata is optional: an RPC failure here used to throw out of this un-awaited call and drop the
+      // migration itself, which under RPC pressure lost most migrations.
       metadata: await resolveEventMetadata({
         connection: options.connection,
         mode: metadataMode,
         commitment,
         mint: value.mint,
         status,
+      }).catch((error: unknown) => {
+        status("metadata-error", { mint: value.mint, error: error instanceof Error ? error.message : String(error) });
+        return null;
       }),
     };
     try {
@@ -1752,7 +1781,7 @@ async function subscribeTradeStream(options: EventSourceOptions & {
   const pumpSwapPools = new Map<string, Promise<PumpSwapPoolIdentity>>();
   const pumpQuoteMetadata = new Map<string, Promise<{ mint: string; decimals: number }>>();
   const cpmmPools = new Map<string, Promise<CurrentMarket | null>>();
-  const SUPPLY_REFRESH_MS = 5 * 60_000;
+  const SUPPLY_REFRESH_MS = 24 * 3600_000; // supply is fixed at mint (pump: 1B, authority revoked); burns only shrink it
   const logPositions = new Map<string, number[]>();
   let stopped = false;
   let resolveClosed!: () => void;
@@ -1795,20 +1824,15 @@ async function subscribeTradeStream(options: EventSourceOptions & {
   const resolvePumpSwapPool = async (poolText: string) => {
     const cached = pumpSwapPools.get(poolText);
     if (cached) return await cached;
-    const pending = (async (): Promise<PumpSwapPoolIdentity> => {
+    // Once per pool, and a watched coin has no price until it resolves: it jumps the RPC queue. pump.fun mints
+    // (6 decimals) and wrapped SOL (9) need no supply read for their decimals.
+    const pending = withTradeRpcPriority(async (): Promise<PumpSwapPoolIdentity> => {
       const pool = await fetchPool(options.connection, new PublicKey(poolText));
-      const [baseSupply, quoteSupply] = await Promise.all([
-        options.connection.getTokenSupply(pool.baseMint, "confirmed"),
-        options.connection.getTokenSupply(pool.quoteMint, "confirmed"),
-      ]);
-      return {
-        pool: poolText,
-        baseMint: pool.baseMint.toBase58(),
-        quoteMint: pool.quoteMint.toBase58(),
-        baseDecimals: baseSupply.value.decimals,
-        quoteDecimals: quoteSupply.value.decimals,
-      };
-    })();
+      const decimalsOf = async (mint: PublicKey) => mint.toBase58() === "So11111111111111111111111111111111111111112" ? 9
+        : mint.toBase58().endsWith("pump") ? 6 : (await options.connection.getTokenSupply(mint, "confirmed")).value.decimals;
+      const [baseDecimals, quoteDecimals] = await Promise.all([decimalsOf(pool.baseMint), decimalsOf(pool.quoteMint)]);
+      return { pool: poolText, baseMint: pool.baseMint.toBase58(), quoteMint: pool.quoteMint.toBase58(), baseDecimals, quoteDecimals };
+    });
     pumpSwapPools.set(poolText, pending);
     try {
       return await pending;
@@ -1818,6 +1842,10 @@ async function subscribeTradeStream(options: EventSourceOptions & {
     }
   };
 
+  // One supply read per mint at a time: a busy coin prints many trades per second, and without this every
+  // trade before the first answer queued its own getTokenSupply (hundreds/min at startup, starving trading).
+  const supplyReads = new Map<string, Promise<void>>();
+  const supplyFailedAt = new Map<string, number>();
   const refreshWatchedSupply = async (state: TradeTokenState) => {
     const now = Date.now();
     if (
@@ -1825,13 +1853,29 @@ async function subscribeTradeStream(options: EventSourceOptions & {
       now - state.supplyRefreshedAtMs < SUPPLY_REFRESH_MS
     )
       return;
-    const supply = await options.connection.getTokenSupply(
-      new PublicKey(state.mint),
-      "confirmed",
-    );
-    state.decimals = supply.value.decimals;
-    state.supplyRaw = BigInt(supply.value.amount);
-    state.supplyRefreshedAtMs = now;
+    // pump.fun coins: always 1B tokens, 6 decimals, mint authority revoked at creation: no RPC read.
+    if (state.mint.endsWith("pump")) {
+      state.decimals = 6; state.supplyRaw = 1_000_000_000_000_000n; state.supplyRefreshedAtMs = now;
+      return;
+    }
+    const running = supplyReads.get(state.mint);
+    if (running) return await running;
+    const failed = supplyFailedAt.get(state.mint);
+    if (failed != null && now - failed < 15_000) throw new Error("token supply read failed recently; retrying shortly");
+    const read = (async () => {
+      const supply = await options.connection.getTokenSupply(
+        new PublicKey(state.mint),
+        "confirmed",
+      );
+      state.decimals = supply.value.decimals;
+      state.supplyRaw = BigInt(supply.value.amount);
+      state.supplyRefreshedAtMs = Date.now();
+      supplyFailedAt.delete(state.mint);
+    })();
+    supplyReads.set(state.mint, read);
+    try { await read; }
+    catch (error) { supplyFailedAt.set(state.mint, Date.now()); throw error; }
+    finally { supplyReads.delete(state.mint); }
   };
 
   const ensureMetadata = async (mint: string, signature?: string) => {
@@ -2002,6 +2046,15 @@ async function subscribeTradeStream(options: EventSourceOptions & {
 
     const state = states.get(mint);
     if (!state || stopped || !subscriptions.has(mint)) return;
+    // A coin can have several PumpSwap pools; a dust pool (e.g. $30 of liquidity) prints prices 100x off.
+    // Follow the deepest pool and drop trades from pools far shallower than it (same quote mint only).
+    const reserve = decoded.poolQuoteRaw;
+    if (state.pool && state.pool !== identity.pool && state.quoteMint === identity.quoteMint && state.poolQuoteRaw != null
+      && reserve * 4n < state.poolQuoteRaw) {
+      status("pumpswap-shallow-pool-ignored", { mint, pool: identity.pool, mainPool: state.pool, signature });
+      return;
+    }
+    if (state.pool === identity.pool || state.poolQuoteRaw == null || reserve >= state.poolQuoteRaw || state.quoteMint !== identity.quoteMint) state.poolQuoteRaw = reserve;
     state.pool = identity.pool;
     state.decimals = identity.baseDecimals;
     state.quoteMint = identity.quoteMint;
@@ -2557,6 +2610,8 @@ async function subscribeTradeStream(options: EventSourceOptions & {
   };
 }
 
+/** Quote mint -> its PumpSwap pool (or null), shared by every quoteSolLoader in the process. */
+const quotePoolDiscovery = new Map<string, { pool: string | null; atMs: number }>();
 export function quoteSolLoader(
   connection: Connection,
   status: (event: string, data?: Record<string, unknown>) => void,
@@ -2617,11 +2672,14 @@ export function quoteSolLoader(
       }
       try {
         const venue = new PumpSwapVenue();
+        // A quote token's PumpSwap pool does not move: discover it once per process (found: kept; not found: 10 min).
+        // Re-discovering it on every cache expiry (inspectToken: getMultipleAccounts + getParsedTransaction) was the
+        // largest RPC user with DJT/XMR-quoted coins (~150 calls/min).
         const knownPool = poolHint?.(mint);
-        const inspected = knownPool ? { pool: knownPool } : await venue.inspectToken(
-          connection,
-          new PublicKey(mint),
-        );
+        const remembered = quotePoolDiscovery.get(mint);
+        const inspected = knownPool ? { pool: knownPool }
+          : remembered && (remembered.pool || Date.now() - remembered.atMs < 600_000) ? (remembered.pool ? { pool: remembered.pool } : null)
+          : await venue.inspectToken(connection, new PublicKey(mint)).then(found => { quotePoolDiscovery.set(mint, { pool: found?.pool ?? null, atMs: Date.now() }); return found; });
         if (inspected?.pool) {
           if (!inspected.pool) throw new Error("Inspected PumpSwap pool address missing");
           const pool = await fetchPool(connection, new PublicKey(inspected.pool));

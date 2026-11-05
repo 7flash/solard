@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOLARD Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0B0E11; --chrome:#0E1216; --panel:#12161B; --line:#1F252D; --line2:#181D23; --chip:#161B21; --border:#2A313B;
+    --text:#E6E8EB; --muted:#A9B2BF; --dim:#8A94A3; --acc:#8FA8FF; --acc-bg:#172038; --sel:#1A2030;
+    --up:#3DD68C; --up-bg:#12241B; --dn:#FF7A66; --dn-bg:#2A1512; --dn-line:#5A2A24; --amb:#F5B841; --amb-bg:#2A2212; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: Inter, system-ui, sans-serif; font-size:13px; }
+  a { color:var(--acc); text-decoration:none } a:hover { color:#B7C6FF }
+  button { font-family:inherit; cursor:pointer; } button:hover { filter:brightness(1.18) }
+  button:disabled { opacity:.45; cursor:default; filter:none }
+  .num { font-family:'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .row:hover { background:#171C22 }
+  .app { min-height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:20px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--chrome); }
+  .brand { display:flex; align-items:center; gap:10px } .brand b { font-weight:700; letter-spacing:.12em; font-size:14px }
+  .chips { display:flex; flex-wrap:wrap; gap:8px }
+  .chip { padding:5px 10px; border-radius:6px; background:var(--chip); color:var(--muted); display:flex; align-items:center; gap:6px }
+  .chip.live { background:var(--up-bg); color:var(--up) } .chip.warn { background:var(--amb-bg); color:var(--amb) }
+  .dot { width:7px; height:7px; border-radius:50%; background:currentColor }
+  .grow { flex:1 }
+  .btn { height:36px; padding:0 14px; border-radius:8px; border:1px solid var(--border); background:var(--chip); color:var(--text); font-size:13px }
+  .btn.primary { padding:0 16px; border:0; background:var(--acc); color:var(--bg); font-weight:600 }
+  .search { height:36px; width:260px; padding:0 14px; border-radius:8px; border:1px solid var(--border); background:var(--chip); color:var(--text); font:inherit; outline:none }
+  .search::placeholder { color:var(--text) }
+  .body { display:flex; flex-wrap:wrap; flex:1; min-height:0 }
+  nav { flex:1 1 220px; max-width:260px; border-right:1px solid var(--line); padding:16px 12px; background:var(--chrome) }
+  .label { color:var(--dim); font-size:11px; font-weight:600; letter-spacing:.08em; padding:0 8px 10px }
+  .wallet { width:100%; display:flex; justify-content:space-between; align-items:center; height:36px; padding:0 10px; border-radius:8px; border:0; font-size:13px; text-align:left; margin-bottom:2px; background:transparent; color:var(--muted) }
+  .wallet.on { background:var(--sel); color:var(--text); font-weight:600 }
+  .wallet span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; margin-right:8px }
+  nav { max-height: calc(100vh - 61px); overflow-y:auto; position:sticky; top:0 }
+  main { flex:999 1 640px; min-width:0; display:flex; flex-direction:column; gap:16px; padding:16px 20px }
+  section.card, .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden }
+  .card-head { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--line) }
+  h2 { margin:0; font-size:14px; font-weight:600 }
+  .scroll { overflow-x:auto }
+  table { width:100%; border-collapse:collapse }
+  th { color:var(--dim); font-size:11px; text-align:left; letter-spacing:.06em; font-weight:600 }
+  .r { text-align:right }
+  #positions th { padding:10px 8px } #positions th:first-child, #positions th:nth-last-child(-n+2) { padding:10px 16px }
+  #positions td { padding:9px 8px } #positions td:first-child, #positions td:nth-last-child(-n+2) { padding:9px 16px }
+  #positions tbody tr { cursor:pointer; border-top:1px solid var(--line2) }
+  #positions tbody tr.on { background:var(--sel); box-shadow: inset 2px 0 0 var(--acc) }
+  .seg { display:block; width:14px; height:6px; border-radius:2px; background:var(--border) } .seg.on { background:var(--acc) }
+  .state { display:inline-block; padding:3px 8px; border-radius:6px; font-size:12px; font-weight:500; background:var(--acc-bg); color:var(--acc) }
+  .state.sell { background:var(--up-bg); color:var(--up) } .state.paused { background:var(--amb-bg); color:var(--amb) }
+  .state.err { background:var(--dn-bg); color:var(--dn) } .state.flat { background:var(--chip); color:var(--dim) }
+  .up { color:var(--up) } .dn { color:var(--dn) } .flatc { color:var(--muted) }
+  .lower { display:flex; flex-wrap:wrap; gap:16px }
+  .detail { flex:1 1 300px; padding:18px; display:flex; flex-direction:column; gap:16px }
+  .tiles { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px }
+  .tile { background:var(--chrome); border-radius:8px; padding:10px 12px } .tile .k { color:var(--dim); font-size:11px } .tile .v { font-size:13px; margin-top:4px } .tile .v.big { font-size:16px }
+  .actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px }
+  .actions button { height:44px; border-radius:8px; border:1px solid var(--border); background:var(--chip); color:var(--text) }
+  .actions .primary { border:0; background:var(--acc); color:var(--bg); font-weight:600 }
+  .actions .danger { border:1px solid var(--dn-line); background:var(--dn-bg); color:var(--dn); font-weight:600 }
+  .linkbtn { height:36px; border-radius:8px; border:0; background:transparent; color:var(--dim); text-align:left; padding:0 }
+  .trades { flex:999 1 560px; min-width:0 }
+  .filters { display:flex; gap:4px; background:var(--chrome); border-radius:8px; padding:3px }
+  .filters button { height:30px; padding:0 12px; border-radius:6px; border:0; font-size:12px; background:transparent; color:var(--dim) }
+  .filters button.on { background:#1F2633; color:var(--text); font-weight:600 }
+  .tscroll { overflow-x:auto; max-height:460px; overflow-y:auto }
+  #trades thead tr { position:sticky; top:0; background:var(--panel) }
+  #trades th { padding:9px 8px } #trades th:first-child, #trades th:last-child { padding:9px 16px }
+  #trades td { padding:7px 8px } #trades td:first-child, #trades td:last-child { padding:7px 16px }
+  #trades tbody tr { border-top:1px solid var(--line2) }
+  .side { display:inline-block; min-width:38px; text-align:center; padding:2px 6px; border-radius:4px; font-size:11px; font-weight:600 }
+  .side.buy { background:var(--up-bg); color:var(--up) } .side.sell { background:var(--dn-bg); color:var(--dn) }
+  .tag { margin-left:8px; padding:2px 6px; border-radius:4px; background:var(--acc-bg); color:var(--acc); font-size:10px; font-weight:600; letter-spacing:.06em }
+  .tag.mine { background:var(--up-bg); color:var(--up) }
+  .empty { padding:18px 16px; color:var(--dim) }
+  #hot td, #decisions td { padding:7px 8px; border-top:1px solid var(--line2) } #hot td:first-child, #decisions td:first-child { padding-left:16px }
+  #hot th, #decisions th { padding:9px 8px } #hot th:first-child, #decisions th:first-child { padding-left:16px }
+  .tabs { display:flex; gap:4px; background:var(--panel); border-radius:8px; padding:3px }
+  .tabs a { height:30px; display:flex; align-items:center; padding:0 12px; border-radius:6px; font-size:12px; color:var(--dim) }
+  .tabs a.on { background:#1F2633; color:var(--text); font-weight:600 }
+  .copy { display:inline-flex; align-items:center; margin-left:6px; border:0; background:transparent; color:var(--dim); padding:2px 3px; border-radius:4px; vertical-align:middle; cursor:pointer }
+  .copy:hover { color:var(--text); background:var(--chip) } .copy.done { color:var(--up) }
+  .toast { position:fixed; bottom:18px; right:18px; background:var(--chip); border:1px solid var(--border); border-radius:8px; padding:10px 14px; max-width:420px; display:none }
+  .toast.show { display:block } .toast.err { border-color:var(--dn-line); color:var(--dn) }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8FA8FF" stroke-width="2" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"></path><path d="M15 7h6v6"></path></svg><b>SOLARD</b></div>
+    <div class="tabs"><a class="on" href="./index.html">Terminal</a><a href="./discovery.html">Discovery</a><a href="./wallets.html">Wallets</a></div>
+    <div class="chips" id="chips"></div>
+    <div class="grow"></div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <input id="search" class="search" placeholder="Search coin or CA" autocomplete="off">
+      <button id="new" class="btn primary">+ New bot</button>
+    </div>
+  </header>
+  <div class="body">
+    <nav aria-label="Wallets"><div class="label">WALLETS</div><div id="wallets"></div></nav>
+    <main>
+      <section class="card">
+        <div class="card-head"><h2>Positions &amp; bots</h2><span id="pos-sub" style="color:var(--dim)"></span><div class="grow"></div><span class="num" style="color:var(--dim)">Total PnL <span id="total-pnl"></span></span></div>
+        <div class="scroll"><table id="positions" style="min-width:980px">
+          <thead><tr><th>COIN</th><th>WALLET</th><th class="r">MCAP</th><th>RANGE</th><th class="r">COST</th><th class="r">VALUE</th><th class="r">PNL</th><th>LADDER</th><th>NEXT ORDER</th></tr></thead>
+          <tbody></tbody></table></div>
+      </section>
+      <section class="lower">
+        <div class="card detail" id="detail"></div>
+        <div class="card trades">
+          <div class="card-head"><h2>Live trades</h2><span id="live" style="display:flex; align-items:center; gap:6px; color:var(--up)"><span class="dot"></span>live</span><span id="trades-sub" style="color:var(--dim)"></span><div class="grow"></div>
+            <div class="filters" id="filters"><button data-f="all" class="on">All</button><button data-f="active">Active traders</button><button data-f="whale">≥1 SOL</button></div></div>
+          <div class="tscroll"><table id="trades" style="min-width:720px">
+            <thead><tr><th>TIME</th><th>SIDE</th><th class="r">SOL</th><th class="r">MCAP</th><th>TRADER</th><th>SESSION B/S</th><th class="r">NET SOL</th><th class="r">WALLET SOL</th></tr></thead>
+            <tbody></tbody></table></div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

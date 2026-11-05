@@ -179,7 +179,20 @@ async function readMarket(
 /** Native instruction-only LaunchLab trades; graduated pools fall through to other venues. */
 export class LaunchLabVenue implements TradeVenuePlugin {
   readonly id = "raydium-launchlab";
+  /** Mints with no LaunchLab pool (checked recently): skip the getProgramAccounts scan for them. */
+  private readonly noPool = new Map<string, number>();
   private async discover(
+    connection: Connection,
+    mint: PublicKey,
+    token?: TokenRow,
+  ): Promise<{ address: PublicKey; info: AccountInfo<Buffer> } | null> {
+    const k = mint.toBase58();
+    if (!token?.pool && (this.noPool.get(k) ?? 0) > Date.now()) return null;
+    const found = await this.discoverNow(connection, mint, token);
+    if (found) this.noPool.delete(k); else this.noPool.set(k, Date.now() + 10 * 60_000);
+    return found;
+  }
+  private async discoverNow(
     connection: Connection,
     mint: PublicKey,
     token?: TokenRow,
