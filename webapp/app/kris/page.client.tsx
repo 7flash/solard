@@ -136,8 +136,8 @@ function paint() { render(<Bubble />, $("bubble")); render(<History />, $("histo
 
 async function pull() {
   try {
-    const feed = await (await fetch("api/kris")).json() as { events: SceneEvent[]; ca?: string };
-    events = feed.events; $("ca").textContent = feed.ca ?? "";
+    const feed = await (await fetch("api/kris")).json() as { events: SceneEvent[] };
+    events = feed.events;
     if (!seen) { seen = new Set(events.map(e => e.id)); if (events[0]) queue.push(events[0]); } // on load, show the latest
     else for (const e of newEvents(events, seen)) { seen.add(e.id); if (keepEvent(e, queue.length)) queue.push(e); }
     paint(); void drain();
@@ -161,7 +161,6 @@ export default function mount() {
   const onClick = (e: Event) => { const b = (e.target as HTMLElement).closest("[data-mint]") as HTMLElement | null; if (b) { handsOffUntil = Date.now() + 30_000; void ask("solard:open", { mint: b.dataset.mint! }); } };
   const hands = () => { handsOffUntil = Date.now() + 30_000; };
   new ResizeObserver(fit).observe($("screen")); window.addEventListener("message", onMessage); window.addEventListener("resize", fit); $("history").addEventListener("click", onClick);
-  $("ca-row").addEventListener("click", () => void navigator.clipboard?.writeText($("ca").textContent ?? ""));
   $("screen").addEventListener("mouseenter", hands); $("screen").addEventListener("mouseleave", hands);
   void pullBots();
   if (DEMO) void loadArt().then(() => sleep(2_500)).then(demo); else void pull();
