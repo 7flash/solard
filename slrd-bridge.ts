@@ -6,6 +6,7 @@
  *   bun slrd-bridge.ts            -> http://127.0.0.1:5174/#token=...   (serves web/dist too) */
 import { coinIndex, scoreWallet, type StatRow, type WalletScore } from "./tui/wallet-scores.ts";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, statSync, readdirSync } from "node:fs";
+import { earlyBoughtPct } from "./tui/bundles.ts";
 import { fillsFromLog } from "./tui/fill-log.ts";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -172,7 +173,7 @@ async function coinWalletsApi(mint: string, watch = true) {
       entryCapUsd: null, delta5: null, smart: smartMap.get(h.owner) ?? null, ours: mine.get(h.owner) ?? null, dev: h.owner === creator, profile: null, from: h.from, viaTransfer: true } as never);
   }
   list.sort((a, b) => b.held - a.held || b.lastAtMs - a.lastAtMs);
-  return { ...coinHistory(mint), mint, symbol, exact: exact?.ready ?? false, clusters: exact?.clusters ?? [], transfers: exact?.transfers?.slice(0, 100) ?? [], transferCount: exact?.transferCount ?? 0, capUsd: coin ? (coin.ammTrades ? coin.ammCapUsd : coin.capUsd) ?? null : null, migrated: coin?.migrated ?? null,
+  return { ...coinHistory(mint), earlyBoughtPct: earlyBoughtPct(rows), mint, symbol, exact: exact?.ready ?? false, clusters: exact?.clusters ?? [], transfers: exact?.transfers?.slice(0, 100) ?? [], transferCount: exact?.transferCount ?? 0, capUsd: coin ? (coin.ammTrades ? coin.ammCapUsd : coin.capUsd) ?? null : null, migrated: coin?.migrated ?? null,
     launchedAtMs: coin?.launchedAtMs ?? null, trades: coin?.trades ?? rows.reduce((a, r) => a + r.buys + r.sells, 0), creator, priceSol: price,
     wallets: list.slice(0, 500), walletCount: list.length, holders: list.filter(w => w.held > 0).length,
     recent: recent.slice(-200).reverse().map(t => ({ ...t, smart: !!(t.trader && smartMap.has(t.trader)), ours: t.trader ? mine.get(t.trader) ?? null : null })) };

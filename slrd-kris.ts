@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { appendFileSync } from "node:fs";
-import { bundleShare, earlyHeldPct, type BuyRow } from "./tui/bundles.ts";
+import { bundleShare, type BuyRow } from "./tui/bundles.ts";
 import { startOutcome, stepOutcome, type Outcome } from "./tui/kris-outcomes.ts";
 import { planSlots, readPick, slotQualifies, slotScore, slotSize, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
 import { coinVerdict, lastFill, rangeSide, rangeTitle, scrubReason, tradeReaction, tradeTitle, type KrisEvent } from "./webapp/public/kris-events.ts";
@@ -140,8 +140,8 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
     const rows = (await Promise.all(fresh.map(async c => {
       const r = await fetch(`http://127.0.0.1:5176/api/coin?mint=${c.mint}&watch=0`, { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(10_000) }).catch(() => null);
       if (!r?.ok) return null;
-      const coin = await r.json() as { recent?: (BuyRow & { sol: number | null })[]; wallets?: { firstAtMs?: number; pct?: number }[]; launchedAtMs?: number | null }, early = earlyHeldPct(coin.wallets ?? [], coin.launchedAtMs), recent = coin.recent ?? [], share = bundleShare(recent), sum = (side: string) => Math.round(recent.slice(0, 100).filter(t => t.side === side).reduce((a, t) => a + (t.sol ?? 0), 0) * 10) / 10;
-      return share >= SLOT_CONFIG.maxBundleShare || early >= SLOT_CONFIG.maxEarlyPct ? null : { c, name: c.symbol || c.mint.slice(0, 6), ageSec: Math.round((c.ageMs ?? 0) / 1000), capUsd: c.capUsd ? Math.round(c.capUsd) : null, wallets: c.traders ?? 0, trades: c.trades ?? 0, smartWallets: c.smart ?? 0, solVolume: c.volSol ? Math.round(c.volSol) : 0, bundledWalletPct: Math.round(share * 100), last100Trades: { buySol: sum("buy"), sellSol: sum("sell") } };
+      const coin = await r.json() as { recent?: (BuyRow & { sol: number | null })[]; earlyBoughtPct?: number | null }, early = coin.earlyBoughtPct ?? 100, recent = coin.recent ?? [], share = bundleShare(recent), sum = (side: string) => Math.round(recent.slice(0, 100).filter(t => t.side === side).reduce((a, t) => a + (t.sol ?? 0), 0) * 10) / 10;
+      return share >= SLOT_CONFIG.maxBundleShare || early >= SLOT_CONFIG.maxEarlyPct ? null : { c, name: c.symbol || c.mint.slice(0, 6), ageSec: Math.round((c.ageMs ?? 0) / 1000), capUsd: c.capUsd ? Math.round(c.capUsd) : null, wallets: c.traders ?? 0, trades: c.trades ?? 0, smartWallets: c.smart ?? 0, solVolume: c.volSol ? Math.round(c.volSol) : 0, bundledWalletPct: Math.round(share * 100), supplyBoughtInFirst3SecPct: Math.round(early), last100Trades: { buySol: sum("buy"), sellSol: sum("sell") } };
     }))).filter(x => x != null);
     if (!rows.length) return;
     const names = rows.map(r => r.name), ev = add({ atMs: Date.now(), kind: "compare", mint: rows[0]!.c.mint, symbol: names.length > 1 ? "New pairs" : names[0]!, title: `Comparing ${names.join(", ")}` });
@@ -186,10 +186,10 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   // The terminal's bundle filter. No answer means no buy.
   const r = await fetch(`http://127.0.0.1:5176/api/coin?mint=${c.mint}&watch=0`, { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`coin read: ${r.status}`);
-  const info = await r.json() as { recent?: BuyRow[]; wallets?: { firstAtMs?: number; pct?: number }[]; launchedAtMs?: number | null }, share = bundleShare(info.recent ?? []), early = earlyHeldPct(info.wallets ?? [], info.launchedAtMs);
+  const info = await r.json() as { recent?: BuyRow[]; earlyBoughtPct?: number | null }, share = bundleShare(info.recent ?? []), early = info.earlyBoughtPct ?? 100; // unknown counts as bundled
   if (share >= SLOT_CONFIG.maxBundleShare || early >= SLOT_CONFIG.maxEarlyPct) {
     book.closedAt = [...book.closedAt.filter(([, at]) => now - at < SLOT_CONFIG.reopenAfterMs), [c.mint, now]]; saveBook();
-    add({ atMs: now, kind: "coin", mint: c.mint, symbol: c.symbol ?? null, title: `Bundle: skip, ${Math.round(share * 100)}% of wallets bought together, ${Math.round(early)}% held from the first 3s` });
+    add({ atMs: now, kind: "coin", mint: c.mint, symbol: c.symbol ?? null, title: `Bundle: skip, ${Math.round(share * 100)}% of wallets bought together, ${Math.round(early)}% of supply bought in the first 3s` });
     return;
   }
   await act({ action: "add", mint: c.mint, buy: a.buy, sell: a.sell, steps: SLOT_CONFIG.steps, budget });

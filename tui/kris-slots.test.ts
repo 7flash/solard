@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { bundleShare, earlyHeldPct } from "./bundles.ts";
+import { bundleShare, earlyBoughtPct } from "./bundles.ts";
 import { planSlots, readPick, slotQualifies, slotRange, slotScore, slotSize, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
@@ -91,10 +91,9 @@ test("a migration counts only soon after it migrated", () => {
   expect(plan({ coins: [m], migratedAt: new Map([["m", now - 900_000]]) })).toBeNull();
   expect(plan({ coins: [m] })).toBeNull();
 });
-test("early held share adds up what the first 3 seconds still hold", () => {
-  expect(earlyHeldPct([{ firstAtMs: 1_000, pct: 40 }, { firstAtMs: 3_500, pct: 30 }, { firstAtMs: 9_000, pct: 20 }], 1_000)).toBe(70);
-  expect(earlyHeldPct([{ firstAtMs: 5_000, pct: 40 }, { firstAtMs: 20_000, pct: 30 }])).toBe(40);
-  expect(earlyHeldPct([])).toBe(0);
+test("early bought share counts the first 3 seconds, sold since or not", () => {
+  expect(earlyBoughtPct([{ firstAtMs: 1_000, tokensBought: 300 }, { firstAtMs: 4_000, tokensBought: 100 }, { firstAtMs: 4_001, tokensBought: 500 }], 1_000)).toBe(40);
+  expect(earlyBoughtPct([])).toBeNull();
 });
 test("bundle share counts wallets buying the same size within a second", () => {
   const same = ["a", "b", "c"].map((trader, i) => ({ atMs: 1_000 + i * 100, side: "buy", sol: 1, trader }));
