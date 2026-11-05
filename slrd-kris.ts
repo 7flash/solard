@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { appendFileSync } from "node:fs";
 import { bundleShare, type BuyRow } from "./tui/bundles.ts";
 import { startOutcome, stepOutcome, type Outcome } from "./tui/kris-outcomes.ts";
-import { freshMigration, planSlots, slotPlan, slotKeepsRange, slotQualifies, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
+import { freshMigration, goodHolders, planSlots, slotPlan, slotKeepsRange, slotSize, slotQualifies, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
 import { coinVerdict, lastFill, rangeSide, rangeTitle, scrubReason, tradeReaction, tradeTitle, type KrisEvent } from "./webapp/public/kris-events.ts";
 
 process.env.JSX_AI_RUNTIME ??= "codex";
@@ -160,19 +160,20 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
     const ev = add({ atMs: now, kind: "decision", mint: a.slot.mint, symbol: a.slot.symbol, title: keepOnRange ? `Slot freed, range keeps it: ${a.reason}` : `Closing: ${a.reason}` });
     return;
   }
-  const c = a.coin, { steps, budget } = slotPlan(a.buy, a.sell);
+  const c = a.coin, { steps, budget: base } = slotPlan(a.buy, a.sell);
   // The terminal's bundle filter. No answer means no buy.
   const r = await fetch(`http://127.0.0.1:5176/api/coin?mint=${c.mint}&watch=0`, { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`coin read: ${r.status}`);
-  const info = await r.json() as { recent?: BuyRow[]; earlyBoughtPct?: number | null; wallets?: { pct: number; ours?: boolean }[] }, tops = (info.wallets ?? []).filter(w => w.pct > 0 && !w.ours).map(w => w.pct).sort((x, y) => y - x), share = bundleShare(info.recent ?? []), early = info.earlyBoughtPct ?? 100; // unknown counts as bundled
+  const info = await r.json() as { recent?: BuyRow[]; earlyBoughtPct?: number | null; wallets?: { pct: number; ours?: boolean; profile?: { coins?: number; wins?: number; realizedSol?: number } | null }[] }, tops = (info.wallets ?? []).filter(w => w.pct > 0 && !w.ours).map(w => w.pct).sort((x, y) => y - x), share = bundleShare(info.recent ?? []), early = info.earlyBoughtPct ?? 100; // unknown counts as bundled
   if (share >= SLOT_CONFIG.maxBundleShare || early >= SLOT_CONFIG.maxEarlyPct) {
     book.closedAt = [...book.closedAt.filter(([, at]) => now - at < SLOT_CONFIG.reopenAfterMs), [c.mint, now]]; saveBook();
     add({ atMs: now, kind: "coin", mint: c.mint, symbol: c.symbol ?? null, title: `Bundle: skip, ${Math.round(share * 100)}% of wallets bought together, ${Math.round(early)}% of supply bought in the first 3s` });
     return;
   }
+  const good = goodHolders(info.wallets ?? []), budget = slotSize(base, good);
   await act({ action: "add", mint: c.mint, buy: a.buy, sell: a.sell, steps, budget, percentSteps: true });
   // Every open with what was known at entry: joined with closed-pnl.jsonl, this shows which entries really pay. Events age out; this does not.
-  appendFileSync(resolve(dot, "kris-slots-log.jsonl"), JSON.stringify({ at: now, mint: c.mint, symbol: c.symbol ?? null, kind: a.kind, sol: budget, cap: c.capUsd ?? null, ageMs: c.ageMs ?? null, wallets: c.traders ?? 0, trades: c.trades ?? 0, volSol: c.volSol ?? 0, smart: c.smart ?? 0, score: a.score, early, share, topHolderPct: tops[0] ?? null, top3HolderPct: tops.slice(0, 3).reduce((x, y) => x + y, 0), buy: a.buy, sell: a.sell, swap: a.swap }) + String.fromCharCode(10));
+  appendFileSync(resolve(dot, "kris-slots-log.jsonl"), JSON.stringify({ at: now, mint: c.mint, symbol: c.symbol ?? null, kind: a.kind, sol: budget, cap: c.capUsd ?? null, ageMs: c.ageMs ?? null, wallets: c.traders ?? 0, trades: c.trades ?? 0, volSol: c.volSol ?? 0, smart: c.smart ?? 0, score: a.score, early, share, goodHolders: good, topHolderPct: tops[0] ?? null, top3HolderPct: tops.slice(0, 3).reduce((x, y) => x + y, 0), buy: a.buy, sell: a.sell, swap: a.swap }) + String.fromCharCode(10));
   book.slots = book.slots.filter(s => s.mint !== c.mint);
   book.slots.push({ mint: c.mint, symbol: c.symbol ?? null, kind: a.kind, openedAtMs: now, score: a.score, buy: a.buy, sell: a.sell });
   book.lastActionMs = now; if (book.pendingKind === a.kind) book.pendingKind = null; saveBook(); seenBots.add(c.mint); walletAt = 0;

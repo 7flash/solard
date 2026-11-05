@@ -35,6 +35,14 @@ export function slotPlan(buy: number, sell: number, c: Config = SLOT_CONFIG) {
   const steps = Math.max(2, Math.min(20, Math.round(Math.log(sell / buy) / Math.log(1 + c.stepPct / 100))));
   return { steps, budget: Math.ceil(steps * c.stepSol * 100) / 100 };
 }
+type HolderProfile = { coins?: number; wins?: number; realizedSol?: number } | null | undefined;
+/** Holders with a real record: 10+ coins, 35%+ won, +10 SOL or more. */
+export const goodHolders = (wallets: { pct: number; ours?: unknown; profile?: HolderProfile }[]) => wallets.filter(w => {
+  const p = w.profile;
+  return w.pct > 0 && !w.ours && !!p && (p.coins ?? 0) >= 10 && (p.wins ?? 0) / (p.coins ?? 1) >= 0.35 && (p.realizedSol ?? 0) >= 10;
+}).length;
+/** Size only goes up. Below the base a step is too small to send. */
+export const slotSize = (budget: number, good: number) => good >= 3 ? budget * 2 : budget;
 export const slotRange = (cap: number, kind: SlotKind = "migrated") => kind === "new" ? { buy: SLOT_CONFIG.newBuyUsd, sell: SLOT_CONFIG.newSellUsd } : { buy: round(cap * 0.6), sell: round(cap * 1.9) };
 
 export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** When each coin was last seen trading. Absent from a list is not quiet: lists empty out on a daemon restart. */ lastSeen?: Map<string, number>; /** Slots holding nothing: the range sold out at its top, so the slot is free to move on. */ emptyMints?: Set<string>; config?: Partial<Config> }): SlotAction | null {

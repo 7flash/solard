@@ -4,7 +4,7 @@ import { tradedFromLog } from "./fill-log.ts";
 import { rangeLevels } from "../packages/core/src/runtime/target-inventory.ts";
 import { rangeFileBody } from "../packages/core/src/runtime/range-commands.ts";
 import { parseRangeSteps } from "../packages/core/src/runtime/range-file.ts";
-import { freshMigration, planSlots, slotPlan, slotKeepsRange, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
+import { freshMigration, goodHolders, planSlots, slotSize, slotPlan, slotKeepsRange, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
@@ -129,5 +129,11 @@ test("a range file with percent steps can be written and read", () => {
   const { text } = rangeFileBody("usd", "5000", "60000", 18, true);
   expect(JSON.parse(text).percentSteps).toBe(true);
   expect(parseRangeSteps(text)).toBe(18);
+});
+test("three good holders double the size, others stay at base", () => {
+  const good = { pct: 2, profile: { coins: 20, wins: 9, realizedSol: 30 } };
+  expect(goodHolders([good, good, { ...good, ours: true }, { pct: 0, profile: good.profile }, { pct: 2, profile: { coins: 5, wins: 5, realizedSol: 99 } }, { pct: 2, profile: { coins: 20, wins: 2, realizedSol: 99 } }, { pct: 2 }])).toBe(2);
+  expect(slotSize(0.06, 2)).toBe(0.06);
+  expect(slotSize(0.06, 3)).toBe(0.12);
 });
 
