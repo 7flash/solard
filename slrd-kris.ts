@@ -16,10 +16,10 @@ process.env.JSX_AI_MODEL ??= "gpt-5.6-sol"; // the local codex default is reject
 const dot = resolve(import.meta.dir, ".range-bots"), token = readFileSync(resolve(dot, "bridge-token"), "utf8").trim(), out = resolve(dot, "kris-events.json");
 const { streamLLM } = await import(process.env.JSX_AI_PATH ?? resolve(import.meta.dir, "..", "jsx-ai", "src", "index.ts")) as { streamLLM: (m: { role: string; content: string }[], o: { timeoutMs: number }) => AsyncIterable<string> };
 const KEEP = 300, KEEP_COINS = 100, THOUGHT_GAP_MS = 4_000;
-const SYSTEM = "You are Kris, a young trader running small Solana memecoin positions through the Solard terminal, and you feel every trade. You are thinking out loud as it happens, sharp and sceptical, but never flat: a win makes you buzz, a loss stings, a rug makes you angry, a pass can feel like relief or regret. Open with how this honestly feels in your own plain words, then give your read. Vary the feeling; never reuse a phrase from your earlier thoughts. "
+const SYSTEM = "You are Kris, a young trader running small Solana memecoin positions through the Solard terminal, and you feel every trade. You are thinking out loud as it happens, sharp and sceptical, but never flat: a win makes you buzz, a loss stings, a rug makes you angry, a pass can feel like relief or regret. Open with how this moment feels in your own plain words, then give your read. Match the feeling to this event alone: a buy is nerve or excitement, a sale in profit is pride, a strong coin is real excitement, a dump you dodged is smug satisfaction, and you can be funny or cocky. Never mention past losses, being burned, bruised or stung unless this event is itself a loss. Never reuse a phrase from your earlier thoughts. "
   + "Never restate the event: the reader already sees it. Give your read: what the move means given the trend, the flow, who holds and where the price sits in the range; "
   + "what you expect next and the one thing that would prove you wrong. Disagree with the position when the facts say so, including saying the range looks wrong or the coin looks like it is being dumped. "
-  + "Your recent results are real: let them temper your confidence. Earlier thoughts are given so you can follow up on them and admit when you were wrong; never repeat one. At most three sentences, first person, plain words. "
+  + "Earlier thoughts are given so you can follow up on them; never repeat one or copy their mood. At most three sentences, first person, plain words. "
   + "Your feelings are yours, but the facts are not: use only the facts given and never invent a number. Talk about the coin and the market only: never mention data, missing information, context, tools, bugs or what you cannot see. A fact that is absent is simply not discussed. "
   + "Every trade is your own plan working: the range buys its levels and sells its levels, so never call a trade a mistake or say it should not have happened. No hashtags, no emojis, no advice to the reader.";
 
@@ -48,11 +48,11 @@ function think(ev: KrisEvent, facts: Record<string, unknown>) {
 async function drainThoughts() {
   if (thinking) return; thinking = true;
   for (let job = waiting.shift(); job; job = waiting.shift()) {
-    const earlier = events.filter(e => e.thought && e.id !== job.ev.id && e.kind !== "coin" && e.kind !== "migrated").slice(0, 6).map(e => ({ coin: e.symbol ?? e.mint.slice(0, 6), event: e.title, thought: e.thought }));
+    const gloomy = /burned|bruis|sting|bites|bitter|licking/i, earlier = events.filter(e => e.thought && e.id !== job.ev.id && e.kind !== "coin" && e.kind !== "migrated" && !gloomy.test(e.thought)).slice(0, 4).map(e => ({ coin: e.symbol ?? e.mint.slice(0, 6), event: e.title, thought: e.thought }));
     try {
       const context = job.ev.kind === "coin" || job.ev.kind === "migrated" ? null : await coinContext(job.ev.mint);
       let text = "";
-      for await (const chunk of streamLLM([{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({ ...job.facts, context, myRecentResults: results, earlierThoughts: earlier }) }], { timeoutMs: 60_000 })) {
+      for await (const chunk of streamLLM([{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({ ...job.facts, context, ...(job.ev.reaction === "loss" ? { myRecentResults: results } : {}), earlierThoughts: earlier }) }], { timeoutMs: 60_000 })) {
         text += chunk; job.ev.thought = text; save();
       }
     } catch (e) { console.log(`${new Date().toISOString()} thought failed: ${String(e).slice(0, 160)}`); }
@@ -107,6 +107,13 @@ async function act(body: Record<string, unknown>) {
 const COMPARE_RULE = "You are comparing new pairs to decide if any deserves a position right now. Let your gut reaction show. Name the coins, compare them on what differs (wallets against trades, buy and sell flow, volume, smart wallets, cap), and say which is strongest and why the others lose. Most new pairs fail within minutes, so passing on all of them is a normal answer. "
   + "At most four sentences. Your very last line must be exactly PICK: followed by one coin name as written, or PICK: NONE.";
 const COMPARE_EVERY_MS = 45_000, PICK_LIFE_MS = 90_000; let comparedAt = 0, picked: { mint: string; at: number } | null = null;
+const passes = new Map<string, { coin: string; cap: number; at: number }>();
+/** Coins Kris passed on in the last 20 minutes and where they are now: real proof of its calls. */
+function passResults(coins: Coin[]) {
+  const caps = new Map(coins.map(c => [c.mint, c.capUsd ?? null])), now = Date.now(), out: { coin: string; capWhenPassed: number; capNow: number; pct: number }[] = [];
+  for (const [mint, p] of passes) { if (now - p.at > 1_200_000) { passes.delete(mint); continue; } const cap = caps.get(mint); if (cap) out.push({ coin: p.coin, capWhenPassed: Math.round(p.cap), capNow: Math.round(cap), pct: Math.round((cap / p.cap - 1) * 100) }); }
+  return out.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct)).slice(0, 3);
+}
 /** The best new pairs side by side. Kris's answer decides which one may open: no pick, no new pair. */
 async function compareNewPairs(bots: Bot[], coins: Coin[]) {
   const now = Date.now(); if (now - comparedAt < COMPARE_EVERY_MS || existsSync(offPath)) return;
@@ -125,14 +132,15 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
     if (!rows.length) return;
     const names = rows.map(r => r.name), ev = add({ atMs: Date.now(), kind: "compare", mint: rows[0]!.c.mint, symbol: names.length > 1 ? "New pairs" : names[0]!, title: `Comparing ${names.join(", ")}` });
     if (!ev) return;
-    const earlier = events.filter(e => e.kind === "compare" && e.thought && e.id !== ev.id).slice(0, 3).map(e => ({ title: e.title, thought: e.thought }));
+    const earlier = events.filter(e => e.kind === "compare" && e.thought && e.id !== ev.id && !/burned|bruis|sting|bites|bitter/i.test(e.thought)).slice(0, 3).map(e => ({ title: e.title, thought: e.thought }));
     let text = "";
-    for await (const chunk of streamLLM([{ role: "system", content: `${SYSTEM} ${COMPARE_RULE}` }, { role: "user", content: JSON.stringify({ candidates: rows.map(({ c: _c, ...r }) => r), openNewPairs: book.slots.filter(s => s.kind === "new").map(s => s.symbol), myRecentResults: results, earlierComparisons: earlier }) }], { timeoutMs: 60_000 })) {
+    for await (const chunk of streamLLM([{ role: "system", content: `${SYSTEM} ${COMPARE_RULE}` }, { role: "user", content: JSON.stringify({ candidates: rows.map(({ c: _c, ...r }) => r), openNewPairs: book.slots.filter(s => s.kind === "new").map(s => s.symbol), coinsYouPassedOn: passResults(coins), earlierComparisons: earlier }) }], { timeoutMs: 60_000 })) {
       text += chunk; ev.thought = readPick(text, names).thought; save();
     }
     const { thought, pick } = readPick(text, names), chosen = rows.find(r => r.name === pick);
     ev.thought = thought; ev.title = chosen ? `Picked ${chosen.name}${names.length > 1 ? ` over ${names.filter(n => n !== chosen.name).join(", ")}` : ""}` : `Passed on ${names.join(", ")}`;
     if (chosen) { ev.mint = chosen.c.mint; picked = { mint: chosen.c.mint, at: Date.now() }; }
+    for (const r of rows) if (r !== chosen && r.c.capUsd && !passes.has(r.c.mint)) passes.set(r.c.mint, { coin: r.name, cap: r.c.capUsd, at: Date.now() });
     save();
   } catch (e) { console.log(`${new Date().toISOString()} compare: ${String(e).slice(0, 160)}`); }
   finally { thinking = false; void drainThoughts(); }
