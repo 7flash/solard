@@ -45,7 +45,7 @@ for (;;) {
     // watch=0: reading a coin here must never start its holder history download.
     for (let i = 0; i < 2 && mints.length; i++)
       await push({ coin: publicCoin(await get(`${bridge}/api/coin-wallets?mint=${mints[next++ % mints.length]}&watch=0`, { "x-slrd-token": bridgeToken }), s) }, s);
-    await push({ kris: publicKris(await get(`${view}/api/kris`, { cookie: `slrd_web=${bridgeToken}` }).then(r => r.events ?? [])), ca: process.env.KRIS_CA ?? "", wallet: process.env.KRIS_WALLET ?? "", stats: totals() }, s);
+    await push({ kris: publicKris(await get(`${view}/api/kris`, { cookie: `slrd_web=${bridgeToken}` }).then(r => r.events ?? [])), ca: process.env.KRIS_CA ?? "", stats: totals() }, s);
     if (lastError) console.log("publishing again");
     lastError = "";
   } catch (e) {
