@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { bundleShare, earlyBoughtPct } from "./bundles.ts";
-import { planSlots, slotKeepsRange, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
+import { freshMigration, planSlots, slotKeepsRange, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
@@ -99,4 +99,10 @@ test("new pairs trade the fixed $5k to $60k range, migrations stay around their 
 test("a coin still held keeps its slot, however old", () => {
   const coins = [coin("old"), coin("fresh", { traders: 6000 })];
   expect(plan({ slots: [slot("old", { openedAtMs: now - 9_000_000 })], heldMints: new Set(["old"]), coins, config: { maxNew: 1, swapRatio: 1 } })).toBeNull();
+});
+test("an old pair that gets busy is not a fresh migration", () => {
+  expect(freshMigration(false, true)).toBe(true);
+  expect(freshMigration(undefined, true)).toBe(false);
+  expect(freshMigration(true, true)).toBe(false);
+  expect(freshMigration(false, false)).toBe(false);
 });

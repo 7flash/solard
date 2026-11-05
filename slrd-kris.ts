@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { appendFileSync } from "node:fs";
 import { bundleShare, type BuyRow } from "./tui/bundles.ts";
 import { startOutcome, stepOutcome, type Outcome } from "./tui/kris-outcomes.ts";
-import { planSlots, slotKeepsRange, slotQualifies, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
+import { freshMigration, planSlots, slotKeepsRange, slotQualifies, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
 import { coinVerdict, lastFill, rangeSide, rangeTitle, scrubReason, tradeReaction, tradeTitle, type KrisEvent } from "./webapp/public/kris-events.ts";
 
 process.env.JSX_AI_RUNTIME ??= "codex";
@@ -154,7 +154,7 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   if (a.type === "close") {
     // Buys off first: a sale that fails must not leave the bot buying with no slot watching it.
     const keepOnRange = slotKeepsRange(bots.find(b => b.mint === a.slot.mint)?.holdingSteps);
-    if (!keepOnRange) { await act({ action: "pause", mint: a.slot.mint }); await act({ action: "stop", mint: a.slot.mint }); closing.set(a.slot.mint, now); }
+    if (!keepOnRange) { await act({ action: "pause", mint: a.slot.mint }); await act({ action: "remove", mint: a.slot.mint }); } // nothing to sell: a stop would fail and restart the bot
     book.slots = book.slots.filter(s => s.mint !== a.slot.mint); book.closedAt = [...book.closedAt.filter(([, at]) => now - at < SLOT_CONFIG.reopenAfterMs), [a.slot.mint, now]];
     book.lastActionMs = now; if (a.forSwap) { book.lastSwapMs = now; book.pendingKind = a.slot.kind; } saveBook();
     const ev = add({ atMs: now, kind: "decision", mint: a.slot.mint, symbol: a.slot.symbol, title: keepOnRange ? `Slot freed, range keeps it: ${a.reason}` : `Closing: ${a.reason}` });
@@ -223,7 +223,8 @@ for (;;) {
     }
     for (const c of ov.coins ?? []) {
       const was = seenCoins.get(c.mint), migrated = !!c.migrated;
-      if (seeded && (was === undefined || (migrated && !was))) { coinEvent(c, migrated); if (migrated) migratedAt.set(c.mint, Date.now()); }
+      const fresh = freshMigration(was, migrated);
+      if (seeded && (fresh || (was === undefined && !migrated))) { coinEvent(c, migrated); if (fresh) migratedAt.set(c.mint, Date.now()); }
       seenCoins.set(c.mint, migrated);
     }
     const known = [...new Map([...(ov.coins ?? []), ...(ov.young ?? [])].map(c => [c.mint, c])).values()]; // the main lists miss coins minutes old
