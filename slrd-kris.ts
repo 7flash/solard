@@ -15,11 +15,11 @@ process.env.JSX_AI_RUNTIME ??= "codex";
 process.env.JSX_AI_MODEL ??= "gpt-5.6-sol"; // the local codex default is rejected by the API
 const dot = resolve(import.meta.dir, ".range-bots"), token = readFileSync(resolve(dot, "bridge-token"), "utf8").trim(), out = resolve(dot, "kris-events.json");
 const { streamLLM } = await import(process.env.JSX_AI_PATH ?? resolve(import.meta.dir, "..", "jsx-ai", "src", "index.ts")) as { streamLLM: (m: { role: string; content: string }[], o: { timeoutMs: number }) => AsyncIterable<string> };
-const KEEP = 300, THOUGHT_GAP_MS = 4_000;
+const KEEP = 300, KEEP_COINS = 100, THOUGHT_GAP_MS = 4_000;
 const SYSTEM = "You are Kris, a sharp, sceptical trader running small Solana memecoin range positions through the Solard terminal, thinking out loud as it happens. "
   + "Never restate the event: the reader already sees it. Give your read: what the move means given the trend, the flow, who holds and where the price sits in the range; "
   + "what you expect next and the one thing that would prove you wrong. Disagree with the position when the facts say so, including saying the range looks wrong or the coin looks like it is being dumped. "
-  + "Earlier thoughts are given so you can follow up on them and admit when you were wrong; never repeat one. At most three sentences, first person, plain words. "
+  + "Your recent results are real: let them temper your confidence. Earlier thoughts are given so you can follow up on them and admit when you were wrong; never repeat one. At most three sentences, first person, plain words. "
   + "Use only the facts given and never invent a number. Talk about the coin and the market only: never mention data, missing information, context, tools, bugs or what you cannot see. A fact that is absent is simply not discussed. "
   + "Every trade is your own plan working: the range buys its levels and sells its levels, so never call a trade a mistake or say it should not have happened. No hashtags, no emojis, no advice to the reader.";
 
@@ -27,10 +27,18 @@ type Bot = { wallet: string; mint: string; symbol?: string | null; capUsd?: numb
 type Decision = { atMs: number; mint: string; name: string; symbol?: string | null; decision: string; reason: string };
 
 let events: KrisEvent[] = []; try { events = JSON.parse(readFileSync(out, "utf8")); } catch {}
-const save = () => { writeFileSync(`${out}.tmp`, JSON.stringify(events.slice(0, KEEP))); renameSync(`${out}.tmp`, out); };
+const isCoin = (e: KrisEvent) => e.kind === "coin" || e.kind === "migrated";
+const save = () => { const kept = [...events.filter(isCoin).slice(0, KEEP_COINS), ...events.filter(e => !isCoin(e)).slice(0, KEEP)].sort((a, b) => b.atMs - a.atMs); writeFileSync(`${out}.tmp`, JSON.stringify(kept)); renameSync(`${out}.tmp`, out); };
 const add = (e: Omit<KrisEvent, "id">) => { const ev = { ...e, id: `${e.atMs}-${e.kind}-${e.mint}` }; if (events.some(x => x.id === ev.id)) return null; events.unshift(ev); events = events.slice(0, KEEP); save(); return ev; };
 
 /** Trades and range moves wait their turn; a new coin gets a thought only when nothing else is waiting. */
+type Closed = { symbol: string | null; mint: string; pnlSol: number; pct: number | null; closedAt: number; openedAt: number | null };
+/** How the last positions really ended, so a read can be checked against results. */
+let results: unknown = null;
+function trackRecord(rows: Closed[]) {
+  const last = rows.slice(0, 12), wins = last.filter(r => r.pnlSol > 0).length;
+  return last.length ? { lastClosed: last.length, won: wins, solResult: Math.round(last.reduce((a, r) => a + r.pnlSol, 0) * 1000) / 1000, worst: [...last].sort((a, b) => a.pnlSol - b.pnlSol).slice(0, 3).map(r => ({ coin: r.symbol ?? r.mint.slice(0, 6), pct: r.pct == null ? null : Math.round(r.pct), heldMin: r.openedAt ? Math.round((r.closedAt - r.openedAt) / 60_000) : null })) } : null;
+}
 const waiting: { ev: KrisEvent; facts: Record<string, unknown> }[] = []; let thinking = false;
 function think(ev: KrisEvent, facts: Record<string, unknown>) {
   const minor = ev.kind === "coin" || ev.kind === "migrated";
@@ -44,7 +52,7 @@ async function drainThoughts() {
     try {
       const context = job.ev.kind === "coin" || job.ev.kind === "migrated" ? null : await coinContext(job.ev.mint);
       let text = "";
-      for await (const chunk of streamLLM([{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({ ...job.facts, context, earlierThoughts: earlier }) }], { timeoutMs: 60_000 })) {
+      for await (const chunk of streamLLM([{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({ ...job.facts, context, myRecentResults: results, earlierThoughts: earlier }) }], { timeoutMs: 60_000 })) {
         text += chunk; job.ev.thought = text; save();
       }
     } catch (e) { console.log(`${new Date().toISOString()} thought failed: ${String(e).slice(0, 160)}`); }
@@ -132,11 +140,13 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
 }
 const seenTrade = new Map<string, number>(), seenBots = new Set<string>(), sides = new Map<string, string>(), seenCoins = new Map<string, boolean>(); let lastDecision = 0, seeded = false;
 /** Every judged coin, followed for 30 minutes through the terminal's coin list. */
-let following: Outcome[] = [], followedAt = 0;
+const followPath = resolve(dot, "kris-following.json"); let following: Outcome[] = [], followedAt = 0;
+try { following = JSON.parse(readFileSync(followPath, "utf8")); } catch {}
 function followCoins(coins: Coin[]) {
   if (Date.now() - followedAt < 10_000) return; followedAt = Date.now();
   const caps = new Map(coins.map(c => [c.mint, c.capUsd ?? null]));
   following = following.filter(o => { if (!stepOutcome(o, caps.get(o.mint) ?? null, Date.now())) return true; appendFileSync(resolve(dot, "kris-outcomes.jsonl"), JSON.stringify(o) + "\n"); return false; });
+  writeFileSync(`${followPath}.tmp`, JSON.stringify(following)); renameSync(`${followPath}.tmp`, followPath);
 }
 /** Trades come first: a coin gets a thought only when Kris is free. Its call is in the title either way. */
 function coinEvent(c: Coin, migrated: boolean) {
@@ -148,7 +158,8 @@ for (;;) {
   try {
     const r = await fetch("http://127.0.0.1:5176/api/overview", { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(15_000) });
     if (!r.ok) throw new Error(`overview ${r.status}`);
-    const ov = await r.json() as { bots: Bot[]; decisions?: Decision[]; coins?: Coin[] }, decisions = ov.decisions ?? [];
+    const ov = await r.json() as { bots: Bot[]; decisions?: Decision[]; coins?: Coin[]; closedRows?: Closed[] }, decisions = ov.decisions ?? [];
+    results = trackRecord(ov.closedRows ?? []);
     for (const b of ov.bots.filter(x => !(x as { inactive?: boolean }).inactive)) {
       const at = b.lastTradeAtMs ?? 0, prev = seenTrade.get(b.mint);
       if (seeded && !seenBots.has(b.mint)) { const ev = add({ atMs: Date.now(), kind: "position", mint: b.mint, symbol: b.symbol ?? null, title: "New position", reaction: "ape" }); if (ev) void think(ev, { event: "opened a new position", ...facts(b) }); }
