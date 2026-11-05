@@ -41,5 +41,16 @@
 .act { display:inline-block; height:24px; line-height:18px; margin-bottom:6px; padding:3px 10px; border-radius:7px; font-size:12px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:#0B0E11 } .act.off { background:#CBD1D9; color:#3A4452 }
 .act.gold { background:var(--amb) } .act.up { background:var(--up) } .act.dn { background:var(--dn) } .act.acc { background:var(--acc) }
 
-@media (max-width:1000px) { .room { height:auto; min-height:100vh; overflow:auto } .room-main { grid-template-columns:1fr } .workstation { height:62vh } .history { max-height:40vh } }
+@media (max-width:1000px) {
+  .room { height:auto; min-height:100vh; overflow:visible }
+  .room-main { display:flex; flex-direction:column; gap:12px; padding:0 12px 56px }
+  .thoughts { display:flex; flex-direction:column; gap:12px; height:auto }
+  .bubble { height:auto; min-height:132px }
+  .history { height:280px; flex:none }
+  .seat { flex:none; height:320px }
+  .workstation { flex:none; height:300px }
+  .monitor { padding:8px 8px 0; border-radius:12px }
+  .tabs-row { display:none } .browser-bar { height:36px; border-radius:6px 6px 0 0 } .address { height:26px; line-height:26px; font-size:13px }
+  .chin { height:20px } .stand, .stand-foot { display:none }
+}
 @media (prefers-reduced-motion: reduce) { .cursor { transition:none } .ripple.go { animation:none !important } }
