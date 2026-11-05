@@ -7,7 +7,7 @@ export type SlotKind = "new" | "migrated";
 export type Slot = { mint: string; symbol: string | null; kind: SlotKind; openedAtMs: number; score: number; buy: number; sell: number };
 export type SlotAction = { type: "open"; kind: SlotKind; coin: SlotCoin; score: number; buy: number; sell: number; swap: boolean } | { type: "close"; slot: Slot; reason: string; forSwap: boolean };
 
-export const SLOT_CONFIG = { maxNew: 4, maxMigrated: 3, budgetSol: 0.15, minSizeSol: 0.1, maxSizeSol: 0.3, steps: 3, gasSol: 0.02, newAgeMs: 180_000, migratedAgeMs: 600_000, actionGapMs: 30_000, swapGapMs: 60_000, minHoldMs: 60_000, swapRatio: 1.2, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.1 };
+export const SLOT_CONFIG = { maxNew: 4, maxMigrated: 3, budgetSol: 0.15, minSizeSol: 0.1, maxSizeSol: 0.3, steps: 3, gasSol: 0.02, newAgeMs: 180_000, migratedAgeMs: 600_000, actionGapMs: 30_000, swapGapMs: 60_000, minHoldMs: 60_000, swapRatio: 1.2, rotateAfterMs: 1_200_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.1 };
 type Config = typeof SLOT_CONFIG;
 
 /** Distinct wallets count most, smart wallets far more, volume a little. Few wallets across many trades is churn. */
@@ -35,7 +35,7 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
   for (const s of o.slots) if (!live.has(s.mint) && now - (o.lastSeen?.get(s.mint) ?? now) > c.staleMs) return { type: "close", slot: s, reason: "went quiet", forSwap: false };
   for (const kind of ["new", "migrated"] as const) {
     const max = kind === "new" ? c.maxNew : c.maxMigrated, mine = o.slots.filter(s => s.kind === kind);
-    const fresh = (x: SlotCoin) => kind === "new" ? !x.migrated && x.ageMs != null && x.ageMs <= c.newAgeMs : !!x.migrated && now - (o.migratedAt.get(x.mint) ?? 0) <= c.migratedAgeMs;
+    const fresh = (x: SlotCoin) => kind === "new" ? !x.migrated && ((x.ageMs != null && x.ageMs <= c.newAgeMs) || !!o.allowNew?.has(x.mint)) : !!x.migrated && now - (o.migratedAt.get(x.mint) ?? 0) <= c.migratedAgeMs;
     const best = o.coins.filter(x => !o.heldMints.has(x.mint) && now - (o.closedAt.get(x.mint) ?? 0) > c.reopenAfterMs && fresh(x) && slotQualifies(x, kind) && (kind !== "new" || !o.allowNew || o.allowNew.has(x.mint)))
       .map(coin => ({ coin, score: slotScore(coin) })).sort((a, b) => b.score - a.score)[0];
     if (!best) continue;
@@ -44,7 +44,8 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
       return { type: "open", kind, coin: best.coin, score: best.score, ...slotRange(best.coin.capUsd!), swap: o.pendingKind === kind };
     }
     if (now - o.lastSwapMs < c.swapGapMs) continue;
-    const now_ = mine.map(s => ({ s, score: live.has(s.mint) ? slotScore(live.get(s.mint)!) : s.score / 2 })).sort((a, b) => a.score - b.score)[0]!;
+    // A slot is for fresh coins. An old one always has more wallets than a new one, so it gives way by age, not by score.
+    const now_ = mine.map(s => ({ s, score: now - s.openedAtMs >= c.rotateAfterMs ? 0 : live.has(s.mint) ? slotScore(live.get(s.mint)!) : s.score / 2 })).sort((a, b) => a.score - b.score)[0]!;
     // A new pair Kris picked by comparing beats his weakest holding outright: the pick is his call.
     const chosen = kind === "new" && !!o.allowNew?.has(best.coin.mint);
     if (now - now_.s.openedAtMs >= c.minHoldMs && (chosen || best.score > now_.score * c.swapRatio)) return { type: "close", slot: now_.s, reason: `${best.coin.symbol ?? best.coin.mint.slice(0, 6)} looks stronger`, forSwap: true };
