@@ -54,3 +54,4 @@
   .chin { height:20px } .stand, .stand-foot { display:none }
 }
 @media (prefers-reduced-motion: reduce) { .cursor { transition:none } .ripple.go { animation:none !important } }
+#traded:not([hidden]) { display:block; line-height:32px }
