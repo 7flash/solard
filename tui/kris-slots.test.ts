@@ -19,7 +19,7 @@ test("a new pair needs wallets, trades and a sane cap", () => {
 });
 test("the range sits tight around the cap", () => { expect(slotRange(10_000)).toEqual({ buy: 9_000, sell: 12_000 }); });
 test("size follows Kris inside the allowance", () => {
-  expect(slotSize(0.2)).toBe(0.2); expect(slotSize(5)).toBe(0.3); expect(slotSize(0.01)).toBe(0.1); expect(slotSize(null)).toBe(0.15);
+  expect(slotSize(0.06)).toBe(0.06); expect(slotSize(5)).toBe(0.08); expect(slotSize(0.01)).toBe(0.03); expect(slotSize(null)).toBe(0.05);
 });
 test("a picked new pair replaces the weakest even without a higher score", () => {
   const coins = [coin("a"), coin("b"), coin("c", { traders: 60 })];
