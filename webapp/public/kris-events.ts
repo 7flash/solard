@@ -1,5 +1,5 @@
 /** Pure helpers for Kris events: reading a bot's last fill and cleaning decision text for the public view. */
-export type KrisEvent = { id: string; atMs: number; kind: "trade" | "position" | "decision" | "range" | "coin" | "migrated"; mint: string; symbol: string | null; title: string; thought?: string; reaction?: string };
+export type KrisEvent = { id: string; atMs: number; kind: "trade" | "position" | "decision" | "range" | "coin" | "migrated" | "compare"; mint: string; symbol: string | null; title: string; thought?: string; reaction?: string };
 
 /** The last confirmed BUY or SELL in a bot log. */
 export function lastFill(log: string) {

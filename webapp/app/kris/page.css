@@ -31,7 +31,7 @@
 .history { height:100%; min-height:0; display:flex; flex-direction:column; background:#100828; border:1px solid #3A2A66; border-radius:12px; overflow:hidden }
 .history h2 { padding:10px 12px; border-bottom:1px solid var(--line) } .history-list { flex:1; overflow:auto; min-height:0 } .empty { padding:14px 12px }
 .entry { display:flex; flex-direction:column; gap:3px; width:100%; padding:9px 12px; border:0; border-bottom:1px solid var(--line2); border-left:3px solid transparent; background:none; color:var(--text); text-align:left }
-.entry:hover { background:#181D23 } .entry.trade { border-left-color:var(--acc) } .entry.position { border-left-color:var(--up) } .entry.range { border-left-color:var(--dn) } .entry.coin { border-left-color:var(--amb) } .entry.migrated { border-left-color:#C792EA }
+.entry:hover { background:#181D23 } .entry.trade { border-left-color:var(--acc) } .entry.position { border-left-color:var(--up) } .entry.range { border-left-color:var(--dn) } .entry.compare { border-left-color:var(--amb); background:#16102F } .entry.coin { border-left-color:var(--amb) } .entry.migrated { border-left-color:#C792EA }
 .entry-top { display:flex; justify-content:space-between; gap:8px } .entry-thought { color:var(--muted); line-height:1.4 }
 
 .bubble { position:relative; height:176px; overflow:hidden; padding:12px 16px; background:#E6E8EB; color:#0B0E11; border-radius:14px; line-height:1.4; font-size:15px }

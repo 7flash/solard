@@ -62,7 +62,7 @@ type Bot = { wallet: string; mint: string; mode?: string; symbol?: string | null
 export async function GET() {
   const [state, disc] = await Promise.all([
     bridge<{ wallets: unknown[]; bots: Bot[]; solUsd: number | null; at: number }>("/api/state"),
-    bridge<{ firehose: unknown; coins: unknown[]; decisions: unknown[] }>("/api/discovery").catch(() => ({ firehose: null, coins: [], decisions: [] })),
+    bridge<{ firehose: unknown; coins: unknown[]; young?: unknown[]; decisions: unknown[] }>("/api/discovery").catch(() => ({ firehose: null, coins: [], young: [], decisions: [] })),
   ]);
   const reg = readJson<{ bots?: Array<{ wallet: string; mint: string; amount: string; smart?: boolean; auto?: boolean; buysPaused?: boolean; addedAt?: number; rangeLocked?: boolean }> }>(".range-bots/bots.json");
   const entries = new Map((reg?.bots ?? []).map(b => [`${b.wallet}:${b.mint}`, b]));
@@ -89,6 +89,6 @@ export async function GET() {
       lastTradeAtMs: lastTradeFromLog(e.wallet, e.mint), error: null, flowSol: st.flowSol ?? 0, pnl: (st.flowSol ?? 0) + valueSol, stale: false, inactive: true }];
   });
   void refreshDexVol([...bots, ...inactive].map(b => b.mint)).catch(() => {});
-  return Response.json({ at: Date.now(), closed: closedPnl(), closedRows: closedList(), solUsd: state.solUsd, wallets: state.wallets, bots: [...bots, ...inactive], firehose: disc.firehose, coins: disc.coins,
+  return Response.json({ at: Date.now(), closed: closedPnl(), closedRows: closedList(), young: disc.young ?? [], solUsd: state.solUsd, wallets: state.wallets, bots: [...bots, ...inactive], firehose: disc.firehose, coins: disc.coins,
     decisions: disc.decisions.slice(0, 40), feedLagMs: daemon?.feed?.lagMs ?? null }, { headers: { "cache-control": "no-store" } });
 }

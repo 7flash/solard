@@ -43,15 +43,15 @@ function drawFrame(name: string, i: number) {
   const g = c.getContext("2d")!; const w = img.width / SPRITE.frames; g.clearRect(0, 0, c.width, c.height); g.drawImage(img, i * w, 0, w, img.height, 0, 0, c.width, c.height);
 }
 async function loadArt() {
-  await Promise.all(Object.keys(REACTIONS).map(async n => { const r = await fetch(`api/kris/art?name=${n}&v=${SPRITE.version}`); if (r.ok) art.set(n, await createImageBitmap(await r.blob())); }));
+  await Promise.all(Object.keys(REACTIONS).filter(n => n !== "compare").map(async n => { const r = await fetch(`api/kris/art?name=${n}&v=${SPRITE.version}`); if (r.ok) art.set(n, await createImageBitmap(await r.blob())); }));
   drawFrame("ape", 0);
 }
 /** Plays once through the loops, then settles on the still. Resolves when it is done. */
 async function react(name: string | null) {
-  if (!name || !art.has(name)) return;
+  if (!name || !REACTIONS[name]) return;
   const id = ++playId; acting = name; paint();
   // Holding faces the viewer, a different body from the other four: Kris stays still and the label says it.
-  if (name === "hold") await sleep(SPRITE.holdMs);
+  if (name === "hold" || !art.has(name)) await sleep(SPRITE.holdMs);
   else for (let i = 0; i < SPRITE.frames * SPRITE.loops && id === playId; i++) { drawFrame(name, i % SPRITE.frames); await sleep(SPRITE.frameMs); }
   if (id === playId) { acting = null; drawFrame("ape", 0); paint(); }
 }

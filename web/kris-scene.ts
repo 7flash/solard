@@ -28,13 +28,14 @@ export const keepEvent = (e: SceneEvent, queued: number) => e.kind !== "coin" &&
 /** Each animation and what it says, shown together so the two always match. */
 export const REACTIONS: Record<string, { label: string; tone: string }> = {
   ape: { label: "Aping in", tone: "gold" }, profit: { label: "Taking profit", tone: "up" }, loss: { label: "Took a loss", tone: "dn" },
-  dip: { label: "Buying the dip", tone: "acc" }, hold: { label: "Holding through it", tone: "acc" } };
+  dip: { label: "Buying the dip", tone: "acc" }, hold: { label: "Holding through it", tone: "acc" }, compare: { label: "Comparing", tone: "gold" } };
 export const SPRITE = { frames: 8, width: 420, height: 567, frameMs: 240, loops: 1, holdMs: 2_600, version: 3 };
 
 /** The animation for an event, or null to stay still: only a trade, a new position or leaving the range animates. */
 export function reactionOf(e: SceneEvent) {
   const old: Record<string, string> = { stack: "profit", swap: "ape" }, r = e.reaction ? old[e.reaction] ?? e.reaction : null;
   if (r) return r;
+  if (e.kind === "compare") return "compare";
   if (e.kind === "range") return /above|below/.test(e.title) ? "hold" : null;
   if (e.kind === "position" || /^Bought/.test(e.title)) return "ape";
   if (/^Sold/.test(e.title)) return "profit";

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { bundleShare } from "./bundles.ts";
-import { planSlots, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
+import { planSlots, readPick, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
@@ -64,4 +64,20 @@ test("bundle share counts wallets buying the same size within a second", () => {
   expect(bundleShare([...same, ...rest])).toBeCloseTo(0.3);
   expect(bundleShare(rest)).toBe(0);
   expect(bundleShare([])).toBe(0);
+});
+test("only the new pair Kris picked can open", () => {
+  const coins = [coin("strong"), coin("picked", { traders: 80 })];
+  expect(plan({ coins, allowNew: new Set(["picked"]) })).toMatchObject({ type: "open", coin: { mint: "picked" } });
+  expect(plan({ coins, allowNew: new Set() })).toBeNull();
+});
+test("a migration does not need a pick", () => {
+  const m = coin("m", { migrated: true, capUsd: 80_000, traders: 400, trades: 900, ageMs: null });
+  expect(plan({ coins: [m], migratedAt: new Map([["m", now - 60_000]]), allowNew: new Set() })).toMatchObject({ type: "open", kind: "migrated" });
+});
+test("the pick is read from the last line and must be a candidate", () => {
+  expect(readPick("A has more wallets than B.\nPICK: A", ["A", "B"])).toEqual({ thought: "A has more wallets than B.", pick: "A" });
+  expect(readPick("Neither.\nPICK: NONE", ["A", "B"]).pick).toBeNull();
+  expect(readPick("I like Z.\nPICK: Z", ["A", "B"]).pick).toBeNull();
+  expect(readPick("No final line here", ["A"])).toEqual({ thought: "No final line here", pick: null });
+  expect(readPick("Fine.\nPICK: **dogwif**.", ["DogWif"]).pick).toBe("DogWif");
 });

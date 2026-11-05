@@ -431,6 +431,8 @@ setInterval(() => {
     ageMs: c.launchedAtMs ? now - c.launchedAtMs : null, status: ours.has(c.mint) ? "ours" : rejected.has(c.mint) ? "rejected" : c.migrated ? "migrated" : "curve", reason: rejected.get(c.mint) ?? null });
   const top = (xs: typeof live) => xs.sort((a, b) => b.trades - a.trades).slice(0, 60).map(view);
   const coins = [...top(live.filter(c => !c.migrated)), ...top(live.filter(c => c.migrated))];
+  // The lists above rank by all-time trades, so a coin minutes old rarely gets on them: its own list, for whoever picks new pairs.
+  const young = live.filter(c => !c.migrated && c.launchedAtMs && now - c.launchedAtMs <= 5 * 60_000).sort((a, b) => b.trades - a.trades).slice(0, 30).map(view);
   // Tickers for our bots and decided coins (web + TUI read symbols.json; metadata RPC often misses fresh coins).
   try {
     const path = resolve(root, ".range-bots", "symbols.json"); let sym: Record<string, string> = {};
@@ -441,7 +443,7 @@ setInterval(() => {
   } catch {}
   const s = firehose.stats;
   const body = JSON.stringify({ at: now, firehose: { liveCoins: firehose.coins.size, trades: s.trades, perSec: s.trades / Math.max(1, (now - s.startedAt) / 1000), lagMs: s.lagMs, unknownPoolTrades: s.unknownPools },
-    coins, decisions: decisions.slice(0, 100).map(d => { const c = firehose.coins.get(d.mint); return { ...d, symbol: c?.symbol ?? null, capUsd: c ? (c.ammTrades ? c.ammCapUsd : c.capUsd) ?? null : null }; }) });
+    coins, young, decisions: decisions.slice(0, 100).map(d => { const c = firehose.coins.get(d.mint); return { ...d, symbol: c?.symbol ?? null, capUsd: c ? (c.ammTrades ? c.ammCapUsd : c.capUsd) ?? null : null }; }) });
   try { writeFileSync(resolve(root, ".range-bots", "discovery.json.tmp"), body); renameSync(resolve(root, ".range-bots", "discovery.json.tmp"), resolve(root, ".range-bots", "discovery.json")); } catch {}
 }, 5_000).unref?.(); // live trades per coin for the TUI (.range-bots/trades/)
 const warmer = client.warmBlockhash({ intervalMs: 30_000 }); // a blockhash is valid ~60s; a trade after 20s fetches its own

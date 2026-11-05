@@ -53,6 +53,10 @@ test("each event picks its animation", () => {
   expect(reactionOf(ev("a", 1, { kind: "range", title: "Back in range at $9k" }))).toBeNull();
   expect(reactionOf(ev("a", 1, { kind: "coin", title: "New coin: skip" }))).toBeNull();
 });
+test("a comparison carries its own label", () => {
+  expect(reactionOf(ev("a", 1, { kind: "compare", title: "Comparing A, B" }))).toBe("compare");
+  expect(keepEvent(ev("a", 1, { kind: "compare" }), 0)).toBe(true);
+});
 test("coins Kris only looks at do not animate, and every animation has a label", () => {
   expect(reactionOf(ev("a", 1, { kind: "coin", title: "New coin: watch, 200 wallets" }))).toBeNull();
   expect(reactionOf(ev("a", 1, { kind: "coin", title: "Bundle: skip, 31% of wallets" }))).toBeNull();

@@ -27,7 +27,7 @@ export function slotQualifies(c: SlotCoin, kind: SlotKind) {
 const round = (v: number) => { const m = 10 ** (Math.floor(Math.log10(v)) - 1); return Math.round(v / m) * m; };
 export const slotRange = (cap: number) => ({ buy: round(cap * 0.8), sell: round(cap * 1.3) });
 
-export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; config?: Partial<Config> }): SlotAction | null {
+export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** New pairs Kris chose by comparing them; when set, no other new pair opens. */ allowNew?: Set<string>; config?: Partial<Config> }): SlotAction | null {
   const c = { ...SLOT_CONFIG, ...o.config }, now = o.nowMs;
   if (now - o.lastActionMs < c.actionGapMs) return null;
   const live = new Map(o.coins.map(x => [x.mint, x]));
@@ -36,7 +36,7 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
   for (const kind of ["new", "migrated"] as const) {
     const max = kind === "new" ? c.maxNew : c.maxMigrated, mine = o.slots.filter(s => s.kind === kind);
     const fresh = (x: SlotCoin) => kind === "new" ? !x.migrated && x.ageMs != null && x.ageMs <= c.newAgeMs : !!x.migrated && now - (o.migratedAt.get(x.mint) ?? 0) <= c.migratedAgeMs;
-    const best = o.coins.filter(x => !o.heldMints.has(x.mint) && now - (o.closedAt.get(x.mint) ?? 0) > c.reopenAfterMs && fresh(x) && slotQualifies(x, kind))
+    const best = o.coins.filter(x => !o.heldMints.has(x.mint) && now - (o.closedAt.get(x.mint) ?? 0) > c.reopenAfterMs && fresh(x) && slotQualifies(x, kind) && (kind !== "new" || !o.allowNew || o.allowNew.has(x.mint)))
       .map(coin => ({ coin, score: slotScore(coin) })).sort((a, b) => b.score - a.score)[0];
     if (!best) continue;
     if (mine.length < max) {
@@ -48,4 +48,11 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
     if (now - now_.s.openedAtMs >= c.minHoldMs && best.score > now_.score * c.swapRatio) return { type: "close", slot: now_.s, reason: `${best.coin.symbol ?? best.coin.mint.slice(0, 6)} looks stronger`, forSwap: true };
   }
   return null;
+}
+
+/** Reads Kris's comparison: the thought without its last line, and the coin named there if it was one of the candidates. */
+export function readPick(text: string, names: string[]) {
+  const m = /PICK:\s*([^\n]*)\s*$/i.exec(text.trim()), thought = text.replace(/\s*PICK:[^\n]*\s*$/i, "").trim();
+  const said = (m?.[1] ?? "").replace(/[*`"'.]/g, "").trim().toLowerCase();
+  return { thought, pick: names.find(n => n.toLowerCase() === said) ?? null };
 }
