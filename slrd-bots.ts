@@ -432,7 +432,7 @@ setInterval(() => {
   const top = (xs: typeof live) => xs.sort((a, b) => b.trades - a.trades).slice(0, 60).map(view);
   const coins = [...top(live.filter(c => !c.migrated)), ...top(live.filter(c => c.migrated))];
   // The lists above rank by all-time trades, so a coin minutes old rarely gets on them: its own list, for whoever picks new pairs.
-  const young = live.filter(c => !c.migrated && c.launchedAtMs && now - c.launchedAtMs <= 5 * 60_000).sort((a, b) => b.trades - a.trades).slice(0, 30).map(view);
+  const young = live.filter(c => !c.migrated && c.launchedAtMs && now - c.launchedAtMs <= 12 * 60_000).sort((a, b) => b.trades - a.trades).slice(0, 60).map(view);
   // Tickers for our bots and decided coins (web + TUI read symbols.json; metadata RPC often misses fresh coins).
   try {
     const path = resolve(root, ".range-bots", "symbols.json"); let sym: Record<string, string> = {};

@@ -157,7 +157,7 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
     const ev = add({ atMs: now, kind: "decision", mint: a.slot.mint, symbol: a.slot.symbol, title: `Closing: ${a.reason}` });
     return;
   }
-  const c = a.coin; let budget = SLOT_CONFIG.budgetSol;
+  const c = a.coin; let budget = a.kind === "migrated" ? SLOT_CONFIG.migratedBudgetSol : SLOT_CONFIG.budgetSol;
   // The terminal's bundle filter. No answer means no buy.
   const r = await fetch(`http://127.0.0.1:5176/api/coin?mint=${c.mint}&watch=0`, { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`coin read: ${r.status}`);

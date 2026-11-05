@@ -1,13 +1,14 @@
 /** Kris's slots: which new pairs and fresh migrations to hold right now. Pure: the coins go in, at most one action comes
  * out. slrd-kris carries the action out through the terminal API.
- *   new pair: launched in the last 3 minutes. migrated: migrated in the last 10.
+ *   new pair: 4 to 10 minutes old, past the first dump (149 tracked coins: median -19% in the first 5 minutes, -3% from
+ *   5 to 10). migrated: migrated in the last 10, and sized larger (median +4% from 1 to 10 minutes).
  * A full side swaps its weakest coin only for one clearly better, so fees are not paid for noise. */
 export type SlotCoin = { mint: string; symbol?: string | null; capUsd?: number | null; trades?: number; traders?: number; smart?: number; volSol?: number; ageMs?: number | null; migrated?: boolean };
 export type SlotKind = "new" | "migrated";
 export type Slot = { mint: string; symbol: string | null; kind: SlotKind; openedAtMs: number; score: number; buy: number; sell: number };
 export type SlotAction = { type: "open"; kind: SlotKind; coin: SlotCoin; score: number; buy: number; sell: number; swap: boolean } | { type: "close"; slot: Slot; reason: string; forSwap: boolean };
 
-export const SLOT_CONFIG = { maxNew: 8, maxMigrated: 6, budgetSol: 0.03, minSizeSol: 0.02, steps: 4, gasSol: 0.02, newAgeMs: 180_000, migratedAgeMs: 600_000, actionGapMs: 30_000, swapGapMs: 30_000, minHoldMs: 300_000, swapRatio: 2, rotateNewMs: 900_000, rotateMigratedMs: 900_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.3, smallBundleShare: 0.1, maxEarlyPct: 60, smallEarlyPct: 25 };
+export const SLOT_CONFIG = { maxNew: 8, maxMigrated: 6, budgetSol: 0.03, migratedBudgetSol: 0.05, minSizeSol: 0.02, steps: 4, gasSol: 0.02, newMinAgeMs: 240_000, newAgeMs: 600_000, migratedAgeMs: 600_000, actionGapMs: 30_000, swapGapMs: 30_000, minHoldMs: 300_000, swapRatio: 2, rotateNewMs: 900_000, rotateMigratedMs: 900_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.3, smallBundleShare: 0.1, maxEarlyPct: 60, smallEarlyPct: 25 };
 type Config = typeof SLOT_CONFIG;
 
 /** Distinct wallets count most, smart wallets far more, volume a little. Few wallets across many trades is churn. */
@@ -35,7 +36,7 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
   for (const s of o.slots) if (!live.has(s.mint) && now - (o.lastSeen?.get(s.mint) ?? now) > c.staleMs) return { type: "close", slot: s, reason: "went quiet", forSwap: false };
   for (const kind of ["new", "migrated"] as const) {
     const max = kind === "new" ? c.maxNew : c.maxMigrated, mine = o.slots.filter(s => s.kind === kind);
-    const fresh = (x: SlotCoin) => kind === "new" ? !x.migrated && x.ageMs != null && x.ageMs <= c.newAgeMs : !!x.migrated && now - (o.migratedAt.get(x.mint) ?? 0) <= c.migratedAgeMs;
+    const fresh = (x: SlotCoin) => kind === "new" ? !x.migrated && x.ageMs != null && x.ageMs >= c.newMinAgeMs && x.ageMs <= c.newAgeMs : !!x.migrated && now - (o.migratedAt.get(x.mint) ?? 0) <= c.migratedAgeMs;
     const best = o.coins.filter(x => !o.heldMints.has(x.mint) && now - (o.closedAt.get(x.mint) ?? 0) > c.reopenAfterMs && fresh(x) && slotQualifies(x, kind))
       .map(coin => ({ coin, score: slotScore(coin) })).sort((a, b) => b.score - a.score)[0];
     if (!best) continue;
