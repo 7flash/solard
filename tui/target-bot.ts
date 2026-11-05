@@ -71,6 +71,9 @@ const sharedQuoteSol = (connection: Connection) => {
   return l;
 };
 
+/** Room for a sell to land on a moving coin. The floor below still applies. */
+export const SELL_SLIPPAGE_BPS = 1_000;
+
 /** A buy may land up to its range level. Slippage is the room to get there, at most 15%: a price-only order has none, so
  * any tick between quote and landing failed it. The guard refuses a quote more than 5% over the level. */
 export function buyOrder(levels: number[], priceSol: number, baseBps: number) {
@@ -424,7 +427,7 @@ export class TargetBot {
       const all = a.amountRaw >= balanceRaw;
       this.status.inFlight = `sell ${(Number(a.amountRaw) / 10 ** decimals).toFixed(0)} tokens (to ${plan.target}/${plan.steps} steps)`; this.write();
       this.o.log(`${label}: SELL ${a.amountRaw} raw${all ? " (all + close account)" : ""} to reach ${plan.target}/${plan.steps} steps`);
-      result = await this.o.client.sell({ wallet: this.o.wallet, token: this.o.mint, slippageBps, // A sell can take a while to land on a busy RPC; a 10% guard from the trigger price then rejects it
+      result = await this.o.client.sell({ wallet: this.o.wallet, token: this.o.mint, slippageBps: Math.max(slippageBps, SELL_SLIPPAGE_BPS), // A sell can take a while to land on a busy RPC; a 10% guard from the trigger price then rejects it
       // after a quick retrace and the bot rides the dump. Allow up to 25% below the trigger, never below the range bottom.
       minPriceSol: Math.max(floorSol, priceSol * 0.75),
         ...(all ? { amount: "all", closeTokenAccount: true } : { amountRaw: a.amountRaw.toString() }) });
