@@ -61,8 +61,8 @@ export class Holders {
       return;
     }
     this.coins.set(mint, { mint, decimals, accounts: new Map(), firstFrom: new Map(), transfers: [], transferCount: 0, cursor: null, ready: false, dirty: false });
-    if (urgent) this.queue.unshift(mint); else this.queue.push(mint);
-    void this.drain();
+    // No history downloads unless asked: they rate-limit the portal, and that makes the price stream lag.
+    if (process.env.SLRD_HOLDERS_BACKFILL === "1") { if (urgent) this.queue.unshift(mint); else this.queue.push(mint); void this.drain(); }
     this.wakeLoop?.();
   }
   private async drain() {
