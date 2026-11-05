@@ -7,7 +7,7 @@ export type SlotKind = "new" | "migrated";
 export type Slot = { mint: string; symbol: string | null; kind: SlotKind; openedAtMs: number; score: number; buy: number; sell: number };
 export type SlotAction = { type: "open"; kind: SlotKind; coin: SlotCoin; score: number; buy: number; sell: number; swap: boolean } | { type: "close"; slot: Slot; reason: string; forSwap: boolean };
 
-export const SLOT_CONFIG = { maxNew: 4, maxMigrated: 3, budgetSol: 0.1, steps: 3, gasSol: 0.02, newAgeMs: 180_000, migratedAgeMs: 600_000, actionGapMs: 60_000, swapGapMs: 180_000, minHoldMs: 120_000, swapRatio: 1.5, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.1 };
+export const SLOT_CONFIG = { maxNew: 4, maxMigrated: 3, budgetSol: 0.15, minSizeSol: 0.1, maxSizeSol: 0.3, steps: 3, gasSol: 0.02, newAgeMs: 180_000, migratedAgeMs: 600_000, actionGapMs: 30_000, swapGapMs: 60_000, minHoldMs: 60_000, swapRatio: 1.2, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.1 };
 type Config = typeof SLOT_CONFIG;
 
 /** Distinct wallets count most, smart wallets far more, volume a little. Few wallets across many trades is churn. */
@@ -25,7 +25,7 @@ export function slotQualifies(c: SlotCoin, kind: SlotKind) {
 }
 
 const round = (v: number) => { const m = 10 ** (Math.floor(Math.log10(v)) - 1); return Math.round(v / m) * m; };
-export const slotRange = (cap: number) => ({ buy: round(cap * 0.8), sell: round(cap * 1.3) });
+export const slotRange = (cap: number) => ({ buy: round(cap * 0.9), sell: round(cap * 1.2) });
 
 export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** New pairs Kris chose by comparing them; when set, no other new pair opens. */ allowNew?: Set<string>; /** When each coin was last seen trading. Absent from a list is not quiet: lists empty out on a daemon restart. */ lastSeen?: Map<string, number>; config?: Partial<Config> }): SlotAction | null {
   const c = { ...SLOT_CONFIG, ...o.config }, now = o.nowMs;
@@ -45,7 +45,9 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
     }
     if (now - o.lastSwapMs < c.swapGapMs) continue;
     const now_ = mine.map(s => ({ s, score: live.has(s.mint) ? slotScore(live.get(s.mint)!) : s.score / 2 })).sort((a, b) => a.score - b.score)[0]!;
-    if (now - now_.s.openedAtMs >= c.minHoldMs && best.score > now_.score * c.swapRatio) return { type: "close", slot: now_.s, reason: `${best.coin.symbol ?? best.coin.mint.slice(0, 6)} looks stronger`, forSwap: true };
+    // A new pair Kris picked by comparing beats his weakest holding outright: the pick is his call.
+    const chosen = kind === "new" && !!o.allowNew?.has(best.coin.mint);
+    if (now - now_.s.openedAtMs >= c.minHoldMs && (chosen || best.score > now_.score * c.swapRatio)) return { type: "close", slot: now_.s, reason: `${best.coin.symbol ?? best.coin.mint.slice(0, 6)} looks stronger`, forSwap: true };
   }
   return null;
 }
@@ -53,6 +55,9 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
 /** Reads Kris's comparison: the thought without its last line, and the coin named there if it was one of the candidates. */
 export function readPick(text: string, names: string[]) {
   const m = /PICK:\s*([^\n]*)\s*$/i.exec(text.trim()), thought = text.replace(/\s*PICK:[^\n]*\s*$/i, "").trim();
-  const said = (m?.[1] ?? "").replace(/[*`"'.]/g, "").trim().toLowerCase();
-  return { thought, pick: names.find(n => n.toLowerCase() === said) ?? null };
+  const line = (m?.[1] ?? "").replace(/[*`"']/g, "").trim(), sized = /^(.*?)\s+([\d.]+)\s*(?:sol)?\.?$/i.exec(line), said = (sized?.[1] ?? line).replace(/\.$/, "").trim().toLowerCase();
+  const size = sized ? Number(sized[2]) : NaN;
+  return { thought, pick: names.find(n => n.toLowerCase() === said) ?? null, size: Number.isFinite(size) && size > 0 ? size : null };
 }
+/** The size Kris asked for, held to the allowance; his default when he named none. */
+export const slotSize = (asked: number | null, c: Pick<Config, "budgetSol" | "minSizeSol" | "maxSizeSol"> = SLOT_CONFIG) => Math.min(c.maxSizeSol, Math.max(c.minSizeSol, asked ?? c.budgetSol));

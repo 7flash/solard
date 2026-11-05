@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { appendFileSync } from "node:fs";
 import { bundleShare, type BuyRow } from "./tui/bundles.ts";
 import { startOutcome, stepOutcome, type Outcome } from "./tui/kris-outcomes.ts";
-import { planSlots, readPick, slotQualifies, slotScore, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
+import { planSlots, readPick, slotQualifies, slotScore, slotSize, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
 import { coinVerdict, lastFill, rangeSide, rangeTitle, scrubReason, tradeReaction, tradeTitle, type KrisEvent } from "./webapp/public/kris-events.ts";
 
 process.env.JSX_AI_RUNTIME ??= "codex";
@@ -104,9 +104,9 @@ async function act(body: Record<string, unknown>) {
   const w = await myWallet(), r = await fetch(`${BRIDGE}/api/bot`, { method: "POST", headers: { "x-slrd-token": token, "content-type": "application/json" }, body: JSON.stringify({ wallet: w.name, ...body }), signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`${body.action}: ${r.status} ${(await r.text()).slice(0, 100)}`);
 }
-const COMPARE_RULE = "You are comparing new pairs to decide if any deserves a position right now. Let your gut reaction show. Name the coins, compare them on what differs (wallets against trades, buy and sell flow, volume, smart wallets, cap), and say which is strongest and why the others lose. Most new pairs fail within minutes, so passing on all of them is a normal answer. "
-  + "At most four sentences. Your very last line must be exactly PICK: followed by one coin name as written, or PICK: NONE.";
-const COMPARE_EVERY_MS = 45_000, PICK_LIFE_MS = 90_000; let comparedAt = 0, picked: { mint: string; at: number } | null = null;
+const COMPARE_RULE = "You are comparing new pairs to decide if any deserves a position right now. Let your gut reaction show. Name the coins, compare them on what differs (wallets against trades, buy and sell flow, volume, smart wallets, cap), and say which is strongest and why the others lose. Passing is fine when nothing leads. "
+  + "You trade aggressively and rotate often: when one coin clearly leads, take it, and size it by conviction from " + SLOT_CONFIG.minSizeSol + " to " + SLOT_CONFIG.maxSizeSol + " SOL. At most four sentences. Your very last line must be exactly PICK: followed by one coin name as written and your size in SOL, like PICK: NAME 0.2, or PICK: NONE.";
+const COMPARE_EVERY_MS = 45_000, PICK_LIFE_MS = 90_000; let comparedAt = 0, picked: { mint: string; at: number; size: number } | null = null;
 const passes = new Map<string, { coin: string; cap: number; at: number }>();
 /** Coins Kris passed on in the last 20 minutes and where they are now: real proof of its calls. */
 function passResults(coins: Coin[]) {
@@ -137,9 +137,9 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
     for await (const chunk of streamLLM([{ role: "system", content: `${SYSTEM} ${COMPARE_RULE}` }, { role: "user", content: JSON.stringify({ candidates: rows.map(({ c: _c, ...r }) => r), openNewPairs: book.slots.filter(s => s.kind === "new").map(s => s.symbol), coinsYouPassedOn: passResults(coins), earlierComparisons: earlier }) }], { timeoutMs: 60_000 })) {
       text += chunk; ev.thought = readPick(text, names).thought; save();
     }
-    const { thought, pick } = readPick(text, names), chosen = rows.find(r => r.name === pick);
-    ev.thought = thought; ev.title = chosen ? `Picked ${chosen.name}${names.length > 1 ? ` over ${names.filter(n => n !== chosen.name).join(", ")}` : ""}` : `Passed on ${names.join(", ")}`;
-    if (chosen) { ev.mint = chosen.c.mint; picked = { mint: chosen.c.mint, at: Date.now() }; }
+    const { thought, pick, size } = readPick(text, names), chosen = rows.find(r => r.name === pick), sol = slotSize(size);
+    ev.thought = thought; ev.title = chosen ? `Picked ${chosen.name} at ${sol} SOL${names.length > 1 ? ` over ${names.filter(n => n !== chosen.name).join(", ")}` : ""}` : `Passed on ${names.join(", ")}`;
+    if (chosen) { ev.mint = chosen.c.mint; picked = { mint: chosen.c.mint, at: Date.now(), size: sol }; }
     for (const r of rows) if (r !== chosen && r.c.capUsd && !passes.has(r.c.mint)) passes.set(r.c.mint, { coin: r.name, cap: r.c.capUsd, at: Date.now() });
     save();
   } catch (e) { console.log(`${new Date().toISOString()} compare: ${String(e).slice(0, 160)}`); }
@@ -166,7 +166,7 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
     if (ev) think(ev, { event: `closing this ${a.slot.kind} position`, reason: a.reason });
     return;
   }
-  const c = a.coin, budget = SLOT_CONFIG.budgetSol;
+  const c = a.coin, budget = picked?.mint === c.mint ? picked.size : SLOT_CONFIG.budgetSol;
   // The terminal's bundle filter. No answer means no buy.
   const r = await fetch(`http://127.0.0.1:5176/api/coin?mint=${c.mint}&watch=0`, { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`coin read: ${r.status}`);

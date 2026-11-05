@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { bundleShare } from "./bundles.ts";
-import { planSlots, readPick, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
+import { planSlots, readPick, slotQualifies, slotRange, slotScore, slotSize, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
@@ -17,7 +17,14 @@ test("a new pair needs wallets, trades and a sane cap", () => {
   expect(slotQualifies(coin("a", { capUsd: 500 }), "new")).toBe(false);
   expect(slotQualifies(coin("a", { capUsd: 100_000 }), "new")).toBe(false);
 });
-test("the range sits around the cap", () => { expect(slotRange(10_000)).toEqual({ buy: 8_000, sell: 13_000 }); });
+test("the range sits tight around the cap", () => { expect(slotRange(10_000)).toEqual({ buy: 9_000, sell: 12_000 }); });
+test("size follows Kris inside the allowance", () => {
+  expect(slotSize(0.2)).toBe(0.2); expect(slotSize(5)).toBe(0.3); expect(slotSize(0.01)).toBe(0.1); expect(slotSize(null)).toBe(0.15);
+});
+test("a picked new pair replaces the weakest even without a higher score", () => {
+  const coins = [coin("a"), coin("b"), coin("c", { traders: 60 })];
+  expect(plan({ slots: [slot("a"), slot("b")], heldMints: new Set(["a", "b"]), coins, allowNew: new Set(["c"]) })).toMatchObject({ type: "close", forSwap: true });
+});
 test("an empty side opens its best coin", () => {
   const a = plan({ coins: [coin("weak", { traders: 60 }), coin("strong")] });
   expect(a).toMatchObject({ type: "open", kind: "new", coin: { mint: "strong" }, swap: false });
@@ -79,9 +86,11 @@ test("a migration does not need a pick", () => {
   expect(plan({ coins: [m], migratedAt: new Map([["m", now - 60_000]]), allowNew: new Set() })).toMatchObject({ type: "open", kind: "migrated" });
 });
 test("the pick is read from the last line and must be a candidate", () => {
-  expect(readPick("A has more wallets than B.\nPICK: A", ["A", "B"])).toEqual({ thought: "A has more wallets than B.", pick: "A" });
+  expect(readPick("A has more wallets than B.\nPICK: A", ["A", "B"])).toEqual({ thought: "A has more wallets than B.", pick: "A", size: null });
+  expect(readPick("Love it.\nPICK: A 0.25", ["A", "B"])).toMatchObject({ pick: "A", size: 0.25 });
+  expect(readPick("Love it.\nPICK: Two Words 0.2 SOL", ["Two Words"])).toMatchObject({ pick: "Two Words", size: 0.2 });
   expect(readPick("Neither.\nPICK: NONE", ["A", "B"]).pick).toBeNull();
   expect(readPick("I like Z.\nPICK: Z", ["A", "B"]).pick).toBeNull();
-  expect(readPick("No final line here", ["A"])).toEqual({ thought: "No final line here", pick: null });
+  expect(readPick("No final line here", ["A"])).toMatchObject({ thought: "No final line here", pick: null });
   expect(readPick("Fine.\nPICK: **dogwif**.", ["DogWif"]).pick).toBe("DogWif");
 });
