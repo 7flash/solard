@@ -106,7 +106,7 @@ async function act(body: Record<string, unknown>) {
 }
 const COMPARE_RULE = "You are comparing new pairs to decide if any deserves a position right now. Let your gut reaction show. Name the coins, compare them on what differs (wallets against trades, buy and sell flow, volume, smart wallets, cap), and say which is strongest and why the others lose. Passing is fine when nothing leads. "
   + "You trade aggressively and rotate often: when one coin clearly leads, take it, and size it by conviction from " + SLOT_CONFIG.minSizeSol + " to " + SLOT_CONFIG.maxSizeSol + " SOL. At most four sentences. Your very last line must be exactly PICK: followed by one coin name as written and your size in SOL, like PICK: NAME 0.2, or PICK: NONE.";
-const COMPARE_EVERY_MS = 45_000, PICK_LIFE_MS = 90_000; let comparedAt = 0, picked: { mint: string; at: number; size: number } | null = null;
+const COMPARE_EVERY_MS = 30_000, PICK_LIFE_MS = 90_000; let comparedAt = 0, picked: { mint: string; at: number; size: number } | null = null;
 const passes = new Map<string, { coin: string; cap: number; at: number }>();
 /** What really happened to coins like these, from the tracker. Read once every few minutes. */
 let odds: unknown = null, oddsAt = 0;
@@ -167,7 +167,7 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   if (gone.length) { book.slots = book.slots.filter(s => !gone.includes(s)); saveBook(); }
   const w = await myWallet(), now = Date.now(), listed = new Set(coins.map(c => c.mint));
   for (const s of book.slots) if (listed.has(s.mint) || !lastSeen.has(s.mint)) lastSeen.set(s.mint, now);
-  const a = planSlots({ coins, slots: book.slots, heldMints: held, closedAt: new Map(book.closedAt), migratedAt, freeSol: w.sol, nowMs: now, lastActionMs: book.lastActionMs, lastSwapMs: book.lastSwapMs, pendingKind: book.pendingKind, lastSeen, allowNew: new Set(picked && now - picked.at < PICK_LIFE_MS ? [picked.mint] : []) });
+  const a = planSlots({ coins, slots: book.slots, heldMints: held, closedAt: new Map(book.closedAt), migratedAt, freeSol: w.sol, nowMs: now, lastActionMs: book.lastActionMs, lastSwapMs: book.lastSwapMs, pendingKind: book.pendingKind, lastSeen, emptyMints: new Set(bots.filter(b => (b.holdingSteps ?? 0) === 0).map(b => b.mint)), allowNew: new Set(picked && now - picked.at < PICK_LIFE_MS ? [picked.mint] : []) });
   if (!a) return;
   if (a.type === "close") {
     await act({ action: "stop", mint: a.slot.mint });
