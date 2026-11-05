@@ -17,13 +17,13 @@ test("a new pair needs wallets, trades and a sane cap", () => {
   expect(slotQualifies(coin("a", { capUsd: 500 }), "new")).toBe(false);
   expect(slotQualifies(coin("a", { capUsd: 100_000 }), "new")).toBe(false);
 });
-test("the range sits tight around the cap", () => { expect(slotRange(10_000)).toEqual({ buy: 9_000, sell: 12_000 }); });
+test("the range is wide on both sides of the cap", () => { expect(slotRange(10_000)).toEqual({ buy: 6_000, sell: 19_000 }); });
 test("size follows Kris inside the allowance", () => {
   expect(slotSize(0.06)).toBe(0.06); expect(slotSize(5)).toBe(0.08); expect(slotSize(0.01)).toBe(0.03); expect(slotSize(null)).toBe(0.05);
 });
 test("a picked new pair replaces the weakest even without a higher score", () => {
   const coins = [coin("a"), coin("b"), coin("c", { traders: 60 })];
-  expect(plan({ slots: [slot("a", { openedAtMs: now - 120_000 }), slot("b", { openedAtMs: now - 120_000 })], heldMints: new Set(["a", "b"]), coins, allowNew: new Set(["c"]) })).toMatchObject({ type: "close", forSwap: true });
+  expect(plan({ slots: [slot("a", { openedAtMs: now - 150_000 }), slot("b", { openedAtMs: now - 150_000 })], heldMints: new Set(["a", "b"]), coins, allowNew: new Set(["c"]) })).toMatchObject({ type: "close", forSwap: true });
 });
 test("an empty side opens its best coin", () => {
   const a = plan({ coins: [coin("weak", { traders: 60 }), coin("strong")] });
@@ -50,13 +50,17 @@ test("an empty list alone closes nothing: a daemon restart empties it", () => {
   expect(plan({ slots: [slot("a", { openedAtMs: now - 9_000_000 })] })).toBeNull();
 });
 test("a full side swaps its weakest only for a clearly better coin", () => {
-  const slots = [slot("a", { openedAtMs: now - 120_000 }), slot("b", { openedAtMs: now - 120_000 })], held = new Set(["a", "b"]);
+  const slots = [slot("a", { openedAtMs: now - 150_000 }), slot("b", { openedAtMs: now - 150_000 })], held = new Set(["a", "b"]);
   const weak = [coin("a", { traders: 60, trades: 120, volSol: 5 }), coin("b")];
   expect(plan({ slots, heldMints: held, coins: [...weak, coin("c")] })).toMatchObject({ type: "close", slot: { mint: "a" }, forSwap: true });
   expect(plan({ slots, heldMints: held, coins: [coin("a"), coin("b"), coin("c")] })).toBeNull();
 });
-test("a slot that sold out moves on at once, whatever its age", () => {
-  const coins = [coin("a"), coin("b"), coin("c", { traders: 60 })], slots = [slot("a", { openedAtMs: now - 10_000 }), slot("b")], heldMints = new Set(["a", "b"]);
+test("a slot opened seconds ago is not swapped just because it holds nothing yet", () => {
+  const coins = [coin("a"), coin("b", { traders: 60 })];
+  expect(plan({ slots: [slot("a", { openedAtMs: now - 30_000 })], heldMints: new Set(["a"]), coins, config: { maxNew: 1 }, emptyMints: new Set(["a"]), allowNew: new Set(["b"]) })).toBeNull();
+});
+test("a slot that sold out moves on after the minimum hold", () => {
+  const coins = [coin("a"), coin("b"), coin("c", { traders: 60 })], slots = [slot("a", { openedAtMs: now - 150_000 }), slot("b", { openedAtMs: now - 150_000 })], heldMints = new Set(["a", "b"]);
   expect(plan({ slots, heldMints, coins, config: { maxNew: 2, swapRatio: 99 }, emptyMints: new Set(["a"]) })).toMatchObject({ type: "close", slot: { mint: "a" }, forSwap: true });
 });
 test("a new pair past its limit gives way", () => {
@@ -74,7 +78,7 @@ test("a pick stays good through its swap even if the coin passes three minutes",
 });
 test("a swap waits for the minimum hold and the swap gap", () => {
   const held = new Set(["a", "b"]), weak = [coin("a", { traders: 60, trades: 120, volSol: 5 }), coin("b"), coin("c")];
-  const young = { openedAtMs: now - 120_000 };
+  const young = { openedAtMs: now - 150_000 };
   expect(plan({ slots: [slot("a", { openedAtMs: now - 30_000 }), slot("b", young)], heldMints: held, coins: weak })).toBeNull();
   expect(plan({ slots: [slot("a", young), slot("b", young)], heldMints: held, coins: weak, lastSwapMs: now - 10_000 })).toBeNull();
 });
