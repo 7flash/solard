@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coin · Solard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root { --bg:#0B0E11; --panel:#12161B; --line:#1F252D; --text:#E6E8EB; --muted:#A9B2BF; --acc:#8FA8FF; --up:#3DD68C; --dn:#FF8A8A }
+* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 Inter,system-ui,sans-serif }
+a { color:inherit; text-decoration:none }
+nav { max-width:1180px; margin:0 auto; padding:22px 24px; display:flex; gap:26px; color:var(--muted); font-size:15px } nav b { color:var(--text); letter-spacing:.04em } nav .spacer { flex:1 }
+.btn { padding:10px 16px; border-radius:10px; font-weight:600; background:var(--acc); color:#0B0E11; display:inline-block }
+main { max-width:860px; margin:0 auto; padding:16px 24px 64px }
+.top { display:flex; gap:16px; align-items:center; margin-bottom:18px } .pic { width:72px; height:72px; flex:none; border-radius:14px; background:#1B2129 center/cover no-repeat }
+h1 { font-size:28px; line-height:1.15; margin:0 } h1 span { color:var(--muted); font-weight:500; font-size:18px } .ca { font:13px 'JetBrains Mono',monospace; color:var(--muted); overflow-wrap:anywhere; margin-top:4px }
+.stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:16px } .stat { padding:12px 14px; background:var(--panel); border:1px solid var(--line); border-radius:12px } .stat small { display:block; color:var(--muted); font-size:13px } .stat b { font:500 18px 'JetBrains Mono',monospace }
+.about { padding:14px 16px; background:var(--panel); border:1px solid var(--line); border-radius:12px; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; margin-bottom:16px }
+.up { color:var(--up) } .dn { color:var(--dn) } @media (max-width:640px) { .stats { grid-template-columns:repeat(2,minmax(0,1fr)) } }
+</style>
+</head>
+<body>
+<nav><a href="/"><b>SOLARD</b></a><a href="/">Coins</a><a href="/terminal/">Terminal</a><span class="spacer"></span><a class="btn" href="/launch">Launch an agent</a></nav>
+<main>
+  <div class="top"><div class="pic" id="pic"></div><div style="min-width:0"><h1 id="name">Coin</h1><div class="ca" id="ca"></div></div></div>
+  <div class="stats">
+    <div class="stat"><small>Market cap</small><b id="cap">—</b></div>
+    <div class="stat"><small>24h volume</small><b id="vol">—</b></div>
+    <div class="stat"><small>24h change</small><b id="chg">—</b></div>
+    <div class="stat"><small>24h buys / sells</small><b id="txns">—</b></div>
+  </div>
+  <div class="about" id="about" hidden></div>
+  <a class="btn" id="buy">Trade on Pump</a>
+</main>
+<script>
+const $ = (id) => document.getElementById(id), mint = decodeURIComponent(location.pathname.split("/").pop() || "");
+const usd = (n) => n == null ? "—" : `$${n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : n.toFixed(0)}`;
+$("ca").textContent = mint; $("buy").href = `https://pump.fun/coin/${encodeURIComponent(mint)}`;
+fetch(`/api/tokens/${encodeURIComponent(mint)}`).then((r) => r.ok ? r.json() : null).then((t) => {
+  if (!t) return;
+  document.title = `$${t.symbol} · Solard`;
+  $("name").textContent = `${t.name} `;
+  const s = document.createElement("span"); s.textContent = `$${t.symbol}`; $("name").append(s);
+  if (/^\/api\/media\/[a-f0-9]{64}\.(png|jpg|gif|webp)$/.test(t.image ?? "")) $("pic").style.backgroundImage = `url("${t.image}")`;
+  if (t.description) { $("about").textContent = t.description; $("about").hidden = false; }
+}).catch(() => {});
+fetch(`https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(mint)}`).then((r) => r.json()).then((d) => {
+  const p = (d?.pairs ?? []).filter((x) => x.marketCap).sort((a, b) => (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0))[0];
+  if (!p) return;
+  $("cap").textContent = usd(p.marketCap); $("vol").textContent = usd(p.volume?.h24);
+  const c = p.priceChange?.h24;
+  if (c != null) { $("chg").textContent = `${c >= 0 ? "+" : ""}${c.toFixed(1)}%`; $("chg").className = c >= 0 ? "up" : "dn"; }
+  if (p.txns?.h24) $("txns").textContent = `${p.txns.h24.buys} / ${p.txns.h24.sells}`;
+}).catch(() => {});
+</script>
+</body>
+</html>

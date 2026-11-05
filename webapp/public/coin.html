@@ -81,7 +81,7 @@ const ago = (ms) => { const m = Math.max(0, Math.round((Date.now() - ms) / 60000
 const tone = (node, n) => { node.classList.toggle("up", n > 0); node.classList.toggle("dn", n < 0); };
 $("ca").textContent = CA; $("buy").href = `https://pump.fun/coin/${CA}`;
 $("ca").addEventListener("click", async () => { await navigator.clipboard?.writeText(CA).catch(() => {}); $("ca").textContent = "Copied"; setTimeout(() => { $("ca").textContent = CA; }, 1200); });
-$("pic").style.backgroundImage = 'url("https://fairfun.xyz/api/media/622d3725f71bacfa915f7c5fe19462315abadeb2bdb0de571c8228900fe92001.png")';
+$("pic").style.backgroundImage = 'url("/api/media/622d3725f71bacfa915f7c5fe19462315abadeb2bdb0de571c8228900fe92001.png")';
 async function market() {
   const d = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CA}`).then((r) => r.json()).catch(() => null);
   const p = (d?.pairs ?? []).filter((x) => x.marketCap).sort((a, b) => (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0))[0];

@@ -26,6 +26,10 @@ Bun.serve({ port, hostname: "127.0.0.1", maxRequestBodySize: MAX_BODY, async fet
   if (req.method !== "GET" && req.method !== "HEAD") return new Response("no", { status: 405 });
   // solard.xyz/terminal with no agent named is the page about the terminal; ?agent=kris is a live terminal.
   if (url.pathname === "/" && (req.headers.get("x-solard-path") ?? "").startsWith("/terminal") && !url.searchParams.get("agent")) return new Response(readFileSync(`${dir}/landing.html`), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
+  // Agent and coin pages read their data in the browser, so one file serves every address.
+  const page = (name: string) => new Response(readFileSync(`${dir}/${name}`), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
+  if (/^\/agents\/[a-z0-9-]+$/.test(url.pathname)) return page("agent.html");
+  if (/^\/coin\/[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(url.pathname)) return page("token.html");
   if (f) return new Response(readFileSync(`${dir}/${f[0]}`), { headers: { "content-type": f[1], "cache-control": "no-cache" } });
   if (url.pathname === "/api/overview") return json(overview);
   if (url.pathname === "/api/kris") return json(`{"events":${kris},"ca":${JSON.stringify(ca)}}`);

@@ -42,14 +42,14 @@ h1 { font-size:40px; line-height:1.1; letter-spacing:-.02em; font-weight:800; ma
   <a class="card" href="/cli"><b>CLI</b><span>The same tools from your shell.</span></a>
 </section>
 <script>
-const KRIS = "sxy2vRktBWFeRuCNdkMN6kcB9aSgCSS8HNuwqfepump", FAIRFUN = "https://fairfun.xyz";
+const KRIS = "sxy2vRktBWFeRuCNdkMN6kcB9aSgCSS8HNuwqfepump";
 const box = document.getElementById("coins"), note = document.getElementById("note");
 let items = [];
 const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
-const image = (src) => /^\/api\/media\/[a-f0-9]{64}\.(png|jpg|gif|webp)$/.test(src ?? "") ? FAIRFUN + src : /^https:\/\//.test(src ?? "") ? src : "";
+const image = (src) => /^\/api\/media\/[a-f0-9]{64}\.(png|jpg|gif|webp)$/.test(src ?? "") ? src : /^https:\/\//.test(src ?? "") ? src : "";
 function card(c) {
   const a = el("a", c.mint === KRIS ? "coin main" : "coin");
-  a.href = c.mint === KRIS ? "/coin/kris" : FAIRFUN + c.href;
+  a.href = c.mint === KRIS ? "/coin/kris" : `/coin/${encodeURIComponent(c.mint)}`;
   const pic = el("div", "pic", (c.symbol ?? "?").slice(0, 2)), url = image(c.image);
   if (url) { const img = new Image(); img.onload = () => { pic.textContent = ""; pic.style.backgroundImage = `url("${encodeURI(url)}")`; }; img.src = url; }
   const info = el("div", "info"), name = el("div", "name", c.name);
