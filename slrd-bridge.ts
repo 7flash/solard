@@ -237,7 +237,7 @@ async function act(body: Record<string, unknown>) {
     case "range": case "add": {
       const buy = Number(body.buy), sell = Number(body.sell), steps = Math.max(1, Math.min(20, Math.trunc(Number(body.steps ?? 3))));
       if (!(buy > 0 && sell > buy)) throw new Error("need 0 < buy < sell (USD market cap)");
-      const { text } = rangeFileBody("usd", String(buy), String(sell), steps);
+      const { text } = rangeFileBody("usd", String(buy), String(sell), steps, body.percentSteps === true);
       const p = rangePath(w, m); writeFileSync(`${p}.tmp`, text); renameSync(`${p}.tmp`, p);
       if (action === "range") updateBot(root, w, m, { rangeLocked: true });
       if (action === "add") {

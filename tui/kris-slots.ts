@@ -8,7 +8,7 @@ export type SlotKind = "new" | "migrated";
 export type Slot = { mint: string; symbol: string | null; kind: SlotKind; openedAtMs: number; score: number; buy: number; sell: number };
 export type SlotAction = { type: "open"; kind: SlotKind; coin: SlotCoin; score: number; buy: number; sell: number; swap: boolean } | { type: "close"; slot: Slot; reason: string; forSwap: boolean };
 
-export const SLOT_CONFIG = { maxNew: 16, maxMigrated: 8, budgetSol: 0.02, migratedBudgetSol: 0.02, minSizeSol: 0.02, steps: 6, newBuyUsd: 5_000, newSellUsd: 60_000, gasSol: 0.02, newMinAgeMs: 240_000, newAgeMs: 600_000, migratedAgeMs: 600_000, actionGapMs: 15_000, swapGapMs: 30_000, minHoldMs: 300_000, swapRatio: 2, rotateNewMs: 900_000, rotateMigratedMs: 900_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.3, smallBundleShare: 0.1, maxEarlyPct: 60, smallEarlyPct: 25 };
+export const SLOT_CONFIG = { maxNew: 16, maxMigrated: 8, budgetSol: 0.02, migratedBudgetSol: 0.02, minSizeSol: 0.02, steps: 6, newBuyUsd: 5_000, newSellUsd: 60_000, stepPct: 15, stepSol: 0.0033, gasSol: 0.02, newMinAgeMs: 240_000, newAgeMs: 600_000, migratedAgeMs: 600_000, actionGapMs: 15_000, swapGapMs: 30_000, minHoldMs: 300_000, swapRatio: 2, rotateNewMs: 900_000, rotateMigratedMs: 900_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.3, smallBundleShare: 0.1, maxEarlyPct: 60, smallEarlyPct: 25 };
 type Config = typeof SLOT_CONFIG;
 
 /** Distinct wallets count most, smart wallets far more, volume a little. Few wallets across many trades is churn. */
@@ -30,6 +30,11 @@ const round = (v: number) => { const m = 10 ** (Math.floor(Math.log10(v)) - 1); 
 export const slotKeepsRange = (holdingSteps?: number | null) => (holdingSteps ?? 0) > 0;
 /** Only a coin watched on the curve and then seen migrated. An old pair that just got busy first appears already migrated. */
 export const freshMigration = (wasMigrated: boolean | undefined, migrated: boolean) => wasMigrated === false && migrated;
+/** Steps about 15% apart, and a size that gives every step a buy the bot will actually send. */
+export function slotPlan(buy: number, sell: number, c: Config = SLOT_CONFIG) {
+  const steps = Math.max(2, Math.min(20, Math.round(Math.log(sell / buy) / Math.log(1 + c.stepPct / 100))));
+  return { steps, budget: Math.ceil(steps * c.stepSol * 100) / 100 };
+}
 export const slotRange = (cap: number, kind: SlotKind = "migrated") => kind === "new" ? { buy: SLOT_CONFIG.newBuyUsd, sell: SLOT_CONFIG.newSellUsd } : { buy: round(cap * 0.6), sell: round(cap * 1.9) };
 
 export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** When each coin was last seen trading. Absent from a list is not quiet: lists empty out on a daemon restart. */ lastSeen?: Map<string, number>; /** Slots holding nothing: the range sold out at its top, so the slot is free to move on. */ emptyMints?: Set<string>; config?: Partial<Config> }): SlotAction | null {
@@ -45,7 +50,7 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
       .map(coin => ({ coin, score: slotScore(coin) })).sort((a, b) => b.score - a.score)[0];
     if (!best) continue;
     if (mine.length < max) {
-      if (o.freeSol < c.budgetSol + c.gasSol) continue;
+      if (o.freeSol < slotPlan(c.newBuyUsd, c.newSellUsd, c).budget + c.gasSol) continue;
       return { type: "open", kind, coin: best.coin, score: best.score, ...slotRange(best.coin.capUsd!, kind), swap: o.pendingKind === kind };
     }
     if (now - o.lastSwapMs < c.swapGapMs) continue;

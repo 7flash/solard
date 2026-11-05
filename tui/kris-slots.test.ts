@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { bundleShare, earlyBoughtPct } from "./bundles.ts";
 import { tradedFromLog } from "./fill-log.ts";
-import { freshMigration, planSlots, slotKeepsRange, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
+import { rangeLevels } from "../packages/core/src/runtime/target-inventory.ts";
+import { rangeFileBody } from "../packages/core/src/runtime/range-commands.ts";
+import { parseRangeSteps } from "../packages/core/src/runtime/range-file.ts";
+import { freshMigration, planSlots, slotPlan, slotKeepsRange, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
@@ -110,5 +113,21 @@ test("an old pair that gets busy is not a fresh migration", () => {
 test("traded volume counts buys, sells and the final sell-all", () => {
   const log = "2026-11-05T15:30:35Z bgr X: BUY confirmed CONFIRMED -0.5 SOL a\n2026-11-05T15:31:00Z bgr X: SELL confirmed CONFIRMED +0.25 SOL b\nbgr:X: sell all attempt 1: confirmed CONFIRMED +0.25 SOL c\nbgr:X: sell all attempt 2: failed NO_ROUTE\n";
   expect(tradedFromLog(log)).toEqual({ sol: 1, trades: 3 });
+});
+test("steps sit about 15% apart from bottom to top", () => {
+  const { steps, budget } = slotPlan(5_000, 60_000);
+  expect(steps).toBe(18);
+  expect(budget / steps).toBeGreaterThanOrEqual(0.003);
+  const levels = rangeLevels(5_000, 60_000, steps, true);
+  for (let i = 1; i < levels.length; i++) { const gap = levels[i]! / levels[i - 1]! - 1; expect(gap).toBeGreaterThan(0.14); expect(gap).toBeLessThan(0.16); }
+  expect(levels[0]).toBeCloseTo(5_000); expect(levels[steps]).toBeCloseTo(60_000);
+});
+test("even spacing stays the default for existing bots", () => {
+  expect(rangeLevels(10, 40, 3)).toEqual([10, 20, 30, 40]);
+});
+test("a range file with percent steps can be written and read", () => {
+  const { text } = rangeFileBody("usd", "5000", "60000", 18, true);
+  expect(JSON.parse(text).percentSteps).toBe(true);
+  expect(parseRangeSteps(text)).toBe(18);
 });
 

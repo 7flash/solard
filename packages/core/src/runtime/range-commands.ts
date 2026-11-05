@@ -22,10 +22,11 @@ export function parseRangeLevel(input: string, unit: RangeUnit): string {
   return String(Number(value) * 1000);
 }
 
-export function rangeFileBody(unit: RangeUnit, buy: string, sell: string, steps = 1) {
+export function rangeFileBody(unit: RangeUnit, buy: string, sell: string, steps = 1, percentSteps = false) {
   const body = {
     ...(unit === "usd" ? { buyMarketCapUsd: buy, sellMarketCapUsd: sell } : { buyPriceSol: buy, sellPriceSol: sell }),
     ...(steps > 1 ? { steps } : {}),
+    ...(percentSteps ? { percentSteps: true } : {}),
   };
   const text = JSON.stringify(body, null, 2) + "\n";
   return { text, spec: parseRangeFile(text) };

@@ -13,7 +13,7 @@ import type { PreparedFastTrade } from "../packages/core/src/tx/prepared-submiss
 import { withTradeRpcPriority } from "../packages/core/src/chain/rpc-priority.ts";
 import { rangeLevels, targetPlan, type TargetPlan } from "../packages/core/src/runtime/target-inventory.ts";
 
-export type TargetRange = { unit: "usd" | "sol"; buy: number; sell: number; steps: number };
+export type TargetRange = { unit: "usd" | "sol"; buy: number; sell: number; steps: number; percentSteps?: boolean };
 export type TargetStatus = {
   mode: "target"; wallet: string; mint: string; budgetSol: number; range: TargetRange; updatedAt: number;
   priceSol: number | null; capUsd: number | null; balanceRaw: string | null; decimals: number | null;
@@ -237,7 +237,7 @@ export class TargetBot {
     if (Date.now() - sample.capturedAtMs > maxAge) throw new Error(`price is stale (${Math.round((Date.now() - sample.capturedAtMs) / 1000)}s old)`);
     const toPrice = (v: number) => range.unit === "usd" ? v / (supply.ui * solUsd) : v;
     const fromPrice = (p: number) => range.unit === "usd" ? p * supply.ui * solUsd : p;
-    const levels = rangeLevels(range.buy, range.sell, range.steps).map(toPrice);
+    const levels = rangeLevels(range.buy, range.sell, range.steps, range.percentSteps).map(toPrice);
     const balanceRaw = await within(15_000, "balance read", this.readBalance());
     const plan: TargetPlan = targetPlan({ levels, budgetSol: this.o.budgetSol, balanceRaw, decimals: supply.decimals, priceSol, buysPaused: this.status.buysPaused });
     Object.assign(this.status, { supplyUi: supply.ui, priceSol, capUsd: priceSol * supply.ui * solUsd, balanceRaw: balanceRaw.toString(), decimals: supply.decimals,

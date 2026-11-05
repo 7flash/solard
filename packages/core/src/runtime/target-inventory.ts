@@ -65,7 +65,8 @@ export function targetPlan(input: TargetInput): TargetPlan {
 }
 
 /** Range levels for N steps between buy and sell (inclusive), as numbers in the range's unit. */
-export function rangeLevels(buy: number, sell: number, steps: number): number[] {
+/** `percent` spaces steps by an equal percentage instead of an equal dollar amount. */
+export function rangeLevels(buy: number, sell: number, steps: number, percent = false): number[] {
   if (!(sell > buy) || !Number.isInteger(steps) || steps < 1) throw new Error("need buy < sell and steps >= 1");
-  return Array.from({ length: steps + 1 }, (_, i) => buy + (sell - buy) * i / steps);
+  return Array.from({ length: steps + 1 }, (_, i) => percent ? buy * (sell / buy) ** (i / steps) : buy + (sell - buy) * i / steps);
 }

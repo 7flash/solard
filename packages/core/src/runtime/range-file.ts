@@ -13,7 +13,7 @@ export function parseRangeFile(text: string): RangeSpec {
  const value=JSON.parse(text);
  if(!value || typeof value!=="object" || Array.isArray(value))throw new Error("Invalid range config");
  parseRangeSteps(text);
- const keys=Object.keys(value).filter(k=>k!=="steps");
+ const keys=Object.keys(value).filter(k=>k!=="steps"&&k!=="percentSteps");
  if(keys.length===2 && keys.every(k=>["buyPriceSol","sellPriceSol"].includes(k)) && typeof value.buyPriceSol==="string" && typeof value.sellPriceSol==="string")
   return fixedPriceBand(value.buyPriceSol,value.sellPriceSol);
  if(keys.length===2 && keys.every(k=>["buyMarketCapUsd","sellMarketCapUsd"].includes(k)) && typeof value.buyMarketCapUsd==="string" && typeof value.sellMarketCapUsd==="string"){

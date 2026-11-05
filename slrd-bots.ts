@@ -457,7 +457,7 @@ type Running = { entry: BotEntry; layout: number; engines: Map<string, Engine>; 
 const targetStatusPath = (b: { wallet: string; mint: string }) => resolve(root, ".range-bots", `target-${b.wallet}-${b.mint}.json`);
 function targetRange(b: BotEntry): TargetRange {
   const text = readFileSync(rangePath(b), "utf8"), bounds = rangeBounds(parseRangeFile(text));
-  return { unit: bounds.unit, buy: Number(bounds.buy), sell: Number(bounds.sell), steps: parseRangeSteps(text) };
+  return { unit: bounds.unit, buy: Number(bounds.buy), sell: Number(bounds.sell), steps: parseRangeSteps(text), percentSteps: JSON.parse(text).percentSteps === true };
 }
 /** One-time backfill of each bot's net SOL flow from confirmed trades in the daemon log ("<wallet> <mint6>"). */
 let flows: Map<string, number> | null = null;
