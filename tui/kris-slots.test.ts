@@ -5,7 +5,7 @@ import { planSlots, slotQualifies, slotRange, slotScore, type Slot, type SlotCoi
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
 const slot = (mint: string, extra: Partial<Slot> = {}): Slot => ({ mint, symbol: mint, kind: "new", openedAtMs: now - 600_000, score: 100, buy: 8_000, sell: 13_000, ...extra });
-const plan = (o: Partial<Parameters<typeof planSlots>[0]>) => planSlots({ coins: [], slots: [], heldMints: new Set(), closedAt: new Map(), migratedAt: new Map(), freeSol: 0.2, nowMs: now, lastActionMs: 0, lastSwapMs: 0, config: { maxNew: 2, maxMigrated: 2, budgetSol: 0.05, gasSol: 0.02 }, ...o });
+const plan = (o: Partial<Parameters<typeof planSlots>[0]>) => planSlots({ coins: [], slots: [], heldMints: new Set(), closedAt: new Map(), migratedAt: new Map(), freeSol: 0.2, nowMs: now, lastActionMs: 0, lastSwapMs: 0, ...o, config: { maxNew: 2, maxMigrated: 2, budgetSol: 0.05, gasSol: 0.02, minHoldMs: 120_000, swapRatio: 1.2, ...o.config } });
 
 test("churn scores below real spread", () => {
   expect(slotScore(coin("a", { traders: 17, trades: 165 }))).toBeLessThan(slotScore(coin("b")));
@@ -91,4 +91,11 @@ test("bundle share counts wallets buying the same size within a second", () => {
   expect(bundleShare([...same, ...rest])).toBeCloseTo(0.3);
   expect(bundleShare(rest)).toBe(0);
   expect(bundleShare([])).toBe(0);
+});
+test("the live settings keep swaps rare: a slot holds 5 minutes and needs a coin twice as strong", () => {
+  const full = planSlots({ coins: [coin("a"), coin("c", { traders: 200, trades: 400 })], slots: [slot("a", { openedAtMs: now - 200_000 })], heldMints: new Set(["a"]), closedAt: new Map(), migratedAt: new Map(), freeSol: 5, nowMs: now, lastActionMs: 0, lastSwapMs: 0, config: { maxNew: 1 } });
+  expect(full).toBeNull();
+});
+test("with room left a coin opens without any swap", () => {
+  expect(planSlots({ coins: [coin("c")], slots: [slot("a"), slot("b")], heldMints: new Set(["a", "b"]), closedAt: new Map(), migratedAt: new Map(), freeSol: 5, nowMs: now, lastActionMs: 0, lastSwapMs: 0 })).toMatchObject({ type: "open", swap: false });
 });
