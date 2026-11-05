@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { appendFileSync } from "node:fs";
 import { bundleShare, type BuyRow } from "./tui/bundles.ts";
 import { startOutcome, stepOutcome, type Outcome } from "./tui/kris-outcomes.ts";
-import { planSlots, readPick, slotQualifies, slotScore, slotSize, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
+import { planSlots, slotQualifies, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
 import { coinVerdict, lastFill, rangeSide, rangeTitle, scrubReason, tradeReaction, tradeTitle, type KrisEvent } from "./webapp/public/kris-events.ts";
 
 process.env.JSX_AI_RUNTIME ??= "codex";
@@ -16,12 +16,10 @@ process.env.JSX_AI_MODEL ??= "gpt-5.6-sol"; // the local codex default is reject
 const dot = resolve(import.meta.dir, ".range-bots"), token = readFileSync(resolve(dot, "bridge-token"), "utf8").trim(), out = resolve(dot, "kris-events.json");
 const { streamLLM } = await import(process.env.JSX_AI_PATH ?? resolve(import.meta.dir, "..", "jsx-ai", "src", "index.ts")) as { streamLLM: (m: { role: string; content: string }[], o: { timeoutMs: number }) => AsyncIterable<string> };
 const KEEP = 300, KEEP_COINS = 100, THOUGHT_GAP_MS = 4_000;
-const SYSTEM = "You are Kris, a young trader running small Solana memecoin positions through the Solard terminal, and you feel every trade. You are thinking out loud as it happens, sharp and sceptical, but never flat: a win makes you buzz, a loss stings, a rug makes you angry, a pass can feel like relief or regret. Open with how this moment feels in your own plain words, then give your read. Match the feeling to this event alone: a buy is nerve or excitement, a sale in profit is pride, a strong coin is real excitement, a dump you dodged is smug satisfaction, and you can be funny or cocky. Never mention past losses, being burned, bruised or stung unless this event is itself a loss. Never reuse a phrase from your earlier thoughts. "
-  + "Never restate the event: the reader already sees it. Give your read: what the move means given the trend, the flow, who holds and where the price sits in the range; "
-  + "what you expect next and the one thing that would prove you wrong. Disagree with the position when the facts say so, including saying the range looks wrong or the coin looks like it is being dumped. "
-  + "Earlier thoughts are given so you can follow up on them; never repeat one or copy their mood. At most three sentences, first person, plain words. "
-  + "Your feelings are yours, but the facts are not: use only the facts given and never invent a number. Talk about the coin and the market only: never mention data, missing information, context, tools, bugs or what you cannot see. A fact that is absent is simply not discussed. "
-  + "Every trade is your own plan working: the range buys its levels and sells its levels, so never call a trade a mistake or say it should not have happened. No hashtags, no emojis, no advice to the reader.";
+const SYSTEM = "You are Kris, a young trader whose memecoin positions on Solana are run by rules on the Solard terminal. You do not choose trades: the rules do. Your job is to look back honestly at how they went, thinking out loud, and you feel every result: a win makes you buzz, a loss stings, a rug makes you angry. "
+  + "Open with how this result feels in your own plain words, then say why it worked or failed, using the facts given: how long it was held, what the range caught, what the flow and holders did, and what that says about this kind of coin. End with the one lesson you take from it. "
+  + "Never recommend a trade or say what you will do next: you are reviewing, not deciding. Earlier thoughts are given so you can spot patterns across results; never repeat one or copy their mood. At most three sentences, first person, plain words. "
+  + "Your feelings are yours, but the facts are not: use only the facts given and never invent a number. Talk about the coin and the market only: never mention data, missing information, context, tools or bugs. A fact that is absent is simply not discussed. No hashtags, no emojis, no advice to the reader.";
 
 type Bot = { wallet: string; mint: string; symbol?: string | null; capUsd?: number | null; range?: { buy: number; sell: number } | null; steps?: number; holdingSteps?: number; vol1hSol?: number | null; pnl?: number; lastTradeAtMs?: number | null };
 type Decision = { atMs: number; mint: string; name: string; symbol?: string | null; decision: string; reason: string };
@@ -39,13 +37,13 @@ function trackRecord(rows: Closed[]) {
   const last = rows.slice(0, 12), wins = last.filter(r => r.pnlSol > 0).length;
   return last.length ? { lastClosed: last.length, won: wins, solResult: Math.round(last.reduce((a, r) => a + r.pnlSol, 0) * 1000) / 1000, worst: [...last].sort((a, b) => a.pnlSol - b.pnlSol).slice(0, 3).map(r => ({ coin: r.symbol ?? r.mint.slice(0, 6), pct: r.pct == null ? null : Math.round(r.pct), heldMin: r.openedAt ? Math.round((r.closedAt - r.openedAt) / 60_000) : null })) } : null;
 }
-const waiting: { ev: KrisEvent; facts: Record<string, unknown> }[] = []; let thinking = false, compareWaiting = false;
+const waiting: { ev: KrisEvent; facts: Record<string, unknown> }[] = []; let thinking = false;
 const thoughtAt = new Map<string, number>();
 function think(ev: KrisEvent, facts: Record<string, unknown>) {
-  if (Date.now() - (thoughtAt.get(ev.mint) ?? 0) < 60_000) return; // one thought a minute per coin keeps Codex within its limit
+  if (ev.kind === "trade" && Date.now() - (thoughtAt.get(ev.mint) ?? 0) < 60_000) return; // one thought a minute per coin keeps Codex within its limit
   thoughtAt.set(ev.mint, Date.now());
   const minor = ev.kind === "coin" || ev.kind === "migrated";
-  if (minor ? thinking || compareWaiting || waiting.length > 0 : waiting.length >= 4) return;
+  if (minor ? thinking || waiting.length > 0 : waiting.length >= 4) return;
   waiting.push({ ev, facts }); void drainThoughts();
 }
 async function drainThoughts() {
@@ -56,12 +54,12 @@ async function drainThoughts() {
       const context = job.ev.kind === "coin" || job.ev.kind === "migrated" ? null : await coinContext(job.ev.mint);
       for (let attempt = 1; attempt <= 2; attempt++) try { // the Codex runtime sometimes exits mid-turn: one more try
         let text = "";
-        for await (const chunk of streamLLM([{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({ ...job.facts, context, ...(job.ev.reaction === "loss" ? { myRecentResults: results } : {}), earlierThoughts: earlier }) }], { timeoutMs: 60_000 })) {
+        for await (const chunk of streamLLM([{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({ ...job.facts, context, myRecentResults: results, oddsForCoinsLikeThese: newPairOdds(), earlierThoughts: earlier }) }], { timeoutMs: 60_000 })) {
           text += chunk; job.ev.thought = text; save();
         }
         break;
       } catch (e) { if (attempt === 2) throw e; await Bun.sleep(1_500); }
-    } catch (e) { console.log(`${new Date().toISOString()} thought failed: ${String(e).slice(0, 160)}`); }
+    } catch (e) { console.log(`${new Date().toISOString()} thought failed: ${String(e).slice(0, 160)}`); if (job.ev.kind === "result" || job.ev.kind === "review") { job.ev.thought ??= job.ev.title; save(); } } // no Codex: results still reach the history
     await Bun.sleep(THOUGHT_GAP_MS);
   }
   thinking = false;
@@ -110,10 +108,6 @@ async function act(body: Record<string, unknown>) {
   const w = await myWallet(), r = await fetch(`${BRIDGE}/api/bot`, { method: "POST", headers: { "x-slrd-token": token, "content-type": "application/json" }, body: JSON.stringify({ wallet: w.name, ...body }), signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`${body.action}: ${r.status} ${(await r.text()).slice(0, 100)}`);
 }
-const COMPARE_RULE = "You are comparing new pairs to decide if any deserves a position right now. Let your gut reaction show. Name the coins, compare them on what differs (wallets against trades, buy and sell flow, volume, smart wallets, cap), and say which is strongest and why the others lose. Passing is fine when nothing leads. "
-  + "You trade aggressively and rotate often: when one coin clearly leads, take it, and size it by conviction from " + SLOT_CONFIG.minSizeSol + " to " + SLOT_CONFIG.maxSizeSol + " SOL. At most four sentences. Your very last line must be exactly PICK: followed by one coin name as written and your size in SOL, like PICK: NAME 0.2, or PICK: NONE.";
-const COMPARE_EVERY_MS = 75_000, PICK_LIFE_MS = 90_000; let llmDownUntil = 0, comparedAt = 0, comparedKey = "", picked: { mint: string; at: number; size: number } | null = null;
-const passes = new Map<string, { coin: string; cap: number; at: number }>();
 /** What really happened to coins like these, from the tracker. Read once every few minutes. */
 let odds: unknown = null, oddsAt = 0;
 function newPairOdds() {
@@ -125,45 +119,20 @@ function newPairOdds() {
   } catch { odds = null; }
   return odds;
 }
-/** Coins Kris passed on in the last 20 minutes and where they are now: real proof of its calls. */
-function passResults(coins: Coin[]) {
-  const caps = new Map(coins.map(c => [c.mint, c.capUsd ?? null])), now = Date.now(), out: { coin: string; capWhenPassed: number; capNow: number; pct: number }[] = [];
-  for (const [mint, p] of passes) { if (now - p.at > 1_200_000) { passes.delete(mint); continue; } const cap = caps.get(mint); if (cap) out.push({ coin: p.coin, capWhenPassed: Math.round(p.cap), capNow: Math.round(cap), pct: Math.round((cap / p.cap - 1) * 100) }); }
-  return out.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct)).slice(0, 3);
-}
-/** The best new pairs side by side. Kris's answer decides which one may open: no pick, no new pair. */
-async function compareNewPairs(bots: Bot[], coins: Coin[]) {
-  const now = Date.now(); if (now - comparedAt < COMPARE_EVERY_MS || existsSync(offPath)) return;
-  const held = new Set(bots.map(b => b.mint)), closed = new Map(book.closedAt);
-  const fresh = coins.filter(c => !c.migrated && c.ageMs != null && c.ageMs <= SLOT_CONFIG.newAgeMs && !held.has(c.mint) && now - (closed.get(c.mint) ?? 0) > SLOT_CONFIG.reopenAfterMs && slotQualifies(c, "new")).sort((a, b) => slotScore(b) - slotScore(a)).slice(0, 4);
-  if (!fresh.length) return;
-  const key = fresh.map(c => c.mint).sort().join(); if (key === comparedKey) return; // the same coins again: nothing new to weigh
-  if (thinking) { compareWaiting = true; return; } // a one-line coin thought must not hold up a real comparison
-  compareWaiting = false; comparedAt = now; comparedKey = key; thinking = true;
-  try {
-    const rows = (await Promise.all(fresh.map(async c => {
-      const r = await fetch(`http://127.0.0.1:5176/api/coin?mint=${c.mint}&watch=0`, { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(10_000) }).catch(() => null);
-      if (!r?.ok) return null;
-      const coin = await r.json() as { recent?: (BuyRow & { sol: number | null })[]; earlyBoughtPct?: number | null }, early = coin.earlyBoughtPct ?? 100, recent = coin.recent ?? [], share = bundleShare(recent), sum = (side: string) => Math.round(recent.slice(0, 100).filter(t => t.side === side).reduce((a, t) => a + (t.sol ?? 0), 0) * 10) / 10;
-      return share >= SLOT_CONFIG.maxBundleShare || early >= SLOT_CONFIG.maxEarlyPct ? null : { c, name: c.symbol || c.mint.slice(0, 6), ageSec: Math.round((c.ageMs ?? 0) / 1000), capUsd: c.capUsd ? Math.round(c.capUsd) : null, wallets: c.traders ?? 0, trades: c.trades ?? 0, smartWallets: c.smart ?? 0, solVolume: c.volSol ? Math.round(c.volSol) : 0, bundledWalletPct: Math.round(share * 100), supplyBoughtInFirst3SecPct: Math.round(early), last100Trades: { buySol: sum("buy"), sellSol: sum("sell") } };
-    }))).filter(x => x != null);
-    if (!rows.length) return;
-    const names = rows.map(r => r.name), ev = add({ atMs: Date.now(), kind: "compare", mint: rows[0]!.c.mint, symbol: names.length > 1 ? "New pairs" : names[0]!, title: `Comparing ${names.join(", ")}` });
-    if (!ev) return;
-    const earlier = events.filter(e => e.kind === "compare" && e.thought && e.id !== ev.id && !/burned|bruis|sting|bites|bitter/i.test(e.thought)).slice(0, 3).map(e => ({ title: e.title, thought: e.thought }));
-    let text = "", failed = Date.now() < llmDownUntil;
-    if (!failed) try { for await (const chunk of streamLLM([{ role: "system", content: `${SYSTEM} ${COMPARE_RULE}` }, { role: "user", content: JSON.stringify({ candidates: rows.map(({ c: _c, ...r }) => r), openNewPairs: book.slots.filter(s => s.kind === "new").map(s => s.symbol), coinsYouPassedOn: passResults(coins), oddsForCoinsLikeThese: newPairOdds(), earlierComparisons: earlier }) }], { timeoutMs: 60_000 })) {
-      text += chunk; ev.thought = readPick(text, names).thought; save();
-    } } catch (e) { failed = true; if (/usage limit/i.test(String(e))) llmDownUntil = Date.now() + 600_000; console.log(`${new Date().toISOString()} compare: ${String(e).slice(0, 120)}`); }
-    // No model: the top score still plays, so a Codex outage does not stop new pairs.
-    const top = failed ? [...rows].sort((a, b) => slotScore(b.c) - slotScore(a.c))[0]! : null;
-    const { thought, pick, size } = top ? { thought: `${top.name} leads on the numbers: ${top.wallets} wallets, ${top.last100Trades.buySol} SOL bought against ${top.last100Trades.sellSol} sold.`, pick: top.name, size: null } : readPick(text, names), chosen = rows.find(r => r.name === pick), sol = slotSize(size);
-    ev.thought = thought; ev.title = chosen ? `Picked ${chosen.name} at ${sol} SOL${names.length > 1 ? ` over ${names.filter(n => n !== chosen.name).join(", ")}` : ""}` : `Passed on ${names.join(", ")}`;
-    if (chosen) { ev.mint = chosen.c.mint; picked = { mint: chosen.c.mint, at: Date.now(), size: sol }; }
-    for (const r of rows) if (r !== chosen && r.c.capUsd && !passes.has(r.c.mint)) passes.set(r.c.mint, { coin: r.name, cap: r.c.capUsd, at: Date.now() });
-    save();
-  } catch (e) { console.log(`${new Date().toISOString()} compare: ${String(e).slice(0, 160)}`); }
-  finally { thinking = false; void drainThoughts(); }
+/** Thoughts come from results: every closed position, and a look over the last ones every 15 minutes. */
+const seenClosed = new Set<string>(); let reviewedAt = Date.now();
+function reviewClosed(rows: Closed[], live: boolean) {
+  for (const r of [...rows].reverse()) {
+    const key = `${r.mint}${r.closedAt}`; if (seenClosed.has(key)) continue; seenClosed.add(key); if (!live) continue;
+    const coin = r.symbol ?? r.mint.slice(0, 6), heldMin = r.openedAt ? Math.round((r.closedAt - r.openedAt) / 60_000) : null, sign = r.pnlSol >= 0 ? "+" : "";
+    const ev = add({ atMs: r.closedAt, kind: "result", mint: r.mint, symbol: r.symbol, title: `Closed ${coin}: ${sign}${r.pnlSol.toFixed(4)} SOL${r.pct == null ? "" : ` (${sign}${Math.round(r.pct)}%)`}`, reaction: r.pnlSol >= 0 ? "profit" : "loss" });
+    if (ev) think(ev, { event: "position closed", coin, solResult: Number(r.pnlSol.toFixed(4)), pct: r.pct == null ? null : Math.round(r.pct), heldMinutes: heldMin });
+  }
+  if (!live || Date.now() - reviewedAt < 900_000 || !rows.length) return;
+  reviewedAt = Date.now();
+  const last = rows.slice(0, 12), won = last.filter(r => r.pnlSol > 0).length, sum = last.reduce((a, r) => a + r.pnlSol, 0), worst = [...last].sort((a, b) => a.pnlSol - b.pnlSol)[0]!;
+  const ev = add({ atMs: Date.now(), kind: "review", mint: worst.mint, symbol: "Review", title: `Last ${last.length} closed: ${won} won, ${sum >= 0 ? "+" : ""}${sum.toFixed(3)} SOL` });
+  if (ev) think(ev, { event: "looking back over the last closed positions for a pattern" });
 }
 const closing = new Map<string, number>(), missingSince = new Map<string, number>(), lastSeen = new Map<string, number>(), pendingSide = new Map<string, { side: string; at: number }>(), reportedAt = new Map<string, number>();
 async function runSlots(bots: Bot[], coins: Coin[]) {
@@ -178,7 +147,7 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   const w = await myWallet(), now = Date.now(), listed = new Set(coins.map(c => c.mint));
   for (const s of book.slots) if (listed.has(s.mint) || !lastSeen.has(s.mint)) lastSeen.set(s.mint, now);
   for (const [mint, at] of closing) { if (!held.has(mint)) closing.delete(mint); else if (now - at > 60_000) { closing.set(mint, now); await act({ action: "stop", mint }); } } // the sale failed: again
-  const a = planSlots({ coins, slots: book.slots, heldMints: held, closedAt: new Map(book.closedAt), migratedAt, freeSol: w.sol, nowMs: now, lastActionMs: book.lastActionMs, lastSwapMs: book.lastSwapMs, pendingKind: book.pendingKind, lastSeen, emptyMints: new Set(bots.filter(b => (b.holdingSteps ?? 0) === 0).map(b => b.mint)), allowNew: new Set(picked && now - picked.at < PICK_LIFE_MS ? [picked.mint] : []) });
+  const a = planSlots({ coins, slots: book.slots, heldMints: held, closedAt: new Map(book.closedAt), migratedAt, freeSol: w.sol, nowMs: now, lastActionMs: book.lastActionMs, lastSwapMs: book.lastSwapMs, pendingKind: book.pendingKind, lastSeen, emptyMints: new Set(bots.filter(b => (b.holdingSteps ?? 0) === 0).map(b => b.mint)) });
   if (!a) return;
   if (a.type === "close") {
     // Buys off first: a sale that fails must not leave the bot buying with no slot watching it.
@@ -186,10 +155,9 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
     book.slots = book.slots.filter(s => s.mint !== a.slot.mint); book.closedAt = [...book.closedAt.filter(([, at]) => now - at < SLOT_CONFIG.reopenAfterMs), [a.slot.mint, now]];
     book.lastActionMs = now; if (a.forSwap) { book.lastSwapMs = now; book.pendingKind = a.slot.kind; } saveBook();
     const ev = add({ atMs: now, kind: "decision", mint: a.slot.mint, symbol: a.slot.symbol, title: `Closing: ${a.reason}` });
-    if (ev) think(ev, { event: `closing this ${a.slot.kind} position`, reason: a.reason });
     return;
   }
-  const c = a.coin; let budget = picked?.mint === c.mint ? picked.size : SLOT_CONFIG.budgetSol;
+  const c = a.coin; let budget = SLOT_CONFIG.budgetSol;
   // The terminal's bundle filter. No answer means no buy.
   const r = await fetch(`http://127.0.0.1:5176/api/coin?mint=${c.mint}&watch=0`, { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`coin read: ${r.status}`);
@@ -201,11 +169,10 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   }
   if (early >= SLOT_CONFIG.smallEarlyPct || share >= SLOT_CONFIG.smallBundleShare) budget = SLOT_CONFIG.minSizeSol; // signs of a bundle: still plays, at the smallest size
   await act({ action: "add", mint: c.mint, buy: a.buy, sell: a.sell, steps: SLOT_CONFIG.steps, budget });
-  book.slots = book.slots.filter(s => s.mint !== c.mint); if (picked?.mint === c.mint) picked = null;
+  book.slots = book.slots.filter(s => s.mint !== c.mint);
   book.slots.push({ mint: c.mint, symbol: c.symbol ?? null, kind: a.kind, openedAtMs: now, score: a.score, buy: a.buy, sell: a.sell });
   book.lastActionMs = now; if (book.pendingKind === a.kind) book.pendingKind = null; saveBook(); seenBots.add(c.mint); walletAt = 0;
   const ev = add({ atMs: now, kind: "position", mint: c.mint, symbol: c.symbol ?? null, title: `${a.swap ? "Swapped into" : "Opened"} ${a.kind === "new" ? "new pair" : "migration"}, ${budget} SOL`, reaction: "ape" });
-  if (ev) think(ev, { event: `opening a ${a.kind} position`, coin: c.symbol ?? c.mint.slice(0, 6), capUsd: c.capUsd ? Math.round(c.capUsd) : null, wallets: c.traders ?? null, trades: c.trades ?? null, smartWallets: c.smart ?? 0, solVolume: c.volSol ?? null, rangeUsd: [a.buy, a.sell], budgetSol: budget });
 }
 const seenTrade = new Map<string, number>(), seenBots = new Set<string>(), sides = new Map<string, string>(), seenCoins = new Map<string, boolean>(); let lastDecision = 0, seeded = false;
 /** Every judged coin, followed for 30 minutes through the terminal's coin list. */
@@ -221,7 +188,6 @@ function followCoins(coins: Coin[]) {
 function coinEvent(c: Coin, migrated: boolean) {
   const v = coinVerdict(c), started = startOutcome(c, migrated ? "migrated" : "coin", v.verdict, Date.now()); if (started) following.push(started);
   const ev = add({ atMs: Date.now(), kind: migrated ? "migrated" : "coin", mint: c.mint, symbol: c.symbol ?? null, title: `${migrated ? "Migrated" : "New coin"}: ${v.verdict}, ${v.reason}` });
-  if (ev && v.verdict !== "skip") void think(ev, { event: migrated ? "coin migrated, deciding whether it is worth a position" : "new coin appeared, deciding whether it is worth a position", call: v.verdict, reason: v.reason, coin: c.symbol ?? c.mint.slice(0, 6), capUsd: c.capUsd ? Math.round(c.capUsd) : null, wallets: c.traders ?? null, trades: c.trades ?? null, smartWallets: c.smart ?? 0 });
 }
 for (;;) {
   try {
@@ -229,14 +195,15 @@ for (;;) {
     if (!r.ok) throw new Error(`overview ${r.status}`);
     const ov = await r.json() as { bots: Bot[]; decisions?: Decision[]; coins?: Coin[]; young?: Coin[]; closedRows?: Closed[] }, decisions = ov.decisions ?? [];
     results = trackRecord(ov.closedRows ?? []);
+    reviewClosed(ov.closedRows ?? [], seeded);
     for (const b of ov.bots.filter(x => !(x as { inactive?: boolean }).inactive)) {
       const at = b.lastTradeAtMs ?? 0, prev = seenTrade.get(b.mint);
-      if (seeded && !seenBots.has(b.mint)) { const ev = add({ atMs: Date.now(), kind: "position", mint: b.mint, symbol: b.symbol ?? null, title: "New position", reaction: "ape" }); if (ev) void think(ev, { event: "opened a new position", ...facts(b) }); }
+      if (seeded && !seenBots.has(b.mint)) { const ev = add({ atMs: Date.now(), kind: "position", mint: b.mint, symbol: b.symbol ?? null, title: "New position", reaction: "ape" }); }
       seenBots.add(b.mint);
       if (seeded && at && at > (prev ?? 0)) {
         const path = resolve(dot, `term-${b.wallet}-${b.mint}.log`), fill = existsSync(path) ? lastFill(readFileSync(path, "utf8")) : null;
         const ev = add({ atMs: at, kind: "trade", mint: b.mint, symbol: b.symbol ?? null, title: tradeTitle(fill), reaction: tradeReaction(fill?.side ?? null, b.holdingSteps ?? 0, b.pnl ?? 0) ?? undefined });
-        if (ev) void think(ev, { event: fill?.side === "BUY" ? "bought" : fill?.side === "SELL" ? "sold" : "traded", sol: fill?.sol ?? null, ...facts(b) });
+        if (ev && fill?.side === "SELL") void think(ev, { event: "sold", sol: fill?.sol ?? null, ...facts(b) });
       }
       if (at) seenTrade.set(b.mint, Math.max(at, prev ?? 0));
       if (b.capUsd && b.range) {
@@ -245,7 +212,7 @@ for (;;) {
         if (side === was) pendingSide.delete(b.mint); else if (pendingSide.get(b.mint)?.side !== side) pendingSide.set(b.mint, { side, at: now });
         const settled = (pendingSide.get(b.mint)?.at ?? now) <= now - 20_000 && now - (reportedAt.get(b.mint) ?? 0) >= 120_000;
         if (seeded && was && was !== side && settled) {
-          reportedAt.set(b.mint, now); pendingSide.delete(b.mint); const ev = add({ atMs: Date.now(), kind: "range", mint: b.mint, symbol: b.symbol ?? null, title: rangeTitle(side, b.capUsd, b.range), reaction: side === "inside" ? undefined : "hold" }); if (ev) void think(ev, { event: side === "inside" ? "price came back into the range" : `price went ${side} the range`, ...facts(b) }); }
+          reportedAt.set(b.mint, now); pendingSide.delete(b.mint); const ev = add({ atMs: Date.now(), kind: "range", mint: b.mint, symbol: b.symbol ?? null, title: rangeTitle(side, b.capUsd, b.range), reaction: side === "inside" ? undefined : "hold" }); }
         if (!was || settled) sides.set(b.mint, side);
       }
     }
@@ -256,7 +223,6 @@ for (;;) {
     }
     const known = [...new Map([...(ov.coins ?? []), ...(ov.young ?? [])].map(c => [c.mint, c])).values()]; // the main lists miss coins minutes old
     followCoins(known);
-    if (seeded) void compareNewPairs(ov.bots, known);
     if (seeded) await runSlots(ov.bots, known).catch(e => console.log(`${new Date().toISOString()} slots: ${String(e).slice(0, 160)}`));
     const fresh = decisions.filter(d => d.atMs > lastDecision).sort((a, b) => a.atMs - b.atMs);
     if (seeded) for (const d of fresh) add({ atMs: d.atMs, kind: "decision", mint: d.mint, symbol: d.symbol ?? d.name, title: `${d.decision}: ${scrubReason(d.reason)}` });

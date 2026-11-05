@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { bundleShare, earlyBoughtPct } from "./bundles.ts";
-import { planSlots, readPick, slotQualifies, slotRange, slotScore, slotSize, type Slot, type SlotCoin } from "./kris-slots.ts";
+import { planSlots, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
@@ -18,13 +18,6 @@ test("a new pair needs wallets, trades and a sane cap", () => {
   expect(slotQualifies(coin("a", { capUsd: 100_000 }), "new")).toBe(false);
 });
 test("the range is wide on both sides of the cap", () => { expect(slotRange(10_000)).toEqual({ buy: 6_000, sell: 19_000 }); });
-test("size follows Kris inside the allowance", () => {
-  expect(slotSize(0.06)).toBe(0.06); expect(slotSize(5)).toBe(0.08); expect(slotSize(0.01)).toBe(0.03); expect(slotSize(null)).toBe(0.05);
-});
-test("a picked new pair replaces the weakest even without a higher score", () => {
-  const coins = [coin("a"), coin("b"), coin("c", { traders: 60 })];
-  expect(plan({ slots: [slot("a", { openedAtMs: now - 150_000 }), slot("b", { openedAtMs: now - 150_000 })], heldMints: new Set(["a", "b"]), coins, allowNew: new Set(["c"]) })).toMatchObject({ type: "close", forSwap: true });
-});
 test("an empty side opens its best coin", () => {
   const a = plan({ coins: [coin("weak", { traders: 60 }), coin("strong")] });
   expect(a).toMatchObject({ type: "open", kind: "new", coin: { mint: "strong" }, swap: false });
@@ -57,7 +50,7 @@ test("a full side swaps its weakest only for a clearly better coin", () => {
 });
 test("a slot opened seconds ago is not swapped just because it holds nothing yet", () => {
   const coins = [coin("a"), coin("b", { traders: 60 })];
-  expect(plan({ slots: [slot("a", { openedAtMs: now - 30_000 })], heldMints: new Set(["a"]), coins, config: { maxNew: 1 }, emptyMints: new Set(["a"]), allowNew: new Set(["b"]) })).toBeNull();
+  expect(plan({ slots: [slot("a", { openedAtMs: now - 30_000 })], heldMints: new Set(["a"]), coins, config: { maxNew: 1 }, emptyMints: new Set(["a"]) })).toBeNull();
 });
 test("a slot that sold out moves on after the minimum hold", () => {
   const coins = [coin("a"), coin("b"), coin("c", { traders: 60 })], slots = [slot("a", { openedAtMs: now - 150_000 }), slot("b", { openedAtMs: now - 150_000 })], heldMints = new Set(["a", "b"]);
@@ -72,9 +65,6 @@ test("a slot held over 15 minutes gives way to a fresh coin, however strong it s
   const base = { coins: [big, fresh], heldMints: new Set(["old"]), migratedAt: new Map([["f", now - 60_000]]), config: { maxMigrated: 1, maxNew: 0 } };
   expect(plan({ ...base, slots: [slot("old", { kind: "migrated", openedAtMs: now - 1_000_000 })] })).toMatchObject({ type: "close", slot: { mint: "old" }, forSwap: true });
   expect(plan({ ...base, slots: [slot("old", { kind: "migrated", openedAtMs: now - 600_000 })] })).toBeNull();
-});
-test("a pick stays good through its swap even if the coin passes three minutes", () => {
-  expect(plan({ coins: [coin("p", { ageMs: 200_000 })], allowNew: new Set(["p"]) })).toMatchObject({ type: "open", coin: { mint: "p" } });
 });
 test("a swap waits for the minimum hold and the swap gap", () => {
   const held = new Set(["a", "b"]), weak = [coin("a", { traders: 60, trades: 120, volSol: 5 }), coin("b"), coin("c")];
@@ -101,22 +91,4 @@ test("bundle share counts wallets buying the same size within a second", () => {
   expect(bundleShare([...same, ...rest])).toBeCloseTo(0.3);
   expect(bundleShare(rest)).toBe(0);
   expect(bundleShare([])).toBe(0);
-});
-test("only the new pair Kris picked can open", () => {
-  const coins = [coin("strong"), coin("picked", { traders: 80 })];
-  expect(plan({ coins, allowNew: new Set(["picked"]) })).toMatchObject({ type: "open", coin: { mint: "picked" } });
-  expect(plan({ coins, allowNew: new Set() })).toBeNull();
-});
-test("a migration does not need a pick", () => {
-  const m = coin("m", { migrated: true, capUsd: 80_000, traders: 400, trades: 900, ageMs: null });
-  expect(plan({ coins: [m], migratedAt: new Map([["m", now - 60_000]]), allowNew: new Set() })).toMatchObject({ type: "open", kind: "migrated" });
-});
-test("the pick is read from the last line and must be a candidate", () => {
-  expect(readPick("A has more wallets than B.\nPICK: A", ["A", "B"])).toEqual({ thought: "A has more wallets than B.", pick: "A", size: null });
-  expect(readPick("Love it.\nPICK: A 0.25", ["A", "B"])).toMatchObject({ pick: "A", size: 0.25 });
-  expect(readPick("Love it.\nPICK: Two Words 0.2 SOL", ["Two Words"])).toMatchObject({ pick: "Two Words", size: 0.2 });
-  expect(readPick("Neither.\nPICK: NONE", ["A", "B"]).pick).toBeNull();
-  expect(readPick("I like Z.\nPICK: Z", ["A", "B"]).pick).toBeNull();
-  expect(readPick("No final line here", ["A"])).toMatchObject({ thought: "No final line here", pick: null });
-  expect(readPick("Fine.\nPICK: **dogwif**.", ["DogWif"]).pick).toBe("DogWif");
 });
