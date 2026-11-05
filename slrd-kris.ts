@@ -108,6 +108,17 @@ const COMPARE_RULE = "You are comparing new pairs to decide if any deserves a po
   + "You trade aggressively and rotate often: when one coin clearly leads, take it, and size it by conviction from " + SLOT_CONFIG.minSizeSol + " to " + SLOT_CONFIG.maxSizeSol + " SOL. At most four sentences. Your very last line must be exactly PICK: followed by one coin name as written and your size in SOL, like PICK: NAME 0.2, or PICK: NONE.";
 const COMPARE_EVERY_MS = 45_000, PICK_LIFE_MS = 90_000; let comparedAt = 0, picked: { mint: string; at: number; size: number } | null = null;
 const passes = new Map<string, { coin: string; cap: number; at: number }>();
+/** What really happened to coins like these, from the tracker. Read once every few minutes. */
+let odds: unknown = null, oddsAt = 0;
+function newPairOdds() {
+  if (Date.now() - oddsAt < 300_000) return odds; oddsAt = Date.now();
+  try {
+    const rows = readFileSync(resolve(dot, "kris-outcomes.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l) as Outcome).filter(o => o.kind === "coin" && slotQualifies({ capUsd: o.cap, traders: o.wallets, trades: o.trades }, "new"));
+    const share = (n: number) => Math.round(n / rows.length * 100), timed = rows.filter(o => o.upMin != null || o.downMin != null);
+    odds = rows.length < 20 ? null : { similarCoinsTracked: rows.length, reachedPlus30Pct: share(rows.filter(o => o.high >= o.cap * 1.3).length), fellMinus30Pct: share(rows.filter(o => o.low <= o.cap * 0.7).length), ...(timed.length >= 20 ? { wentUpBeforeDownPct: Math.round(timed.filter(o => o.upMin != null && (o.downMin == null || o.upMin < o.downMin)).length / timed.length * 100) } : {}) };
+  } catch { odds = null; }
+  return odds;
+}
 /** Coins Kris passed on in the last 20 minutes and where they are now: real proof of its calls. */
 function passResults(coins: Coin[]) {
   const caps = new Map(coins.map(c => [c.mint, c.capUsd ?? null])), now = Date.now(), out: { coin: string; capWhenPassed: number; capNow: number; pct: number }[] = [];
@@ -134,7 +145,7 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
     if (!ev) return;
     const earlier = events.filter(e => e.kind === "compare" && e.thought && e.id !== ev.id && !/burned|bruis|sting|bites|bitter/i.test(e.thought)).slice(0, 3).map(e => ({ title: e.title, thought: e.thought }));
     let text = "";
-    for await (const chunk of streamLLM([{ role: "system", content: `${SYSTEM} ${COMPARE_RULE}` }, { role: "user", content: JSON.stringify({ candidates: rows.map(({ c: _c, ...r }) => r), openNewPairs: book.slots.filter(s => s.kind === "new").map(s => s.symbol), coinsYouPassedOn: passResults(coins), earlierComparisons: earlier }) }], { timeoutMs: 60_000 })) {
+    for await (const chunk of streamLLM([{ role: "system", content: `${SYSTEM} ${COMPARE_RULE}` }, { role: "user", content: JSON.stringify({ candidates: rows.map(({ c: _c, ...r }) => r), openNewPairs: book.slots.filter(s => s.kind === "new").map(s => s.symbol), coinsYouPassedOn: passResults(coins), oddsForCoinsLikeThese: newPairOdds(), earlierComparisons: earlier }) }], { timeoutMs: 60_000 })) {
       text += chunk; ev.thought = readPick(text, names).thought; save();
     }
     const { thought, pick, size } = readPick(text, names), chosen = rows.find(r => r.name === pick), sol = slotSize(size);

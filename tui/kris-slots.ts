@@ -21,7 +21,7 @@ export function slotScore(c: SlotCoin) {
 export function slotQualifies(c: SlotCoin, kind: SlotKind) {
   const cap = c.capUsd ?? 0, traders = c.traders ?? 0, trades = c.trades ?? 0;
   if (trades === 0 || traders / trades < 0.2) return false;
-  return kind === "new" ? cap >= 6_000 && cap <= 60_000 && traders >= 40 && trades >= 60 : cap >= 30_000 && cap <= 500_000 && traders >= 150;
+  return kind === "new" ? cap >= 6_000 && cap <= 60_000 && traders >= 40 && trades >= 60 : cap >= 15_000 && cap <= 500_000 && traders >= 100;
 }
 
 const round = (v: number) => { const m = 10 ** (Math.floor(Math.log10(v)) - 1); return Math.round(v / m) * m; };
