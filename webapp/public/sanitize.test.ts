@@ -31,3 +31,10 @@ test("a coin carries its candles and fills, and only their known fields", async 
   expect(c.candles[0]).toEqual({ m: 1, o: 2, h: 3, l: 1, c: 2, v: 5 });
   expect(c.fills[0]).toEqual({ atMs: 1, side: "buy", sol: 0.1 });
 });
+
+test("thoughts survive a flood of events without one", async () => {
+  const { publicKris } = await import("./sanitize.ts");
+  const events = [...Array.from({ length: 200 }, (_, i) => ({ id: "c" + i, atMs: 1000 - i })), { id: "t", atMs: 1, thought: "x" }];
+  const out = publicKris(events) as { id: string }[];
+  expect(out.some(e => e.id === "t")).toBe(true); expect(out.length).toBe(31);
+});

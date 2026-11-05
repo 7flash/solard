@@ -169,6 +169,8 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   }
   if (early >= SLOT_CONFIG.smallEarlyPct || share >= SLOT_CONFIG.smallBundleShare) budget = SLOT_CONFIG.minSizeSol; // signs of a bundle: still plays, at the smallest size
   await act({ action: "add", mint: c.mint, buy: a.buy, sell: a.sell, steps: SLOT_CONFIG.steps, budget });
+  // Every open with what was known at entry: joined with closed-pnl.jsonl, this shows which entries really pay. Events age out; this does not.
+  appendFileSync(resolve(dot, "kris-slots-log.jsonl"), JSON.stringify({ at: now, mint: c.mint, symbol: c.symbol ?? null, kind: a.kind, sol: budget, cap: c.capUsd ?? null, ageMs: c.ageMs ?? null, wallets: c.traders ?? 0, trades: c.trades ?? 0, volSol: c.volSol ?? 0, smart: c.smart ?? 0, score: a.score, early, share, buy: a.buy, sell: a.sell, swap: a.swap }) + String.fromCharCode(10));
   book.slots = book.slots.filter(s => s.mint !== c.mint);
   book.slots.push({ mint: c.mint, symbol: c.symbol ?? null, kind: a.kind, openedAtMs: now, score: a.score, buy: a.buy, sell: a.sell });
   book.lastActionMs = now; if (book.pendingKind === a.kind) book.pendingKind = null; saveBook(); seenBots.add(c.mint); walletAt = 0;

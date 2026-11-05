@@ -33,7 +33,7 @@ export function publicCoin(c: Row, s: Secrets, maxWallets = 150, maxTrades = 300
 
 const KRIS = ["id", "atMs", "kind", "mint", "symbol", "title", "thought", "reaction"];
 /** Kris's feed for krisagent.xyz. */
-export const publicKris = (events: Row[], max = 120) => events.slice(0, max).map(e => pick(e, KRIS));
+export const publicKris = (events: Row[], max = 120) => [...events.filter(e => e.thought).slice(0, max), ...events.filter(e => !e.thought).slice(0, 30)].map(e => pick(e, KRIS)).sort((a, b) => Number(b.atMs) - Number(a.atMs)); // new coins must not push his thoughts out
 
 const LEAK = /api[-_]?key|helius|x-slrd|bridge-token|privateKey|secretKey/i;
 export function assertClean(json: string, s: Secrets) {
