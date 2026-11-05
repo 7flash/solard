@@ -48,8 +48,10 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
     }
     if (now - o.lastSwapMs < c.swapGapMs) continue;
     // A slot is for fresh coins. An old one always has more wallets than a new one, so it gives way by age, not by score.
-    const rotateAfter = kind === "new" ? c.rotateNewMs : c.rotateMigratedMs, empty = (s: Slot) => !!o.emptyMints?.has(s.mint);
-    const now_ = mine.map(s => ({ s, score: empty(s) ? -1 : now - s.openedAtMs >= rotateAfter ? 0 : live.has(s.mint) ? slotScore(live.get(s.mint)!) : s.score / 2 })).sort((a, b) => a.score - b.score)[0]!;
+    const empty = (s: Slot) => !!o.emptyMints?.has(s.mint);
+    // Only a sold-out slot gives way. A coin still held stays on its range and in its slot, so money in coins stays bounded by the slots.
+    const now_ = mine.filter(empty).map(s => ({ s, score: -1 })).sort((a, b) => a.s.openedAtMs - b.s.openedAtMs)[0];
+    if (!now_) continue;
     if (now - now_.s.openedAtMs >= c.minHoldMs && best.score > now_.score * c.swapRatio) return { type: "close", slot: now_.s, reason: `${best.coin.symbol ?? best.coin.mint.slice(0, 6)} looks stronger`, forSwap: true };
   }
   return null;
