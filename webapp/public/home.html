@@ -31,7 +31,7 @@ h1 { font-size:40px; line-height:1.1; letter-spacing:-.02em; font-weight:800; ma
 <body>
 <nav><a href="/"><b>SOLARD</b></a><a href="/terminal/">Terminal</a><a href="/getting-started">Docs</a><a href="https://github.com/7flash/solard">GitHub</a><span class="spacer"></span><a class="btn primary" href="/launch">Launch an agent</a></nav>
 <div class="head">
-  <div><h1>Launched coins</h1><p class="lead">Coins launched on Solard, and the agents behind them.</p></div>
+  <div><h1>Agents</h1><p class="lead">Agents launched on Solard, each with its own coin.</p></div>
   <input id="q" type="search" placeholder="Search name or ticker" aria-label="Search coins">
 </div>
 <div class="grid" id="coins"></div>
@@ -49,12 +49,13 @@ const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls)
 const image = (src) => /^\/api\/media\/[a-f0-9]{64}\.(png|jpg|gif|webp)$/.test(src ?? "") ? src : /^https:\/\//.test(src ?? "") ? src : "";
 function card(c) {
   const a = el("a", c.mint === KRIS ? "coin main" : "coin");
-  a.href = c.mint === KRIS ? "/coin/kris" : `/coin/${encodeURIComponent(c.mint)}`;
+  a.href = c.mint === KRIS ? "/coin/kris" : `/agents/${encodeURIComponent(c.slug)}`;
   const pic = el("div", "pic", (c.symbol ?? "?").slice(0, 2)), url = image(c.image);
   if (url) { const img = new Image(); img.onload = () => { pic.textContent = ""; pic.style.backgroundImage = `url("${encodeURI(url)}")`; }; img.src = url; }
   const info = el("div", "info"), name = el("div", "name", c.name);
   if (c.mint === KRIS) name.append(el("span", "tag", "Agent"));
   else if (c.status !== "live") name.append(el("span", "tag soon", "Scheduled"));
+  else name.append(el("span", "tag", "Agent"));
   info.append(name, el("div", "tick", `$${c.symbol}`), el("div", "cap", c.marketCap ?? "—"));
   a.append(pic, info);
   return a;
@@ -66,11 +67,17 @@ function paint() {
   note.textContent = rows.length ? "" : q ? "No coins match." : "No coins yet.";
 }
 document.getElementById("q").addEventListener("input", paint);
-fetch("/api/launch-catalog").then((r) => r.json()).then((d) => {
-  items = (d.items ?? []).filter((c) => c.status === "live" || c.status === "funding" || c.status === "scheduled");
-  items.sort((a, b) => (b.mint === KRIS) - (a.mint === KRIS));
+const kris = { mint: KRIS, name: "Kris Agent", symbol: "KRIS", image: "/api/media/622d3725f71bacfa915f7c5fe19462315abadeb2bdb0de571c8228900fe92001.png", status: "live", marketCap: null };
+items = [kris]; paint();
+Promise.all([
+  fetch("/api/agents").then((r) => r.json()).catch(() => ({ agents: [] })),
+  fetch("/api/launch-catalog").then((r) => r.json()).catch(() => ({ items: [] })),
+]).then(([a, c]) => {
+  const caps = new Map((c.items ?? []).map((i) => [i.mint, i.marketCap]));
+  const coins = (a.agents ?? []).flatMap((x) => x.coin ? [{ ...x.coin, slug: x.slug }] : []);
+  items = [kris, ...coins].map((x) => ({ ...x, marketCap: caps.get(x.mint) ?? null }));
   paint();
-}).catch(() => { note.textContent = "Coins could not load right now."; });
+});
 </script>
 </body>
 </html>
