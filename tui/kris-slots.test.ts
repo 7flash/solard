@@ -107,3 +107,8 @@ test("a slot ending never sells held tokens", () => {
   expect(slotKeepsRange(4)).toBe(true); expect(slotKeepsRange(1)).toBe(true);
   expect(slotKeepsRange(0)).toBe(false); expect(slotKeepsRange(undefined)).toBe(false);
 });
+test("new pairs trade the fixed $5k to $60k range, migrations stay around their cap", () => {
+  expect(slotRange(9_000, "new")).toEqual({ buy: 5_000, sell: 60_000 });
+  expect(slotRange(40_000, "new")).toEqual({ buy: 5_000, sell: 60_000 });
+  expect(slotRange(50_000, "migrated")).toEqual({ buy: 30_000, sell: 95_000 });
+});

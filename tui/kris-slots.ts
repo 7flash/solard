@@ -8,7 +8,7 @@ export type SlotKind = "new" | "migrated";
 export type Slot = { mint: string; symbol: string | null; kind: SlotKind; openedAtMs: number; score: number; buy: number; sell: number };
 export type SlotAction = { type: "open"; kind: SlotKind; coin: SlotCoin; score: number; buy: number; sell: number; swap: boolean } | { type: "close"; slot: Slot; reason: string; forSwap: boolean };
 
-export const SLOT_CONFIG = { maxNew: 16, maxMigrated: 8, budgetSol: 0.02, migratedBudgetSol: 0.02, minSizeSol: 0.02, steps: 4, gasSol: 0.02, newMinAgeMs: 240_000, newAgeMs: 600_000, migratedAgeMs: 600_000, actionGapMs: 15_000, swapGapMs: 30_000, minHoldMs: 300_000, swapRatio: 2, rotateNewMs: 900_000, rotateMigratedMs: 900_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.3, smallBundleShare: 0.1, maxEarlyPct: 60, smallEarlyPct: 25 };
+export const SLOT_CONFIG = { maxNew: 16, maxMigrated: 8, budgetSol: 0.02, migratedBudgetSol: 0.02, minSizeSol: 0.02, steps: 6, newBuyUsd: 5_000, newSellUsd: 60_000, gasSol: 0.02, newMinAgeMs: 240_000, newAgeMs: 600_000, migratedAgeMs: 600_000, actionGapMs: 15_000, swapGapMs: 30_000, minHoldMs: 300_000, swapRatio: 2, rotateNewMs: 900_000, rotateMigratedMs: 900_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.3, smallBundleShare: 0.1, maxEarlyPct: 60, smallEarlyPct: 25 };
 type Config = typeof SLOT_CONFIG;
 
 /** Distinct wallets count most, smart wallets far more, volume a little. Few wallets across many trades is churn. */
@@ -28,7 +28,7 @@ export function slotQualifies(c: SlotCoin, kind: SlotKind) {
 const round = (v: number) => { const m = 10 ** (Math.floor(Math.log10(v)) - 1); return Math.round(v / m) * m; };
 /** A slot ending never sells: a bot holding tokens stays on its range, only an empty one stops. */
 export const slotKeepsRange = (holdingSteps?: number | null) => (holdingSteps ?? 0) > 0;
-export const slotRange = (cap: number) => ({ buy: round(cap * 0.6), sell: round(cap * 1.9) });
+export const slotRange = (cap: number, kind: SlotKind = "migrated") => kind === "new" ? { buy: SLOT_CONFIG.newBuyUsd, sell: SLOT_CONFIG.newSellUsd } : { buy: round(cap * 0.6), sell: round(cap * 1.9) };
 
 export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** When each coin was last seen trading. Absent from a list is not quiet: lists empty out on a daemon restart. */ lastSeen?: Map<string, number>; /** Slots holding nothing: the range sold out at its top, so the slot is free to move on. */ emptyMints?: Set<string>; config?: Partial<Config> }): SlotAction | null {
   const c = { ...SLOT_CONFIG, ...o.config }, now = o.nowMs;
@@ -44,7 +44,7 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
     if (!best) continue;
     if (mine.length < max) {
       if (o.freeSol < c.budgetSol + c.gasSol) continue;
-      return { type: "open", kind, coin: best.coin, score: best.score, ...slotRange(best.coin.capUsd!), swap: o.pendingKind === kind };
+      return { type: "open", kind, coin: best.coin, score: best.score, ...slotRange(best.coin.capUsd!, kind), swap: o.pendingKind === kind };
     }
     if (now - o.lastSwapMs < c.swapGapMs) continue;
     // A slot is for fresh coins. An old one always has more wallets than a new one, so it gives way by age, not by score.
