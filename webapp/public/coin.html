@@ -124,7 +124,7 @@ async function kris() {
     $("best").textContent = name(sorted[0]); $("worst").textContent = name(sorted[sorted.length - 1]);
   }
   const k = await fetch("/terminal/api/kris").then((r) => r.json()).catch(() => null);
-  const list = (k?.events ?? []).filter((e) => e.thought).slice(0, 12);
+  const list = (k?.events ?? []).filter((e) => e.thought).slice(0, 6);
   if (list.length) $("thoughts").replaceChildren(...list.map((e) => {
     const row = document.createElement("div"), when = document.createElement("small");
     row.className = "thought"; when.textContent = `${e.symbol ?? "Kris"} · ${ago(e.atMs)}`;
