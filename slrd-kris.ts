@@ -28,7 +28,7 @@ type Decision = { atMs: number; mint: string; name: string; symbol?: string | nu
 
 let events: KrisEvent[] = []; try { events = JSON.parse(readFileSync(out, "utf8")); } catch {}
 const isCoin = (e: KrisEvent) => e.kind === "coin" || e.kind === "migrated";
-const save = () => { const kept = [...events.filter(isCoin).slice(0, KEEP_COINS), ...events.filter(e => !isCoin(e)).slice(0, KEEP)].sort((a, b) => b.atMs - a.atMs); writeFileSync(`${out}.tmp`, JSON.stringify(kept)); renameSync(`${out}.tmp`, out); };
+const save = () => { const kept = [...events.filter(isCoin).slice(0, KEEP_COINS), ...events.filter(e => !isCoin(e)).slice(0, KEEP)].sort((a, b) => b.atMs - a.atMs); writeFileSync(`${out}.tmp`, JSON.stringify(kept)); try { renameSync(`${out}.tmp`, out); } catch { /* Windows: a reader has it open; the next save writes it */ } };
 const add = (e: Omit<KrisEvent, "id">) => { const ev = { ...e, id: `${e.atMs}-${e.kind}-${e.mint}` }; if (events.some(x => x.id === ev.id)) return null; events.unshift(ev); events = events.slice(0, KEEP); save(); return ev; };
 
 /** Trades and range moves wait their turn; a new coin gets a thought only when nothing else is waiting. */

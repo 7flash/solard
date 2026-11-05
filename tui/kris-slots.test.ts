@@ -34,7 +34,7 @@ test("coins older than three minutes are not new pairs", () => {
   expect(plan({ coins: [coin("unknown", { ageMs: null })] })).toBeNull();
 });
 test("no SOL for the budget and fees, no open", () => { expect(plan({ coins: [coin("a")], freeSol: 0.02 })).toBeNull(); });
-test("one action a minute at most", () => { expect(plan({ coins: [coin("a")], lastActionMs: now - 30_000 })).toBeNull(); });
+test("one action every 30 seconds at most", () => { expect(plan({ coins: [coin("a")], lastActionMs: now - 10_000 })).toBeNull(); });
 test("a coin already held, or just closed, is not opened", () => {
   expect(plan({ coins: [coin("a")], heldMints: new Set(["a"]) })).toBeNull();
   expect(plan({ coins: [coin("a")], closedAt: new Map([["a", now - 60_000]]) })).toBeNull();
@@ -57,8 +57,8 @@ test("a full side swaps its weakest only for a clearly better coin", () => {
 });
 test("a swap waits for the minimum hold and the swap gap", () => {
   const held = new Set(["a", "b"]), weak = [coin("a", { traders: 60, trades: 120, volSol: 5 }), coin("b"), coin("c")];
-  expect(plan({ slots: [slot("a", { openedAtMs: now - 60_000 }), slot("b")], heldMints: held, coins: weak })).toBeNull();
-  expect(plan({ slots: [slot("a"), slot("b")], heldMints: held, coins: weak, lastSwapMs: now - 60_000 })).toBeNull();
+  expect(plan({ slots: [slot("a", { openedAtMs: now - 30_000 }), slot("b")], heldMints: held, coins: weak })).toBeNull();
+  expect(plan({ slots: [slot("a"), slot("b")], heldMints: held, coins: weak, lastSwapMs: now - 30_000 })).toBeNull();
 });
 test("the open after a swap close is marked as the swap", () => {
   expect(plan({ coins: [coin("c")], pendingKind: "new" })).toMatchObject({ type: "open", swap: true });
