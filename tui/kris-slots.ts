@@ -26,6 +26,8 @@ export function slotQualifies(c: SlotCoin, kind: SlotKind) {
 }
 
 const round = (v: number) => { const m = 10 ** (Math.floor(Math.log10(v)) - 1); return Math.round(v / m) * m; };
+/** A slot ending never sells: a bot holding tokens stays on its range, only an empty one stops. */
+export const slotKeepsRange = (holdingSteps?: number | null) => (holdingSteps ?? 0) > 0;
 export const slotRange = (cap: number) => ({ buy: round(cap * 0.6), sell: round(cap * 1.9) });
 
 export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** When each coin was last seen trading. Absent from a list is not quiet: lists empty out on a daemon restart. */ lastSeen?: Map<string, number>; /** Slots holding nothing: the range sold out at its top, so the slot is free to move on. */ emptyMints?: Set<string>; config?: Partial<Config> }): SlotAction | null {

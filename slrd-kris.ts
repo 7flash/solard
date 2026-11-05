@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { appendFileSync } from "node:fs";
 import { bundleShare, type BuyRow } from "./tui/bundles.ts";
 import { startOutcome, stepOutcome, type Outcome } from "./tui/kris-outcomes.ts";
-import { planSlots, slotQualifies, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
+import { planSlots, slotKeepsRange, slotQualifies, SLOT_CONFIG, type Slot, type SlotCoin, type SlotKind } from "./tui/kris-slots.ts";
 import { coinVerdict, lastFill, rangeSide, rangeTitle, scrubReason, tradeReaction, tradeTitle, type KrisEvent } from "./webapp/public/kris-events.ts";
 
 process.env.JSX_AI_RUNTIME ??= "codex";
@@ -153,10 +153,11 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   if (!a) return;
   if (a.type === "close") {
     // Buys off first: a sale that fails must not leave the bot buying with no slot watching it.
-    await act({ action: "pause", mint: a.slot.mint }); await act({ action: "stop", mint: a.slot.mint }); closing.set(a.slot.mint, now);
+    const keepOnRange = slotKeepsRange(bots.find(b => b.mint === a.slot.mint)?.holdingSteps);
+    if (!keepOnRange) { await act({ action: "pause", mint: a.slot.mint }); await act({ action: "stop", mint: a.slot.mint }); closing.set(a.slot.mint, now); }
     book.slots = book.slots.filter(s => s.mint !== a.slot.mint); book.closedAt = [...book.closedAt.filter(([, at]) => now - at < SLOT_CONFIG.reopenAfterMs), [a.slot.mint, now]];
     book.lastActionMs = now; if (a.forSwap) { book.lastSwapMs = now; book.pendingKind = a.slot.kind; } saveBook();
-    const ev = add({ atMs: now, kind: "decision", mint: a.slot.mint, symbol: a.slot.symbol, title: `Closing: ${a.reason}` });
+    const ev = add({ atMs: now, kind: "decision", mint: a.slot.mint, symbol: a.slot.symbol, title: keepOnRange ? `Slot freed, range keeps it: ${a.reason}` : `Closing: ${a.reason}` });
     return;
   }
   const c = a.coin; let budget = a.kind === "migrated" ? SLOT_CONFIG.migratedBudgetSol : SLOT_CONFIG.budgetSol;

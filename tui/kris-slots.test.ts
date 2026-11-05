@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { bundleShare, earlyBoughtPct } from "./bundles.ts";
-import { planSlots, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
+import { planSlots, slotKeepsRange, slotQualifies, slotRange, slotScore, type Slot, type SlotCoin } from "./kris-slots.ts";
 
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
@@ -102,4 +102,8 @@ test("with room left a coin opens without any swap", () => {
 test("a new pair waits out its first four minutes", () => {
   const at = (ageMs: number) => planSlots({ coins: [coin("c", { ageMs })], slots: [], heldMints: new Set(), closedAt: new Map(), migratedAt: new Map(), freeSol: 5, nowMs: now, lastActionMs: 0, lastSwapMs: 0 });
   expect(at(120_000)).toBeNull(); expect(at(300_000)).toMatchObject({ type: "open" }); expect(at(700_000)).toBeNull();
+});
+test("a slot ending never sells held tokens", () => {
+  expect(slotKeepsRange(4)).toBe(true); expect(slotKeepsRange(1)).toBe(true);
+  expect(slotKeepsRange(0)).toBe(false); expect(slotKeepsRange(undefined)).toBe(false);
 });
