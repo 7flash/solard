@@ -7,6 +7,8 @@ const port = Number(process.env.PORT ?? 3030), MAX_BODY = 3_000_000, MAX_COINS =
 const files: Record<string, [string, string]> = { "/home": ["home.html", "text/html; charset=utf-8"], "/launch": ["launch.html", "text/html; charset=utf-8"], "/coin/kris": ["coin.html", "text/html; charset=utf-8"], "/terminal.webp": ["terminal.webp", "image/webp"], "/": ["index.html", "text/html; charset=utf-8"], "/live.js": ["live.js", "text/javascript; charset=utf-8"], "/style.css": ["style.css", "text/css; charset=utf-8"] };
 /** Kris trades in public, so this one address is shown on purpose. The publisher still refuses to send any wallet. */
 const wallet = "FaezkixuFKvFQS2NPPopZ7PzTd1a41MsMncunRkTLbgr";
+/** The newest frame of Kris's browser, in memory only. */
+let screen: { body: Uint8Array; url: string; at: number } | null = null;
 let overview = "null", kris = "[]", ca = "", stats = "null"; const coins = new Map<string, string>(), ART = new Set(["ape", "profit", "loss", "dip", "hold"]);
 const json = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 const digest = (a: string) => new Bun.CryptoHasher("sha256").update(a).digest("hex");
@@ -25,7 +27,18 @@ Bun.serve({ port, hostname: "127.0.0.1", maxRequestBodySize: MAX_BODY, async fet
     }
     return json(`{"ok":true}`);
   }
+  if (req.method === "POST" && url.pathname === "/api/screen") {
+    if (!allowed((req.headers.get("authorization") ?? "").replace(/^Bearer /, ""))) return json(`{"error":"no"}`, 401);
+    const body = new Uint8Array(await req.arrayBuffer()), at = req.headers.get("x-screen-url") ?? "";
+    if (body.length > 600_000 || !/^https:\/\/pump\.fun\//.test(at)) return json(`{"error":"bad frame"}`, 400);
+    screen = { body, url: at, at: Date.now() };
+    return json(`{"ok":true}`);
+  }
   if (req.method !== "GET" && req.method !== "HEAD") return new Response("no", { status: 405 });
+  if (url.pathname === "/api/screen") {
+    if (!screen || Date.now() - screen.at > 20_000) return new Response("offline", { status: 404, headers: { "cache-control": "no-store" } });
+    return new Response(screen.body, { headers: { "content-type": "image/jpeg", "cache-control": "no-store", "x-screen-url": screen.url } });
+  }
   // solard.xyz/terminal with no agent named is the page about the terminal; ?agent=kris is a live terminal.
   if (url.pathname === "/" && (req.headers.get("x-solard-path") ?? "").startsWith("/terminal") && !url.searchParams.get("agent")) return new Response(readFileSync(`${dir}/landing.html`), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
   // Agent and coin pages read their data in the browser, so one file serves every address.

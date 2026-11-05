@@ -150,6 +150,15 @@ async function pullBots() {
   } catch {}
 }
 
+/** Kris's real browser when it is streaming; the terminal when it is not. */
+let frameUrl = "";
+async function showBrowser() {
+  const r = await fetch("api/screen", { cache: "no-store" }).catch(() => null), img = $("browser") as HTMLImageElement;
+  if (!r?.ok) { img.hidden = true; return; }
+  const next = URL.createObjectURL(await r.blob());
+  img.onload = () => { if (frameUrl) URL.revokeObjectURL(frameUrl); frameUrl = next; img.hidden = false; };
+  img.src = next;
+}
 export default function mount() {
   fit(); moveTo(40, 40); void loadArt();
   const onMessage = (m: MessageEvent) => {
@@ -160,10 +169,11 @@ export default function mount() {
   };
   const onClick = (e: Event) => { const b = (e.target as HTMLElement).closest("[data-mint]") as HTMLElement | null; if (b) { handsOffUntil = Date.now() + 30_000; void ask("solard:open", { mint: b.dataset.mint! }); } };
   const hands = () => { handsOffUntil = Date.now() + 30_000; };
+  void showBrowser(); const browserTimer = setInterval(() => void showBrowser(), 2_000);
   new ResizeObserver(fit).observe($("screen")); window.addEventListener("message", onMessage); window.addEventListener("resize", fit); $("history").addEventListener("click", onClick);
   $("screen").addEventListener("mouseenter", hands); $("screen").addEventListener("mouseleave", hands);
   void pullBots();
   if (DEMO) void loadArt().then(() => sleep(2_500)).then(demo); else void pull();
   const a = setInterval(() => { if (!DEMO) void pull(); }, 2_000), b = setInterval(() => void pullBots(), 6_000), c = setInterval(() => { if (!DEMO) void drain(); }, 5_000);
-  return () => { clearInterval(a); clearInterval(b); clearInterval(c); window.removeEventListener("message", onMessage); window.removeEventListener("resize", fit); };
+  return () => { clearInterval(browserTimer); clearInterval(a); clearInterval(b); clearInterval(c); window.removeEventListener("message", onMessage); window.removeEventListener("resize", fit); };
 }

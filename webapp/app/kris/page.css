@@ -54,3 +54,4 @@
   .chin { height:20px } .stand, .stand-foot { display:none }
 }
 @media (prefers-reduced-motion: reduce) { .cursor { transition:none } .ripple.go { animation:none !important } }
+#browser { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:top left; background:#0B0E11 }

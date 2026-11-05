@@ -21,7 +21,7 @@ export default function KrisRoom() {
               <div className="browser-bar"><span className="nav">‹</span><span className="nav">›</span><span className="nav">⟳</span><a className="address" href="https://solard.xyz/terminal?agent=kris" target="_blank" rel="noreferrer"><span className="lock">●</span> solard.xyz/terminal?agent=kris</a></div>
             </div>
             <div className="screen" id="screen">
-              <iframe id="term" title="Solard terminal" src="./?embed=1&sort=last&dir=desc" />
+              <iframe id="term" title="Solard terminal" src="./?embed=1&sort=last&dir=desc" /><img id="browser" alt="" hidden />
               <div id="ripple" className="ripple" />
               <div id="cursor" className="cursor">
                 <svg viewBox="0 0 24 24" width="36" height="36"><path d="M4 2l16 10-7.2 1.6L9 21z" fill="#8FA8FF" stroke="#0B0E11" strokeWidth="1.5" strokeLinejoin="round" /></svg>
