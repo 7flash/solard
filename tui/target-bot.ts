@@ -71,6 +71,12 @@ const sharedQuoteSol = (connection: Connection) => {
   return l;
 };
 
+/** A buy may fill anywhere up to the range level it is buying for: the range decides, not the last stream price. */
+export function buySlippageBps(levels: number[], priceSol: number, baseBps: number) {
+  const above = levels.filter(l => l >= priceSol);
+  return above.length ? Math.max(baseBps, Math.ceil((Math.min(...above) / priceSol - 1) * 10_000)) : baseBps;
+}
+
 export class TargetBot {
   private stopped = false;
   private balance: { raw: bigint; at: number } | null = null;
@@ -292,7 +298,7 @@ export class TargetBot {
     const confirm = targetPlan({ levels, budgetSol: this.o.budgetSol, balanceRaw: fresh, decimals: supply.decimals, priceSol, buysPaused: this.status.buysPaused });
     if (!confirm.action || Date.now() < this.holdUntil) return;
     // Coins quoted in another token route SOL -> quote -> coin: two hops of price impact need more room.
-    await this.execute(confirm, priceSol, fresh, supply.decimals, slippageBps, Math.min(...levels));
+    await this.execute(confirm, priceSol, fresh, supply.decimals, confirm.action.side === "buy" ? buySlippageBps(levels, priceSol, slippageBps) : slippageBps, Math.min(...levels));
   }
 
   /** Pool price from our own venue code; for pools it cannot read (e.g. Raydium CPMM after a migration),
