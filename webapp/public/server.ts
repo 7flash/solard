@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 
 const dir = import.meta.dir, token = readFileSync(`${dir}/.token`, "utf8").trim();
 const port = Number(process.env.PORT ?? 3030), MAX_BODY = 3_000_000, MAX_COINS = 80;
-const files: Record<string, [string, string]> = { "/home": ["home.html", "text/html; charset=utf-8"], "/launch": ["launch.html", "text/html; charset=utf-8"], "/terminal.webp": ["terminal.webp", "image/webp"], "/": ["index.html", "text/html; charset=utf-8"], "/live.js": ["live.js", "text/javascript; charset=utf-8"], "/style.css": ["style.css", "text/css; charset=utf-8"] };
+const files: Record<string, [string, string]> = { "/home": ["home.html", "text/html; charset=utf-8"], "/launch": ["launch.html", "text/html; charset=utf-8"], "/coin/kris": ["coin.html", "text/html; charset=utf-8"], "/terminal.webp": ["terminal.webp", "image/webp"], "/": ["index.html", "text/html; charset=utf-8"], "/live.js": ["live.js", "text/javascript; charset=utf-8"], "/style.css": ["style.css", "text/css; charset=utf-8"] };
 let overview = "null", kris = "[]", ca = ""; const coins = new Map<string, string>(), ART = new Set(["ape", "profit", "loss", "dip", "hold"]);
 const json = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 const digest = (a: string) => new Bun.CryptoHasher("sha256").update(a).digest("hex");
