@@ -122,16 +122,17 @@ async function demo() {
 function Bubble() {
   const shown = current ? events.filter(e => e.id === current) : [];
   if (!shown.length && note) return <div><div className="act off">Reviewing</div><div className="thought">{note}</div></div>;
-  const b = bubble(shown.length ? shown : events, Date.now());
+  const b = bubble(shown.length ? shown : thoughts(), Date.now());
   if (!b) return <div className="thought idle">Watching the terminal. Nothing to report yet.</div>;
   const r = acting ? REACTIONS[acting] : null;
   return <div><div className={`act ${r ? r.tone : "off"}`}>{r?.label ?? "Watching"}</div><div className="bubble-head"><b>{b.coin}</b> {b.title}</div><div className="thought">{b.thought ?? (b.thinking ? "Thinking…" : "")}</div></div>;
 }
-const History = () => <div>{events.length ? events.slice(0, 80).map(e => <button key={e.id} className={`entry ${e.kind}`} data-mint={e.mint}>
+const thoughts = () => events.filter(e => e.thought);
+const History = () => <div>{thoughts().length ? thoughts().slice(0, 80).map(e => <button key={e.id} className={`entry ${e.kind}`} data-mint={e.mint}>
   <span className="entry-top"><b>{e.symbol ?? short(e.mint)}</b><span className="dim num">{clock(e.atMs)}</span></span>
-  <span>{e.title}</span>{e.thought ? <span className="entry-thought">{e.thought}</span> : null}</button>) : <div className="dim empty">No trades yet.</div>}</div>;
+  <span className="entry-thought">{e.thought}</span></button>) : <div className="dim empty">Nothing yet.</div>}</div>;
 
-function paint() { render(<Bubble />, $("bubble")); render(<History />, $("history")); $("history-n").textContent = `${events.length}`; }
+function paint() { render(<Bubble />, $("bubble")); render(<History />, $("history")); $("history-n").textContent = `${thoughts().length}`; }
 
 async function pull() {
   try {
