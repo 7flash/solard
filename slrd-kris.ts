@@ -192,7 +192,7 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
     add({ atMs: now, kind: "coin", mint: c.mint, symbol: c.symbol ?? null, title: `Bundle: skip, ${Math.round(share * 100)}% of wallets bought together, ${Math.round(early)}% of supply bought in the first 3s` });
     return;
   }
-  if (early >= SLOT_CONFIG.smallEarlyPct) budget = SLOT_CONFIG.minSizeSol; // heavy early buying: still plays, at the smallest size
+  if (early >= SLOT_CONFIG.smallEarlyPct || share >= SLOT_CONFIG.smallBundleShare) budget = SLOT_CONFIG.minSizeSol; // signs of a bundle: still plays, at the smallest size
   await act({ action: "add", mint: c.mint, buy: a.buy, sell: a.sell, steps: SLOT_CONFIG.steps, budget });
   book.slots = book.slots.filter(s => s.mint !== c.mint); if (picked?.mint === c.mint) picked = null;
   book.slots.push({ mint: c.mint, symbol: c.symbol ?? null, kind: a.kind, openedAtMs: now, score: a.score, buy: a.buy, sell: a.sell });
