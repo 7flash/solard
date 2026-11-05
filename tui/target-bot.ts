@@ -71,10 +71,12 @@ const sharedQuoteSol = (connection: Connection) => {
   return l;
 };
 
-/** The most a buy may pay: the range level it is buying for. It never falls under the old stream guard, so a level just above the price still fills. */
-export function buyLimitSol(levels: number[], priceSol: number, baseBps: number) {
-  const above = levels.filter(l => l >= priceSol), old = priceSol * (1.07 + baseBps / 10_000);
-  return above.length ? Math.max(Math.min(...above), old) : old;
+/** A buy may land up to its range level. Slippage is the room to get there, at most 15%: a price-only order has none, so
+ * any tick between quote and landing failed it. The guard refuses a quote more than 5% over the level. */
+export function buyOrder(levels: number[], priceSol: number, baseBps: number) {
+  const above = levels.filter(l => l >= priceSol), limit = Math.max(above.length ? Math.min(...above) : 0, priceSol * (1.07 + baseBps / 10_000));
+  const slippageBps = Math.min(1_500, Math.max(baseBps, Math.ceil((limit / priceSol - 1) * 10_000)));
+  return { slippageBps, maxPriceSol: limit * 1.05 * (1 + slippageBps / 10_000) };
 }
 
 export class TargetBot {
@@ -298,7 +300,7 @@ export class TargetBot {
     const confirm = targetPlan({ levels, budgetSol: this.o.budgetSol, balanceRaw: fresh, decimals: supply.decimals, priceSol, buysPaused: this.status.buysPaused });
     if (!confirm.action || Date.now() < this.holdUntil) return;
     // Coins quoted in another token route SOL -> quote -> coin: two hops of price impact need more room.
-    await this.execute(confirm, priceSol, fresh, supply.decimals, slippageBps, Math.min(...levels), buyLimitSol(levels, priceSol, slippageBps));
+    await this.execute(confirm, priceSol, fresh, supply.decimals, slippageBps, Math.min(...levels), buyOrder(levels, priceSol, slippageBps));
   }
 
   /** Pool price from our own venue code; for pools it cannot read (e.g. Raydium CPMM after a migration),
@@ -392,7 +394,7 @@ export class TargetBot {
     this.o.onDead?.();
   }
 
-  private async execute(plan: TargetPlan, priceSol: number, balanceRaw: bigint, decimals: number, slippageBps: number, floorSol: number, buyLimit?: number) {
+  private async execute(plan: TargetPlan, priceSol: number, balanceRaw: bigint, decimals: number, slippageBps: number, floorSol: number, order?: ReturnType<typeof buyOrder>) {
     const label = `${this.o.wallet} ${this.o.mint.slice(0, 6)}`;
     let a = plan.action!;
     if (a.side === "buy" && this.o.buyRoom) {
@@ -417,7 +419,7 @@ export class TargetBot {
       if (amountSol < 0.003) return;
       this.status.inFlight = `buy ${amountSol.toFixed(4)} SOL (to ${plan.target}/${plan.steps} steps)`; this.write();
       this.o.log(`${label}: BUY ${amountSol.toFixed(4)} SOL to reach ${plan.target}/${plan.steps} steps`);
-      result = await this.o.client.buy({ wallet: this.o.wallet, token: this.o.mint, amount: amountSol.toFixed(6), ...(buyLimit ? { maxPriceSol: buyLimit } : { slippageBps, maxPriceSol: priceSol * (1.07 + slippageBps / 10_000) }) });
+      result = await this.o.client.buy({ wallet: this.o.wallet, token: this.o.mint, amount: amountSol.toFixed(6), ...(order ?? { slippageBps, maxPriceSol: priceSol * (1.07 + slippageBps / 10_000) }) });
     } else {
       const all = a.amountRaw >= balanceRaw;
       this.status.inFlight = `sell ${(Number(a.amountRaw) / 10 ** decimals).toFixed(0)} tokens (to ${plan.target}/${plan.steps} steps)`; this.write();
