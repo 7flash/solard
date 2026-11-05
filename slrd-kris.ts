@@ -109,7 +109,7 @@ async function act(body: Record<string, unknown>) {
 }
 const COMPARE_RULE = "You are comparing new pairs to decide if any deserves a position right now. Let your gut reaction show. Name the coins, compare them on what differs (wallets against trades, buy and sell flow, volume, smart wallets, cap), and say which is strongest and why the others lose. Passing is fine when nothing leads. "
   + "You trade aggressively and rotate often: when one coin clearly leads, take it, and size it by conviction from " + SLOT_CONFIG.minSizeSol + " to " + SLOT_CONFIG.maxSizeSol + " SOL. At most four sentences. Your very last line must be exactly PICK: followed by one coin name as written and your size in SOL, like PICK: NAME 0.2, or PICK: NONE.";
-const COMPARE_EVERY_MS = 30_000, PICK_LIFE_MS = 90_000; let comparedAt = 0, picked: { mint: string; at: number; size: number } | null = null;
+const COMPARE_EVERY_MS = 30_000, PICK_LIFE_MS = 90_000; let llmDownUntil = 0, comparedAt = 0, picked: { mint: string; at: number; size: number } | null = null;
 const passes = new Map<string, { coin: string; cap: number; at: number }>();
 /** What really happened to coins like these, from the tracker. Read once every few minutes. */
 let odds: unknown = null, oddsAt = 0;
@@ -147,11 +147,13 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
     const names = rows.map(r => r.name), ev = add({ atMs: Date.now(), kind: "compare", mint: rows[0]!.c.mint, symbol: names.length > 1 ? "New pairs" : names[0]!, title: `Comparing ${names.join(", ")}` });
     if (!ev) return;
     const earlier = events.filter(e => e.kind === "compare" && e.thought && e.id !== ev.id && !/burned|bruis|sting|bites|bitter/i.test(e.thought)).slice(0, 3).map(e => ({ title: e.title, thought: e.thought }));
-    let text = "";
-    for await (const chunk of streamLLM([{ role: "system", content: `${SYSTEM} ${COMPARE_RULE}` }, { role: "user", content: JSON.stringify({ candidates: rows.map(({ c: _c, ...r }) => r), openNewPairs: book.slots.filter(s => s.kind === "new").map(s => s.symbol), coinsYouPassedOn: passResults(coins), oddsForCoinsLikeThese: newPairOdds(), earlierComparisons: earlier }) }], { timeoutMs: 60_000 })) {
+    let text = "", failed = Date.now() < llmDownUntil;
+    if (!failed) try { for await (const chunk of streamLLM([{ role: "system", content: `${SYSTEM} ${COMPARE_RULE}` }, { role: "user", content: JSON.stringify({ candidates: rows.map(({ c: _c, ...r }) => r), openNewPairs: book.slots.filter(s => s.kind === "new").map(s => s.symbol), coinsYouPassedOn: passResults(coins), oddsForCoinsLikeThese: newPairOdds(), earlierComparisons: earlier }) }], { timeoutMs: 60_000 })) {
       text += chunk; ev.thought = readPick(text, names).thought; save();
-    }
-    const { thought, pick, size } = readPick(text, names), chosen = rows.find(r => r.name === pick), sol = slotSize(size);
+    } } catch (e) { failed = true; if (/usage limit/i.test(String(e))) llmDownUntil = Date.now() + 600_000; console.log(`${new Date().toISOString()} compare: ${String(e).slice(0, 120)}`); }
+    // No model: the top score still plays, so a Codex outage does not stop new pairs.
+    const top = failed ? [...rows].sort((a, b) => slotScore(b.c) - slotScore(a.c))[0]! : null;
+    const { thought, pick, size } = top ? { thought: `${top.name} leads on the numbers: ${top.wallets} wallets, ${top.last100Trades.buySol} SOL bought against ${top.last100Trades.sellSol} sold.`, pick: top.name, size: null } : readPick(text, names), chosen = rows.find(r => r.name === pick), sol = slotSize(size);
     ev.thought = thought; ev.title = chosen ? `Picked ${chosen.name} at ${sol} SOL${names.length > 1 ? ` over ${names.filter(n => n !== chosen.name).join(", ")}` : ""}` : `Passed on ${names.join(", ")}`;
     if (chosen) { ev.mint = chosen.c.mint; picked = { mint: chosen.c.mint, at: Date.now(), size: sol }; }
     for (const r of rows) if (r !== chosen && r.c.capUsd && !passes.has(r.c.mint)) passes.set(r.c.mint, { coin: r.name, cap: r.c.capUsd, at: Date.now() });
@@ -163,6 +165,7 @@ const closing = new Map<string, number>(), missingSince = new Map<string, number
 async function runSlots(bots: Bot[], coins: Coin[]) {
   if (existsSync(offPath)) return;
   const held = new Set(bots.map(b => b.mint));
+  try { const keep = new Set(JSON.parse(readFileSync(resolve(dot, "kris-keep.json"), "utf8")) as string[]), left = book.slots.filter(s => !keep.has(s.mint)); if (left.length !== book.slots.length) { book.slots = left; saveBook(); } } catch {}
   // A position closed from anywhere else leaves its slot.
   if (!bots.length) return; // the daemon is restarting
   for (const s of book.slots) if (held.has(s.mint)) missingSince.delete(s.mint); else if (!missingSince.has(s.mint)) missingSince.set(s.mint, Date.now());
