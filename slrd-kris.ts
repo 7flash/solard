@@ -145,7 +145,7 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
   } catch (e) { console.log(`${new Date().toISOString()} compare: ${String(e).slice(0, 160)}`); }
   finally { thinking = false; void drainThoughts(); }
 }
-const missingSince = new Map<string, number>(), lastSeen = new Map<string, number>();
+const missingSince = new Map<string, number>(), lastSeen = new Map<string, number>(), pendingSide = new Map<string, { side: string; at: number }>(), reportedAt = new Map<string, number>();
 async function runSlots(bots: Bot[], coins: Coin[]) {
   if (existsSync(offPath)) return;
   const held = new Set(bots.map(b => b.mint));
@@ -216,9 +216,13 @@ for (;;) {
       }
       if (at) seenTrade.set(b.mint, Math.max(at, prev ?? 0));
       if (b.capUsd && b.range) {
-        const side = rangeSide(b.capUsd, b.range), was = sides.get(b.mint);
-        if (seeded && was && was !== side) { const ev = add({ atMs: Date.now(), kind: "range", mint: b.mint, symbol: b.symbol ?? null, title: rangeTitle(side, b.capUsd, b.range), reaction: side === "inside" ? undefined : "hold" }); if (ev) void think(ev, { event: side === "inside" ? "price came back into the range" : `price went ${side} the range`, ...facts(b) }); }
-        sides.set(b.mint, side);
+        // A price sitting on a range edge crosses it every few seconds: it counts once it has stayed 20s, and at most every 2 min.
+        const side = rangeSide(b.capUsd, b.range), was = sides.get(b.mint), now = Date.now();
+        if (side === was) pendingSide.delete(b.mint); else if (pendingSide.get(b.mint)?.side !== side) pendingSide.set(b.mint, { side, at: now });
+        const settled = (pendingSide.get(b.mint)?.at ?? now) <= now - 20_000 && now - (reportedAt.get(b.mint) ?? 0) >= 120_000;
+        if (seeded && was && was !== side && settled) {
+          reportedAt.set(b.mint, now); pendingSide.delete(b.mint); const ev = add({ atMs: Date.now(), kind: "range", mint: b.mint, symbol: b.symbol ?? null, title: rangeTitle(side, b.capUsd, b.range), reaction: side === "inside" ? undefined : "hold" }); if (ev) void think(ev, { event: side === "inside" ? "price came back into the range" : `price went ${side} the range`, ...facts(b) }); }
+        if (!was || settled) sides.set(b.mint, side);
       }
     }
     for (const c of ov.coins ?? []) {

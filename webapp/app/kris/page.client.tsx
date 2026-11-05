@@ -120,7 +120,7 @@ async function demo() {
 }
 
 function Bubble() {
-  const shown = current ? events.filter(e => e.id === current) : [];
+  const shown = current ? events.filter(e => e.id === current && e.thought) : [];
   if (!shown.length && note) return <div><div className="act off">Reviewing</div><div className="thought">{note}</div></div>;
   const b = bubble(shown.length ? shown : thoughts(), Date.now());
   if (!b) return <div className="thought idle">Watching the terminal. Nothing to report yet.</div>;
