@@ -528,7 +528,7 @@ async function startTargetOnce(entry: BotEntry): Promise<boolean> {
     },
     statusPath: targetStatusPath(entry), buysPaused: entry.buysPaused,
     buyRoom: async sol => buyRoom({ freeSol: await walletFreeSol(entry.wallet, 5_000).catch(() => null), buySol: sol, addedAtMs: entry.addedAt, nowMs: Date.now(),
-      floorSol: Number(process.env.SLRD_SOL_FLOOR ?? 0.1), newEntryMin: Number(process.env.SLRD_NEW_ENTRY_MIN ?? 30) }),
+      floorSol: Number(process.env.SLRD_SOL_FLOOR ?? 0.1), newEntryMin: Number(process.env.SLRD_NEW_ENTRY_MIN ?? 0) }),
     balanceOf: (owner, mint) => walletBalances.balance(owner, mint), onTraded: () => { walletBalances.invalidate(client.walletAddress(entry.wallet)); freeSolByWallet.delete(entry.wallet); }, onPriceRejected: () => { feed.invalidate(entry.mint); seeds.delete(entry.mint); }, urgent: !!entry.smart,
     log: text => { log(text); write(botLogPath(entry), `annotation target ${text}`); },
     onDead: () => removeBot(root, entry.wallet, entry.mint), flowSol, supply }).start();
