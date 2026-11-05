@@ -8,7 +8,7 @@ import { bundledWallets } from "../../tui/bundles.ts";
 
 type Bot = { wallet: string; mint: string; symbol?: string | null; capUsd?: number | null; range?: { unit: string; buy: number; sell: number } | null; steps?: number;
   holdingSteps?: number; target?: number; budgetSol?: number; base: number; mult: number; valueSol?: number | null; pnl: number; flowSol: number; source: string; buysPaused: boolean;
-  error: string | null; stale: boolean; nextBuy?: number | null; nextSell?: number | null; addedAt?: number | null; lastTradeAtMs?: number | null; vol1hSol?: number | null; volCoveredMin?: number | null; amountRaw?: string | null; priceSol?: number | null; costSol?: number | null; rangeLocked?: boolean; inactive?: boolean };
+  error: string | null; stale: boolean; nextBuy?: number | null; nextSell?: number | null; addedAt?: number | null; lastTradeAtMs?: number | null; vol1hSol?: number | null; vol5mSol?: number | null; volCoveredMin?: number | null; amountRaw?: string | null; priceSol?: number | null; costSol?: number | null; rangeLocked?: boolean; inactive?: boolean };
 type Coin = { mint: string; symbol: string | null; ageMs: number | null; capUsd: number | null; ammCapUsd?: number | null; trades: number; traders?: number; smart?: number; lastTradeMs: number; status: string; migrated: boolean };
 type ClosedRow = { mint: string; symbol: string | null; closedAt: number; openedAt: number | null; boughtSol: number; buys: number; sells: number; pnlSol: number; pct: number | null };
 type Overview = { at: number; closed?: { sol: number; bots: number }; closedRows?: ClosedRow[]; solUsd: number | null; bots: Bot[]; coins: Coin[]; firehose: { liveCoins: number; perSec: number; lagMs: number } | null; feedLagMs: number | null };
@@ -71,7 +71,7 @@ function ClosedList({ rows }: { rows: ClosedRow[] }) {
 
 // ---------- left: positions ----------
 /** Hourly volume as a share of market cap: $50k an hour means far more on a $100k coin than on a $5M one. */
-const volToCap = (b: Bot) => b.vol1hSol != null && b.capUsd && S.ov?.solUsd ? b.vol1hSol * S.ov.solUsd / b.capUsd : null;
+const volToCap = (b: Bot) => b.vol5mSol != null && b.capUsd && S.ov?.solUsd ? b.vol5mSol * S.ov.solUsd / b.capUsd : null;
 function Positions({ bots }: { bots: Bot[] }) {
   // Click a header to sort by it; again to flip the direction (kept in the URL).
   const rangePos = (b: Bot) => b.range && b.capUsd ? (b.capUsd - b.range.buy) / (b.range.sell - b.range.buy) : -Infinity;
@@ -84,7 +84,7 @@ function Positions({ bots }: { bots: Bot[] }) {
     .sort((a, b) => { const x = k(a), y = k(b); return (x < y ? -1 : x > y ? 1 : 0) * S.sortDir; });
   const th = (id: string, label: string, right = false) => <th className={`sortable${right ? " r" : ""}${S.sortKey === id ? " on" : ""}`} data-sort={id}>{label}{S.sortKey === id ? (S.sortDir < 0 ? " ▼" : " ▲") : ""}</th>;
   return <table>
-    <thead><tr>{th("coin", "COIN")}{th("mcap", "MCAP", true)}{th("vol", "VOL/MCAP", true)}{th("range", "RANGE")}{th("held", "HELD", true)}{th("holding", "HOLDING", true)}{th("size", "SIZE", true)}{th("pnl", "P&L SOL", true)}{th("added", "ADDED", true)}{th("last", "LAST TRADE", true)}{th("state", "STATE")}</tr></thead>
+    <thead><tr>{th("coin", "COIN")}{th("mcap", "MCAP", true)}{th("vol", "VOL 5M", true)}{th("range", "RANGE")}{th("held", "HELD", true)}{th("holding", "HOLDING", true)}{th("size", "SIZE", true)}{th("pnl", "P&L SOL", true)}{th("added", "ADDED", true)}{th("last", "LAST TRADE", true)}{th("state", "STATE")}</tr></thead>
     <tbody>{list.map(b => {
       const r = b.range, pos = r && b.capUsd ? Math.max(0, Math.min(1, (b.capUsd - r.buy) / (r.sell - r.buy))) : null;
       const state = b.inactive ? <span className="dim" title="not running: last known numbers, nothing will sell or buy this until it runs again">inactive</span> : b.error ? <span className="chip c-err" title={b.error}>{b.error.slice(0, 18)}</span>
@@ -92,7 +92,7 @@ function Positions({ bots }: { bots: Bot[] }) {
       return <tr key={b.mint} className={`row${S.coin === b.mint ? " sel" : ""}${b.inactive ? " inactive" : ""}`} data-mint={b.mint}>
         <td><b>{(b.symbol ?? short(b.mint)).slice(0, 12)}</b>{b.source === "manual" ? null : <span> <span className={`chip c-${b.source}`}>{b.source === "migration" ? "migr" : b.source}</span></span>}</td>
         <td className="num r">{usd(b.capUsd)}</td>
-        <td className="num r" title={b.vol1hSol != null ? `${b.vol1hSol.toFixed(1)} SOL traded in the last hour${volToCap(b) != null ? `, ${Math.round(volToCap(b)! * 100)}% of market cap` : ""}${b.volCoveredMin != null && b.volCoveredMin < 60 ? ` (watched ${b.volCoveredMin} min so far)` : ""}` : ""}>{b.vol1hSol != null && S.ov?.solUsd ? usdSmall(b.vol1hSol * S.ov.solUsd) : "—"}{b.volCoveredMin != null && b.volCoveredMin < 60 ? <span className="dim">*</span> : null}</td>
+        <td className="num r" title={b.vol5mSol != null ? `${b.vol5mSol.toFixed(1)} SOL traded in the last 5 minutes${volToCap(b) != null ? `, ${Math.round(volToCap(b)! * 100)}% of market cap` : ""}${b.vol1hSol != null ? `. ${b.vol1hSol.toFixed(1)} SOL in the last hour` : ""}` : ""}>{b.vol5mSol != null && S.ov?.solUsd ? usdSmall(b.vol5mSol * S.ov.solUsd) : "—"}</td>
         <td className="num">{r ? <span title={`${usd(r.buy)} → ${usd(r.sell)}`}><span className="bar"><span className="fill" style={{ width: `${Math.round((b.holdingSteps ?? 0) / (b.steps || 1) * 72)}px` }} />{pos != null && <i style={{ left: `${Math.round(pos * 69)}px` }} />}</span></span> : "—"}</td>
         <td className="num r">{b.holdingSteps ?? 0}/{b.steps ?? "?"}</td>
         <td className="num r" title={b.costSol != null ? `cost ${b.costSol.toFixed(4)} SOL${b.valueSol != null ? ` · now ${b.valueSol.toFixed(4)} SOL` : ""}` : ""}>{b.valueSol ? <>{b.valueSol.toFixed(4)}<span className="dim"> · {fmtTokens(b.valueSol && b.priceSol ? b.valueSol / b.priceSol : 0)}</span></> : <span className="dim">—</span>}</td>

@@ -5,7 +5,7 @@ type Row = Record<string, unknown>;
 const pick = (o: Row, keys: string[]) => Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k]]));
 
 const BOT = ["mint", "symbol", "capUsd", "range", "steps", "holdingSteps", "target", "budgetSol", "base", "mult", "valueSol", "pnl", "flowSol", "costSol", "source",
-  "buysPaused", "rangeLocked", "stale", "inactive", "nextBuy", "nextSell", "addedAt", "lastTradeAtMs", "vol1hSol", "volCoveredMin", "priceSol", "amountRaw"];
+  "buysPaused", "rangeLocked", "stale", "inactive", "nextBuy", "nextSell", "addedAt", "lastTradeAtMs", "vol1hSol", "vol5mSol", "volCoveredMin", "priceSol", "amountRaw"];
 const COIN = ["mint", "symbol", "ageMs", "capUsd", "ammCapUsd", "trades", "traders", "smart", "lastTradeMs", "status", "migrated"];
 const WALLET = ["trader", "held", "pct", "buys", "sells", "solIn", "solOut", "pnlSol", "firstAtMs", "lastAtMs", "entryCapUsd", "delta5", "smart", "dev", "profile", "from", "viaTransfer"];
 const TRADE = ["signature", "atMs", "side", "sol", "tokens", "capUsd", "trader", "smart"];

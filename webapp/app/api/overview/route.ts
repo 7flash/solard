@@ -67,13 +67,14 @@ export async function GET() {
   const reg = readJson<{ bots?: Array<{ wallet: string; mint: string; amount: string; smart?: boolean; auto?: boolean; buysPaused?: boolean; addedAt?: number; rangeLocked?: boolean }> }>(".range-bots/bots.json");
   const entries = new Map((reg?.bots ?? []).map(b => [`${b.wallet}:${b.mint}`, b]));
   const daemon = readJson<{ feed?: { lagMs?: number } }>(".range-bots/daemon-status.json");
-  const vols = readJson<{ coveredMin: number; sol: Record<string, number> }>(".range-bots/volumes.json");
+  const vols = readJson<{ coveredMin: number; sol: Record<string, number>; buckets?: Record<string, [number, number][]> }>(".range-bots/volumes.json");
+  const vol5m = (mint: string) => { const from = Math.floor(Date.now() / 60_000) - 4, b = vols?.buckets?.[mint]; return b ? b.reduce((sum, [m, v]) => m >= from ? sum + v : sum, 0) : null; };
   const bots = state.bots.filter(b => b.mode === "target").map(b => {
     const e = entries.get(`${b.wallet}:${b.mint}`), st = readJson<{ error?: string | null; flowSol?: number; updatedAt?: number; lastTradeAtMs?: number | null }>(`.range-bots/target-${b.wallet}-${b.mint}.json`);
     const base = Number(e?.amount ?? b.budgetSol ?? 0);
     return { ...b, base, mult: base > 0 && b.budgetSol ? Math.round(b.budgetSol / base * 100) / 100 : 1,
       source: e?.smart ? "smart" : e?.auto ? "migration" : "manual", buysPaused: !!e?.buysPaused,
-      vol1hSol: Math.max(vols?.sol[b.mint] ?? 0, state.solUsd ? (dexVol.get(b.mint) ?? 0) / state.solUsd : 0), volCoveredMin: vols?.coveredMin ?? null,
+      vol1hSol: Math.max(vols?.sol[b.mint] ?? 0, state.solUsd ? (dexVol.get(b.mint) ?? 0) / state.solUsd : 0), vol5mSol: vol5m(b.mint), volCoveredMin: vols?.coveredMin ?? null,
       rangeLocked: !!e?.rangeLocked, addedAt: e?.addedAt ?? null, lastTradeAtMs: Math.max(st?.lastTradeAtMs ?? 0, lastTradeFromLog(b.wallet, b.mint) ?? 0) || null,
       error: st?.error ?? null, flowSol: st?.flowSol ?? 0, pnl: (st?.flowSol ?? 0) + (b.valueSol ?? 0), stale: st?.updatedAt ? Date.now() - st.updatedAt > 60_000 : true };
   });
@@ -85,7 +86,7 @@ export async function GET() {
     const valueSol = Number(st.balanceRaw ?? 0) / 10 ** (st.decimals ?? 6) * (st.priceSol ?? 0), base = Number(e.amount ?? st.budgetSol ?? 0);
     return [{ wallet: e.wallet, mint: e.mint, mode: "target", symbol: symbols[e.mint] ?? null, capUsd: dexCap.get(e.mint) ?? st.capUsd ?? null, range: st.range ?? null, steps: st.steps, holdingSteps: st.held, budgetSol: st.budgetSol,
       valueSol, priceSol: st.priceSol ?? null, nextBuy: null, nextSell: null, base, mult: 1, source: e.smart ? "smart" : e.auto ? "migration" : "manual", buysPaused: !!e.buysPaused,
-      vol1hSol: Math.max(vols?.sol[e.mint] ?? 0, state.solUsd ? (dexVol.get(e.mint) ?? 0) / state.solUsd : 0), volCoveredMin: vols?.coveredMin ?? null, rangeLocked: !!e.rangeLocked, addedAt: e.addedAt ?? null,
+      vol1hSol: Math.max(vols?.sol[e.mint] ?? 0, state.solUsd ? (dexVol.get(e.mint) ?? 0) / state.solUsd : 0), vol5mSol: vol5m(e.mint), volCoveredMin: vols?.coveredMin ?? null, rangeLocked: !!e.rangeLocked, addedAt: e.addedAt ?? null,
       lastTradeAtMs: lastTradeFromLog(e.wallet, e.mint), error: null, flowSol: st.flowSol ?? 0, pnl: (st.flowSol ?? 0) + valueSol, stale: false, inactive: true }];
   });
   void refreshDexVol([...bots, ...inactive].map(b => b.mint)).catch(() => {});
