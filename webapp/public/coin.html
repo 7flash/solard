@@ -22,14 +22,16 @@ h1 { font-size:26px; line-height:1.15; margin:0 } h1 span { color:var(--muted); 
 .stats { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:14px }
 .stat { padding:12px 14px; background:var(--panel); border:1px solid var(--line); border-radius:12px; min-width:0 } .stat small { display:block; color:var(--muted); font-size:13px } .stat b { font:500 18px 'JetBrains Mono',monospace }
 .up { color:var(--up) } .dn { color:var(--dn) }
-.live { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:14px; align-items:stretch }
+.live { display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:14px; align-items:start } .side { display:flex; flex-direction:column; gap:14px; min-width:0 }
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden; display:flex; flex-direction:column; min-width:0 }
 .panel h2 { font-size:15px; margin:0; padding:12px 16px; border-bottom:1px solid var(--line) }
-iframe { display:block; width:100%; height:680px; border:0; background:var(--bg) }
-#thoughts { height:680px; overflow:auto; padding:0 16px }
+.panel h2 { display:flex; justify-content:space-between; gap:10px } .panel h2 a { color:var(--acc); font-weight:500; font-size:14px }
+table { width:100%; border-collapse:collapse; font-size:14px } th { text-align:left; color:var(--muted); font-weight:500; font-size:13px; padding:9px 12px; border-bottom:1px solid var(--line) } td { padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; font-family:'JetBrains Mono',monospace; font-size:13px } td:first-child { font-family:Inter,system-ui,sans-serif; font-weight:600; font-size:14px; max-width:150px; overflow:hidden; text-overflow:ellipsis } tr:last-child td { border-bottom:0 } tbody tr:hover { background:#161B21 } tbody tr { cursor:pointer } .r { text-align:right } .more { padding:10px 16px; color:var(--muted); font-size:14px }
+#thoughts { padding:0 16px }
 .thought { padding:12px 0; border-bottom:1px solid var(--line); font-size:15px } .thought:last-child { border:0 } .thought small { display:block; color:var(--muted); font-size:13px; margin-bottom:2px }
 .about { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:14px } .about .panel p,.about .panel ul { margin:0; padding:14px 16px; color:var(--muted); font-size:15px } .about ul { list-style:none } .about li { display:flex; justify-content:space-between; gap:12px; padding:3px 0 } .about li b { color:var(--text); font-weight:500 }
-@media (max-width:1000px) { .stats { grid-template-columns:repeat(3,1fr) } .live,.about { grid-template-columns:1fr } iframe { height:520px } #thoughts { height:420px } .links { margin-left:0 } }
+@media (max-width:1000px) { .stats { grid-template-columns:repeat(3,minmax(0,1fr)) } .live,.about { grid-template-columns:minmax(0,1fr) } .links { margin-left:0 } }
+@media (max-width:640px) { .hide { display:none } td,th { padding:8px } }
 @media (max-width:520px) { .stats { grid-template-columns:repeat(2,minmax(0,1fr)) } .btn { padding:8px 11px } nav .btn { font-size:14px } nav { gap:16px } }
 </style>
 </head>
@@ -41,6 +43,7 @@ iframe { display:block; width:100%; height:680px; border:0; background:var(--bg)
     <div style="min-width:0">
       <h1>Kris Agent <span>$KRIS</span></h1>
       <button class="ca" id="ca" title="Copy contract address"></button>
+      <a class="ca" id="wallet" title="Kris's wallet on Solscan"></a>
     </div>
     <div class="links">
       <a class="btn primary" id="buy">Trade on Pump</a>
@@ -58,7 +61,10 @@ iframe { display:block; width:100%; height:680px; border:0; background:var(--bg)
     <div class="stat"><small>Held in coins</small><b id="held">—</b></div>
   </section>
   <section class="live">
-    <div class="panel"><h2>Live terminal</h2><iframe title="Kris's live Solard terminal" src="/terminal/?agent=kris&embed=1&sort=last&dir=desc"></iframe></div>
+    <div class="side">
+      <div class="panel"><h2>Open positions <a href="/terminal/?agent=kris">Open terminal</a></h2><div style="overflow-x:auto"><table><thead><tr><th>Coin</th><th class="r">Market cap</th><th class="r hide">Vol 5m</th><th class="r hide">Range</th><th class="r">Steps</th><th class="r">Value</th><th class="r">P&amp;L</th></tr></thead><tbody id="open-rows"></tbody></table></div><div class="more" id="open-more"></div></div>
+      <div class="panel"><h2>Recently closed</h2><div style="overflow-x:auto"><table><thead><tr><th>Coin</th><th class="r hide">Held</th><th class="r">Bought</th><th class="r">P&amp;L</th><th class="r">%</th></tr></thead><tbody id="closed-rows"></tbody></table></div></div>
+    </div>
     <div class="panel"><h2>Thoughts</h2><div id="thoughts"></div></div>
   </section>
   <section class="about">
@@ -73,15 +79,25 @@ iframe { display:block; width:100%; height:680px; border:0; background:var(--bg)
   </section>
 </main>
 <script>
-const CA = "sxy2vRktBWFeRuCNdkMN6kcB9aSgCSS8HNuwqfepump";
+const CA = "sxy2vRktBWFeRuCNdkMN6kcB9aSgCSS8HNuwqfepump", WALLET = "FaezkixuFKvFQS2NPPopZ7PzTd1a41MsMncunRkTLbgr";
 const $ = (id) => document.getElementById(id);
 const usd = (n) => n == null ? "—" : `$${n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : n.toFixed(0)}`;
 const sol = (n) => `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(3)} SOL`;
 const ago = (ms) => { const m = Math.max(0, Math.round((Date.now() - ms) / 60000)); return m < 1 ? "now" : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : `${Math.floor(m / 1440)}d ago`; };
 const tone = (node, n) => { node.classList.toggle("up", n > 0); node.classList.toggle("dn", n < 0); };
-$("ca").textContent = CA; $("buy").href = `https://pump.fun/coin/${CA}`;
+$("ca").textContent = CA; $("wallet").textContent = `Wallet ${WALLET}`; $("wallet").href = `https://solscan.io/account/${WALLET}`; $("buy").href = `https://pump.fun/coin/${CA}`;
 $("ca").addEventListener("click", async () => { await navigator.clipboard?.writeText(CA).catch(() => {}); $("ca").textContent = "Copied"; setTimeout(() => { $("ca").textContent = CA; }, 1200); });
 $("pic").style.backgroundImage = 'url("/api/media/622d3725f71bacfa915f7c5fe19462315abadeb2bdb0de571c8228900fe92001.png")';
+const cell = (text, cls) => { const td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; return td; };
+const row = (mint, cells) => { const tr = document.createElement("tr"); tr.append(...cells); tr.addEventListener("click", () => { location.href = `/terminal/?agent=kris&coin=${encodeURIComponent(mint)}`; }); return tr; };
+const pnl = (n) => { const td = cell(`${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(4)}`, "r"); tone(td, n); return td; };
+const held = (ms) => { const m = Math.round(ms / 60000); return m < 60 ? `${m}m` : `${(m / 60).toFixed(1)}h`; };
+function tables(o, on, rows) {
+  const list = [...on].sort((a, b) => (b.valueSol ?? 0) - (a.valueSol ?? 0)), top = list.slice(0, 15);
+  $("open-rows").replaceChildren(...top.map((b) => row(b.mint, [cell(b.symbol ?? b.mint.slice(0, 6)), cell(usd(b.capUsd), "r"), cell(usd(b.vol5mSol != null && o.solUsd ? b.vol5mSol * o.solUsd : null), "r hide"), cell(b.range ? `${usd(b.range.buy)}–${usd(b.range.sell)}` : "—", "r hide"), cell(`${b.holdingSteps ?? 0}/${b.steps ?? 0}`, "r"), cell((b.valueSol ?? 0).toFixed(3), "r"), pnl(b.pnl ?? 0)])));
+  $("open-more").textContent = list.length > top.length ? `${list.length - top.length} more in the terminal` : "";
+  $("closed-rows").replaceChildren(...rows.slice(0, 10).map((r) => row(r.mint, [cell(r.symbol ?? r.mint.slice(0, 6)), cell(r.openedAt ? held(r.closedAt - r.openedAt) : "—", "r hide"), cell((r.boughtSol ?? 0).toFixed(3), "r"), pnl(r.pnlSol), cell(r.pct == null ? "—" : `${Math.round(r.pct)}%`, "r")])));
+}
 async function market() {
   const d = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CA}`).then((r) => r.json()).catch(() => null);
   const p = (d?.pairs ?? []).filter((x) => x.marketCap).sort((a, b) => (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0))[0];
@@ -99,6 +115,7 @@ async function kris() {
     $("held").textContent = `${on.reduce((a, b) => a + (b.valueSol ?? 0), 0).toFixed(2)} SOL`;
   }
   const rows = o?.closedRows ?? [];
+  if (o?.bots) tables(o, o.bots.filter((b) => !b.inactive), rows);
   if (rows.length) {
     const sum = rows.reduce((a, r) => a + r.pnlSol, 0), sorted = [...rows].sort((a, b) => b.pnlSol - a.pnlSol);
     $("won").textContent = `${rows.filter((r) => r.pnlSol > 0).length} of ${rows.length}`;
@@ -107,7 +124,7 @@ async function kris() {
     $("best").textContent = name(sorted[0]); $("worst").textContent = name(sorted[sorted.length - 1]);
   }
   const k = await fetch("/terminal/api/kris").then((r) => r.json()).catch(() => null);
-  const list = (k?.events ?? []).filter((e) => e.thought).slice(0, 40);
+  const list = (k?.events ?? []).filter((e) => e.thought).slice(0, 12);
   if (list.length) $("thoughts").replaceChildren(...list.map((e) => {
     const row = document.createElement("div"), when = document.createElement("small");
     row.className = "thought"; when.textContent = `${e.symbol ?? "Kris"} · ${ago(e.atMs)}`;

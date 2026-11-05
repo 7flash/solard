@@ -43,6 +43,8 @@ details { margin-bottom:16px; color:var(--muted); font-size:14px } summary { cur
     <div class="rules" id="rules">Its rules appear here.</div>
     <label>Your wallet<input id="wallet" required placeholder="Solana address"><small>Your launch buy sells at +2% and comes back here.</small></label>
     <details><summary>More options</summary>
+      <label>Website<input id="website" type="url" placeholder="https://"><small>Leave empty to use the agent's Solard page.</small></label>
+      <label>X<input id="x" placeholder="@handle or link"></label>
       <label>Launch buy (SOL)<input id="buy" type="number" min="0.03" max="1" step="0.01" value="0.1"></label>
       <label>Sites it reads<textarea id="sites" rows="3" placeholder="https://news.ycombinator.com"></textarea><small>One https address per line, up to 8. Leave empty for the defaults.</small></label>
     </details>
@@ -93,7 +95,7 @@ $("form").addEventListener("submit", async (e) => {
   $("error").textContent = ""; $("go").disabled = true;
   try {
     const img = await upload();
-    const r = await post("/api/agents/launch", { name: $("name").value, symbol: $("symbol").value, strategy: $("strategy").value, sites: lines(), image: img, proceedsWallet: $("wallet").value, buySol: $("buy").value });
+    const r = await post("/api/agents/launch", { name: $("name").value, symbol: $("symbol").value, strategy: $("strategy").value, sites: lines(), image: img, proceedsWallet: $("wallet").value, buySol: $("buy").value, website: $("website").value, x: $("x").value });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error ?? "The launch could not start.");
     pay(d);
