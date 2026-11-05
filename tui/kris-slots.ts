@@ -27,12 +27,12 @@ export function slotQualifies(c: SlotCoin, kind: SlotKind) {
 const round = (v: number) => { const m = 10 ** (Math.floor(Math.log10(v)) - 1); return Math.round(v / m) * m; };
 export const slotRange = (cap: number) => ({ buy: round(cap * 0.8), sell: round(cap * 1.3) });
 
-export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** New pairs Kris chose by comparing them; when set, no other new pair opens. */ allowNew?: Set<string>; config?: Partial<Config> }): SlotAction | null {
+export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** New pairs Kris chose by comparing them; when set, no other new pair opens. */ allowNew?: Set<string>; /** When each coin was last seen trading. Absent from a list is not quiet: lists empty out on a daemon restart. */ lastSeen?: Map<string, number>; config?: Partial<Config> }): SlotAction | null {
   const c = { ...SLOT_CONFIG, ...o.config }, now = o.nowMs;
   if (now - o.lastActionMs < c.actionGapMs) return null;
   const live = new Map(o.coins.map(x => [x.mint, x]));
   // The range decides what a position does: a slot only ends when the coin goes quiet, or by a swap below.
-  for (const s of o.slots) if (!live.has(s.mint) && now - s.openedAtMs > c.staleMs) return { type: "close", slot: s, reason: "went quiet", forSwap: false };
+  for (const s of o.slots) if (!live.has(s.mint) && now - (o.lastSeen?.get(s.mint) ?? now) > c.staleMs) return { type: "close", slot: s, reason: "went quiet", forSwap: false };
   for (const kind of ["new", "migrated"] as const) {
     const max = kind === "new" ? c.maxNew : c.maxMigrated, mine = o.slots.filter(s => s.kind === kind);
     const fresh = (x: SlotCoin) => kind === "new" ? !x.migrated && x.ageMs != null && x.ageMs <= c.newAgeMs : !!x.migrated && now - (o.migratedAt.get(x.mint) ?? 0) <= c.migratedAgeMs;

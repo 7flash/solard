@@ -137,7 +137,7 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
   } catch (e) { console.log(`${new Date().toISOString()} compare: ${String(e).slice(0, 160)}`); }
   finally { thinking = false; void drainThoughts(); }
 }
-const missingSince = new Map<string, number>();
+const missingSince = new Map<string, number>(), lastSeen = new Map<string, number>();
 async function runSlots(bots: Bot[], coins: Coin[]) {
   if (existsSync(offPath)) return;
   const held = new Set(bots.map(b => b.mint));
@@ -146,8 +146,9 @@ async function runSlots(bots: Bot[], coins: Coin[]) {
   for (const s of book.slots) if (held.has(s.mint)) missingSince.delete(s.mint); else if (!missingSince.has(s.mint)) missingSince.set(s.mint, Date.now());
   const gone = book.slots.filter(s => Date.now() - (missingSince.get(s.mint) ?? Infinity) > 180_000);
   if (gone.length) { book.slots = book.slots.filter(s => !gone.includes(s)); saveBook(); }
-  const w = await myWallet(), now = Date.now();
-  const a = planSlots({ coins, slots: book.slots, heldMints: held, closedAt: new Map(book.closedAt), migratedAt, freeSol: w.sol, nowMs: now, lastActionMs: book.lastActionMs, lastSwapMs: book.lastSwapMs, pendingKind: book.pendingKind, allowNew: new Set(picked && now - picked.at < PICK_LIFE_MS ? [picked.mint] : []) });
+  const w = await myWallet(), now = Date.now(), listed = new Set(coins.map(c => c.mint));
+  for (const s of book.slots) if (listed.has(s.mint) || !lastSeen.has(s.mint)) lastSeen.set(s.mint, now);
+  const a = planSlots({ coins, slots: book.slots, heldMints: held, closedAt: new Map(book.closedAt), migratedAt, freeSol: w.sol, nowMs: now, lastActionMs: book.lastActionMs, lastSwapMs: book.lastSwapMs, pendingKind: book.pendingKind, lastSeen, allowNew: new Set(picked && now - picked.at < PICK_LIFE_MS ? [picked.mint] : []) });
   if (!a) return;
   if (a.type === "close") {
     await act({ action: "stop", mint: a.slot.mint });

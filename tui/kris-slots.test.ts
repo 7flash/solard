@@ -35,8 +35,12 @@ test("a coin already held, or just closed, is not opened", () => {
 test("falling under its range does not close a slot: the range decides", () => {
   expect(plan({ slots: [slot("a")], coins: [coin("a", { capUsd: 3_000 })], heldMints: new Set(["a"]) })).toBeNull();
 });
-test("a quiet coin is closed after half an hour", () => {
-  expect(plan({ slots: [slot("a", { openedAtMs: now - 2_000_000 })] })).toMatchObject({ type: "close", reason: "went quiet" });
+test("a coin not seen trading for half an hour is closed", () => {
+  expect(plan({ slots: [slot("a")], lastSeen: new Map([["a", now - 2_000_000]]) })).toMatchObject({ type: "close", reason: "went quiet" });
+});
+test("an empty list alone closes nothing: a daemon restart empties it", () => {
+  expect(plan({ slots: [slot("a", { openedAtMs: now - 9_000_000 })], lastSeen: new Map([["a", now - 60_000]]) })).toBeNull();
+  expect(plan({ slots: [slot("a", { openedAtMs: now - 9_000_000 })] })).toBeNull();
 });
 test("a full side swaps its weakest only for a clearly better coin", () => {
   const slots = [slot("a"), slot("b")], held = new Set(["a", "b"]);
