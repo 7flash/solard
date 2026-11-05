@@ -5,7 +5,7 @@ import { planSlots, readPick, slotQualifies, slotRange, slotScore, type Slot, ty
 const now = 10_000_000_000;
 const coin = (mint: string, extra: Partial<SlotCoin> = {}): SlotCoin => ({ mint, symbol: mint, capUsd: 10_000, trades: 300, traders: 150, smart: 0, volSol: 30, ageMs: 60_000, migrated: false, ...extra });
 const slot = (mint: string, extra: Partial<Slot> = {}): Slot => ({ mint, symbol: mint, kind: "new", openedAtMs: now - 600_000, score: 100, buy: 8_000, sell: 13_000, ...extra });
-const plan = (o: Partial<Parameters<typeof planSlots>[0]>) => planSlots({ coins: [], slots: [], heldMints: new Set(), closedAt: new Map(), migratedAt: new Map(), freeSol: 0.2, nowMs: now, lastActionMs: 0, lastSwapMs: 0, ...o });
+const plan = (o: Partial<Parameters<typeof planSlots>[0]>) => planSlots({ coins: [], slots: [], heldMints: new Set(), closedAt: new Map(), migratedAt: new Map(), freeSol: 0.2, nowMs: now, lastActionMs: 0, lastSwapMs: 0, config: { maxNew: 2, maxMigrated: 2, budgetSol: 0.05, gasSol: 0.02 }, ...o });
 
 test("churn scores below real spread", () => {
   expect(slotScore(coin("a", { traders: 17, trades: 165 }))).toBeLessThan(slotScore(coin("b")));
