@@ -40,7 +40,10 @@ function trackRecord(rows: Closed[]) {
   return last.length ? { lastClosed: last.length, won: wins, solResult: Math.round(last.reduce((a, r) => a + r.pnlSol, 0) * 1000) / 1000, worst: [...last].sort((a, b) => a.pnlSol - b.pnlSol).slice(0, 3).map(r => ({ coin: r.symbol ?? r.mint.slice(0, 6), pct: r.pct == null ? null : Math.round(r.pct), heldMin: r.openedAt ? Math.round((r.closedAt - r.openedAt) / 60_000) : null })) } : null;
 }
 const waiting: { ev: KrisEvent; facts: Record<string, unknown> }[] = []; let thinking = false, compareWaiting = false;
+const thoughtAt = new Map<string, number>();
 function think(ev: KrisEvent, facts: Record<string, unknown>) {
+  if (Date.now() - (thoughtAt.get(ev.mint) ?? 0) < 60_000) return; // one thought a minute per coin keeps Codex within its limit
+  thoughtAt.set(ev.mint, Date.now());
   const minor = ev.kind === "coin" || ev.kind === "migrated";
   if (minor ? thinking || compareWaiting || waiting.length > 0 : waiting.length >= 4) return;
   waiting.push({ ev, facts }); void drainThoughts();
@@ -109,7 +112,7 @@ async function act(body: Record<string, unknown>) {
 }
 const COMPARE_RULE = "You are comparing new pairs to decide if any deserves a position right now. Let your gut reaction show. Name the coins, compare them on what differs (wallets against trades, buy and sell flow, volume, smart wallets, cap), and say which is strongest and why the others lose. Passing is fine when nothing leads. "
   + "You trade aggressively and rotate often: when one coin clearly leads, take it, and size it by conviction from " + SLOT_CONFIG.minSizeSol + " to " + SLOT_CONFIG.maxSizeSol + " SOL. At most four sentences. Your very last line must be exactly PICK: followed by one coin name as written and your size in SOL, like PICK: NAME 0.2, or PICK: NONE.";
-const COMPARE_EVERY_MS = 30_000, PICK_LIFE_MS = 90_000; let llmDownUntil = 0, comparedAt = 0, picked: { mint: string; at: number; size: number } | null = null;
+const COMPARE_EVERY_MS = 75_000, PICK_LIFE_MS = 90_000; let llmDownUntil = 0, comparedAt = 0, comparedKey = "", picked: { mint: string; at: number; size: number } | null = null;
 const passes = new Map<string, { coin: string; cap: number; at: number }>();
 /** What really happened to coins like these, from the tracker. Read once every few minutes. */
 let odds: unknown = null, oddsAt = 0;
@@ -134,8 +137,9 @@ async function compareNewPairs(bots: Bot[], coins: Coin[]) {
   const held = new Set(bots.map(b => b.mint)), closed = new Map(book.closedAt);
   const fresh = coins.filter(c => !c.migrated && c.ageMs != null && c.ageMs <= SLOT_CONFIG.newAgeMs && !held.has(c.mint) && now - (closed.get(c.mint) ?? 0) > SLOT_CONFIG.reopenAfterMs && slotQualifies(c, "new")).sort((a, b) => slotScore(b) - slotScore(a)).slice(0, 4);
   if (!fresh.length) return;
+  const key = fresh.map(c => c.mint).sort().join(); if (key === comparedKey) return; // the same coins again: nothing new to weigh
   if (thinking) { compareWaiting = true; return; } // a one-line coin thought must not hold up a real comparison
-  compareWaiting = false; comparedAt = now; thinking = true;
+  compareWaiting = false; comparedAt = now; comparedKey = key; thinking = true;
   try {
     const rows = (await Promise.all(fresh.map(async c => {
       const r = await fetch(`http://127.0.0.1:5176/api/coin?mint=${c.mint}&watch=0`, { headers: { cookie: `slrd_web=${token}` }, signal: AbortSignal.timeout(10_000) }).catch(() => null);
@@ -217,7 +221,7 @@ function followCoins(coins: Coin[]) {
 function coinEvent(c: Coin, migrated: boolean) {
   const v = coinVerdict(c), started = startOutcome(c, migrated ? "migrated" : "coin", v.verdict, Date.now()); if (started) following.push(started);
   const ev = add({ atMs: Date.now(), kind: migrated ? "migrated" : "coin", mint: c.mint, symbol: c.symbol ?? null, title: `${migrated ? "Migrated" : "New coin"}: ${v.verdict}, ${v.reason}` });
-  if (ev) void think(ev, { event: migrated ? "coin migrated, deciding whether it is worth a position" : "new coin appeared, deciding whether it is worth a position", call: v.verdict, reason: v.reason, coin: c.symbol ?? c.mint.slice(0, 6), capUsd: c.capUsd ? Math.round(c.capUsd) : null, wallets: c.traders ?? null, trades: c.trades ?? null, smartWallets: c.smart ?? 0 });
+  if (ev && v.verdict !== "skip") void think(ev, { event: migrated ? "coin migrated, deciding whether it is worth a position" : "new coin appeared, deciding whether it is worth a position", call: v.verdict, reason: v.reason, coin: c.symbol ?? c.mint.slice(0, 6), capUsd: c.capUsd ? Math.round(c.capUsd) : null, wallets: c.traders ?? null, trades: c.trades ?? null, smartWallets: c.smart ?? 0 });
 }
 for (;;) {
   try {
