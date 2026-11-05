@@ -8,7 +8,7 @@ export type SlotKind = "new" | "migrated";
 export type Slot = { mint: string; symbol: string | null; kind: SlotKind; openedAtMs: number; score: number; buy: number; sell: number };
 export type SlotAction = { type: "open"; kind: SlotKind; coin: SlotCoin; score: number; buy: number; sell: number; swap: boolean } | { type: "close"; slot: Slot; reason: string; forSwap: boolean };
 
-export const SLOT_CONFIG = { maxNew: 8, maxMigrated: 6, topSizeSol: 0.08, midSizeSol: 0.03, minSizeSol: 0.02, topWallets: 400, midWallets: 150, steps: 4, gasSol: 0.02, newMinAgeMs: 240_000, newAgeMs: 600_000, migratedAgeMs: 600_000, actionGapMs: 30_000, swapGapMs: 30_000, minHoldMs: 300_000, swapRatio: 2, rotateNewMs: 900_000, rotateMigratedMs: 900_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.3, smallBundleShare: 0.1, maxEarlyPct: 60, };
+export const SLOT_CONFIG = { maxNew: 8, maxMigrated: 6, budgetSol: 0.05, migratedBudgetSol: 0.08, minSizeSol: 0.02, steps: 4, gasSol: 0.02, newMinAgeMs: 240_000, newAgeMs: 600_000, migratedAgeMs: 600_000, actionGapMs: 30_000, swapGapMs: 30_000, minHoldMs: 300_000, swapRatio: 2, rotateNewMs: 900_000, rotateMigratedMs: 900_000, staleMs: 1_800_000, reopenAfterMs: 1_800_000, maxBundleShare: 0.3, smallBundleShare: 0.1, maxEarlyPct: 60, smallEarlyPct: 25 };
 type Config = typeof SLOT_CONFIG;
 
 /** Distinct wallets count most, smart wallets far more, volume a little. Few wallets across many trades is churn. */
@@ -27,11 +27,6 @@ export function slotQualifies(c: SlotCoin, kind: SlotKind) {
 
 const round = (v: number) => { const m = 10 ** (Math.floor(Math.log10(v)) - 1); return Math.round(v / m) * m; };
 export const slotRange = (cap: number) => ({ buy: round(cap * 0.6), sell: round(cap * 1.9) });
-/** Wallets at entry are what has split winners from losers in the ledger. Same-size buying still means the smallest size. */
-export function slotSize(wallets: number, sameSizeShare: number, c: Config = SLOT_CONFIG) {
-  if (sameSizeShare >= c.smallBundleShare || wallets < c.midWallets) return c.minSizeSol;
-  return wallets >= c.topWallets ? c.topSizeSol : c.midSizeSol;
-}
 
 export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<string>; closedAt: Map<string, number>; migratedAt: Map<string, number>; freeSol: number; nowMs: number; lastActionMs: number; lastSwapMs: number; pendingKind?: SlotKind | null; /** When each coin was last seen trading. Absent from a list is not quiet: lists empty out on a daemon restart. */ lastSeen?: Map<string, number>; /** Slots holding nothing: the range sold out at its top, so the slot is free to move on. */ emptyMints?: Set<string>; config?: Partial<Config> }): SlotAction | null {
   const c = { ...SLOT_CONFIG, ...o.config }, now = o.nowMs;
@@ -46,7 +41,7 @@ export function planSlots(o: { coins: SlotCoin[]; slots: Slot[]; heldMints: Set<
       .map(coin => ({ coin, score: slotScore(coin) })).sort((a, b) => b.score - a.score)[0];
     if (!best) continue;
     if (mine.length < max) {
-      if (o.freeSol < c.topSizeSol + c.gasSol) continue;
+      if (o.freeSol < c.budgetSol + c.gasSol) continue;
       return { type: "open", kind, coin: best.coin, score: best.score, ...slotRange(best.coin.capUsd!), swap: o.pendingKind === kind };
     }
     if (now - o.lastSwapMs < c.swapGapMs) continue;
